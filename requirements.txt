@@ -1,0 +1,8 @@
+aiogram
+python-dotenv
+supabase
+google-genai
+pydantic
+pymupdf
+pillow
+aiohttp
