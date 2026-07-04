@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+import asyncio
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -18,6 +19,7 @@ if not API_KEYS and os.getenv("GEMINI_API_KEY"):
 
 current_key_idx = 0
 blocked_keys = {}
+_lock = asyncio.Lock()
 
 class QuizQuestion(BaseModel):
     question: str = Field(description="نص السؤال الاختياري المستخرج من النص المرفق.")
@@ -26,10 +28,20 @@ class QuizQuestion(BaseModel):
     hint: str = Field(description="تلميح ذكي للطالب.")
     was_corrupted_text_fixed: bool = Field(description="تكون true إذا تم تصحيح أخطاء النص.")
 
-def extract_content(file_bytes, mime_type="image/jpeg"):
+def _extract_content_sync(file_bytes, mime_type, key):
+    client = genai.Client(api_key=key)
+    response = client.models.generate_content(
+        model='gemini-2.0-flash',
+        contents=[
+            types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+            "استخرج النص من هذا الملف بدقة عالية. أخرج النص فقط."
+        ]
+    )
+    return response.text
+
+async def extract_content(file_bytes, mime_type="image/jpeg"):
     """
-    استخراج النص من أي ملف (صورة أو PDF) عبر Gemini مباشرة.
-    mime_type: 'image/jpeg' للصور أو 'application/pdf' للملفات.
+    استخراج النص من أي ملف (صورة أو PDF) عبر Gemini بأسلوب غير متزامن.
     """
     global current_key_idx
     
@@ -39,70 +51,67 @@ def extract_content(file_bytes, mime_type="image/jpeg"):
     now = datetime.datetime.now()
 
     for _ in range(len(API_KEYS)):
-        # تخطي المفاتيح المحظورة
-        if current_key_idx in blocked_keys and now < blocked_keys[current_key_idx]:
-            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
-            continue
+        async with _lock:
+            if current_key_idx in blocked_keys and now < blocked_keys[current_key_idx]:
+                current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+                continue
+            key = API_KEYS[current_key_idx]
             
-        key = API_KEYS[current_key_idx]
         try:
-            client = genai.Client(api_key=key)
-            response = client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=[
-                    types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-                    "استخرج النص من هذا الملف بدقة عالية. أخرج النص فقط."
-                ]
-            )
-            return response.text
+            return await asyncio.to_thread(_extract_content_sync, file_bytes, mime_type, key)
             
         except Exception as e:
             error_msg = str(e).lower()
-            if "429" in error_msg or "resource_exhausted" in error_msg or "quota" in error_msg:
-                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
-            else:
-                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
-            
-            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+            async with _lock:
+                if "429" in error_msg or "resource_exhausted" in error_msg or "quota" in error_msg:
+                    blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
+                else:
+                    blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
+                
+                current_key_idx = (current_key_idx + 1) % len(API_KEYS)
             
     return "❌ فشلت جميع المحاولات."
 
-def get_questions_from_text(text, count):
-    """توليد الأسئلة بصيغة JSON مع تدوير المفاتيح"""
+def _get_questions_sync(text, count, key):
+    prompt = f"أنت خبير تعليمي، استخرج {count} أسئلة اختيار من متعدد من هذا النص: {text}"
+    client = genai.Client(api_key=key)
+    response = client.models.generate_content(
+        model='gemini-2.0-flash',
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=list[QuizQuestion],
+        ),
+    )
+    return json.loads(response.text)
+
+async def get_questions_from_text(text, count):
+    """توليد الأسئلة بصيغة JSON مع تدوير المفاتيح بأسلوب غير متزامن"""
     global current_key_idx
     
     if not API_KEYS:
         return []
 
-    prompt = f"أنت خبير تعليمي، استخرج {count} أسئلة اختيار من متعدد من هذا النص: {text}"
-    
     now = datetime.datetime.now()
     
     for _ in range(len(API_KEYS)):
-        if current_key_idx in blocked_keys and now < blocked_keys[current_key_idx]:
-            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
-            continue
+        async with _lock:
+            if current_key_idx in blocked_keys and now < blocked_keys[current_key_idx]:
+                current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+                continue
+            key = API_KEYS[current_key_idx]
             
-        key = API_KEYS[current_key_idx]
         try:
-            client = genai.Client(api_key=key)
-            response = client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=list[QuizQuestion],
-                ),
-            )
-            return json.loads(response.text)
+            return await asyncio.to_thread(_get_questions_sync, text, count, key)
             
         except Exception as e:
             error_msg = str(e).lower()
-            if "429" in error_msg or "resource_exhausted" in error_msg or "quota" in error_msg:
-                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
-            else:
-                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
-            
-            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+            async with _lock:
+                if "429" in error_msg or "resource_exhausted" in error_msg or "quota" in error_msg:
+                    blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
+                else:
+                    blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
+                
+                current_key_idx = (current_key_idx + 1) % len(API_KEYS)
             
     return []
