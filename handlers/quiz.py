@@ -2,7 +2,7 @@ import os
 import asyncio
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
-from config import bot, QuizState, MAX_DOC_SIZE, MAX_PHOTO_SIZE, MAX_PDF_PAGES
+from config import bot, QuizState, MAX_DOC_SIZE, MAX_PHOTO_SIZE
 from utils import process_file_smart
 from gemini_helper import get_questions_from_text, extract_content
 from supabase_helper import check_or_add_user, update_user_stats
@@ -16,6 +16,9 @@ async def handle_document(msg: types.Message, state: FSMContext):
         await msg.answer("❌ عذراً، البوت يدعم ملفات PDF فقط.")
         return
 
+    # إنشاء المجلد تلقائياً إذا لم يكن موجوداً
+    os.makedirs("downloads", exist_ok=True)
+
     path = f"downloads/{msg.document.file_id}.pdf"
     file = await bot.get_file(msg.document.file_id)
     await bot.download_file(file.file_path, path)
@@ -26,6 +29,9 @@ async def handle_document(msg: types.Message, state: FSMContext):
 
 @router.message(F.photo)
 async def handle_photo(msg: types.Message, state: FSMContext):
+    # إنشاء المجلد تلقائياً إذا لم يكن موجوداً
+    os.makedirs("downloads", exist_ok=True)
+    
     path = f"downloads/{msg.photo[-1].file_id}.png"
     file = await bot.get_file(msg.photo[-1].file_id)
     await bot.download_file(file.file_path, path)
@@ -40,7 +46,7 @@ async def process_count(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     path = data.get('file_path')
     
-    processing_msg = await msg.answer("🤖 جاري المعالجة...")
+    processing_msg = await msg.answer("🤖 جاري المعالجة والتحليل...")
     try:
         full_text = ""
         if data.get('is_photo'):
@@ -51,12 +57,14 @@ async def process_count(msg: types.Message, state: FSMContext):
                 if item["type"] == "text":
                     full_text += item["content"] + "\n"
                 else:
+                    # إرسال الصورة لـ Gemini
                     full_text += await extract_content(item["content"], "image/png") + "\n"
+                    await asyncio.sleep(1) # لتجنب الضغط على الـ API
         
         quiz_data = await get_questions_from_text(full_text, count)
         
         if not quiz_data:
-            await processing_msg.edit_text("❌ لم يتمكن الذكاء الاصطناعي من استخراج أسئلة. حاول بملف أوضح.")
+            await processing_msg.edit_text("❌ لم يتمكن الذكاء الاصطناعي من استخراج أسئلة. الملف قد يكون غير واضح.")
             await state.clear()
             return
 
@@ -64,10 +72,12 @@ async def process_count(msg: types.Message, state: FSMContext):
         await state.update_data(questions=quiz_data, current_index=0, score=0, total_count=len(quiz_data))
         await state.set_state(QuizState.answering_quiz)
         await processing_msg.delete()
+        # هنا استدعاء دالة عرض السؤال (تأكد أن دالة send_question موجودة في ملفك)
+        from handlers.quiz import send_question 
         await send_question(msg, state)
             
     except Exception as e:
-        await processing_msg.edit_text(f"❌ خطأ: `{e}`")
+        await processing_msg.edit_text(f"❌ خطأ تقني: `{e}`")
         await state.clear()
     finally:
         if path and os.path.exists(path): os.remove(path)
