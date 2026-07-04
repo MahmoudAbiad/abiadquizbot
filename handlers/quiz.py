@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 from pypdf import PdfReader
 from config import bot, QuizState, MAX_DOC_SIZE, MAX_PHOTO_SIZE, MAX_PDF_PAGES
 from utils import process_file_smart
-from gemini_helper import get_questions_from_text, extract_content # تم تصحيح الاستيراد هنا
+from gemini_helper import get_questions_from_text, extract_content
 from supabase_helper import check_or_add_user, update_user_stats
 from keyboards import get_main_menu_keyboard
 
@@ -61,7 +61,6 @@ async def process_count(msg: types.Message, state: FSMContext):
     path = data.get('file_path')
     is_photo = data.get('is_photo', False)
     
-    # تم إزالة asyncio.to_thread
     user_info = await check_or_add_user(msg.from_user.id, msg.from_user.username or "Unknown")
     current_points = user_info["points"]
     
@@ -80,10 +79,8 @@ async def process_count(msg: types.Message, state: FSMContext):
         full_text = ""
         if is_photo:
             with open(path, "rb") as f: image_bytes = f.read()
-            # استدعاء دالة Gemini الجديدة مباشرة
             full_text = await extract_content(image_bytes, mime_type="image/png")
         else:
-            # هنا يجب بقاء to_thread لأن دالة process_file_smart الموجودة في utils.py لم نحولها لـ async
             processed_data = await asyncio.to_thread(process_file_smart, path)
             for item in processed_data:
                 if item["type"] == "text":
@@ -95,7 +92,6 @@ async def process_count(msg: types.Message, state: FSMContext):
         
         if not full_text.strip() or full_text.startswith("❌"): raise ValueError("لم نتمكن من استخراج أي نصوص مقروءة.")
 
-        # استدعاء الأسئلة مباشرة
         quiz_data = await get_questions_from_text(full_text, count)
         if not quiz_data:
             await processing_msg.edit_text("❌ لم يتمكن الذكاء الاصطناعي من استخراج أسئلة مفيدة.")
@@ -103,7 +99,6 @@ async def process_count(msg: types.Message, state: FSMContext):
             return
 
         actual_count = len(quiz_data)
-        # خصم النقاط مباشرة
         await update_user_stats(msg.from_user.id, actual_count)
         
         await state.update_data(questions=quiz_data, current_index=0, score=0, total_count=actual_count)
@@ -119,7 +114,8 @@ async def process_count(msg: types.Message, state: FSMContext):
             await send_question(msg, state)
             
     except Exception as e:
-        await processing_msg.edit_text(f"❌ عذراً، واجهنا مشكلة أثناء معالجة الملف.")
+        # إظهار الخطأ الحقيقي في التلجرام للتشخيص
+        await processing_msg.edit_text(f"❌ خطأ تقني أثناء المعالجة:\n`{e}`")
         print(f"Developer Error: {e}")
         await state.clear()
     finally:
