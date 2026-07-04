@@ -2,14 +2,12 @@ import os
 import asyncio
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
-from config import bot, QuizState, MAX_DOC_SIZE, MAX_PHOTO_SIZE
-from gemini_helper import get_questions_from_text, extract_content
+from pypdf import PdfReader
+from config import bot, QuizState, MAX_DOC_SIZE, MAX_PHOTO_SIZE, MAX_PDF_PAGES
+from utils import process_file_smart
+from gemini_helper import get_questions_from_text, extract_content # تم تصحيح الاستيراد هنا
 from supabase_helper import check_or_add_user, update_user_stats
 from keyboards import get_main_menu_keyboard
-
-# يضمن وجود المجلد
-if not os.path.exists("downloads"):
-    os.makedirs("downloads")
 
 router = Router()
 
@@ -19,14 +17,24 @@ async def handle_document(msg: types.Message, state: FSMContext):
         await msg.answer("❌ هذا الملف كبير جداً! الحد الأقصى المسموح به هو 20 ميجابايت.")
         return
 
-    path = f"downloads/{msg.document.file_id}_{msg.document.file_name}"
+    if not os.path.exists("downloads"): os.makedirs("downloads")
+    path = f"downloads/{msg.document.file_name}"
     file = await bot.get_file(msg.document.file_id)
     await bot.download_file(file.file_path, path)
     
-    # تحديد نوع الملف لـ Gemini (PDF أو صورة)
-    mime_type = "application/pdf" if msg.document.mime_type == "application/pdf" else "image/jpeg"
-    
-    await state.update_data(file_path=path, is_photo=False, mime_type=mime_type)
+    try:
+        reader = PdfReader(path)
+        page_count = len(reader.pages)
+        if page_count > MAX_PDF_PAGES:
+            await msg.answer(f"❌ الملف يحتوي على ({page_count}) صفحة! الحد الأقصى المسموح به هو {MAX_PDF_PAGES} صفحة.")
+            if os.path.exists(path): os.remove(path)
+            return
+    except Exception:
+        await msg.answer("❌ عذراً، فشل البوت في قراءة ملف الـ PDF.")
+        if os.path.exists(path): os.remove(path)
+        return
+
+    await state.update_data(file_path=path, is_photo=False)
     await state.set_state(QuizState.waiting_for_count)
     await msg.answer("✅ تم رفع وقراءة الملف بنجاح!\nكم سؤالاً تريد توليده؟ (أرسل رقماً فقط)")
 
@@ -37,11 +45,12 @@ async def handle_photo(msg: types.Message, state: FSMContext):
         await msg.answer("❌ حجم الصورة كبير جداً! الحد الأقصى هو 10 ميجابايت.")
         return
 
+    if not os.path.exists("downloads"): os.makedirs("downloads")
     path = f"downloads/{photo.file_id}.png"
     file = await bot.get_file(photo.file_id)
     await bot.download_file(file.file_path, path)
     
-    await state.update_data(file_path=path, is_photo=True, mime_type="image/jpeg")
+    await state.update_data(file_path=path, is_photo=True)
     await state.set_state(QuizState.waiting_for_count)
     await msg.answer("✅ تم استقبال الصورة بنجاح!\nكم سؤالاً تريد توليده؟ (أرسل رقماً فقط)")
 
@@ -50,10 +59,12 @@ async def process_count(msg: types.Message, state: FSMContext):
     count = int(msg.text)
     data = await state.get_data()
     path = data.get('file_path')
-    mime_type = data.get('mime_type', 'image/jpeg')
+    is_photo = data.get('is_photo', False)
     
-    user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown")
+    # تم إزالة asyncio.to_thread
+    user_info = await check_or_add_user(msg.from_user.id, msg.from_user.username or "Unknown")
     current_points = user_info["points"]
+    
     if current_points < count:
         bot_info = await bot.get_me()
         await msg.answer(
@@ -66,25 +77,34 @@ async def process_count(msg: types.Message, state: FSMContext):
     
     processing_msg = await msg.answer("🤖 جاري قراءة المحتوى ومعالجته بالذكاء الاصطناعي...")
     try:
-        # قراءة الملف وإرساله مباشرة لـ Gemini
-        with open(path, "rb") as f:
-            file_bytes = f.read()
+        full_text = ""
+        if is_photo:
+            with open(path, "rb") as f: image_bytes = f.read()
+            # استدعاء دالة Gemini الجديدة مباشرة
+            full_text = await extract_content(image_bytes, mime_type="image/png")
+        else:
+            # هنا يجب بقاء to_thread لأن دالة process_file_smart الموجودة في utils.py لم نحولها لـ async
+            processed_data = await asyncio.to_thread(process_file_smart, path)
+            for item in processed_data:
+                if item["type"] == "text":
+                    full_text += item["content"] + "\n"
+                else:
+                    img_text = await extract_content(item["content"], mime_type="image/png")
+                    full_text += img_text + "\n"
+                    await asyncio.sleep(2)
         
-        # استخراج النص باستخدام الدالة الجديدة المباشرة
-        full_text = await asyncio.to_thread(extract_content, file_bytes, mime_type=mime_type)
+        if not full_text.strip() or full_text.startswith("❌"): raise ValueError("لم نتمكن من استخراج أي نصوص مقروءة.")
 
-        if not full_text.strip() or "❌" in full_text: 
-            raise ValueError("لم نتمكن من استخراج أي نصوص مقروءة.")
-
-        # توليد الأسئلة
-        quiz_data = await asyncio.to_thread(get_questions_from_text, full_text, count)
+        # استدعاء الأسئلة مباشرة
+        quiz_data = await get_questions_from_text(full_text, count)
         if not quiz_data:
             await processing_msg.edit_text("❌ لم يتمكن الذكاء الاصطناعي من استخراج أسئلة مفيدة.")
             await state.clear()
             return
 
         actual_count = len(quiz_data)
-        await asyncio.to_thread(update_user_stats, msg.from_user.id, actual_count)
+        # خصم النقاط مباشرة
+        await update_user_stats(msg.from_user.id, actual_count)
         
         await state.update_data(questions=quiz_data, current_index=0, score=0, total_count=actual_count)
         await state.set_state(QuizState.answering_quiz)
