@@ -7,9 +7,10 @@ def process_file_smart(path):
         for page in doc:
             text = page.get_text().strip()
             if text:
+                # إذا وجدنا نصاً، نأخذه
                 results.append({"type": "text", "content": text})
             else:
-                # تحويل الصفحة لصورة وإرسالها لـ Gemini
+                # إذا كانت الصفحة صورة (سكانر)، نحولها لـ bytes
                 pix = page.get_pixmap(dpi=150)
                 img_bytes = pix.tobytes("png")
                 results.append({"type": "image", "content": img_bytes})
