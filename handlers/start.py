@@ -5,7 +5,6 @@ from config import bot
 from keyboards import get_main_menu_keyboard
 from supabase_helper import check_or_add_user
 
-# 🌟 السطر الأهم الذي يربط الملف بالـ main.py
 router = Router()
 
 @router.message(Command("start"))
@@ -17,8 +16,9 @@ async def start(msg: types.Message, command: CommandObject):
     if command.args and command.args.isdigit():
         referrer_id = int(command.args)
         
-    # التحقق من قاعدة البيانات وتشغيل التجديد اليومي ونظام الإحالة
-    user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown", referrer_id)
+    # تم إزالة asyncio.to_thread
+    user_info = await check_or_add_user(msg.from_user.id, msg.from_user.username or "Unknown", referrer_id)
+    
     points = user_info["points"]
     status = user_info["status"]
     
