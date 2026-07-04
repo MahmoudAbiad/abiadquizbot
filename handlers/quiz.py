@@ -2,7 +2,6 @@ import os
 import asyncio
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
-from pypdf import PdfReader
 from config import bot, QuizState, MAX_DOC_SIZE, MAX_PHOTO_SIZE, MAX_PDF_PAGES
 from utils import process_file_smart
 from gemini_helper import get_questions_from_text, extract_content
@@ -13,26 +12,32 @@ router = Router()
 
 @router.message(F.document)
 async def handle_document(msg: types.Message, state: FSMContext):
+    # منع الملفات غير الـ PDF (مثل DOCX وغيرها) لتجنب الانهيار
+    if not msg.document.file_name.lower().endswith('.pdf'):
+        await msg.answer("❌ عذراً، البوت يدعم ملفات بصيغة (PDF) فقط.")
+        return
+
     if msg.document.file_size > MAX_DOC_SIZE:
         await msg.answer("❌ هذا الملف كبير جداً! الحد الأقصى المسموح به هو 20 ميجابايت.")
         return
 
     if not os.path.exists("downloads"): os.makedirs("downloads")
-    path = f"downloads/{msg.document.file_name}"
+    path = f"downloads/{msg.document.file_id}.pdf"
     file = await bot.get_file(msg.document.file_id)
     await bot.download_file(file.file_path, path)
     
+    # فحص عدد الصفحات (اختياري، يمكنك استخدام fitz هنا أيضاً لكن pypdf أسرع للفحص الأولي إذا أردت)
+    import fitz
     try:
-        reader = PdfReader(path)
-        page_count = len(reader.pages)
+        doc = fitz.open(path)
+        page_count = doc.page_count
+        doc.close()
         if page_count > MAX_PDF_PAGES:
             await msg.answer(f"❌ الملف يحتوي على ({page_count}) صفحة! الحد الأقصى المسموح به هو {MAX_PDF_PAGES} صفحة.")
             if os.path.exists(path): os.remove(path)
             return
     except Exception:
-        await msg.answer("❌ عذراً، فشل البوت في قراءة ملف الـ PDF.")
-        if os.path.exists(path): os.remove(path)
-        return
+        pass # سيكتشف الخطأ لاحقاً في utils.py
 
     await state.update_data(file_path=path, is_photo=False)
     await state.set_state(QuizState.waiting_for_count)
@@ -67,7 +72,7 @@ async def process_count(msg: types.Message, state: FSMContext):
     if current_points < count:
         bot_info = await bot.get_me()
         await msg.answer(
-            f"❌ رصيدك الحالي ({current_points}) لا يكفي لتوليد {count} أسئلة.\nيمكنك الشحن أو دعوة زملائك للحصول على نقاط إضافية عن طريق الخيارات أدناه 👇",
+            f"❌ رصيدك الحالي ({current_points}) لا يكفي لتوليد {count} أسئلة.\nيمكنك الشحن أو دعوة زملائك للحصول على نقاط إضافية.",
             reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
         )
         if path and os.path.exists(path): os.remove(path)
@@ -85,12 +90,14 @@ async def process_count(msg: types.Message, state: FSMContext):
             for item in processed_data:
                 if item["type"] == "text":
                     full_text += item["content"] + "\n"
-                else:
+                elif item["type"] == "image":
+                    # إرسال الصورة المستخرجة من الـ PDF إلى Gemini
                     img_text = await extract_content(item["content"], mime_type="image/png")
                     full_text += img_text + "\n"
-                    await asyncio.sleep(2)
+                    # تأخير بسيط لتجنب مشكلة Rate Limit من Gemini API
+                    await asyncio.sleep(2) 
         
-        if not full_text.strip() or full_text.startswith("❌"): raise ValueError("لم نتمكن من استخراج أي نصوص مقروءة.")
+        if not full_text.strip() or full_text.startswith("❌"): raise ValueError("لم نتمكن من استخراج أي نصوص مقروءة من الملف أو الصورة.")
 
         quiz_data = await get_questions_from_text(full_text, count)
         if not quiz_data:
@@ -105,16 +112,16 @@ async def process_count(msg: types.Message, state: FSMContext):
         await state.set_state(QuizState.answering_quiz)
         await processing_msg.delete()
 
-        corrupted_questions = [f"السؤال رقم {i+1}" for i, q in enumerate(quiz_data) if q.get('was_corrupted_text_fixed')]
+        corrupted_questions = [f"السؤال {i+1}" for i, q in enumerate(quiz_data) if q.get('was_corrupted_text_fixed')]
         if corrupted_questions:
-            warning_text = f"⚠️ **تنبيه قبل بداية الاختبار:**\nنظراً لوجود كلمات غير واضحة بالورقة، أصلح الذكاء الاصطناعي السياق تلقائياً لـ ({', '.join(corrupted_questions)}).\n\nاضغط أدناه للبدء 👇"
+            warning_text = f"⚠️ **تنبيه:** نظراً لوجود كلمات غير واضحة بالورقة، أصلح الذكاء الاصطناعي السياق لـ ({', '.join(corrupted_questions)}).\n\nاضغط أدناه للبدء 👇"
             start_kb = [[types.InlineKeyboardButton(text="🚀 ابدأ الاختبار الآن", callback_data="start_first_question")]]
             await msg.answer(warning_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=start_kb))
         else:
             await send_question(msg, state)
             
     except Exception as e:
-        # إظهار الخطأ الحقيقي في التلجرام للتشخيص
+        # ستظهر لك المشكلة بوضوح إذا حدثت الآن
         await processing_msg.edit_text(f"❌ خطأ تقني أثناء المعالجة:\n`{e}`")
         print(f"Developer Error: {e}")
         await state.clear()
