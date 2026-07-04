@@ -16,11 +16,12 @@ async def admin_charge_points(msg: types.Message, command: CommandObject):
         target_id = int(args[0])
         amount = int(args[1])
         
-        new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
+        # تم إزالة asyncio.to_thread لأن الدالة أصبحت غير متزامنة
+        new_balance = await admin_add_points(target_id, amount)
         if new_balance is not None:
             await msg.answer(f"✅ تم بنجاح شحن {amount} نقطة للمستخدم `{target_id}`.\n💰 رصيده الجديد أصبح: {new_balance} نقطة.")
             try:
-                await bot.send_message(target_id, f"🎉 بشرى سارة! قامت الإدارة بشحن حسابك بـ **{amount}** نقطة إشانية.\n💰 رصيدك الإجمالي الحالي: {new_balance} نقطة. استمتع بالاختبارات!")
+                await bot.send_message(target_id, f"🎉 بشرى سارة! قامت الإدارة بشحن حسابك بـ **{amount}** نقطة إضافية.\n💰 رصيدك الإجمالي الحالي: {new_balance} نقطة. استمتع بالاختبارات!")
             except Exception:
                 pass
         else:
@@ -33,7 +34,8 @@ async def admin_db_stats(msg: types.Message):
     """أمر رؤية إحصائيات سوبابيس العامة: /dbstats"""
     if msg.from_user.id != ADMIN_ID: return
     
-    stats = await asyncio.to_thread(admin_get_global_stats)
+    # تم التعديل
+    stats = await admin_get_global_stats()
     report = (
         "📊 **إحصائيات قاعدة البيانات (Supabase) الحالية:**\n\n"
         f"👥 إجمالي الطلاب المسجلين: {stats['total_users']} طالب.\n"
@@ -49,7 +51,8 @@ async def admin_get_user(msg: types.Message, command: CommandObject):
         await msg.answer("الرجاء إدخال اليوزرنيم أو الآيدي بعد الأمر. مثال:\n`/searchuser Mahmoud`")
         return
         
-    user_data = await asyncio.to_thread(admin_search_user, command.args.strip())
+    # تم التعديل
+    user_data = await admin_search_user(command.args.strip())
     if user_data:
         info = (
             "🔍 **بيانات الطالب المستخرجة:**\n\n"
