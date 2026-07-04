@@ -6,21 +6,19 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+# تحميل المتغيرات
 load_dotenv()
 
-# 1. جلب المفاتيح من ملف .env وتحويلها إلى قائمة (List)
+# إعداد مفاتيح API من ملف .env
+# تأكد أن المتغير في .env هو: GEMINI_API_KEYS=key1,key2,key3
 api_keys_raw = os.getenv("GEMINI_API_KEYS", "")
 API_KEYS = [k.strip() for k in api_keys_raw.split(",") if k.strip()]
 
-# خيار أمان: إذا نسيت وتذكرت مفتاحاً واحداً بالصيغة القديمة، سيعتمد عليه ولا يتوقف الكود
+# خيار احتياطي في حال وجود مفتاح واحد فقط بالاسم القديم
 if not API_KEYS and os.getenv("GEMINI_API_KEY"):
     API_KEYS = [os.getenv("GEMINI_API_KEY")]
 
-# مؤشر لتتبع المفتاح الحالي
 current_key_idx = 0
-
-# 🌟 قاموس ذكي لتتبع المفاتيح المحظورة وموعد فك الحظر عنها تلقائياً
-# الهيكل الصغير سيكون: { index_المفتاح: وقت_فك_الحظر }
 blocked_keys = {}
 
 class QuizQuestion(BaseModel):
@@ -31,71 +29,16 @@ class QuizQuestion(BaseModel):
     was_corrupted_text_fixed: bool = Field(description="تكون true فقط إذا تم إصلاح تشوهات النص الناتجة عن الـ OCR سياقياً.")
 
 def extract_text_from_image(image_bytes):
-    """استخراج النص من الصورة مع ميزة الحظر المؤقت الذكي للمفاتيح وتخطيها دون تأخير"""
+    """استخراج النص من الصورة مع تدوير المفاتيح عند الحظر"""
     global current_key_idx
     
     if not API_KEYS:
-        return "❌ خطأ: لم يتم ضبط مفاتيح GEMINI_API_KEYS في ملف .env"
+        return "❌ خطأ: لم يتم ضبط مفاتيح GEMINI_API_KEYS"
 
     now = datetime.datetime.now()
 
-    # محاولة التنقل بين المفاتيح المتاحة بالتوالي
     for _ in range(len(API_KEYS)):
-        
-        # 🌟 فحص ما إذا كان المفتاح الحالي محظوراً حالياً وهل ما زلنا ضمن فترة الحظر
-        if current_key_idx in blocked_keys and now < blocked_keys[current_key_idx]:
-            print(f"ℹ️ تخطي المفتاح {current_key_idx} تلقائياً لأنه محظور (ينتهي الحظر في: {blocked_keys[current_key_idx].strftime('%Y-%m-%d %H:%M:%S')})")
-            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
-            continue # تخطي إلى المفتاح التالي فوراَ دون إضاعة وقت في الاتصال
-            
-        key = API_KEYS[current_key_idx]
-        try:
-            client = genai.Client(api_key=key)
-            
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
-                    "استخرج النص الموجود في هذه الصورة بدقة. أخرج النص فقط دون أي مقدمات."
-                ]
-            )
-            return response.text
-            
-        except Exception as e:
-            error_msg = str(e).lower()
-            
-            # 🌟 فحص نوع الخطأ: هل هو نفاد حصة (429 أو Resource Exhausted)؟
-            if "429" in error_msg or "resource_exhausted" in error_msg or "quota" in error_msg:
-                # حظر المفتاح لمدة 24 ساعة (سيعود للعمل تلقائياً غداً في نفس هذا الوقت)
-                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
-                print(f"🛑 تم حظر المفتاح رقم {current_key_idx} لمدة 24 ساعة بسبب استنفاد الحصة اليومية.")
-            else:
-                # خطأ مؤقت آخر (مثل بطء الشبكة)، نعطيه حظر مؤقت قصير جداً لمدة دقيقتين فقط
-                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
-                print(f"⚠️ خطأ مؤقت أو شبكي في المفتاح رقم {current_key_idx}، تم تعليقه لمدة دقيقتين. الخطأ: {e}")
-                
-            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
-            
-    return "❌ فشلت جميع محاولات قراءة الصورة بسبب نفاد مخصصات كافة المفاتيح المتاحة حالياً."
-
-def get_questions_from_text(text, count):
-    """توليد الأسئلة بصيغة JSON مع تخطي ذكي للمفاتيح الميتة وإعادتها للخدمة في اليوم التالي"""
-    global current_key_idx
-    
-    if not API_KEYS:
-        return []
-
-    prompt = f"""
-    أنت خبير تعليمي، مهمتك استخراج {count} أسئلة اختيار من متعدد بناءً على النص المرفق حصراً ووفق القواعد الصارمة التالية:
-    1. الاستناد الكامل: استخرج الأسئلة من العبارات والمعلومات الموجودة في النص المرفق فقط. لا تقم بإضافة معلومات خارجية.
-    2. معالجة عيوب النصوص (OCR): افحص النص بدقة، وإذا وجدت كلمات مشوهة قم بتعديلها لتصبح مناسبة للسياق، واجعل قيمة `was_corrupted_text_fixed` تساوي `true`.
-    3. صغ لكل سؤال تلميحاً ذكياً (hint) يساعد الطالب على الاستنتاج دون إعطائه الحل المباشر.
-    """
-    
-    now = datetime.datetime.now()
-    
-    for _ in range(len(API_KEYS)):
-        # 🌟 فحص حالة الحظر قبل الاستخدام لضمان السرعة القصوى للبوت
+        # تخطي المفاتيح المحظورة
         if current_key_idx in blocked_keys and now < blocked_keys[current_key_idx]:
             current_key_idx = (current_key_idx + 1) % len(API_KEYS)
             continue
@@ -103,9 +46,53 @@ def get_questions_from_text(text, count):
         key = API_KEYS[current_key_idx]
         try:
             client = genai.Client(api_key=key)
-            
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-2.0-flash', # الموديل الصحيح
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
+                    "استخرج النص الموجود في هذه الصورة بدقة. أخرج النص فقط دون أي مقدمات."
+                ]
+            )
+            print(f"DEBUG: تم استخراج نص بنجاح. الطول: {len(response.text)}")
+            return response.text
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "429" in error_msg or "resource_exhausted" in error_msg or "quota" in error_msg:
+                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
+                print(f"🛑 حظر مفتاح {current_key_idx} (استنفاد الحصة).")
+            else:
+                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
+                print(f"⚠️ خطأ مؤقت في مفتاح {current_key_idx}: {e}")
+            
+            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+            
+    return ""
+
+def get_questions_from_text(text, count):
+    """توليد الأسئلة بصيغة JSON مع تدوير المفاتيح"""
+    global current_key_idx
+    
+    if not API_KEYS:
+        return []
+
+    prompt = f"""
+    أنت خبير تعليمي، استخرج {count} أسئلة اختيار من متعدد بناءً على النص المرفق.
+    إذا وجدت كلمات مشوهة، قم بتصحيحها واجعل was_corrupted_text_fixed تساوي true.
+    """
+    
+    now = datetime.datetime.now()
+    
+    for _ in range(len(API_KEYS)):
+        if current_key_idx in blocked_keys and now < blocked_keys[current_key_idx]:
+            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+            continue
+            
+        key = API_KEYS[current_key_idx]
+        try:
+            client = genai.Client(api_key=key)
+            response = client.models.generate_content(
+                model='gemini-2.0-flash', # الموديل الصحيح
                 contents=[prompt, text[:10000]],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -116,14 +103,13 @@ def get_questions_from_text(text, count):
             
         except Exception as e:
             error_msg = str(e).lower()
-            
             if "429" in error_msg or "resource_exhausted" in error_msg or "quota" in error_msg:
                 blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
-                print(f"🛑 تم حظر المفتاح رقم {current_key_idx} لمدة 24 ساعة أثناء توليد الأسئلة.")
+                print(f"🛑 حظر مفتاح {current_key_idx} أثناء توليد الأسئلة.")
             else:
                 blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
-                print(f"⚠️ خطأ مؤقت في المفتاح رقم {current_key_idx} أثناء التوليد، عُلق لدقيقتين. الخطأ: {e}")
-                
+                print(f"⚠️ خطأ مؤقت في مفتاح {current_key_idx} أثناء التوليد: {e}")
+            
             current_key_idx = (current_key_idx + 1) % len(API_KEYS)
             
     return []
