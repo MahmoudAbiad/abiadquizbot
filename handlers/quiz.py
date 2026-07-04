@@ -1,5 +1,11 @@
 import os
 import asyncio
+# أضف هذا الجزء في بداية الملف بعد الـ Imports مباشرة
+# هذا يضمن وجود المجلد بمجرد تشغيل البوت
+if not os.path.exists("downloads"):
+    os.makedirs("downloads")
+
+# لا تقم بمسح الكود القديم، فقط تأكد من أن الدوال تستخدم هذا المسار
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from pypdf import PdfReader
