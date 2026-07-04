@@ -1,11 +1,5 @@
 import os
 import asyncio
-# أضف هذا الجزء في بداية الملف بعد الـ Imports مباشرة
-# هذا يضمن وجود المجلد بمجرد تشغيل البوت
-if not os.path.exists("downloads"):
-    os.makedirs("downloads")
-
-# لا تقم بمسح الكود القديم، فقط تأكد من أن الدوال تستخدم هذا المسار
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from pypdf import PdfReader
@@ -14,6 +8,10 @@ from utils import process_file_smart
 from gemini_helper import get_questions_from_text, extract_text_from_image
 from supabase_helper import check_or_add_user, update_user_stats
 from keyboards import get_main_menu_keyboard
+
+# يضمن وجود المجلد بمجرد تشغيل البوت
+if not os.path.exists("downloads"):
+    os.makedirs("downloads")
 
 router = Router()
 
@@ -28,7 +26,8 @@ async def handle_document(msg: types.Message, state: FSMContext):
     file = await bot.get_file(msg.document.file_id)
     await bot.download_file(file.file_path, path)
     
-try:
+    # تم تعديل المسافات هنا ليكون الـ try داخل الدالة
+    try:
         reader = PdfReader(path)
         page_count = len(reader.pages)
         
@@ -38,8 +37,6 @@ try:
             all_text += page.extract_text() or ""
             
         if len(all_text.strip()) < 10:
-            # إذا فشلت pypdf في استخراج نص، سنحاول عبر process_file_smart لاحقاً
-            # لا نوقف البوت، فقط نعلم المستخدم
             await msg.answer("⚠️ الملف يبدو كصور ضوئية، سأحاول معالجته بالذكاء الاصطناعي...")
 
         if page_count > MAX_PDF_PAGES:
@@ -49,7 +46,6 @@ try:
             
     except Exception as e:
         print(f"DEBUG: Error reading PDF: {e}")
-        # لا نخرج، ربما تكون الصور هي الحل
 
     await state.update_data(file_path=path, is_photo=False)
     await state.set_state(QuizState.waiting_for_count)
