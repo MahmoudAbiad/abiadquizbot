@@ -1,5 +1,6 @@
 import os
 import datetime
+import asyncio
 from dotenv import load_dotenv, find_dotenv
 from supabase import create_client
 
@@ -8,24 +9,20 @@ load_dotenv(dotenv_path)
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
-def check_or_add_user(user_id, username, referrer_id=None):
-    """التحقق من المستخدم، إدارة الإحالات، ومنح النقاط اليومية تلقائياً"""
+def _check_or_add_user_sync(user_id, username, referrer_id=None):
+    """المنطق المتزامن الأساسي للتحقق من المستخدم"""
     today = datetime.date.today().isoformat()
     response = supabase.table("users").select("*").eq("user_id", user_id).execute()
     
     if not response.data:
-        # 1. مستخدم جديد بالكامل
         actual_referrer = None
-        # التأكد من أن رابط الإحالة ليس للمستخدم نفسه وأن المحيل موجود في النظام
         if referrer_id and str(referrer_id) != str(user_id):
             ref_check = supabase.table("users").select("points").eq("user_id", referrer_id).execute()
             if ref_check.data:
                 actual_referrer = referrer_id
-                # مكافأة المحيل بـ 10 نقاط إضافية
                 new_ref_points = ref_check.data[0]['points'] + 10
                 supabase.table("users").update({"points": new_ref_points}).eq("user_id", referrer_id).execute()
         
-        # تسجيل المستخدم الجديد بـ 20 نقطة ترحيبية
         supabase.table("users").insert({
             "user_id": user_id, 
             "username": username, 
@@ -37,13 +34,11 @@ def check_or_add_user(user_id, username, referrer_id=None):
         
         return {"points": 20, "status": "new", "referrer": actual_referrer}
     
-    # 2. مستخدم مسجل مسبقاً - فحص التجديد اليومي
     user_data = response.data[0]
     current_points = user_data['points']
     last_renewal = user_data.get('last_renewal')
     
     if last_renewal != today:
-        # تجديد يومي: إضافة 15 نقطة مجانية فوق رصيده الحالي لليوم الجديد
         current_points += 15 
         supabase.table("users").update({
             "points": current_points,
@@ -53,8 +48,10 @@ def check_or_add_user(user_id, username, referrer_id=None):
         
     return {"points": current_points, "status": "normal", "referrer": None}
 
-def update_user_stats(user_id, questions_generated):
-    """خصم النقاط بعد توليد الأسئلة"""
+async def check_or_add_user(user_id, username, referrer_id=None):
+    return await asyncio.to_thread(_check_or_add_user_sync, user_id, username, referrer_id)
+
+def _update_user_stats_sync(user_id, questions_generated):
     user = supabase.table("users").select("points, total_questions").eq("user_id", user_id).execute()
     if user.data:
         current_points = user.data[0]['points']
@@ -65,10 +62,10 @@ def update_user_stats(user_id, questions_generated):
         return new_points
     return None
 
-# 🌟 دوال الآدمن الجديدة 🌟
+async def update_user_stats(user_id, questions_generated):
+    return await asyncio.to_thread(_update_user_stats_sync, user_id, questions_generated)
 
-def admin_add_points(target_id, amount):
-    """دالة خاصة بالآدمن لشحن رصيد أي طالب"""
+def _admin_add_points_sync(target_id, amount):
     user = supabase.table("users").select("points").eq("user_id", target_id).execute()
     if user.data:
         new_points = user.data[0]['points'] + amount
@@ -76,8 +73,10 @@ def admin_add_points(target_id, amount):
         return new_points
     return None
 
-def admin_get_global_stats():
-    """جلب إحصائيات البوت الكاملة من سوبابيس"""
+async def admin_add_points(target_id, amount):
+    return await asyncio.to_thread(_admin_add_points_sync, target_id, amount)
+
+def _admin_get_global_stats_sync():
     response = supabase.table("users").select("user_id, total_questions").execute()
     if response.data:
         total_users = len(response.data)
@@ -85,10 +84,15 @@ def admin_get_global_stats():
         return {"total_users": total_users, "total_questions": total_questions}
     return {"total_users": 0, "total_questions": 0}
 
-def admin_search_user(query):
-    """البحث عن طالب برقم الآيدي أو اليوزرنيم لمعاينة بياناته"""
+async def admin_get_global_stats():
+    return await asyncio.to_thread(_admin_get_global_stats_sync)
+
+def _admin_search_user_sync(query):
     if str(query).isdigit():
         res = supabase.table("users").select("*").eq("user_id", int(query)).execute()
     else:
         res = supabase.table("users").select("*").eq("username", query).execute()
     return res.data[0] if res.data else None
+
+async def admin_search_user(query):
+    return await asyncio.to_thread(_admin_search_user_sync, query)
