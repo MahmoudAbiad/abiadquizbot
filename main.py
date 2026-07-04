@@ -1,6 +1,6 @@
 import asyncio
 import os
-from aiogram import Bot
+from aiogram import Bot, types
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from config import bot, dp, ADMIN_ID
