@@ -16,25 +16,25 @@ router = Router()
 @router.message(F.document)
 async def handle_document(msg: types.Message, state: FSMContext):
     if msg.document.file_size > MAX_DOC_SIZE:
-        await msg.answer("❌ الملف كبير جداً! الحد الأقصى 20 ميجابايت.")
+        await msg.answer("❌ هذا الملف كبير جداً! الحد الأقصى المسموح به هو 20 ميجابايت.")
         return
 
     path = f"downloads/{msg.document.file_id}_{msg.document.file_name}"
     file = await bot.get_file(msg.document.file_id)
     await bot.download_file(file.file_path, path)
     
-    # تحديد نوع الملف لـ Gemini
+    # تحديد نوع الملف لـ Gemini (PDF أو صورة)
     mime_type = "application/pdf" if msg.document.mime_type == "application/pdf" else "image/jpeg"
     
     await state.update_data(file_path=path, is_photo=False, mime_type=mime_type)
     await state.set_state(QuizState.waiting_for_count)
-    await msg.answer("✅ تم رفع الملف بنجاح!\nكم سؤالاً تريد توليده؟ (أرسل رقماً فقط)")
+    await msg.answer("✅ تم رفع وقراءة الملف بنجاح!\nكم سؤالاً تريد توليده؟ (أرسل رقماً فقط)")
 
 @router.message(F.photo)
 async def handle_photo(msg: types.Message, state: FSMContext):
     photo = msg.photo[-1]
     if photo.file_size > MAX_PHOTO_SIZE:
-        await msg.answer("❌ حجم الصورة كبير جداً! الحد الأقصى 10 ميجابايت.")
+        await msg.answer("❌ حجم الصورة كبير جداً! الحد الأقصى هو 10 ميجابايت.")
         return
 
     path = f"downloads/{photo.file_id}.png"
@@ -54,37 +54,32 @@ async def process_count(msg: types.Message, state: FSMContext):
     
     user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown")
     current_points = user_info["points"]
-    
     if current_points < count:
         bot_info = await bot.get_me()
         await msg.answer(
-            f"❌ رصيدك الحالي ({current_points}) لا يكفي.\nيمكنك الشحن أو دعوة زملائك.",
+            f"❌ رصيدك الحالي ({current_points}) لا يكفي لتوليد {count} أسئلة.\nيمكنك الشحن أو دعوة زملائك للحصول على نقاط إضافية عن طريق الخيارات أدناه 👇",
             reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
         )
         if path and os.path.exists(path): os.remove(path)
         await state.clear()
         return
     
-    processing_msg = await msg.answer("🤖 جاري قراءة الملف عبر الذكاء الاصطناعي...")
-    
+    processing_msg = await msg.answer("🤖 جاري قراءة المحتوى ومعالجته بالذكاء الاصطناعي...")
     try:
-        # قراءة الملف كـ Bytes
+        # قراءة الملف وإرساله مباشرة لـ Gemini
         with open(path, "rb") as f:
             file_bytes = f.read()
-            
-        # معالجة الملف مباشرة عبر Gemini
+        
+        # استخراج النص باستخدام الدالة الجديدة المباشرة
         full_text = await asyncio.to_thread(extract_content, file_bytes, mime_type=mime_type)
 
-        if not full_text or "❌" in full_text:
-            await processing_msg.edit_text("❌ لم يتمكن الذكاء الاصطناعي من قراءة الملف. حاول مرة أخرى.")
-            await state.clear()
-            return
+        if not full_text.strip() or "❌" in full_text: 
+            raise ValueError("لم نتمكن من استخراج أي نصوص مقروءة.")
 
         # توليد الأسئلة
         quiz_data = await asyncio.to_thread(get_questions_from_text, full_text, count)
-        
         if not quiz_data:
-            await processing_msg.edit_text("❌ تعذر استخراج أسئلة من هذا المحتوى.")
+            await processing_msg.edit_text("❌ لم يتمكن الذكاء الاصطناعي من استخراج أسئلة مفيدة.")
             await state.clear()
             return
 
@@ -95,16 +90,100 @@ async def process_count(msg: types.Message, state: FSMContext):
         await state.set_state(QuizState.answering_quiz)
         await processing_msg.delete()
 
-        await send_question(msg, state)
+        corrupted_questions = [f"السؤال رقم {i+1}" for i, q in enumerate(quiz_data) if q.get('was_corrupted_text_fixed')]
+        if corrupted_questions:
+            warning_text = f"⚠️ **تنبيه قبل بداية الاختبار:**\nنظراً لوجود كلمات غير واضحة بالورقة، أصلح الذكاء الاصطناعي السياق تلقائياً لـ ({', '.join(corrupted_questions)}).\n\nاضغط أدناه للبدء 👇"
+            start_kb = [[types.InlineKeyboardButton(text="🚀 ابدأ الاختبار الآن", callback_data="start_first_question")]]
+            await msg.answer(warning_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=start_kb))
+        else:
+            await send_question(msg, state)
             
     except Exception as e:
-        await processing_msg.edit_text(f"❌ عذراً، واجهنا خطأ تقني.")
-        print(f"Error: {e}")
+        await processing_msg.edit_text(f"❌ عذراً، واجهنا مشكلة أثناء معالجة الملف.")
+        print(f"Developer Error: {e}")
         await state.clear()
     finally:
         if path and os.path.exists(path):
             try: os.remove(path)
-            except: pass
+            except Exception: pass
 
-# --- بقية الدوال (handle_answer, handle_hint, إلخ) تظل كما هي في كودك ---
-# (لم أغيرها لأنها لا تحتاج لتغيير)
+@router.callback_query(QuizState.answering_quiz, F.data == "start_first_question")
+async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext):
+    await call.message.delete()
+    await send_question(call, state)
+    await call.answer()
+
+async def send_question(msg_or_call, state: FSMContext):
+    data = await state.get_data()
+    questions = data['questions']
+    idx = data['current_index']
+    
+    if idx >= len(questions):
+        score = data['score']
+        total = data['total_count']
+        chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
+        bot_info = await bot.get_me()
+        await bot.send_message(chat_id, f"🏁 **اكتمل الاختبار بنجاح!**\n\n🎯 نتيجتك النهائية: {score} من {total}", reply_markup=get_main_menu_keyboard(bot_info.username, chat_id))
+        await state.clear()
+        return
+        
+    q = questions[idx]
+    text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n{q['question']}"
+    
+    kb = []
+    for i, opt in enumerate(q['options']):
+        kb.append([types.InlineKeyboardButton(text=opt, callback_data=f"ans_{i}")])
+    kb.append([types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")])
+    
+    if isinstance(msg_or_call, types.Message):
+        await msg_or_call.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+    else:
+        await msg_or_call.message.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(QuizState.answering_quiz, F.data.startswith("ans_"))
+async def handle_answer(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    questions = data['questions']
+    idx = data['current_index']
+    q = questions[idx]
+    
+    selected_opt = int(call.data.split("_")[1])
+    correct_opt = q['correct_option_id']
+    
+    score = data['score']
+    if selected_opt == correct_opt:
+        score += 1
+        await state.update_data(score=score)
+        status_text = "✅ **إجابة صحيحة وممتازة!**"
+    else:
+        status_text = f"❌ **إجابة خاطئة!**\n💡 الإجابة الصحيحة هي: **{q['options'][correct_opt]}**"
+        
+    new_kb = []
+    for i, opt in enumerate(q['options']):
+        prefix = "🟢 " if i == correct_opt else ("🔴 " if i == selected_opt and selected_opt != correct_opt else "")
+        new_kb.append([types.InlineKeyboardButton(text=f"{prefix}{opt}", callback_data="ignored")])
+    
+    new_kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
+    updated_text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n{q['question']}\n\n📊 {status_text}"
+    
+    await call.message.edit_text(updated_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=new_kb))
+    await call.answer()
+
+@router.callback_query(QuizState.answering_quiz, F.data == "get_hint")
+async def handle_hint(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    q = data['questions'][data['current_index']]
+    await call.answer(f"💡 تلميح: {q['hint']}", show_alert=True)
+
+@router.callback_query(QuizState.answering_quiz, F.data == "next_question")
+async def handle_next(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(current_index=data['current_index'] + 1)
+    try: await call.message.delete()
+    except Exception: pass
+    await send_question(call, state)
+    await call.answer()
+
+@router.callback_query(F.data == "ignored")
+async def handle_ignored_click(call: types.CallbackQuery):
+    await call.answer()
