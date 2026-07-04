@@ -6,11 +6,10 @@ def process_file_smart(path):
         doc = fitz.open(path)
         for page in doc:
             text = page.get_text().strip()
-            # إزالة شرط الطول (> 50)، أرسل النص دائماً
             if text:
                 results.append({"type": "text", "content": text})
             else:
-                # إذا لم يوجد نص، حول الصفحة لصورة ليتعامل معها Gemini
+                # تحويل الصفحة لصورة وإرسالها لـ Gemini
                 pix = page.get_pixmap(dpi=150)
                 img_bytes = pix.tobytes("png")
                 results.append({"type": "image", "content": img_bytes})
