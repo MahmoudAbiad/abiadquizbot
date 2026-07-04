@@ -6,3 +6,4 @@ pydantic
 pymupdf
 pillow
 aiohttp
+pypdf
