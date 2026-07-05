@@ -32,7 +32,7 @@ OPTION_COUNT = 4
 ADMIN_CONTACT = "@abiadd"
 
 # ==================== Error Messages ====================
-ERROR_FILE_TOO_LARGE = "❌ هذا الملف كبير جداً! الحد الأقصى المسموح به هو {max_size} ميجابايت."
+ERROR_FILE_TOO_LARGE = "❌ هذا الملف كبير جداً! الحد الأقصى المموح به هو {max_size} ميجابايت."
 ERROR_INVALID_PDF_PAGES = "❌ الملف يحتوي على ({page_count}) صفحة! الحد الأقصى المسموح به هو {max_pages} صفحة."
 ERROR_PDF_READ_FAILED = "❌ عذراً، فشل البوت في قراءة ملف الـ PDF."
 ERROR_IMAGE_TOO_LARGE = "❌ حجم الصورة كبير جداً! الحد الأقصى هو {max_size} ميجابايت."
@@ -71,6 +71,6 @@ QUOTA_ERROR_KEYWORDS = ["429", "resource_exhausted", "quota"]
 
 # ==================== Webhook Configuration ====================
 import os
-WEBHOOK_HOST = "0.0.0.0"  # Listen on all interfaces
-WEBHOOK_PORT = int(os.getenv("PORT", 8000))  # Port from environment or default 8000
-WEBHOOK_PATH = "/webhook"  # Webhook endpoint path
+WEBHOOK_HOST = "0.0.0.0"  # الاستماع لجميع الواجهات داخل الحاوية
+WEBHOOK_PORT = int(os.getenv("PORT", 8080))  # الاعتماد الافتراضي على المنفذ 8080 ليتوافق مع ريلواي
+WEBHOOK_PATH = "/webhook"  # المسار الخاص باستقبال طلبات تليجرام

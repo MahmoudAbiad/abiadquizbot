@@ -15,11 +15,12 @@ from constants import (
     MAX_DOC_SIZE, MAX_PHOTO_SIZE, MAX_PDF_PAGES,
     ERROR_FILE_TOO_LARGE, ERROR_INVALID_PDF_PAGES, ERROR_PDF_READ_FAILED,
     ERROR_IMAGE_TOO_LARGE, ERROR_NO_TEXT_EXTRACTED, ERROR_NO_QUESTIONS_GENERATED,
-    ERROR_INSUFFICIENT_POINTS, SUCCESS_FILE_UPLOADED, SUCCESS_PHOTO_UPLOADED,
+    ERROR_INSUFFICIENT_POINTS, ERROR_API_KEYS_NOT_CONFIGURED,
+    SUCCESS_FILE_UPLOADED, SUCCESS_PHOTO_UPLOADED,
     SUCCESS_QUIZ_COMPLETED, MSG_PROCESSING
 )
 from utils import process_file_smart, safe_file_cleanup, ensure_directory_exists
-from gemini_helper import get_questions_from_text, extract_text_from_image
+from gemini_helper import get_questions_from_text, extract_text_from_image, has_gemini_api_keys
 from supabase_helper import check_or_add_user, update_user_stats
 from keyboards import get_main_menu_keyboard, get_quiz_start_keyboard, get_quiz_result_keyboard
 from validators import validate_file_size, validate_pdf_pages, validate_question_count
@@ -193,8 +194,18 @@ async def _generate_and_start_quiz(
         processing_msg: Processing status message
     """
     try:
+        if not has_gemini_api_keys():
+            await processing_msg.edit_text(f"❌ {ERROR_API_KEYS_NOT_CONFIGURED}")
+            await state.clear()
+            return
+
         # Extract text from file
         full_text = await _extract_text_from_file(file_path, is_photo)
+
+        if full_text in (ERROR_API_KEYS_NOT_CONFIGURED, "❌ خطأ: لم يتم ضبط مفاتيح GEMINI_API_KEYS في ملف .env"):
+            await processing_msg.edit_text(f"❌ {ERROR_API_KEYS_NOT_CONFIGURED}")
+            await state.clear()
+            return
         
         if not full_text.strip():
             await processing_msg.edit_text(f"❌ {ERROR_NO_TEXT_EXTRACTED}")

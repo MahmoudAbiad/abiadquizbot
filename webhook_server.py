@@ -1,5 +1,5 @@
 """
-Webhook configuration and FastAPI setup for Azure deployment.
+Webhook configuration and FastAPI setup for Azure/Railway deployment.
 Handles HTTP server setup and webhook endpoint routing.
 """
 
@@ -18,7 +18,7 @@ app = FastAPI(title="Quiz Maker Bot", version="2.0")
 # ==================== Health Check ====================
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for Azure monitoring"""
+    """Health check endpoint for platform monitoring"""
     return {"status": "ok", "bot": "running"}
 
 # ==================== Webhook Endpoint ====================
@@ -26,12 +26,6 @@ async def health_check():
 async def webhook(request: Request):
     """
     Handle incoming Telegram updates via webhook.
-    
-    Args:
-        request: FastAPI request object
-        
-    Returns:
-        dict: Status response
     """
     try:
         # Parse Telegram update from request
@@ -51,8 +45,7 @@ async def webhook(request: Request):
 @app.on_event("startup")
 async def on_startup():
     """
-    Set bot webhook on startup.
-    Called when FastAPI server starts.
+    Set bot webhook and commands on startup. Called when FastAPI server starts.
     """
     try:
         # Get webhook URL from environment
@@ -61,22 +54,28 @@ async def on_startup():
             logger.warning("WEBHOOK_URL not set in environment, using polling mode")
             return
         
-        # Construct full webhook URL
+        webhook_url = webhook_url.rstrip("/")
         full_webhook_url = f"{webhook_url}{WEBHOOK_PATH}"
         
-        # Set webhook
+        # 1. حذف الـ Webhook القديم وتنظيف التحديثات المعلقة المسببة للـ 502
+        await bot.delete_webhook(drop_pending_updates=True)
+        
+        # 2. ضبط مسار الـ Webhook الجديد والمستقر
         await bot.set_webhook(
             url=full_webhook_url,
             drop_pending_updates=True,
             allowed_updates=["message", "callback_query", "inline_query"]
         )
-        
         logger.info(f"Webhook set successfully to: {full_webhook_url}")
         print(f"✅ تم تفعيل Webhook بنجاح على: {full_webhook_url}")
         
+        # 🔥 استدعاء دالة الأوامر من الـ main محلياً هنا داخل نفس الـ Loop لمنع تعارض الحزم
+        from main import set_bot_commands
+        await set_bot_commands(bot)
+        
     except Exception as e:
-        logger.error(f"Failed to set webhook: {e}", exception=e)
-        print(f"❌ فشل تفعيل Webhook: {e}")
+        logger.error(f"Failed to set webhook or commands: {e}", exception=e)
+        print(f"❌ فشل تفعيل الـ Webhook أو الأوامر في السيرفر: {e}")
 
 # ==================== Shutdown Event ====================
 @app.on_event("shutdown")
@@ -90,18 +89,23 @@ async def on_shutdown():
     except Exception as e:
         logger.error(f"Error during shutdown: {e}", exception=e)
 
+# ==================== Run Server Function ====================
 def run_webhook_server():
     """
-    Run the webhook server using Uvicorn.
+    Run the webhook server using Uvicorn with dynamic ports for Railway.
     """
     import uvicorn
     
-    logger.info(f"Starting webhook server on {WEBHOOK_HOST}:{WEBHOOK_PORT}")
-    print(f"🚀 بدء خادم Webhook على {WEBHOOK_HOST}:{WEBHOOK_PORT}")
+    # جلب البورت ديناميكياً من ريلواي أو استخدام الثابت المتوافق
+    port = int(os.getenv("PORT", WEBHOOK_PORT))
+    host = "0.0.0.0"  # إجبارية لاستقبال حركة المرور الخارجية عبر ريلواي
+    
+    logger.info(f"Starting webhook server on {host}:{port}")
+    print(f"🚀 بدء خادم Webhook على {host}:{port}")
     
     uvicorn.run(
         app,
-        host=WEBHOOK_HOST,
-        port=WEBHOOK_PORT,
+        host=host,
+        port=port,
         log_level="info"
     )

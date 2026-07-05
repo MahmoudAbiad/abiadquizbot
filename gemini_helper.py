@@ -34,6 +34,22 @@ if not API_KEYS and os.getenv("GEMINI_API_KEY"):
 current_key_idx: int = 0
 blocked_keys: Dict[int, datetime.datetime] = {}
 
+def has_gemini_api_keys() -> bool:
+    """Return whether at least one Gemini API key is configured."""
+    return bool(API_KEYS)
+
+def _detect_image_mime_type(image_bytes: bytes) -> str:
+    """Detect the mime type for common image formats."""
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
+        return "image/gif"
+    if image_bytes.startswith(b"RIFF") and len(image_bytes) >= 12 and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
 # ==================== Data Models ====================
 class QuizQuestion(BaseModel):
     """Model for a quiz question with metadata"""
@@ -131,11 +147,12 @@ def extract_text_from_image(image_bytes: bytes) -> str:
         try:
             key = API_KEYS[current_key_idx]
             client = genai.Client(api_key=key)
+            mime_type = _detect_image_mime_type(image_bytes)
             
             response = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                     SYSTEM_PROMPT_EXTRACT_TEXT
                 ]
             )
