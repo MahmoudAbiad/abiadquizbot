@@ -9,7 +9,7 @@ MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_PDF_PAGES = 30
 
 # ==================== AI Model Configuration ====================
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 MAX_TEXT_LENGTH_FOR_AI = 10000  # Characters
 AI_REQUEST_TIMEOUT = 30  # Seconds
 
