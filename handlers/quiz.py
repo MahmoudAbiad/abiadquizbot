@@ -48,6 +48,7 @@ from keyboards import (
     get_quiz_question_keyboard,
     get_quiz_answered_keyboard,
     get_favorites_actions_keyboard,
+    get_sections_actions_keyboard,
     get_favorite_section_keyboard,
 )
 from validators import validate_file_size, validate_pdf_pages, validate_question_count
@@ -88,6 +89,22 @@ def _build_favorites_text(favorites: list, sort_mode: str, search_query: str) ->
             lines.append(f"{index}. {title}")
         else:
             lines.append(f"{index}. {title} — {section_title}")
+
+    return "\n".join(lines)
+
+
+def _build_sections_text(sections: list, quiz_counts: dict[str, int]) -> str:
+    lines = ["📁 أقسام المفضلة", ""]
+
+    if not sections:
+        lines.append("لا توجد أقسام محفوظة بعد.")
+        return "\n".join(lines)
+
+    for index, section in enumerate(sections, start=1):
+        title = section.get("title") or DEFAULT_FAVORITE_SECTION_TITLE
+        section_id = section.get("section_id")
+        quiz_count = quiz_counts.get(section_id, 0)
+        lines.append(f"{index}. {title} — {quiz_count} كويز")
 
     return "\n".join(lines)
 
@@ -176,6 +193,25 @@ async def _send_favorites_menu(target: Union[types.Message, types.CallbackQuery]
     favorites = await asyncio.to_thread(list_favorite_quizzes, target.from_user.id, search_query or None, sort_mode)
     text = _build_favorites_text(favorites, sort_mode, search_query)
     keyboard = get_favorites_keyboard(favorites, sort_mode=sort_mode, search_query=search_query)
+
+    if isinstance(target, types.CallbackQuery):
+        await target.message.answer(text, reply_markup=keyboard)
+    else:
+        await target.answer(text, reply_markup=keyboard)
+
+
+async def _send_sections_menu(target: Union[types.Message, types.CallbackQuery], state: FSMContext) -> None:
+    sections = await asyncio.to_thread(list_favorite_sections, target.from_user.id)
+    favorites = await asyncio.to_thread(list_favorite_quizzes, target.from_user.id, None, "latest")
+
+    quiz_counts: dict[str, int] = {}
+    for item in favorites:
+        section_id = item.get("section_id")
+        if section_id:
+            quiz_counts[section_id] = quiz_counts.get(section_id, 0) + 1
+
+    text = _build_sections_text(sections, quiz_counts)
+    keyboard = get_sections_actions_keyboard()
 
     if isinstance(target, types.CallbackQuery):
         await target.message.answer(text, reply_markup=keyboard)
@@ -738,6 +774,17 @@ async def show_favorites_menu(call: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         log_error(logger, f"Error in show_favorites_menu: {e}", exception=e)
         await call.answer("❌ تعذر عرض المفضلة", show_alert=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "sections_menu")
+async def show_sections_menu(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await _send_sections_menu(call, state)
+    except Exception as e:
+        log_error(logger, f"Error in show_sections_menu: {e}", exception=e)
+        await call.answer("❌ تعذر عرض الأقسام", show_alert=True)
     finally:
         await call.answer()
 

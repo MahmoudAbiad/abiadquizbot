@@ -85,7 +85,16 @@ def get_favorites_actions_keyboard(sort_mode: str = "latest") -> types.InlineKey
             types.InlineKeyboardButton(text=sort_latest_label, callback_data="favorites_sort_latest"),
             types.InlineKeyboardButton(text=sort_section_label, callback_data="favorites_sort_section"),
         ],
+        [types.InlineKeyboardButton(text="📁 تصفح الأقسام", callback_data="sections_menu")],
         [types.InlineKeyboardButton(text="🧹 مسح البحث", callback_data="favorites_clear_search")],
+        [types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_sections_actions_keyboard() -> types.InlineKeyboardMarkup:
+    kb = [
+        [types.InlineKeyboardButton(text="⭐ عرض الكويزات المحفوظة", callback_data="favorites_menu")],
         [types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
