@@ -127,7 +127,7 @@ async def admin_fetch_all_users(msg: types.Message):
     
     try:
         supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-        res = supabase.table("users").select("*").order("created_at", desc=True).execute()
+        res = supabase.table("users").select("*").order("joined_at", desc=True).execute()
         users = res.data
         
         if not users:
