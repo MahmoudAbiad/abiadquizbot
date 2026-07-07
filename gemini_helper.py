@@ -81,8 +81,8 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             key = API_KEYS[current_key_idx]
             client = genai.Client(api_key=key)
             
-            # رفع الملف إلى خوادم جوجل المؤقتة
-            uploaded_file = client.files.upload(file=file_path, mime_type=mime_type)
+            # 🔥 تم إصلاح الخطأ: إزالة mime_type ليتم التعرف عليه تلقائياً من امتداد الملف ومنع الانهيار
+            uploaded_file = client.files.upload(file=file_path)
             
             response = client.models.generate_content(
                 model=GEMINI_MODEL,
@@ -97,7 +97,7 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             if response.usage_metadata:
                 total_tokens = response.usage_metadata.total_token_count
             
-            # حذف الملف فوراً للحفاظ على المساحة والخصوصية
+            # حذف الملف فوراً من خوادم جوجل المؤقتة للحفاظ على الخصوصية
             client.files.delete(name=uploaded_file.name)
             
             result = json.loads(response.text)
@@ -106,7 +106,6 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             
         except Exception as e:
             error_msg = str(e)
-            # 🔥 السطر الجديد الأهم: طباعة الخطأ الحقيقي في الـ Logs لمعرفته فوراً
             log_error(logger, f"❌ خطأ في مفتاح جيمني رقم {current_key_idx} أثناء المعالجة: {error_msg}")
             
             if uploaded_file:
