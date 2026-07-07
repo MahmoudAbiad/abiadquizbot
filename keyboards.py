@@ -30,6 +30,12 @@ def get_quiz_result_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+def get_quiz_start_keyboard() -> types.InlineKeyboardMarkup:
+    kb = [
+        [types.InlineKeyboardButton(text="🚀 ابدأ الاختبار", callback_data="start_first_question")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 def get_favorites_keyboard(favorites: list) -> types.InlineKeyboardMarkup:
     kb = []
     for item in favorites:
