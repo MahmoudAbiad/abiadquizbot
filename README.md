@@ -79,7 +79,7 @@ python main.py
 
 ## 🗃️ جداول Supabase الإضافية
 
-لإتاحة ميزات **مشاركة الكويز** و**القائمة المفضلة**، أنشئ الجدولين التاليين في Supabase:
+لإتاحة ميزات **مشاركة الكويز** و**القائمة المفضلة المنظمة**، أنشئ الجداول التالية في Supabase:
 
 ```sql
 create table if not exists shared_quizzes (
@@ -90,16 +90,32 @@ create table if not exists shared_quizzes (
 	created_at timestamptz not null default now()
 );
 
+create table if not exists favorite_quiz_sections (
+	section_id text primary key,
+	user_id bigint not null,
+	title text not null,
+	created_at timestamptz not null default now()
+);
+
 create table if not exists favorite_quizzes (
 	favorite_id text primary key,
 	user_id bigint not null,
 	title text not null,
+	source_title text,
+	section_id text,
 	quiz_data jsonb not null,
 	created_at timestamptz not null default now()
 );
 ```
 
-إذا لم تُنشأ هذه الجداول، سيستمر البوت في العمل للأوامر والاختبار العادي، لكن أزرار المشاركة والمفضلة لن تحفظ البيانات بشكل دائم.
+ملاحظات مهمة:
+
+- حقل `title` داخل `favorite_quizzes` أصبح اسم الكويز المخصص الذي يختاره المستخدم قبل الحفظ.
+- حقل `source_title` يحفظ اسم المصدر الأصلي لسهولة التتبع.
+- يمكن حفظ الكويز داخل قسم أو بدون قسم، مع حد أقصى 20 قسمًا لكل مستخدم.
+- من داخل المفضلة يمكن البحث والفرز حسب الأحدث أو حسب القسم.
+
+إذا لم تُنشأ هذه الجداول أو الحقول الجديدة، سيستمر البوت في العمل للأوامر والاختبار العادي، لكن أزرار المشاركة والمفضلة المنظمة لن تحفظ البيانات بشكل دائم.
 
 ---
 

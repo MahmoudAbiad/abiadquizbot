@@ -36,13 +36,20 @@ def get_quiz_start_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_favorites_keyboard(favorites: list) -> types.InlineKeyboardMarkup:
+def get_favorites_keyboard(favorites: list, sort_mode: str = "latest", search_query: str = "") -> types.InlineKeyboardMarkup:
     kb = []
+    kb.extend(get_favorites_actions_keyboard(sort_mode).inline_keyboard[:-1])
     for item in favorites:
         title = item.get("title") or "كويز محفوظ"
         favorite_id = item.get("favorite_id")
-        kb.append([types.InlineKeyboardButton(text=f"🎯 {title}", callback_data=f"fav_open_{favorite_id}")])
+        section_title = item.get("section_title") or "عام"
+        label = f"🎯 {title}"
+        if section_title:
+            label = f"🎯 {title} • {section_title}"
+        kb.append([types.InlineKeyboardButton(text=label, callback_data=f"fav_open_{favorite_id}")])
         kb.append([types.InlineKeyboardButton(text="🗑 حذف من المفضلة", callback_data=f"fav_del_{favorite_id}")])
+    if search_query:
+        kb.append([types.InlineKeyboardButton(text=f"🔎 نتيجة البحث: {search_query}", callback_data="ignored")])
     kb.append([types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -56,6 +63,7 @@ def get_cache_choice_keyboard(points_cost: int) -> types.InlineKeyboardMarkup:
 def get_quiz_question_keyboard(options: list) -> types.InlineKeyboardMarkup:
     kb = [[types.InlineKeyboardButton(text=opt, callback_data=f"ans_{i}")] for i, opt in enumerate(options)]
     kb.append([types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")])
+    kb.append([types.InlineKeyboardButton(text="⏹ إيقاف الكويز", callback_data="quiz_stop")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: int) -> types.InlineKeyboardMarkup:
@@ -64,4 +72,37 @@ def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: in
         prefix = "🟢 " if i == correct_opt else "🔴 " if i == selected_opt else ""
         kb.append([types.InlineKeyboardButton(text=f"{prefix}{opt}", callback_data="ignored")])
     kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
+    kb.append([types.InlineKeyboardButton(text="⏹ إيقاف الكويز", callback_data="quiz_stop")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_favorites_actions_keyboard(sort_mode: str = "latest") -> types.InlineKeyboardMarkup:
+    sort_latest_label = "✅ الأحدث" if sort_mode == "latest" else "⬇️ حسب الأحدث"
+    sort_section_label = "✅ حسب القسم" if sort_mode == "section" else "📁 حسب القسم"
+    kb = [
+        [
+            types.InlineKeyboardButton(text="🔍 بحث", callback_data="favorites_search"),
+            types.InlineKeyboardButton(text=sort_latest_label, callback_data="favorites_sort_latest"),
+            types.InlineKeyboardButton(text=sort_section_label, callback_data="favorites_sort_section"),
+        ],
+        [types.InlineKeyboardButton(text="🧹 مسح البحث", callback_data="favorites_clear_search")],
+        [types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_favorite_section_keyboard(sections: list, allow_new: bool = True, allow_default: bool = True) -> types.InlineKeyboardMarkup:
+    kb = []
+    for section in sections:
+        section_id = section.get("section_id")
+        title = section.get("title") or "قسم"
+        kb.append([types.InlineKeyboardButton(text=f"📁 {title}", callback_data=f"fav_section_{section_id}")])
+
+    if allow_new:
+        kb.append([types.InlineKeyboardButton(text="➕ إنشاء قسم جديد", callback_data="fav_section_new")])
+
+    if allow_default:
+        kb.append([types.InlineKeyboardButton(text="⏭ بدون قسم", callback_data="fav_section_default")])
+
+    kb.append([types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)

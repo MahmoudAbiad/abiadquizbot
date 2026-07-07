@@ -4,14 +4,14 @@ Handles HTTP server setup safely with modern lifespan context and proper Pydanti
 """
 
 import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from contextlib import asynccontextmanager
 from aiogram.types import Update
 from config import bot, dp
 # نقوم باستيراد دالة الأوامر من config لتجنب الـ Circular Import مع ملف main
 from config import set_bot_commands 
 from logger import get_logger
-from constants import WEBHOOK_PATH, WEBHOOK_PORT
+from constants import WEBHOOK_PATH, WEBHOOK_PORT, TELEGRAM_WEBHOOK_SECRET
 
 logger = get_logger(__name__)
 
@@ -26,13 +26,17 @@ async def lifespan(app: FastAPI):
         webhook_url = os.getenv("WEBHOOK_URL")
         if webhook_url:
             full_webhook_url = f"{webhook_url.rstrip('/')}{WEBHOOK_PATH}"
+
+            if not TELEGRAM_WEBHOOK_SECRET:
+                raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is not configured")
             
             # تنظيف الـ Webhook القديم وتفعيل الجديد
             await bot.delete_webhook(drop_pending_updates=True)
             await bot.set_webhook(
                 url=full_webhook_url,
                 drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"]
+                allowed_updates=["message", "callback_query"],
+                secret_token=TELEGRAM_WEBHOOK_SECRET,
             )
             print(f"✅ تم تفعيل Webhook بنجاح على: {full_webhook_url}")
             
@@ -68,6 +72,11 @@ async def webhook(request: Request):
     استقبال التحديثات من تلغرام وتحليلها بشكل صحيح.
     """
     try:
+        if TELEGRAM_WEBHOOK_SECRET:
+            incoming_secret = request.headers.get("x-telegram-bot-api-secret-token")
+            if incoming_secret != TELEGRAM_WEBHOOK_SECRET:
+                raise HTTPException(status_code=403, detail="Forbidden")
+
         update_data = await request.json()
         
         # [إصلاح الخطأ الحرج]: استخدام model_validate لتحليل البيانات المتداخلة بالكامل

@@ -13,7 +13,9 @@ from logger import get_logger, log_error, log_warning, log_info
 # الاستيراد الآمن والمتطابق
 from constants import (
     WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS,
-    POINTS_PER_QUESTION
+    POINTS_PER_QUESTION,
+    DEFAULT_FAVORITE_SECTION_TITLE,
+    MAX_FAVORITE_SECTIONS,
 )
 from validators import validate_user_id, validate_points_amount
 
@@ -150,13 +152,55 @@ def get_shared_quiz(share_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 # ==================== Favorite Quiz Operations ====================
-def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str, Any]]) -> Optional[str]:
+def count_favorite_sections(user_id: int) -> int:
+    try:
+        res = supabase.table("favorite_quiz_sections").select("section_id", count="exact").eq("user_id", user_id).execute()
+        return int(res.count or 0)
+    except Exception as e:
+        log_error(logger, f"Error counting favorite sections: {e}", exception=e)
+        return 0
+
+
+def list_favorite_sections(user_id: int) -> List[Dict[str, Any]]:
+    try:
+        res = supabase.table("favorite_quiz_sections").select("section_id, title, created_at").eq("user_id", user_id).order("created_at", desc=False).execute()
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error listing favorite sections: {e}", exception=e)
+        return []
+
+
+def create_favorite_section(user_id: int, title: str) -> Optional[str]:
+    try:
+        section_id = uuid.uuid4().hex[:12]
+        supabase.table("favorite_quiz_sections").insert({
+            "section_id": section_id,
+            "user_id": user_id,
+            "title": title,
+            "created_at": datetime.datetime.utcnow().isoformat(),
+        }).execute()
+        log_info(logger, f"Created favorite section: {section_id} for user {user_id}")
+        return section_id
+    except Exception as e:
+        log_error(logger, f"Error creating favorite section: {e}", exception=e)
+        return None
+
+
+def save_favorite_quiz(
+    user_id: int,
+    title: str,
+    quiz_data: List[Dict[str, Any]],
+    section_id: Optional[str] = None,
+    source_title: Optional[str] = None,
+) -> Optional[str]:
     try:
         favorite_id = uuid.uuid4().hex[:12]
         supabase.table("favorite_quizzes").insert({
             "favorite_id": favorite_id,
             "user_id": user_id,
             "title": title,
+            "source_title": source_title or title,
+            "section_id": section_id,
             "quiz_data": quiz_data,
             "created_at": datetime.datetime.utcnow().isoformat()
         }).execute()
@@ -166,13 +210,46 @@ def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str, Any]]
         log_error(logger, f"Error saving favorite quiz: {e}", exception=e)
         return None
 
-def list_favorite_quizzes(user_id: int) -> List[Dict[str, Any]]:
+def list_favorite_quizzes(
+    user_id: int,
+    search_query: Optional[str] = None,
+    sort_by: str = "latest",
+) -> List[Dict[str, Any]]:
     try:
-        res = supabase.table("favorite_quizzes").select("favorite_id, title, created_at").eq("user_id", user_id).order("created_at", desc=True).execute()
-        return res.data or []
+        sections_res = supabase.table("favorite_quiz_sections").select("section_id, title").eq("user_id", user_id).execute()
+        section_map = {item["section_id"]: item["title"] for item in (sections_res.data or [])}
+
+        res = supabase.table("favorite_quizzes").select("favorite_id, title, source_title, section_id, created_at").eq("user_id", user_id).execute()
+        items = []
+        for row in (res.data or []):
+            item = dict(row)
+            section_title = section_map.get(item.get("section_id")) or DEFAULT_FAVORITE_SECTION_TITLE
+            item["section_title"] = section_title
+            items.append(item)
+
+        if search_query:
+            query = search_query.strip().lower()
+            items = [
+                item for item in items
+                if query in (item.get("title") or "").lower()
+                or query in (item.get("source_title") or "").lower()
+                or query in (item.get("section_title") or "").lower()
+            ]
+
+        if sort_by == "section":
+            items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+            items.sort(key=lambda item: (item.get("section_title") or "").lower())
+        else:
+            items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+
+        return items
     except Exception as e:
         log_error(logger, f"Error listing favorite quizzes: {e}", exception=e)
         return []
+
+
+def can_create_more_favorite_sections(user_id: int) -> bool:
+    return count_favorite_sections(user_id) < MAX_FAVORITE_SECTIONS
 
 def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str, Any]]:
     try:

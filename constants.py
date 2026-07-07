@@ -30,8 +30,21 @@ MIN_QUESTIONS_TO_GENERATE = 1
 MAX_QUESTIONS_TO_GENERATE = 50
 OPTION_COUNT = 4
 
+# ==================== Favorites Settings ====================
+MAX_FAVORITE_SECTIONS = 20
+DEFAULT_FAVORITE_SECTION_TITLE = "عام"
+MAX_FAVORITE_TITLE_LENGTH = 80
+
 # ==================== Message Content ====================
 ADMIN_CONTACT = "@abiadd"
+MSG_FAVORITE_NAME_PROMPT = "✏️ أرسل اسمًا للكويز قبل حفظه في المفضلة:"
+MSG_FAVORITE_NAME_INVALID = "❌ اسم الكويز يجب أن يكون بين 2 و {max_len} حرفًا."
+MSG_FAVORITE_SECTION_PROMPT = "📁 اختر قسمًا لهذا الكويز أو أنشئ قسمًا جديدًا:"
+MSG_FAVORITE_SECTION_CREATE = "➕ أرسل اسم القسم الجديد:"
+MSG_FAVORITE_SAVED = "⭐ تم حفظ الكويز في المفضلة بنجاح."
+MSG_FAVORITES_SEARCH_PROMPT = "🔍 أرسل كلمة البحث داخل المفضلة:"
+MSG_FAVORITES_SEARCH_EMPTY = "❌ لم يتم العثور على نتائج مطابقة."
+MSG_QUIZ_STOPPED = "⏹ تم إيقاف الكويز والخروج منه."
 
 # ==================== Error Messages ====================
 ERROR_FILE_TOO_LARGE = "❌ هذا الملف كبير جداً! الحد الأقصى المسموح به هو {max_size} ميجابايت."
@@ -78,3 +91,4 @@ QUOTA_ERROR_KEYWORDS = ["429", "resource_exhausted", "quota"]
 WEBHOOK_HOST = "0.0.0.0" 
 WEBHOOK_PORT = int(os.getenv("PORT", 8080))  
 WEBHOOK_PATH = "/webhook"
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")

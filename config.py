@@ -20,6 +20,9 @@ class QuizState(StatesGroup):
     """حالات المستخدم المخصصة لإدارة تدفق الكويز"""
     waiting_for_count = State()  # انتظار تحديد عدد الأسئلة
     answering_quiz = State()     # مرحلة الإجابة على الأسئلة الحالية
+    saving_favorite_name = State()  # انتظار اسم الكويز قبل حفظه في المفضلة
+    saving_favorite_section_name = State()  # انتظار اسم القسم الجديد
+    searching_favorites = State()  # انتظار كلمة البحث داخل المفضلة
 
 # ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:

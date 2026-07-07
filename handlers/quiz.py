@@ -13,10 +13,16 @@ from pypdf import PdfReader
 from config import bot, QuizState
 from constants import (
     MAX_DOC_SIZE, MAX_PHOTO_SIZE, MAX_PDF_PAGES,
+    MAX_FAVORITE_TITLE_LENGTH,
+    MAX_FAVORITE_SECTIONS,
+    DEFAULT_FAVORITE_SECTION_TITLE,
     ERROR_FILE_TOO_LARGE, ERROR_INVALID_PDF_PAGES, ERROR_PDF_READ_FAILED,
     ERROR_IMAGE_TOO_LARGE, ERROR_NO_TEXT_EXTRACTED, ERROR_NO_QUESTIONS_GENERATED,
     ERROR_INSUFFICIENT_POINTS, SUCCESS_FILE_UPLOADED, SUCCESS_PHOTO_UPLOADED,
-    SUCCESS_QUIZ_COMPLETED, MSG_PROCESSING
+    SUCCESS_QUIZ_COMPLETED, MSG_PROCESSING,
+    MSG_FAVORITE_NAME_PROMPT, MSG_FAVORITE_NAME_INVALID, MSG_FAVORITE_SECTION_PROMPT,
+    MSG_FAVORITE_SECTION_CREATE, MSG_FAVORITE_SAVED, MSG_FAVORITES_SEARCH_PROMPT,
+    MSG_FAVORITES_SEARCH_EMPTY, MSG_QUIZ_STOPPED,
 )
 from utils import process_file_smart, safe_file_cleanup, ensure_directory_exists
 from gemini_helper import get_questions_from_text, extract_text_from_image
@@ -28,10 +34,22 @@ from supabase_helper import (
     get_shared_quiz,
     save_favorite_quiz,
     list_favorite_quizzes,
+    list_favorite_sections,
+    create_favorite_section,
+    can_create_more_favorite_sections,
     get_favorite_quiz,
     remove_favorite_quiz,
 )
-from keyboards import get_main_menu_keyboard, get_quiz_start_keyboard, get_quiz_result_keyboard, get_favorites_keyboard
+from keyboards import (
+    get_main_menu_keyboard,
+    get_quiz_start_keyboard,
+    get_quiz_result_keyboard,
+    get_favorites_keyboard,
+    get_quiz_question_keyboard,
+    get_quiz_answered_keyboard,
+    get_favorites_actions_keyboard,
+    get_favorite_section_keyboard,
+)
 from validators import validate_file_size, validate_pdf_pages, validate_question_count
 from logger import get_logger, log_error, log_info, log_warning
 
@@ -44,6 +62,84 @@ DOWNLOADS_DIR = "downloads"
 def _build_source_title(state_data: dict, fallback: str = "كويز") -> str:
     title = state_data.get("source_title") or fallback
     return title[:80]
+
+
+def _build_favorites_text(favorites: list, sort_mode: str, search_query: str) -> str:
+    lines = ["⭐ الكويزات المفضلة"]
+    lines.append(f"📌 الفرز: {'حسب القسم' if sort_mode == 'section' else 'الأحدث'}")
+    if search_query:
+        lines.append(f"🔎 البحث: {search_query}")
+    lines.append("")
+
+    if not favorites:
+        lines.append(MSG_FAVORITES_SEARCH_EMPTY if search_query else "لا توجد كويزات محفوظة بعد.")
+        return "\n".join(lines)
+
+    current_section = None
+    for index, favorite in enumerate(favorites, start=1):
+        section_title = favorite.get("section_title") or DEFAULT_FAVORITE_SECTION_TITLE
+        if sort_mode == "section" and section_title != current_section:
+            current_section = section_title
+            lines.append(f"📁 {section_title}")
+        title = favorite.get("title") or "كويز محفوظ"
+        if sort_mode == "section":
+            lines.append(f"{index}. {title}")
+        else:
+            lines.append(f"{index}. {title} — {section_title}")
+
+    return "\n".join(lines)
+
+
+async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
+    bot_info = await bot.get_me()
+    menu = get_main_menu_keyboard(bot_info.username, user_id)
+    text = "🏠 القائمة الرئيسية"
+    if isinstance(call_or_message, types.CallbackQuery):
+        await call_or_message.message.answer(text, reply_markup=menu)
+    else:
+        await call_or_message.answer(text, reply_markup=menu)
+
+
+async def _save_pending_favorite(
+    target: Union[types.Message, types.CallbackQuery],
+    state: FSMContext,
+    section_id: Optional[str] = None,
+) -> bool:
+    data = await state.get_data()
+    questions = data.get("questions", [])
+    favorite_name = data.get("pending_favorite_name")
+    source_title = data.get("source_title") or "كويز"
+
+    if not questions or not favorite_name:
+        if isinstance(target, types.CallbackQuery):
+            await target.answer("❌ لا يمكن حفظ هذا الكويز حالياً", show_alert=True)
+        else:
+            await target.answer("❌ لا يمكن حفظ هذا الكويز حالياً")
+        return False
+
+    favorite_id = await asyncio.to_thread(
+        save_favorite_quiz,
+        target.from_user.id,
+        favorite_name,
+        questions,
+        section_id,
+        source_title,
+    )
+
+    if not favorite_id:
+        if isinstance(target, types.CallbackQuery):
+            await target.answer("❌ تعذر حفظ الكويز في المفضلة", show_alert=True)
+        else:
+            await target.answer("❌ تعذر حفظ الكويز في المفضلة")
+        return False
+
+    await state.update_data(pending_favorite_name=None)
+    await state.set_state(QuizState.answering_quiz)
+    if isinstance(target, types.CallbackQuery):
+        await target.message.answer(MSG_FAVORITE_SAVED)
+    else:
+        await target.answer(MSG_FAVORITE_SAVED)
+    return True
 
 
 async def _start_loaded_quiz(
@@ -69,6 +165,20 @@ async def _start_loaded_quiz(
         except Exception:
             pass
     await send_question(msg_or_call, state)
+
+
+async def _send_favorites_menu(target: Union[types.Message, types.CallbackQuery], state: FSMContext) -> None:
+    data = await state.get_data()
+    sort_mode = data.get("favorites_sort_mode", "latest")
+    search_query = data.get("favorites_search_query", "")
+    favorites = await asyncio.to_thread(list_favorite_quizzes, target.from_user.id, search_query or None, sort_mode)
+    text = _build_favorites_text(favorites, sort_mode, search_query)
+    keyboard = get_favorites_keyboard(favorites, sort_mode=sort_mode, search_query=search_query)
+
+    if isinstance(target, types.CallbackQuery):
+        await target.message.answer(text, reply_markup=keyboard)
+    else:
+        await target.answer(text, reply_markup=keyboard)
 
 # ==================== File Handlers ====================
 
@@ -403,20 +513,32 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         # Send current question
         q = questions[idx]
         text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n{q['question']}"
-        
-        # Build keyboard with answer options
-        kb = []
-        for i, opt in enumerate(q['options']):
-            kb.append([types.InlineKeyboardButton(text=opt, callback_data=f"ans_{i}")])
-        kb.append([types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")])
-        
+        keyboard = get_quiz_question_keyboard(q['options'])
+
         if isinstance(msg_or_call, types.Message):
-            await msg_or_call.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+            await msg_or_call.answer(text, reply_markup=keyboard)
         else:
-            await msg_or_call.message.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+            await msg_or_call.message.answer(text, reply_markup=keyboard)
             
     except Exception as e:
         log_error(logger, f"Error in send_question: {e}", exception=e)
+
+
+@router.callback_query(QuizState.answering_quiz, F.data == "quiz_stop")
+async def stop_quiz(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await state.clear()
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+        await _send_main_menu(call, call.from_user.id)
+        await call.message.answer(MSG_QUIZ_STOPPED)
+    except Exception as e:
+        log_error(logger, f"Error in stop_quiz: {e}", exception=e)
+        await call.answer("❌ تعذر إيقاف الكويز", show_alert=True)
+    finally:
+        await call.answer()
 
 
 @router.callback_query(F.data == "quiz_replay")
@@ -483,13 +605,9 @@ async def favorite_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ لا يوجد كويز لحفظه", show_alert=True)
             return
 
-        title = _build_source_title(data)
-        favorite_id = await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions)
-        if not favorite_id:
-            await call.answer("❌ تعذر حفظ الكويز في المفضلة", show_alert=True)
-            return
-
-        await call.message.answer(f"⭐ تم حفظ الكويز في المفضلة بعنوان: {title}")
+        await state.update_data(pending_favorite_name=None)
+        await state.set_state(QuizState.saving_favorite_name)
+        await call.message.answer(MSG_FAVORITE_NAME_PROMPT)
     except Exception as e:
         log_error(logger, f"Error in favorite_quiz: {e}", exception=e)
         await call.answer("❌ حدث خطأ أثناء حفظ الكويز", show_alert=True)
@@ -497,15 +615,81 @@ async def favorite_quiz(call: types.CallbackQuery, state: FSMContext):
         await call.answer()
 
 
-@router.callback_query(F.data == "favorites_menu")
-async def show_favorites_menu(call: types.CallbackQuery):
+@router.message(QuizState.saving_favorite_name, F.text)
+async def process_favorite_name(msg: types.Message, state: FSMContext):
     try:
-        favorites = await asyncio.to_thread(list_favorite_quizzes, call.from_user.id)
-        if not favorites:
-            await call.message.answer("⭐ لا توجد كويزات محفوظة بعد.")
+        favorite_name = msg.text.strip()
+        if len(favorite_name) < 2 or len(favorite_name) > MAX_FAVORITE_TITLE_LENGTH:
+            await msg.answer(MSG_FAVORITE_NAME_INVALID.format(max_len=MAX_FAVORITE_TITLE_LENGTH))
             return
 
-        await call.message.answer("⭐ **الكويزات المفضلة:**", reply_markup=get_favorites_keyboard(favorites), parse_mode="Markdown")
+        await state.update_data(pending_favorite_name=favorite_name)
+        sections = await asyncio.to_thread(list_favorite_sections, msg.from_user.id)
+        allow_new = can_create_more_favorite_sections(msg.from_user.id)
+        await msg.answer(
+            MSG_FAVORITE_SECTION_PROMPT,
+            reply_markup=get_favorite_section_keyboard(sections, allow_new=allow_new, allow_default=True),
+        )
+    except Exception as e:
+        log_error(logger, f"Error in process_favorite_name: {e}", exception=e)
+        await msg.answer("❌ تعذر متابعة حفظ الكويز")
+
+
+@router.message(QuizState.saving_favorite_section_name, F.text)
+async def process_favorite_section_name(msg: types.Message, state: FSMContext):
+    try:
+        section_name = msg.text.strip()
+        if not section_name:
+            await msg.answer("❌ اسم القسم لا يمكن أن يكون فارغًا")
+            return
+
+        if not can_create_more_favorite_sections(msg.from_user.id):
+            await msg.answer(f"❌ وصلت للحد الأقصى وهو {MAX_FAVORITE_SECTIONS} قسمًا")
+            await state.set_state(QuizState.answering_quiz)
+            return
+
+        section_id = await asyncio.to_thread(create_favorite_section, msg.from_user.id, section_name)
+        if not section_id:
+            await msg.answer("❌ تعذر إنشاء القسم")
+            return
+
+        saved = await _save_pending_favorite(msg, state, section_id=section_id)
+        if saved:
+            await msg.answer(f"📁 تم إنشاء القسم وحفظ الكويز داخله: {section_name}")
+    except Exception as e:
+        log_error(logger, f"Error in process_favorite_section_name: {e}", exception=e)
+        await msg.answer("❌ تعذر إنشاء القسم")
+
+
+@router.callback_query(F.data.startswith("fav_section_") )
+async def favorite_section_existing(call: types.CallbackQuery, state: FSMContext):
+    try:
+        section_id = call.data.replace("fav_section_", "", 1)
+        if section_id == "new":
+            if not can_create_more_favorite_sections(call.from_user.id):
+                await call.answer(f"❌ وصلت للحد الأقصى وهو {MAX_FAVORITE_SECTIONS} قسمًا", show_alert=True)
+                return
+
+            await state.set_state(QuizState.saving_favorite_section_name)
+            await call.message.answer(MSG_FAVORITE_SECTION_CREATE)
+            return
+
+        if section_id == "default":
+            await _save_pending_favorite(call, state, section_id=None)
+            return
+
+        await _save_pending_favorite(call, state, section_id=section_id)
+    except Exception as e:
+        log_error(logger, f"Error in favorite_section_existing: {e}", exception=e)
+        await call.answer("❌ تعذر حفظ الكويز", show_alert=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "favorites_menu")
+async def show_favorites_menu(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await _send_favorites_menu(call, state)
     except Exception as e:
         log_error(logger, f"Error in show_favorites_menu: {e}", exception=e)
         await call.answer("❌ تعذر عرض المفضلة", show_alert=True)
@@ -513,11 +697,58 @@ async def show_favorites_menu(call: types.CallbackQuery):
         await call.answer()
 
 
+@router.callback_query(F.data == "favorites_search")
+async def favorites_search(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await state.set_state(QuizState.searching_favorites)
+        await call.message.answer(MSG_FAVORITES_SEARCH_PROMPT)
+    finally:
+        await call.answer()
+
+
+@router.message(QuizState.searching_favorites, F.text)
+async def process_favorites_search(msg: types.Message, state: FSMContext):
+    try:
+        query = msg.text.strip()
+        await state.update_data(favorites_search_query=query)
+        await state.set_state(None)
+        await _send_favorites_menu(msg, state)
+    except Exception as e:
+        log_error(logger, f"Error in process_favorites_search: {e}", exception=e)
+        await msg.answer("❌ تعذر البحث داخل المفضلة")
+
+
+@router.callback_query(F.data == "favorites_clear_search")
+async def favorites_clear_search(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await state.update_data(favorites_search_query="")
+        await _send_favorites_menu(call, state)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "favorites_sort_latest")
+async def favorites_sort_latest(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await state.update_data(favorites_sort_mode="latest")
+        await _send_favorites_menu(call, state)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "favorites_sort_section")
+async def favorites_sort_section(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await state.update_data(favorites_sort_mode="section")
+        await _send_favorites_menu(call, state)
+    finally:
+        await call.answer()
+
+
 @router.callback_query(F.data == "favorites_back")
 async def favorites_back(call: types.CallbackQuery):
     try:
-        bot_info = await bot.get_me()
-        await call.message.answer("🏠 القائمة الرئيسية", reply_markup=get_main_menu_keyboard(bot_info.username, call.from_user.id))
+        await _send_main_menu(call, call.from_user.id)
     finally:
         await call.answer()
 
@@ -525,8 +756,7 @@ async def favorites_back(call: types.CallbackQuery):
 @router.callback_query(F.data == "quiz_home")
 async def quiz_home(call: types.CallbackQuery):
     try:
-        bot_info = await bot.get_me()
-        await call.message.answer("🏠 القائمة الرئيسية", reply_markup=get_main_menu_keyboard(bot_info.username, call.from_user.id))
+        await _send_main_menu(call, call.from_user.id)
     finally:
         await call.answer()
 
@@ -549,12 +779,13 @@ async def open_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("fav_del_"))
-async def delete_favorite_quiz(call: types.CallbackQuery):
+async def delete_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         favorite_id = call.data.replace("fav_del_", "", 1)
         removed = await asyncio.to_thread(remove_favorite_quiz, call.from_user.id, favorite_id)
         if removed:
             await call.message.answer("🗑 تم حذف الكويز من المفضلة.")
+            await _send_favorites_menu(call, state)
         else:
             await call.answer("❌ تعذر حذف الكويز", show_alert=True)
     except Exception as e:
@@ -603,32 +834,25 @@ async def handle_answer(call: types.CallbackQuery, state: FSMContext):
         if is_correct:
             score += 1
             await state.update_data(score=score)
-            status_text = "✅ **إجابة صحيحة وممتازة!**"
+            status_text = "✅ إجابة صحيحة وممتازة!"
             log_info(logger, f"Correct answer: {call.from_user.id}, Q{idx+1}")
         else:
-            status_text = f"❌ **إجابة خاطئة!**\n💡 الإجابة الصحيحة هي: **{q['options'][correct_opt]}**"
+            status_text = f"❌ إجابة خاطئة!\n💡 الإجابة الصحيحة هي: {q['options'][correct_opt]}"
             log_info(logger, f"Incorrect answer: {call.from_user.id}, Q{idx+1}")
+
+        explanation = q.get("explanation") or "لا يوجد شرح إضافي لهذا السؤال."
         
         # Build result keyboard
-        new_kb = []
-        for i, opt in enumerate(q['options']):
-            if i == correct_opt:
-                prefix = "🟢 "
-            elif i == selected_opt and not is_correct:
-                prefix = "🔴 "
-            else:
-                prefix = ""
-            new_kb.append([types.InlineKeyboardButton(text=f"{prefix}{opt}", callback_data="ignored")])
-        
-        new_kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
+        new_kb = get_quiz_answered_keyboard(q['options'], correct_opt, selected_opt)
         
         updated_text = (
-            f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n"
+            f"📝 السؤال {idx + 1} من {len(questions)}:\n\n"
             f"{q['question']}\n\n"
-            f"📊 {status_text}"
+            f"📊 {status_text}\n\n"
+            f"📘 الشرح: {explanation}"
         )
         
-        await call.message.edit_text(updated_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=new_kb))
+        await call.message.edit_text(updated_text, reply_markup=new_kb)
         
     except Exception as e:
         log_error(logger, f"Error in handle_answer: {e}", exception=e)
