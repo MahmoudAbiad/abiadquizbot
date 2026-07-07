@@ -1,11 +1,10 @@
 """
-Quiz Execution Module - Handles quiz questions delivery, answering, 
-hints, and completion logic.
+Quiz execution module - handles answering questions, hints, and results.
 """
-
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from typing import Union
+
 from config import bot, QuizState
 from constants import MSG_QUIZ_STOPPED
 from keyboards import (
@@ -15,10 +14,11 @@ from keyboards import (
 from logger import get_logger, log_error, log_info
 
 logger = get_logger(__name__)
+
+# 💡 تعريف الراوتر الأساسي للملف
 router = Router()
 
 async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
-    """Helper to send the main menu keyboard."""
     bot_info = await bot.get_me()
     menu = get_main_menu_keyboard(bot_info.username, user_id)
     text = "🏠 القائمة الرئيسية"
@@ -27,8 +27,8 @@ async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQu
     else:
         await call_or_message.answer(text, reply_markup=menu)
 
-async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared") -> None:
-    """Starts a quiz loaded from favorites or shared links (Made public for external imports)."""
+# 💡 هذه هي الدالة التي تسببت في الخطأ لأنها كانت مفقودة
+async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared") -> None:
     await state.update_data(
         questions=quiz_data, current_index=0, score=0,
         total_count=len(quiz_data), source_title=source_title,
@@ -43,16 +43,14 @@ async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuer
     await send_question(msg_or_call, state)
 
 async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext) -> None:
-    """Sends the current question or handles the quiz completion screen."""
     try:
         data = await state.get_data()
-        questions = data.get('questions', [])
-        idx = data.get('current_index', 0)
+        questions = data['questions']
+        idx = data['current_index']
         
-        # 🏁 Check if quiz is completed
         if idx >= len(questions):
-            score = data.get('score', 0)
-            total = data.get('total_count', 0)
+            score = data['score']
+            total = data['total_count']
             chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
             
             percentage = (score / total * 100) if total > 0 else 0
@@ -64,13 +62,9 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             )
             await bot.send_message(chat_id, result_text, reply_markup=get_quiz_result_keyboard())
             log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
-            
-            # التحسين: نقوم بتصفير الحالة الفردية حتى لا يعلق حساب المستخدم، مع إبقاء البيانات للـ Replay
             await state.update_data(quiz_completed=True)
-            await state.set_state(None)
             return
         
-        # 📝 Send Current Question
         q = questions[idx]
         text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n{q['question']}"
         keyboard = get_quiz_question_keyboard(q['options'])
@@ -116,11 +110,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         if not questions:
             await call.answer("❌ لا يوجد كويز محفوظ لإعادة تشغيله", show_alert=True)
             return
-            
-        # التحسين: إعادة تعيين الحالة لتستقبل أزرار الإجابات بشكل صحيح
-        await state.set_state(QuizState.answering_quiz)
         await state.update_data(current_index=0, score=0, quiz_completed=False)
-        
         try:
             await call.message.delete()
         except Exception:
