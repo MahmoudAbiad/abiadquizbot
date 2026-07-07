@@ -1,6 +1,6 @@
 """
 Gemini AI integration for direct file processing and quiz generation.
-Handles API key rotation, quota management, and Usage Metadata tracking.
+Handles API key rotation, quota management, and Usage Metadata tracking with strict logging.
 """
 
 import os
@@ -13,13 +13,14 @@ from google.genai import types
 from pydantic import BaseModel, Field
 from constants import (
     GEMINI_MODEL, KEY_BLOCK_QUOTA_EXHAUSTED, KEY_BLOCK_TEMPORARY_ERROR,
-    SYSTEM_PROMPT_GENERATE_QUESTIONS, QUOTA_ERROR_KEYWORDS, ERROR_API_KEYS_NOT_CONFIGURED
+    SYSTEM_PROMPT_GENERATE_QUESTIONS, QUOTA_ERROR_KEYWORDS
 )
 from logger import get_logger, log_error, log_warning, log_info
 
 load_dotenv()
 logger = get_logger(__name__)
 
+# ==================== Configuration ====================
 api_keys_raw = os.getenv("GEMINI_API_KEYS", "")
 API_KEYS: List[str] = [k.strip() for k in api_keys_raw.split(",") if k.strip()]
 
@@ -32,6 +33,7 @@ blocked_keys: Dict[int, datetime.datetime] = {}
 def has_gemini_api_keys() -> bool:
     return bool(API_KEYS)
 
+# ==================== Data Models ====================
 class QuizQuestion(BaseModel):
     question: str = Field(description="نص السؤال الاختياري المستخرج من المستند المرفق حصراً.")
     options: List[str] = Field(description="أربعة خيارات فريدة ومتوازنة للسؤال.")
@@ -56,13 +58,15 @@ def _is_key_blocked() -> bool:
         return False
     return True
 
+# ==================== Main Functions ====================
 def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     """
     رفع الملف مباشرة لجيميني وقراءة عدد التوكينات الفعلي المستهلك عبر usage_metadata.
-    Returns: Tuple[quiz_data, total_tokens]
     """
     global current_key_idx
-    if not API_KEYS: return None
+    if not API_KEYS: 
+        log_error(logger, "No Gemini API keys found in environment variables.")
+        return None
     
     prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.format(count=count)
     max_attempts = len(API_KEYS)
@@ -77,6 +81,7 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             key = API_KEYS[current_key_idx]
             client = genai.Client(api_key=key)
             
+            # رفع الملف إلى خوادم جوجل المؤقتة
             uploaded_file = client.files.upload(file=file_path, mime_type=mime_type)
             
             response = client.models.generate_content(
@@ -92,6 +97,7 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             if response.usage_metadata:
                 total_tokens = response.usage_metadata.total_token_count
             
+            # حذف الملف فوراً للحفاظ على المساحة والخصوصية
             client.files.delete(name=uploaded_file.name)
             
             result = json.loads(response.text)
@@ -100,6 +106,9 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             
         except Exception as e:
             error_msg = str(e)
+            # 🔥 السطر الجديد الأهم: طباعة الخطأ الحقيقي في الـ Logs لمعرفته فوراً
+            log_error(logger, f"❌ خطأ في مفتاح جيمني رقم {current_key_idx} أثناء المعالجة: {error_msg}")
+            
             if uploaded_file:
                 try: client.files.delete(name=uploaded_file.name)
                 except: pass
