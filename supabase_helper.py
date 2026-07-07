@@ -195,14 +195,29 @@ def save_favorite_quiz(
 ) -> Optional[str]:
     try:
         favorite_id = uuid.uuid4().hex[:12]
-        supabase.table("favorite_quizzes").insert({
+        payload = {
+            "favorite_id": favorite_id,  # Fixed: Added identifier string directly into payload
             "user_id": user_id,
             "title": title,
             "source_title": source_title or title,
-            "section_id": section_id,
             "quiz_data": quiz_data,
             "created_at": datetime.datetime.utcnow().isoformat()
-        }).execute()
+        }
+        if section_id is not None:
+            payload["section_id"] = section_id
+
+        try:
+            supabase.table("favorite_quizzes").insert(payload).execute()
+        except Exception as insert_error:
+            # Safer parsing for APIError objects or standard string errors
+            error_text = getattr(insert_error, 'message', str(insert_error))
+            if section_id is not None and "section_id" in error_text and "favorite_quizzes" in error_text:
+                payload.pop("section_id", None)
+                supabase.table("favorite_quizzes").insert(payload).execute()
+                log_warning(logger, "Saved favorite quiz without section_id because the deployed schema does not expose that column yet.")
+            else:
+                raise
+
         log_info(logger, f"Saved favorite quiz: {favorite_id} for user {user_id}")
         return favorite_id
     except Exception as e:
@@ -222,10 +237,19 @@ def list_favorite_quizzes(
             if item.get("section_id")
         }
 
-        res = supabase.table("favorite_quizzes").select("title, source_title, section_id, created_at").eq("user_id", user_id).execute()
+        try:
+            res = supabase.table("favorite_quizzes").select("favorite_id, title, source_title, section_id, created_at").eq("user_id", user_id).execute()
+        except Exception as select_error:
+            error_text = getattr(select_error, 'message', str(select_error))
+            if "section_id" in error_text and "favorite_quizzes" in error_text:
+                res = supabase.table("favorite_quizzes").select("favorite_id, title, source_title, created_at").eq("user_id", user_id).execute()
+            else:
+                raise
+
         items = []
         for row in (res.data or []):
             item = dict(row)
+            # Safe tracking fallback options
             item["favorite_id"] = item.get("favorite_id") or item.get("created_at")
             section_title = section_map.get(item.get("section_id")) or DEFAULT_FAVORITE_SECTION_TITLE
             item["section_title"] = section_title
@@ -257,7 +281,8 @@ def can_create_more_favorite_sections(user_id: int) -> bool:
 
 def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str, Any]]:
     try:
-        res = supabase.table("favorite_quizzes").select("*").eq("user_id", user_id).eq("created_at", favorite_id).execute()
+        # Fixed: Query via favorite_id column instead of created_at timestamp
+        res = supabase.table("favorite_quizzes").select("*").eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
         if res.data:
             return res.data[0]
         return None
@@ -267,7 +292,8 @@ def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str, Any]
 
 def remove_favorite_quiz(user_id: int, favorite_id: str) -> bool:
     try:
-        supabase.table("favorite_quizzes").delete().eq("user_id", user_id).eq("created_at", favorite_id).execute()
+        # Fixed: Query via favorite_id column instead of created_at timestamp
+        supabase.table("favorite_quizzes").delete().eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
         log_info(logger, f"Removed favorite quiz: {favorite_id} for user {user_id}")
         return True
     except Exception as e:
