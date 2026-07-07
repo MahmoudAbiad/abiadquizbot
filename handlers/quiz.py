@@ -18,8 +18,11 @@ from constants import (
 )
 from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
 from gemini_helper import generate_quiz_from_file, has_gemini_api_keys
-from supabase_helper import check_or_add_user, update_user_stats, supabase
-from keyboards import get_main_menu_keyboard
+from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz, save_quiz_to_cache
+from keyboards import (
+    get_main_menu_keyboard, get_cache_choice_keyboard, 
+    get_quiz_question_keyboard, get_quiz_answered_keyboard
+)
 from validators import validate_file_size, validate_question_count, validate_pdf_pages
 from logger import get_logger, log_error, log_info
 
@@ -54,37 +57,33 @@ async def _process_uploaded_file(msg: types.Message, state: FSMContext, file_id:
                     await msg.answer(pdf_error)
                     safe_file_cleanup(file_path)
                     return
-            except Exception as e:
+            except Exception:
                 await processing_msg.delete()
                 await msg.answer(ERROR_PDF_READ_FAILED)
                 safe_file_cleanup(file_path)
                 return
 
-        # فحص التكرار من قاعدة البيانات
+        # فحص التكرار وجلب التوكينات المخزنة للكويز السابق
         file_hash = calculate_file_hash(file_path)
-        res = await asyncio.to_thread(lambda: supabase.table("files_cache").select("questions_data, total_tokens").eq("file_hash", file_hash).execute())
+        cached_data = await asyncio.to_thread(get_cached_quiz, file_hash)
         
         await processing_msg.delete()
         
-        if res.data:
-            cached_quiz = res.data[0]['questions_data']
-            original_tokens = res.data[0]['total_tokens'] or 10000 # افتراضي إن سقط سهواً
+        if cached_data:
+            cached_quiz = cached_data['questions_data']
+            original_tokens = cached_data.get('total_tokens') or 15000
             
             await state.update_data(file_path=file_path, file_hash=file_hash, is_photo=is_photo, mime_type=mime_type, cached_quiz=cached_quiz, original_tokens=original_tokens)
             
-            # حساب نقاط الخصم (20% من تكلفة التوكينات الأصلية)
+            # حساب تكلفة الخصم (20% من تكلفة النقاط الأصلية للتوكينات)
             base_points = max(1, round(original_tokens / 1000))
             points_cost = max(1, int(base_points * DISCOUNT_RATE_FOR_CACHED))
             
-            kb = [
-                [types.InlineKeyboardButton(text=f"🎁 كويز جاهز بـ {points_cost} نقطة (خصم 80%)", callback_data="cache_accept")],
-                [types.InlineKeyboardButton(text="🆕 توليد كويز جديد (تكلفة كاملة)", callback_data="cache_reject")]
-            ]
             await msg.answer(
                 "💡 **هذا الملف تمت معالجته مسبقاً!**\n\n"
-                f"يوجد كويز مسبق مكون من {len(cached_quiz)} سؤال لهذا الملف.\n"
+                f"يوجد اختبار جاهز مكون من {len(cached_quiz)} سؤال لهذا الملف.\n"
                 "اختر ما يناسبك:", 
-                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb)
+                reply_markup=get_cache_choice_keyboard(points_cost)
             )
         else:
             await state.update_data(file_path=file_path, file_hash=file_hash, is_photo=is_photo, mime_type=mime_type)
@@ -112,12 +111,11 @@ async def handle_cache_accept(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         cached_quiz = data.get('cached_quiz')
-        original_tokens = data.get('original_tokens', 10000)
+        original_tokens = data.get('original_tokens', 15000)
         file_path = data.get('file_path')
         
         user_info = await asyncio.to_thread(check_or_add_user, call.from_user.id, call.from_user.username or "Unknown")
         
-        # احتساب تكلفة نقاط التوكينات المخفضة
         base_points = max(1, round(original_tokens / 1000))
         points_to_deduct = max(1, int(base_points * DISCOUNT_RATE_FOR_CACHED))
         
@@ -135,7 +133,6 @@ async def handle_cache_accept(call: types.CallbackQuery, state: FSMContext):
         await call.message.delete()
         await send_question(call, state)
         safe_file_cleanup(file_path)
-        
     except Exception as e:
         log_error(logger, f"Error in cache accept: {e}")
     finally:
@@ -162,10 +159,9 @@ async def process_count(msg: types.Message, state: FSMContext):
         data = await state.get_data()
         file_path, file_hash, mime_type = data.get('file_path'), data.get('file_hash'), data.get('mime_type')
         
-        # فحص رصيد مبدئي لحماية السيرفر من العمليات الوهمية
         user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown")
-        if user_info["points"] < 2: # حد أدنى كأمان لتوليد الطلب
-            await msg.answer("❌ رصيد نقاطك منخفض جداً، يرجى شحن حسابك أو انتظار التجديد اليومي.")
+        if user_info["points"] < 2:  # حد أمان
+            await msg.answer("❌ رصيد نقاطك منخفض جداً لإجراء عمليات التوليد بالذكاء الاصطناعي.")
             safe_file_cleanup(file_path)
             await state.clear()
             return
@@ -178,7 +174,6 @@ async def process_count(msg: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        # توليد الأسئلة وجلب التوكينات الفعلية من جوجل
         gemini_result = await asyncio.to_thread(generate_quiz_from_file, file_path, count, mime_type)
         
         if not gemini_result:
@@ -190,23 +185,22 @@ async def process_count(msg: types.Message, state: FSMContext):
         quiz_data, total_tokens = gemini_result
         actual_count = len(quiz_data)
         
-        # تحويل التوكينات إلى أرقام أسهل للفهم: 1000 توكن = 1 نقطة (معادلة الخطة الورقية)
+        # 1000 توكن = 1 نقطة فعلياً
         points_to_deduct = max(1, round(total_tokens / 1000))
         
         if user_info["points"] < points_to_deduct:
             bot_info = await bot.get_me()
             await processing_msg.edit_text(
-                f"❌ التكلفة الفعلية للمستند بلغت ({total_tokens:,} توكن) أي ما يعادل **{points_to_deduct}** نقطة.\n"
-                f"رصيدك الحالي هو ({user_info['points']}) نقطة فقط ولا يكفي لإتمام العملية.",
+                f"❌ تكلفة معالجة المستند بلغت ({total_tokens:,} توكن) أي ما يعادل **{points_to_deduct}** نقطة.\n"
+                f"💰 رصيدك المتاح هو ({user_info['points']}) نقطة فقط ولا يكفي لإتمام الطلب.",
                 reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
             )
             safe_file_cleanup(file_path)
             await state.clear()
             return
         
-        # خصم النقاط بناء على التوكينات وحفظ الكاش متضمناً التوكينات الأصلية للمستند
         await asyncio.to_thread(update_user_stats, msg.from_user.id, points_to_deduct, actual_count)
-        await asyncio.to_thread(lambda: supabase.table("files_cache").insert({"file_hash": file_hash, "questions_data": quiz_data, "total_tokens": total_tokens}).execute())
+        await asyncio.to_thread(save_quiz_to_cache, file_hash, quiz_data, total_tokens)
         
         await state.update_data(questions=quiz_data, current_index=0, score=0, total_count=actual_count)
         await state.set_state(QuizState.answering_quiz)
@@ -214,7 +208,6 @@ async def process_count(msg: types.Message, state: FSMContext):
         await processing_msg.delete()
         safe_file_cleanup(file_path)
         await send_question(msg, state)
-        
     except Exception as e:
         log_error(logger, f"Error in process_count: {e}")
         await msg.answer("❌ حدث خطأ أثناء توليد الكويز.")
@@ -245,14 +238,10 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         q = questions[idx]
         text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n{q['question']}"
         
-        kb = [[types.InlineKeyboardButton(text=opt, callback_data=f"ans_{i}")] for i, opt in enumerate(q['options'])]
-        kb.append([types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")])
-        
         if isinstance(msg_or_call, types.Message):
-            await msg_or_call.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+            await msg_or_call.answer(text, reply_markup=get_quiz_question_keyboard(q['options']))
         else:
-            await msg_or_call.message.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
-            
+            await msg_or_call.message.answer(text, reply_markup=get_quiz_question_keyboard(q['options']))
     except Exception as e:
         log_error(logger, f"Error sending question: {e}")
 
@@ -275,15 +264,8 @@ async def handle_answer(call: types.CallbackQuery, state: FSMContext):
         if explanation_text:
             status_text += f"\n\n📚 **الشرح:** {explanation_text}"
         
-        new_kb = []
-        for i, opt in enumerate(q['options']):
-            prefix = "🟢 " if i == correct_opt else "🔴 " if i == selected_opt else ""
-            new_kb.append([types.InlineKeyboardButton(text=f"{prefix}{opt}", callback_data="ignored")])
-            
-        new_kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
         updated_text = f"📝 **السؤال {data['current_index'] + 1} من {len(data['questions'])}:**\n\n{q['question']}\n\n{status_text}"
-        await call.message.edit_text(updated_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=new_kb))
-        
+        await call.message.edit_text(updated_text, reply_markup=get_quiz_answered_keyboard(q['options'], correct_opt, selected_opt))
     except Exception as e:
         log_error(logger, f"Error in handle_answer: {e}")
     finally:

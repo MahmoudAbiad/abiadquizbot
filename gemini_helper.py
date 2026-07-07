@@ -12,17 +12,14 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 from constants import (
-    GEMINI_MODEL, AI_REQUEST_TIMEOUT,
-    KEY_BLOCK_QUOTA_EXHAUSTED, KEY_BLOCK_TEMPORARY_ERROR,
-    SYSTEM_PROMPT_GENERATE_QUESTIONS, QUOTA_ERROR_KEYWORDS,
-    ERROR_API_KEYS_NOT_CONFIGURED
+    GEMINI_MODEL, KEY_BLOCK_QUOTA_EXHAUSTED, KEY_BLOCK_TEMPORARY_ERROR,
+    SYSTEM_PROMPT_GENERATE_QUESTIONS, QUOTA_ERROR_KEYWORDS, ERROR_API_KEYS_NOT_CONFIGURED
 )
 from logger import get_logger, log_error, log_warning, log_info
 
 load_dotenv()
 logger = get_logger(__name__)
 
-# ==================== Configuration ====================
 api_keys_raw = os.getenv("GEMINI_API_KEYS", "")
 API_KEYS: List[str] = [k.strip() for k in api_keys_raw.split(",") if k.strip()]
 
@@ -35,7 +32,6 @@ blocked_keys: Dict[int, datetime.datetime] = {}
 def has_gemini_api_keys() -> bool:
     return bool(API_KEYS)
 
-# ==================== Data Models ====================
 class QuizQuestion(BaseModel):
     question: str = Field(description="نص السؤال الاختياري المستخرج من المستند المرفق حصراً.")
     options: List[str] = Field(description="أربعة خيارات فريدة ومتوازنة للسؤال.")
@@ -44,34 +40,29 @@ class QuizQuestion(BaseModel):
     explanation: str = Field(description="شرح أكاديمي مقتضب يوضح لماذا هذه الإجابة هي الصحيحة.")
 
 def _is_quota_error(error_msg: str) -> bool:
-    error_lower = error_msg.lower()
-    return any(keyword in error_lower for keyword in QUOTA_ERROR_KEYWORDS)
+    return any(k in error_msg.lower() for k in QUOTA_ERROR_KEYWORDS)
 
 def _rotate_api_key() -> None:
     global current_key_idx
     current_key_idx = (current_key_idx + 1) % len(API_KEYS)
 
 def _block_current_key(hours: int) -> None:
-    unblock_time = datetime.datetime.now() + datetime.timedelta(hours=hours)
-    blocked_keys[current_key_idx] = unblock_time
+    blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=hours)
 
 def _is_key_blocked() -> bool:
-    if current_key_idx not in blocked_keys:
-        return False
+    if current_key_idx not in blocked_keys: return False
     if datetime.datetime.now() >= blocked_keys[current_key_idx]:
         del blocked_keys[current_key_idx]
         return False
     return True
 
-# ==================== Main Functions ====================
 def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     """
-    رفع الملف وتوليد الأسئلة، مع إرجاع التوكينات المستهلكة فعلياً من الـ Metadata.
-    Returns: Tuple[quiz_data, total_tokens] أو None في حال الفشل.
+    رفع الملف مباشرة لجيميني وقراءة عدد التوكينات الفعلي المستهلك عبر usage_metadata.
+    Returns: Tuple[quiz_data, total_tokens]
     """
     global current_key_idx
-    if not API_KEYS:
-        return None
+    if not API_KEYS: return None
     
     prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.format(count=count)
     max_attempts = len(API_KEYS)
@@ -97,17 +88,14 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
                 ),
             )
             
-            # جلب عدد التوكينات الفعلي من الـ usage_metadata المطور (طلب المستخدم)
             total_tokens = 0
             if response.usage_metadata:
                 total_tokens = response.usage_metadata.total_token_count
             
-            # حذف الملف فوراً للحفاظ على الخصوصية والمساحة
             client.files.delete(name=uploaded_file.name)
             
             result = json.loads(response.text)
-            log_info(logger, f"Generated {len(result)} questions. Tokens used: {total_tokens}")
-            
+            log_info(logger, f"Generated successfully. Tokens: {total_tokens}")
             return result, total_tokens
             
         except Exception as e:
@@ -122,5 +110,5 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
                 _block_current_key(KEY_BLOCK_TEMPORARY_ERROR)
             
             _rotate_api_key()
-    
+            
     return None
