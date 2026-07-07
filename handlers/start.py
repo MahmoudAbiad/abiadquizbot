@@ -9,7 +9,6 @@ from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from config import bot
-from handlers.execution import start_loaded_quiz
 from keyboards import get_main_menu_keyboard
 from supabase_helper import check_or_add_user, get_shared_quiz
 from logger import get_logger, log_warning, log_info
@@ -36,10 +35,10 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             share_id = command.args.replace("share_", "", 1)
             shared = await asyncio.to_thread(get_shared_quiz, share_id)
             if shared:
-                # 🛠️ تم التعديل هنا للاستيراد من ملف التنفيذ الجديد لتفادي الأخطاء
+                # 💡 الاستدعاء الداخلي بالاسم الصحيح (مع الشرطة السفلية)
                 from handlers.execution import _start_loaded_quiz
                 await msg.answer(f"🔗 تم فتح كويز مشترك: {shared.get('title') or 'كويز مشترك'}")
-                await start_loaded_quiz(msg, state, shared["quiz_data"], shared.get('title') or 'كويز مشترك', origin="shared")
+                await _start_loaded_quiz(msg, state, shared["quiz_data"], shared.get('title') or 'كويز مشترك', origin="shared")
                 return
 
         # Extract referrer ID from command arguments
@@ -91,7 +90,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         
         await msg.answer(
             welcome_text,
-            parse_mode="HTML",  # تفعيل تنسيق HTML ليظهر الخط العريض
+            parse_mode="HTML",
             reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
         )
         
@@ -125,7 +124,7 @@ async def show_recharge_info(call: types.CallbackQuery):
             "2️⃣ سيتم تأكيد وتفعيل النقاط في حسابك فوراً.\n"
             "3️⃣ يمكنك العودة ومتابعة المذاكرة وتوليد الكويزات دون أي انقطاع! 🚀"
         )
-        await call.message.answer(recharge_text, parse_mode="HTML")  # تفعيل تنسيق HTML هنا أيضاً
+        await call.message.answer(recharge_text, parse_mode="HTML")
         log_info(logger, f"User {call.from_user.id} requested recharge info")
         
     except Exception as e:
@@ -142,6 +141,5 @@ async def show_recharge_info(call: types.CallbackQuery):
 async def set_bot_commands(bot):
     commands = [
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
-        # يمكنك إضافة أي أوامر أخرى هنا
     ]
     await bot.set_my_commands(commands)
