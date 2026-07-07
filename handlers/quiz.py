@@ -57,6 +57,8 @@ logger = get_logger(__name__)
 router = Router()
 
 DOWNLOADS_DIR = "downloads"
+processing_users_lock = asyncio.Lock()
+processing_users: set[int] = set()
 
 
 def _build_source_title(state_data: dict, fallback: str = "كويز") -> str:
@@ -312,10 +314,32 @@ async def process_count(msg: types.Message, state: FSMContext):
             safe_file_cleanup(file_path)
             await state.clear()
             return
-        
-        # Start quiz generation
-        processing_msg = await msg.answer(MSG_PROCESSING)
-        await _generate_and_start_quiz(msg, file_path, is_photo, count, state, processing_msg)
+
+        async with processing_users_lock:
+            if msg.from_user.id in processing_users or (await state.get_data()).get("quiz_processing"):
+                await msg.answer("⏳ جاري معالجة الملف بالفعل، انتظر حتى ينتهي ثم جرّب مرة أخرى.")
+                return
+            processing_users.add(msg.from_user.id)
+        try:
+            await state.update_data(quiz_processing=True)
+
+            # Start quiz generation
+            processing_msg = await msg.answer(MSG_PROCESSING)
+            asyncio.create_task(
+                _generate_and_start_quiz_background(
+                    msg,
+                    file_path,
+                    is_photo,
+                    count,
+                    state,
+                    processing_msg,
+                )
+            )
+        except Exception:
+            await state.update_data(quiz_processing=False)
+            async with processing_users_lock:
+                processing_users.discard(msg.from_user.id)
+            raise
         
     except Exception as e:
         log_error(logger, f"Error in process_count: {e}", exception=e)
@@ -410,6 +434,27 @@ async def _generate_and_start_quiz(
     
     finally:
         safe_file_cleanup(file_path)
+
+
+async def _generate_and_start_quiz_background(
+    msg: types.Message,
+    file_path: str,
+    is_photo: bool,
+    count: int,
+    state: FSMContext,
+    processing_msg: types.Message,
+) -> None:
+    user_id = msg.from_user.id
+    try:
+        await _generate_and_start_quiz(msg, file_path, is_photo, count, state, processing_msg)
+    finally:
+        try:
+            await state.update_data(quiz_processing=False)
+        except Exception:
+            pass
+
+        async with processing_users_lock:
+            processing_users.discard(user_id)
 
 async def _extract_text_from_file(file_path: str, is_photo: bool) -> str:
     """
