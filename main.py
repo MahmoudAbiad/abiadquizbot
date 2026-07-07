@@ -9,7 +9,7 @@ import asyncio
 import uvicorn
 from logger import get_logger
 from config import bot, dp
-from handlers import start_router, admin_router, quiz_router
+from handlers import start_router, admin_router, files_router, execution_router, favorites_router, sharing_router
 from middlewares import ThrottlingMiddleware
 from aiogram import types
 
@@ -21,7 +21,14 @@ def main():
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
     
     # 2. تسجيل الـ Routers الأساسية للبوت
-    dp.include_routers(admin_router, start_router, quiz_router)
+    dp.include_routers(
+    start_router,
+    admin_router,
+    files_router,
+    execution_router,
+    favorites_router,
+    sharing_router
+)
     
     webhook_url = os.getenv("WEBHOOK_URL")
     

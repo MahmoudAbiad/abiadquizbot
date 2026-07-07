@@ -35,10 +35,9 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             share_id = command.args.replace("share_", "", 1)
             shared = await asyncio.to_thread(get_shared_quiz, share_id)
             if shared:
-                # 🛠️ تم التعديل هنا للاستيراد من ملف التنفيذ الجديد لتفادي الأخطاء
-                from handlers.execution import _start_loaded_quiz
+                from handlers.quiz import _start_loaded_quiz
                 await msg.answer(f"🔗 تم فتح كويز مشترك: {shared.get('title') or 'كويز مشترك'}")
-                await _start_loaded_quiz(msg, state, shared["quiz_data"], shared.get('title') or 'كويز مشترك', origin="shared")
+                await _start_loaded_quiz(msg, state, shared["quiz_data"], shared.get("title") or "كويز مشترك", origin="shared")
                 return
 
         # Extract referrer ID from command arguments
@@ -137,10 +136,3 @@ async def show_recharge_info(call: types.CallbackQuery):
     
     finally:
         await call.answer()
-
-async def set_bot_commands(bot):
-    commands = [
-        types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
-        # يمكنك إضافة أي أوامر أخرى هنا
-    ]
-    await bot.set_my_commands(commands)
