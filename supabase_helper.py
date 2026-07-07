@@ -154,7 +154,7 @@ def get_shared_quiz(share_id: str) -> Optional[Dict[str, Any]]:
 # ==================== Favorite Quiz Operations ====================
 def count_favorite_sections(user_id: int) -> int:
     try:
-        res = supabase.table("favorite_quiz_sections").select("section_id", count="exact").eq("user_id", user_id).execute()
+        res = supabase.table("favorite_quizzes").select("section_id", count="exact").eq("user_id", user_id).execute()
         return int(res.count or 0)
     except Exception as e:
         log_error(logger, f"Error counting favorite sections: {e}", exception=e)
@@ -173,7 +173,7 @@ def list_favorite_sections(user_id: int) -> List[Dict[str, Any]]:
 def create_favorite_section(user_id: int, title: str) -> Optional[str]:
     try:
         section_id = uuid.uuid4().hex[:12]
-        supabase.table("favorite_quiz_sections").insert({
+        supabase.table("favorite_quizzes").insert({
             "section_id": section_id,
             "user_id": user_id,
             "title": title,
@@ -216,7 +216,7 @@ def list_favorite_quizzes(
     sort_by: str = "latest",
 ) -> List[Dict[str, Any]]:
     try:
-        sections_res = supabase.table("favorite_quiz_sections").select("section_id, title").eq("user_id", user_id).execute()
+        sections_res = supabase.table("favorite_quizzes").select("section_id, title").eq("user_id", user_id).execute()
         section_map = {item["section_id"]: item["title"] for item in (sections_res.data or [])}
 
         res = supabase.table("favorite_quizzes").select("favorite_id, title, source_title, section_id, created_at").eq("user_id", user_id).execute()
