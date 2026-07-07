@@ -9,7 +9,7 @@ from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv, find_dotenv
 from supabase import create_client
 from logger import get_logger, log_error, log_warning, log_info
-# استيراد متطابق 100% يمنع خطأ الـ ImportError
+# الاستيراد الآمن والمتطابق
 from constants import (
     WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS,
     POINTS_PER_QUESTION
