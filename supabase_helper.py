@@ -152,46 +152,8 @@ def get_shared_quiz(share_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 # ==================== Favorite Quiz Operations ====================
-def _migrate_legacy_favorite_sections(user_id: int) -> None:
-    try:
-        legacy = supabase.table("favorite_quizzes").select("section_id, title, created_at").eq("user_id", user_id).execute()
-        legacy_sections = [
-            item for item in (legacy.data or [])
-            if item.get("section_id") and not item.get("favorite_id")
-        ]
-
-        if not legacy_sections:
-            return
-
-        existing = supabase.table("favorite_quiz_sections").select("section_id").eq("user_id", user_id).execute()
-        existing_ids = {item.get("section_id") for item in (existing.data or []) if item.get("section_id")}
-
-        rows_to_insert = []
-        legacy_ids = set()
-        for item in legacy_sections:
-            section_id = item.get("section_id")
-            if not section_id or section_id in existing_ids:
-                continue
-            rows_to_insert.append({
-                "section_id": section_id,
-                "user_id": user_id,
-                "title": item.get("title") or DEFAULT_FAVORITE_SECTION_TITLE,
-                "created_at": item.get("created_at") or datetime.datetime.utcnow().isoformat(),
-            })
-            legacy_ids.add(section_id)
-
-        if rows_to_insert:
-            supabase.table("favorite_quiz_sections").insert(rows_to_insert).execute()
-
-        if legacy_ids:
-            supabase.table("favorite_quizzes").delete().eq("user_id", user_id).in_("section_id", list(legacy_ids)).is_("favorite_id", None).execute()
-    except Exception as e:
-        log_warning(logger, f"Legacy favorite sections migration skipped for user {user_id}: {e}")
-
-
 def count_favorite_sections(user_id: int) -> int:
     try:
-        _migrate_legacy_favorite_sections(user_id)
         res = supabase.table("favorite_quiz_sections").select("section_id", count="exact").eq("user_id", user_id).execute()
         return int(res.count or 0)
     except Exception as e:
@@ -201,7 +163,6 @@ def count_favorite_sections(user_id: int) -> int:
 
 def list_favorite_sections(user_id: int) -> List[Dict[str, Any]]:
     try:
-        _migrate_legacy_favorite_sections(user_id)
         res = supabase.table("favorite_quiz_sections").select("section_id, title, created_at").eq("user_id", user_id).order("created_at", desc=False).execute()
         return res.data or []
     except Exception as e:
@@ -255,7 +216,6 @@ def list_favorite_quizzes(
     sort_by: str = "latest",
 ) -> List[Dict[str, Any]]:
     try:
-        _migrate_legacy_favorite_sections(user_id)
         sections_res = supabase.table("favorite_quiz_sections").select("section_id, title").eq("user_id", user_id).execute()
         section_map = {
             item["section_id"]: item["title"]
