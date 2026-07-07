@@ -16,9 +16,9 @@ from aiogram import types
 logger = get_logger(__name__)
 
 def main():
-    # 1. تفعيل الحماية (Rate Limiting) على الرسائل والأزرار (4 ثوانٍ كحد أقصى)
-    dp.message.middleware(ThrottlingMiddleware(limit=4))
-    dp.callback_query.middleware(ThrottlingMiddleware(limit=2))
+    # 1. تفعيل الحماية (Rate Limiting) بشكل خفيف حتى لا يعيق تسلسل الكويز الطبيعي
+    dp.message.middleware(ThrottlingMiddleware(limit=1.2))
+    dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
     
     # 2. تسجيل الـ Routers الأساسية للبوت
     dp.include_routers(admin_router, start_router, quiz_router)

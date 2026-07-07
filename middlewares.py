@@ -3,11 +3,12 @@ Middlewares for Telegram Bot.
 Handles anti-spam (Rate Limiting) to protect the bot and API keys.
 """
 
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Optional, Set
 from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery
 from cachetools import TTLCache
 from logger import get_logger
+from config import ADMIN_ID
 
 logger = get_logger(__name__)
 
@@ -15,9 +16,10 @@ class ThrottlingMiddleware(BaseMiddleware):
     """
     ميدل وير يمنع المستخدمين من إرسال طلبات متتالية سريعة جداً.
     """
-    def __init__(self, limit: int = 4):
+    def __init__(self, limit: float = 4, exempt_user_ids: Optional[Set[int]] = None):
         # السماح بطلب واحد فقط كل (limit) ثوانٍ لكل مستخدم
         self.cache = TTLCache(maxsize=10000, ttl=limit)
+        self.exempt_user_ids = exempt_user_ids or set()
 
     async def __call__(
         self,
@@ -28,6 +30,9 @@ class ThrottlingMiddleware(BaseMiddleware):
         # التحقق مما إذا كان الحدث رسالة أو ضغطة زر
         if isinstance(event, (Message, CallbackQuery)):
             user_id = event.from_user.id
+
+            if user_id == ADMIN_ID or user_id in self.exempt_user_ids:
+                return await handler(event, data)
             
             # إذا كان المستخدم في الكاش، فهذا يعني أنه أرسل طلباً قبل انتهاء المهلة
             if user_id in self.cache:
