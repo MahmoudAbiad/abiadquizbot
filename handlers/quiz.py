@@ -1,382 +1,251 @@
 """
-Quiz handling module - main quiz flow and question answering.
-Manages file upload, question generation, quiz execution, and scoring.
+Quiz handling module - main quiz flow, caching logic, and token tracking.
+Supports structural usage-metadata deduction and 80% discount for cached files.
 """
 
 import os
 import asyncio
-from typing import Union, Optional
+from typing import Union
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from pypdf import PdfReader
 
 from config import bot, QuizState
 from constants import (
-    MAX_DOC_SIZE, MAX_PHOTO_SIZE, MAX_PDF_PAGES,
-    ERROR_FILE_TOO_LARGE, ERROR_INVALID_PDF_PAGES, ERROR_PDF_READ_FAILED,
-    ERROR_IMAGE_TOO_LARGE, ERROR_NO_TEXT_EXTRACTED, ERROR_NO_QUESTIONS_GENERATED,
-    ERROR_INSUFFICIENT_POINTS, ERROR_API_KEYS_NOT_CONFIGURED,
-    SUCCESS_FILE_UPLOADED, SUCCESS_PHOTO_UPLOADED,
-    SUCCESS_QUIZ_COMPLETED, MSG_PROCESSING
+    ERROR_INSUFFICIENT_POINTS, ERROR_NO_QUESTIONS_GENERATED, ERROR_API_KEYS_NOT_CONFIGURED,
+    ERROR_PDF_READ_FAILED, SUCCESS_FILE_UPLOADED, SUCCESS_PHOTO_UPLOADED, MSG_PROCESSING,
+    DISCOUNT_RATE_FOR_CACHED
 )
-from utils import process_file_smart, safe_file_cleanup, ensure_directory_exists
-from gemini_helper import get_questions_from_text, extract_text_from_image, has_gemini_api_keys
-from supabase_helper import check_or_add_user, update_user_stats
-from keyboards import get_main_menu_keyboard, get_quiz_start_keyboard, get_quiz_result_keyboard
-from validators import validate_file_size, validate_pdf_pages, validate_question_count
-from logger import get_logger, log_error, log_info, log_warning
+from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
+from gemini_helper import generate_quiz_from_file, has_gemini_api_keys
+from supabase_helper import check_or_add_user, update_user_stats, supabase
+from keyboards import get_main_menu_keyboard
+from validators import validate_file_size, validate_question_count, validate_pdf_pages
+from logger import get_logger, log_error, log_info
 
 logger = get_logger(__name__)
 router = Router()
-
 DOWNLOADS_DIR = "downloads"
 
-# ==================== File Handlers ====================
+# ==================== File Handlers & Validation ====================
+
+async def _process_uploaded_file(msg: types.Message, state: FSMContext, file_id: str, file_name: str, file_size: int, is_photo: bool, mime_type: str = None):
+    file_path = ""
+    try:
+        is_valid, error = validate_file_size(file_size, "photo" if is_photo else "document")
+        if not is_valid:
+            await msg.answer(error)
+            return
+
+        ensure_directory_exists(DOWNLOADS_DIR)
+        file_path = os.path.join(DOWNLOADS_DIR, file_name)
+        processing_msg = await msg.answer("⏳ جاري استلام الملف وفحصه...")
+        
+        file = await bot.get_file(file_id)
+        await bot.download_file(file.file_path, file_path)
+        
+        if not is_photo and file_name.lower().endswith('.pdf'):
+            try:
+                reader = PdfReader(file_path)
+                page_count = len(reader.pages)
+                is_valid_pdf, pdf_error = validate_pdf_pages(page_count)
+                if not is_valid_pdf:
+                    await processing_msg.delete()
+                    await msg.answer(pdf_error)
+                    safe_file_cleanup(file_path)
+                    return
+            except Exception as e:
+                await processing_msg.delete()
+                await msg.answer(ERROR_PDF_READ_FAILED)
+                safe_file_cleanup(file_path)
+                return
+
+        # فحص التكرار من قاعدة البيانات
+        file_hash = calculate_file_hash(file_path)
+        res = await asyncio.to_thread(lambda: supabase.table("files_cache").select("questions_data, total_tokens").eq("file_hash", file_hash).execute())
+        
+        await processing_msg.delete()
+        
+        if res.data:
+            cached_quiz = res.data[0]['questions_data']
+            original_tokens = res.data[0]['total_tokens'] or 10000 # افتراضي إن سقط سهواً
+            
+            await state.update_data(file_path=file_path, file_hash=file_hash, is_photo=is_photo, mime_type=mime_type, cached_quiz=cached_quiz, original_tokens=original_tokens)
+            
+            # حساب نقاط الخصم (20% من تكلفة التوكينات الأصلية)
+            base_points = max(1, round(original_tokens / 1000))
+            points_cost = max(1, int(base_points * DISCOUNT_RATE_FOR_CACHED))
+            
+            kb = [
+                [types.InlineKeyboardButton(text=f"🎁 كويز جاهز بـ {points_cost} نقطة (خصم 80%)", callback_data="cache_accept")],
+                [types.InlineKeyboardButton(text="🆕 توليد كويز جديد (تكلفة كاملة)", callback_data="cache_reject")]
+            ]
+            await msg.answer(
+                "💡 **هذا الملف تمت معالجته مسبقاً!**\n\n"
+                f"يوجد كويز مسبق مكون من {len(cached_quiz)} سؤال لهذا الملف.\n"
+                "اختر ما يناسبك:", 
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb)
+            )
+        else:
+            await state.update_data(file_path=file_path, file_hash=file_hash, is_photo=is_photo, mime_type=mime_type)
+            await state.set_state(QuizState.waiting_for_count)
+            await msg.answer(SUCCESS_PHOTO_UPLOADED if is_photo else SUCCESS_FILE_UPLOADED)
+            
+    except Exception as e:
+        log_error(logger, f"Error processing file: {e}")
+        await msg.answer("❌ حدث خطأ أثناء رفع الملف.")
+        if file_path: safe_file_cleanup(file_path)
 
 @router.message(F.document)
 async def handle_document(msg: types.Message, state: FSMContext):
-    """
-    Handle PDF document uploads.
-    
-    Args:
-        msg: Message object with document
-        state: FSM context
-    """
-    try:
-        # Validate file size
-        is_valid, error = validate_file_size(msg.document.file_size, "document")
-        if not is_valid:
-            await msg.answer(error)
-            return
-        
-        # Ensure download directory exists
-        ensure_directory_exists(DOWNLOADS_DIR)
-        
-        # Download file
-        file_path = os.path.join(DOWNLOADS_DIR, msg.document.file_name)
-        file = await bot.get_file(msg.document.file_id)
-        await bot.download_file(file.file_path, file_path)
-        
-        log_info(logger, f"Document downloaded: {msg.document.file_name}")
-        
-        # Validate PDF pages
-        try:
-            reader = PdfReader(file_path)
-            page_count = len(reader.pages)
-            is_valid, error = validate_pdf_pages(page_count)
-            if not is_valid:
-                await msg.answer(error)
-                safe_file_cleanup(file_path)
-                return
-                
-        except Exception as e:
-            log_error(logger, f"Error reading PDF: {e}", exception=e)
-            await msg.answer(ERROR_PDF_READ_FAILED)
-            safe_file_cleanup(file_path)
-            return
-        
-        # Store file info and request question count
-        await state.update_data(file_path=file_path, is_photo=False)
-        await state.set_state(QuizState.waiting_for_count)
-        await msg.answer(SUCCESS_FILE_UPLOADED)
-        
-    except Exception as e:
-        log_error(logger, f"Error in handle_document: {e}", exception=e)
-        await msg.answer("❌ حدث خطأ أثناء رفع الملف. يرجى المحاولة لاحقاً.")
+    await _process_uploaded_file(msg, state, msg.document.file_id, msg.document.file_name, msg.document.file_size, False, msg.document.mime_type)
 
 @router.message(F.photo)
 async def handle_photo(msg: types.Message, state: FSMContext):
-    """
-    Handle photo/image uploads.
-    
-    Args:
-        msg: Message object with photo
-        state: FSM context
-    """
+    photo = msg.photo[-1]
+    await _process_uploaded_file(msg, state, photo.file_id, f"{photo.file_id}.png", photo.file_size, True, "image/png")
+
+# ==================== Cache Choice Handlers ====================
+
+@router.callback_query(F.data == "cache_accept")
+async def handle_cache_accept(call: types.CallbackQuery, state: FSMContext):
     try:
-        photo = msg.photo[-1]  # Get highest quality version
+        data = await state.get_data()
+        cached_quiz = data.get('cached_quiz')
+        original_tokens = data.get('original_tokens', 10000)
+        file_path = data.get('file_path')
         
-        # Validate photo size
-        is_valid, error = validate_file_size(photo.file_size, "photo")
-        if not is_valid:
-            await msg.answer(error)
+        user_info = await asyncio.to_thread(check_or_add_user, call.from_user.id, call.from_user.username or "Unknown")
+        
+        # احتساب تكلفة نقاط التوكينات المخفضة
+        base_points = max(1, round(original_tokens / 1000))
+        points_to_deduct = max(1, int(base_points * DISCOUNT_RATE_FOR_CACHED))
+        
+        if user_info["points"] < points_to_deduct:
+            await call.message.edit_text(ERROR_INSUFFICIENT_POINTS.format(current=user_info['points'], required=points_to_deduct))
+            await state.clear()
+            safe_file_cleanup(file_path)
             return
+            
+        await asyncio.to_thread(update_user_stats, call.from_user.id, points_to_deduct, len(cached_quiz))
         
-        # Ensure download directory exists
-        ensure_directory_exists(DOWNLOADS_DIR)
+        await state.update_data(questions=cached_quiz, current_index=0, score=0, total_count=len(cached_quiz))
+        await state.set_state(QuizState.answering_quiz)
         
-        # Download photo
-        file_path = os.path.join(DOWNLOADS_DIR, f"{photo.file_id}.png")
-        file = await bot.get_file(photo.file_id)
-        await bot.download_file(file.file_path, file_path)
-        
-        log_info(logger, f"Photo downloaded: {photo.file_id}")
-        
-        # Store file info and request question count
-        await state.update_data(file_path=file_path, is_photo=True)
-        await state.set_state(QuizState.waiting_for_count)
-        await msg.answer(SUCCESS_PHOTO_UPLOADED)
+        await call.message.delete()
+        await send_question(call, state)
+        safe_file_cleanup(file_path)
         
     except Exception as e:
-        log_error(logger, f"Error in handle_photo: {e}", exception=e)
-        await msg.answer("❌ حدث خطأ أثناء رفع الصورة. يرجى المحاولة لاحقاً.")
+        log_error(logger, f"Error in cache accept: {e}")
+    finally:
+        await call.answer()
 
-# ==================== Question Count Handler ====================
+@router.callback_query(F.data == "cache_reject")
+async def handle_cache_reject(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(QuizState.waiting_for_count)
+    await call.message.edit_text("✅ حسناً، كم سؤالاً تريد توليده بشكل جديد؟ (أرسل رقماً فقط)")
+    await call.answer()
+
+# ==================== Question Generation ====================
 
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
 async def process_count(msg: types.Message, state: FSMContext):
-    """
-    Process question count input and start quiz generation.
-    
-    Args:
-        msg: Message with question count
-        state: FSM context
-    """
+    file_path = ""
     try:
         count = int(msg.text)
-        
-        # Validate question count
         is_valid, error = validate_question_count(count)
         if not is_valid:
             await msg.answer(f"❌ {error}")
             return
         
         data = await state.get_data()
-        file_path = data.get('file_path')
-        is_photo = data.get('is_photo', False)
+        file_path, file_hash, mime_type = data.get('file_path'), data.get('file_hash'), data.get('mime_type')
         
-        # Check user points
-        user_info = await asyncio.to_thread(
-            check_or_add_user,
-            msg.from_user.id,
-            msg.from_user.username or "Unknown"
-        )
-        current_points = user_info["points"]
+        # فحص رصيد مبدئي لحماية السيرفر من العمليات الوهمية
+        user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown")
+        if user_info["points"] < 2: # حد أدنى كأمان لتوليد الطلب
+            await msg.answer("❌ رصيد نقاطك منخفض جداً، يرجى شحن حسابك أو انتظار التجديد اليومي.")
+            safe_file_cleanup(file_path)
+            await state.clear()
+            return
         
-        if current_points < count:
-            log_warning(logger, f"User {msg.from_user.id} insufficient points ({current_points} < {count})")
+        processing_msg = await msg.answer(MSG_PROCESSING)
+        
+        if not has_gemini_api_keys():
+            await processing_msg.edit_text(f"❌ {ERROR_API_KEYS_NOT_CONFIGURED}")
+            safe_file_cleanup(file_path)
+            await state.clear()
+            return
+
+        # توليد الأسئلة وجلب التوكينات الفعلية من جوجل
+        gemini_result = await asyncio.to_thread(generate_quiz_from_file, file_path, count, mime_type)
+        
+        if not gemini_result:
+            await processing_msg.edit_text(f"❌ {ERROR_NO_QUESTIONS_GENERATED}")
+            safe_file_cleanup(file_path)
+            await state.clear()
+            return
+            
+        quiz_data, total_tokens = gemini_result
+        actual_count = len(quiz_data)
+        
+        # تحويل التوكينات إلى أرقام أسهل للفهم: 1000 توكن = 1 نقطة (معادلة الخطة الورقية)
+        points_to_deduct = max(1, round(total_tokens / 1000))
+        
+        if user_info["points"] < points_to_deduct:
             bot_info = await bot.get_me()
-            await msg.answer(
-                ERROR_INSUFFICIENT_POINTS.format(current=current_points, required=count),
+            await processing_msg.edit_text(
+                f"❌ التكلفة الفعلية للمستند بلغت ({total_tokens:,} توكن) أي ما يعادل **{points_to_deduct}** نقطة.\n"
+                f"رصيدك الحالي هو ({user_info['points']}) نقطة فقط ولا يكفي لإتمام العملية.",
                 reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
             )
             safe_file_cleanup(file_path)
             await state.clear()
             return
         
-        # Start quiz generation
-        processing_msg = await msg.answer(MSG_PROCESSING)
-        await _generate_and_start_quiz(msg, file_path, is_photo, count, state, processing_msg)
+        # خصم النقاط بناء على التوكينات وحفظ الكاش متضمناً التوكينات الأصلية للمستند
+        await asyncio.to_thread(update_user_stats, msg.from_user.id, points_to_deduct, actual_count)
+        await asyncio.to_thread(lambda: supabase.table("files_cache").insert({"file_hash": file_hash, "questions_data": quiz_data, "total_tokens": total_tokens}).execute())
         
-    except Exception as e:
-        log_error(logger, f"Error in process_count: {e}", exception=e)
-        await msg.answer("❌ حدث خطأ أثناء معالجة طلبك.")
-
-# ==================== Quiz Generation ====================
-
-async def _generate_and_start_quiz(
-    msg: types.Message,
-    file_path: str,
-    is_photo: bool,
-    count: int,
-    state: FSMContext,
-    processing_msg: types.Message
-) -> None:
-    """
-    Generate quiz questions and start quiz flow.
-    
-    Args:
-        msg: Original message
-        file_path: Path to uploaded file
-        is_photo: Whether file is a photo
-        count: Number of questions to generate
-        state: FSM context
-        processing_msg: Processing status message
-    """
-    try:
-        if not has_gemini_api_keys():
-            await processing_msg.edit_text(f"❌ {ERROR_API_KEYS_NOT_CONFIGURED}")
-            await state.clear()
-            return
-
-        # Extract text from file
-        full_text = await _extract_text_from_file(file_path, is_photo)
-
-        if full_text in (ERROR_API_KEYS_NOT_CONFIGURED, "❌ خطأ: لم يتم ضبط مفاتيح GEMINI_API_KEYS في ملف .env"):
-            await processing_msg.edit_text(f"❌ {ERROR_API_KEYS_NOT_CONFIGURED}")
-            await state.clear()
-            return
-        
-        if not full_text.strip():
-            await processing_msg.edit_text(f"❌ {ERROR_NO_TEXT_EXTRACTED}")
-            await state.clear()
-            return
-        
-        # Generate questions
-        quiz_data = await asyncio.to_thread(get_questions_from_text, full_text, count)
-        
-        if not quiz_data:
-            await processing_msg.edit_text(f"❌ {ERROR_NO_QUESTIONS_GENERATED}")
-            await state.clear()
-            return
-        
-        actual_count = len(quiz_data)
-        
-        # Update user statistics
-        await asyncio.to_thread(update_user_stats, msg.from_user.id, actual_count)
-        
-        log_info(logger, f"Generated {actual_count} questions for user {msg.from_user.id}")
-        
-        # Update state with quiz data
-        await state.update_data(
-            questions=quiz_data,
-            current_index=0,
-            score=0,
-            total_count=actual_count
-        )
+        await state.update_data(questions=quiz_data, current_index=0, score=0, total_count=actual_count)
         await state.set_state(QuizState.answering_quiz)
         
-        try:
-            await processing_msg.delete()
-        except Exception:
-            pass
-        
-        # Check for corrupted text fixes
-        corrupted_questions = [
-            f"السؤال رقم {i+1}"
-            for i, q in enumerate(quiz_data)
-            if q.get('was_corrupted_text_fixed')
-        ]
-        
-        if corrupted_questions:
-            warning_text = (
-                f"⚠️ **تنبيه قبل بداية الاختبار:**\n"
-                f"نظراً لوجود كلمات غير واضحة بالورقة، أصلح الذكاء الاصطناعي السياق تلقائياً لـ "
-                f"({', '.join(corrupted_questions)}).\n\n"
-                f"اضغط أدناه للبدء 👇"
-            )
-            await msg.answer(warning_text, reply_markup=get_quiz_start_keyboard())
-        else:
-            await send_question(msg, state)
-        
-    except Exception as e:
-        log_error(logger, f"Error in quiz generation: {e}", exception=e)
-        try:
-            await processing_msg.edit_text("❌ حدث خطأ أثناء معالجة الملف.")
-        except Exception:
-            pass
-        await state.clear()
-    
-    finally:
+        await processing_msg.delete()
         safe_file_cleanup(file_path)
-
-async def _extract_text_from_file(file_path: str, is_photo: bool) -> str:
-    """
-    Extract text from file (photo or PDF).
-    
-    Args:
-        file_path: Path to file
-        is_photo: Whether file is a photo
-        
-    Returns:
-        Extracted text
-    """
-    try:
-        full_text = ""
-        
-        if is_photo:
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
-            full_text = await asyncio.to_thread(extract_text_from_image, image_bytes)
-        else:
-            processed_data = await asyncio.to_thread(process_file_smart, file_path)
-            
-            for item in processed_data:
-                if item["type"] == "text":
-                    full_text += item["content"] + "\n"
-                else:
-                    img_text = await asyncio.to_thread(extract_text_from_image, item["content"])
-                    full_text += img_text + "\n"
-                    await asyncio.sleep(2)  # Rate limiting between API calls
-        
-        return full_text
+        await send_question(msg, state)
         
     except Exception as e:
-        log_error(logger, f"Error extracting text: {e}", exception=e)
-        return ""
+        log_error(logger, f"Error in process_count: {e}")
+        await msg.answer("❌ حدث خطأ أثناء توليد الكويز.")
+        if file_path: safe_file_cleanup(file_path)
 
-# ==================== Quiz Execution ====================
-
-@router.callback_query(QuizState.answering_quiz, F.data == "start_first_question")
-async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext):
-    """
-    Start quiz after corruption warning.
-    
-    Args:
-        call: Callback query
-        state: FSM context
-    """
-    try:
-        await call.message.delete()
-        await send_question(call, state)
-    except Exception as e:
-        log_error(logger, f"Error in start_quiz_after_warning: {e}", exception=e)
-    finally:
-        await call.answer()
+# ==================== Quiz Execution Flow ====================
 
 async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext) -> None:
-    """
-    Send current question to user.
-    
-    Args:
-        msg_or_call: Message or callback query object
-        state: FSM context
-    """
     try:
         data = await state.get_data()
-        questions = data['questions']
-        idx = data['current_index']
+        questions, idx = data['questions'], data['current_index']
         
-        # Check if quiz is completed
         if idx >= len(questions):
-            score = data['score']
-            total = data['total_count']
-            
-            if isinstance(msg_or_call, types.Message):
-                chat_id = msg_or_call.chat.id
-            else:
-                chat_id = msg_or_call.message.chat.id
-            
+            score, total = data['score'], data['total_count']
+            chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
             bot_info = await bot.get_me()
-            
-            # Calculate percentage
             percentage = (score / total * 100) if total > 0 else 0
             
             result_text = (
                 f"🏁 **اكتمل الاختبار بنجاح!**\n\n"
-                f"🎯 نتيجتك النهائية: **{score}** من **{total}**\n"
-                f"📊 النسبة المئوية: **{percentage:.1f}%**\n\n"
-                f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
+                f"🎯 نتيجتك النهائية: **{score}** من **{total}** ({percentage:.1f}%)\n\n"
+                f"{'🏆 مستوى بطل ممتاز!' if percentage >= 80 else '👍 أداء جيد، استمر في الممارسة!'}"
             )
-            
-            await bot.send_message(
-                chat_id,
-                result_text,
-                reply_markup=get_main_menu_keyboard(bot_info.username, chat_id)
-            )
-            
-            log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
+            await bot.send_message(chat_id, result_text, reply_markup=get_main_menu_keyboard(bot_info.username, chat_id))
             await state.clear()
             return
-        
-        # Send current question
+            
         q = questions[idx]
         text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n{q['question']}"
         
-        # Build keyboard with answer options
-        kb = []
-        for i, opt in enumerate(q['options']):
-            kb.append([types.InlineKeyboardButton(text=opt, callback_data=f"ans_{i}")])
+        kb = [[types.InlineKeyboardButton(text=opt, callback_data=f"ans_{i}")] for i, opt in enumerate(q['options'])]
         kb.append([types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")])
         
         if isinstance(msg_or_call, types.Message):
@@ -385,113 +254,59 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             await msg_or_call.message.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
             
     except Exception as e:
-        log_error(logger, f"Error in send_question: {e}", exception=e)
+        log_error(logger, f"Error sending question: {e}")
 
 @router.callback_query(QuizState.answering_quiz, F.data.startswith("ans_"))
 async def handle_answer(call: types.CallbackQuery, state: FSMContext):
-    """
-    Handle user's answer to question.
-    
-    Args:
-        call: Callback query with answer
-        state: FSM context
-    """
     try:
         data = await state.get_data()
-        questions = data['questions']
-        idx = data['current_index']
-        q = questions[idx]
-        
+        q = data['questions'][data['current_index']]
         selected_opt = int(call.data.split("_")[1])
         correct_opt = q['correct_option_id']
-        
-        # Check answer
-        score = data['score']
         is_correct = selected_opt == correct_opt
         
         if is_correct:
-            score += 1
-            await state.update_data(score=score)
+            await state.update_data(score=data['score'] + 1)
             status_text = "✅ **إجابة صحيحة وممتازة!**"
-            log_info(logger, f"Correct answer: {call.from_user.id}, Q{idx+1}")
         else:
             status_text = f"❌ **إجابة خاطئة!**\n💡 الإجابة الصحيحة هي: **{q['options'][correct_opt]}**"
-            log_info(logger, f"Incorrect answer: {call.from_user.id}, Q{idx+1}")
+            
+        explanation_text = q.get('explanation', '')
+        if explanation_text:
+            status_text += f"\n\n📚 **الشرح:** {explanation_text}"
         
-        # Build result keyboard
         new_kb = []
         for i, opt in enumerate(q['options']):
-            if i == correct_opt:
-                prefix = "🟢 "
-            elif i == selected_opt and not is_correct:
-                prefix = "🔴 "
-            else:
-                prefix = ""
+            prefix = "🟢 " if i == correct_opt else "🔴 " if i == selected_opt else ""
             new_kb.append([types.InlineKeyboardButton(text=f"{prefix}{opt}", callback_data="ignored")])
-        
+            
         new_kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
-        
-        updated_text = (
-            f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n"
-            f"{q['question']}\n\n"
-            f"📊 {status_text}"
-        )
-        
+        updated_text = f"📝 **السؤال {data['current_index'] + 1} من {len(data['questions'])}:**\n\n{q['question']}\n\n{status_text}"
         await call.message.edit_text(updated_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=new_kb))
         
     except Exception as e:
-        log_error(logger, f"Error in handle_answer: {e}", exception=e)
+        log_error(logger, f"Error in handle_answer: {e}")
     finally:
         await call.answer()
 
 @router.callback_query(QuizState.answering_quiz, F.data == "get_hint")
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
-    """
-    Provide hint for current question.
-    
-    Args:
-        call: Callback query
-        state: FSM context
-    """
     try:
         data = await state.get_data()
-        q = data['questions'][data['current_index']]
-        await call.answer(f"💡 تلميح: {q['hint']}", show_alert=True)
-    except Exception as e:
-        log_error(logger, f"Error in handle_hint: {e}", exception=e)
-        await call.answer("❌ خطأ في جلب التلميح")
+        await call.answer(f"💡 تلميح: {data['questions'][data['current_index']]['hint']}", show_alert=True)
+    except Exception:
+        await call.answer("❌ تعذر جلب التلميح")
 
 @router.callback_query(QuizState.answering_quiz, F.data == "next_question")
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
-    """
-    Move to next question.
-    
-    Args:
-        call: Callback query
-        state: FSM context
-    """
     try:
         data = await state.get_data()
         await state.update_data(current_index=data['current_index'] + 1)
-        
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
-        
+        await call.message.delete()
         await send_question(call, state)
-        
-    except Exception as e:
-        log_error(logger, f"Error in handle_next: {e}", exception=e)
-    finally:
-        await call.answer()
+    except Exception: pass
+    finally: await call.answer()
 
 @router.callback_query(F.data == "ignored")
 async def handle_ignored_click(call: types.CallbackQuery):
-    """
-    Handle clicks on disabled buttons.
-    
-    Args:
-        call: Callback query
-    """
-    await call.answer("✅ تم تسجيل إجابتك")
+    await call.answer("✅ تم تسجيل إجابتك بالفعل")

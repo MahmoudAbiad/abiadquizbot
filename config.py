@@ -1,43 +1,36 @@
 """
 Bot configuration and FSM states initialization.
 Handles bot setup, dispatcher configuration, and Finite State Machine states.
+Moved set_bot_commands here to prevent circular imports between main and webhook_server.
 """
 
 import os
-from typing import Optional
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 from logger import get_logger
 
-# Load environment variables
+# شحن متغيرات البيئة
 load_dotenv()
 logger = get_logger(__name__)
 
-# ==================== Bot Initialization ====================
+# ==================== FSM States ====================
+class QuizState(StatesGroup):
+    """حالات المستخدم المخصصة لإدارة تدفق الكويز"""
+    waiting_for_count = State()  # انتظار تحديد عدد الأسئلة
+    answering_quiz = State()     # مرحلة الإجابة على الأسئلة الحالية
+
+# ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:
-    """
-    Retrieve bot token from environment.
-    
-    Returns:
-        str: Bot token
-        
-    Raises:
-        ValueError: If BOT_TOKEN is not set
-    """
+    """جلب توكن البوت من ملف البيئة"""
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise ValueError("BOT_TOKEN is not set in .env file")
     return token
 
 def _get_admin_id() -> int:
-    """
-    Retrieve admin ID from environment.
-    
-    Returns:
-        int: Admin user ID (0 if not set)
-    """
+    """جلب معرف الآدمن من ملف البيئة"""
     try:
         admin_id = os.getenv("ADMIN_ID", "0")
         return int(admin_id)
@@ -45,18 +38,43 @@ def _get_admin_id() -> int:
         logger.warning("Invalid ADMIN_ID in .env, defaulting to 0")
         return 0
 
-# Initialize bot and dispatcher
+# ==================== Initialization ====================
 try:
-    bot = Bot(token=_get_bot_token(), request_timeout=300)
+    bot = Bot(token=_get_bot_token())
+    # استخدام MemoryStorage (يمكن ترقيته مستقبلاً لـ RedisStorage لحفظ الجلسات عند إعادة التشغيل)
     dp = Dispatcher(storage=MemoryStorage())
     ADMIN_ID: int = _get_admin_id()
     logger.info(f"Bot initialized successfully. Admin ID: {ADMIN_ID if ADMIN_ID else 'Not set'}")
 except Exception as e:
-    logger.critical(f"Failed to initialize bot: {e}", exception=e)
+    logger.critical(f"Failed to initialize bot components: {e}")
     raise
 
-# ==================== FSM States ====================
-class QuizState(StatesGroup):
-    """Finite State Machine states for quiz flow"""
-    waiting_for_count = State()  # Waiting for user to input number of questions
-    answering_quiz = State()  # Quiz is in progress
+# ==================== Shared Functions (Fixes Circular Import) ====================
+async def set_bot_commands(bot_instance: Bot):
+    """
+    إعداد القائمة الزرقاء للأوامر (Menu) في تلغرام.
+    تم نقلها هنا لكي تستدعيها ملفات main و webhook_server بأمان دون تداخل.
+    """
+    try:
+        # أوامر الطلاب الافتراضية
+        student_commands = [
+            types.BotCommand(command="start", description="🔄 تشغيل البوت وعرض الرصيد")
+        ]
+        await bot_instance.set_my_commands(student_commands, scope=types.BotCommandScopeDefault())
+        
+        # أوامر الآدمن الخاصة (تظهر للآدمن فقط)
+        if ADMIN_ID != 0:
+            admin_commands = [
+                types.BotCommand(command="start", description="🔄 تشغيل البوت وعرض الرصيد"),
+                types.BotCommand(command="charge", description="💰 شحن نقاط لطالب"),
+                types.BotCommand(command="dbstats", description="📊 إحصائيات قاعدة البيانات"),
+                types.BotCommand(command="searchuser", description="🔍 فحص بيانات طالب"),
+                types.BotCommand(command="fetchall", description="👥 استعراض جميع الطلاب")
+            ]
+            await bot_instance.set_my_commands(
+                admin_commands,
+                scope=types.BotCommandScopeChat(chat_id=ADMIN_ID)
+            )
+        logger.info("Bot commands menus set successfully.")
+    except Exception as e:
+        logger.error(f"Error setting bot commands menu: {e}")

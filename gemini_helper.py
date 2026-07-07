@@ -1,22 +1,21 @@
 """
-Gemini AI integration for text extraction and quiz question generation.
-Handles API key rotation and intelligent blocking for quota management.
+Gemini AI integration for direct file processing and quiz generation.
+Handles API key rotation, quota management, and Usage Metadata tracking.
 """
 
 import os
 import json
 import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 from constants import (
-    GEMINI_MODEL, MAX_TEXT_LENGTH_FOR_AI, AI_REQUEST_TIMEOUT,
+    GEMINI_MODEL, AI_REQUEST_TIMEOUT,
     KEY_BLOCK_QUOTA_EXHAUSTED, KEY_BLOCK_TEMPORARY_ERROR,
-    SYSTEM_PROMPT_EXTRACT_TEXT, SYSTEM_PROMPT_GENERATE_QUESTIONS,
-    QUOTA_ERROR_KEYWORDS, ERROR_API_KEYS_NOT_CONFIGURED,
-    ERROR_ALL_KEYS_EXHAUSTED
+    SYSTEM_PROMPT_GENERATE_QUESTIONS, QUOTA_ERROR_KEYWORDS,
+    ERROR_API_KEYS_NOT_CONFIGURED
 )
 from logger import get_logger, log_error, log_warning, log_info
 
@@ -27,7 +26,6 @@ logger = get_logger(__name__)
 api_keys_raw = os.getenv("GEMINI_API_KEYS", "")
 API_KEYS: List[str] = [k.strip() for k in api_keys_raw.split(",") if k.strip()]
 
-# Fallback for single API key format
 if not API_KEYS and os.getenv("GEMINI_API_KEY"):
     API_KEYS = [os.getenv("GEMINI_API_KEY")]
 
@@ -35,204 +33,94 @@ current_key_idx: int = 0
 blocked_keys: Dict[int, datetime.datetime] = {}
 
 def has_gemini_api_keys() -> bool:
-    """Return whether at least one Gemini API key is configured."""
     return bool(API_KEYS)
-
-def _detect_image_mime_type(image_bytes: bytes) -> str:
-    """Detect the mime type for common image formats."""
-    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if image_bytes.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
-        return "image/gif"
-    if image_bytes.startswith(b"RIFF") and len(image_bytes) >= 12 and image_bytes[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/png"
 
 # ==================== Data Models ====================
 class QuizQuestion(BaseModel):
-    """Model for a quiz question with metadata"""
-    question: str = Field(description="نص السؤال الاختياري المستخرج من النص المرفق حصراً.")
+    question: str = Field(description="نص السؤال الاختياري المستخرج من المستند المرفق حصراً.")
     options: List[str] = Field(description="أربعة خيارات فريدة ومتوازنة للسؤال.")
     correct_option_id: int = Field(description="مؤشر الخيار الصحيح من 0 إلى 3.")
-    hint: str = Field(description="تلميح ذكي ومساعد يقرب الفكرة للطالب دون إعطائه الحل المباشر.")
-    was_corrupted_text_fixed: bool = Field(description="تكون true فقط إذا تم إصلاح تشوهات النص الناتجة عن الـ OCR سياقياً.")
-
-# ==================== Helper Functions ====================
-def _validate_api_keys() -> bool:
-    """
-    Validate that API keys are configured.
-    
-    Returns:
-        bool: True if API keys are available
-    """
-    if not API_KEYS:
-        log_error(logger, "No GEMINI_API_KEYS configured in .env")
-        return False
-    return True
+    hint: str = Field(description="تلميح ذكي ومساعد يقرب الفكرة للطالب.")
+    explanation: str = Field(description="شرح أكاديمي مقتضب يوضح لماذا هذه الإجابة هي الصحيحة.")
 
 def _is_quota_error(error_msg: str) -> bool:
-    """
-    Check if error is due to quota exhaustion.
-    
-    Args:
-        error_msg: Error message from API
-        
-    Returns:
-        bool: True if quota error
-    """
     error_lower = error_msg.lower()
     return any(keyword in error_lower for keyword in QUOTA_ERROR_KEYWORDS)
 
 def _rotate_api_key() -> None:
-    """Rotate to next available API key"""
     global current_key_idx
     current_key_idx = (current_key_idx + 1) % len(API_KEYS)
 
 def _block_current_key(hours: int) -> None:
-    """
-    Block current API key for specified duration.
-    
-    Args:
-        hours: Number of hours to block
-    """
     unblock_time = datetime.datetime.now() + datetime.timedelta(hours=hours)
     blocked_keys[current_key_idx] = unblock_time
-    log_warning(logger, f"Key {current_key_idx} blocked until {unblock_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 def _is_key_blocked() -> bool:
-    """
-    Check if current API key is blocked.
-    
-    Returns:
-        bool: True if key is currently blocked
-    """
     if current_key_idx not in blocked_keys:
         return False
-    
     if datetime.datetime.now() >= blocked_keys[current_key_idx]:
-        # Unblock expired key
         del blocked_keys[current_key_idx]
         return False
-    
     return True
 
 # ==================== Main Functions ====================
-def extract_text_from_image(image_bytes: bytes) -> str:
+def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     """
-    Extract text from image using Gemini Vision API.
-    Implements intelligent API key rotation and blocking.
-    
-    Args:
-        image_bytes: Image data in bytes
-        
-    Returns:
-        str: Extracted text or error message
+    رفع الملف وتوليد الأسئلة، مع إرجاع التوكينات المستهلكة فعلياً من الـ Metadata.
+    Returns: Tuple[quiz_data, total_tokens] أو None في حال الفشل.
     """
     global current_key_idx
-    
-    if not _validate_api_keys():
-        return ERROR_API_KEYS_NOT_CONFIGURED
-    
-    max_attempts = len(API_KEYS)
-    
-    for attempt in range(max_attempts):
-        # Skip blocked keys
-        if _is_key_blocked():
-            log_info(logger, f"Skipping blocked key {current_key_idx}")
-            _rotate_api_key()
-            continue
-        
-        try:
-            key = API_KEYS[current_key_idx]
-            client = genai.Client(api_key=key)
-            mime_type = _detect_image_mime_type(image_bytes)
-            
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                    SYSTEM_PROMPT_EXTRACT_TEXT
-                ]
-            )
-            
-            log_info(logger, f"Successfully extracted text using key {current_key_idx}")
-            return response.text
-            
-        except Exception as e:
-            error_msg = str(e)
-            
-            if _is_quota_error(error_msg):
-                _block_current_key(KEY_BLOCK_QUOTA_EXHAUSTED)
-                log_warning(logger, f"Quota exhausted on key {current_key_idx}")
-            else:
-                _block_current_key(KEY_BLOCK_TEMPORARY_ERROR)
-                log_warning(logger, f"Temporary error on key {current_key_idx}: {error_msg}")
-            
-            _rotate_api_key()
-    
-    log_error(logger, "All API keys exhausted")
-    return ERROR_ALL_KEYS_EXHAUSTED
-
-def get_questions_from_text(text: str, count: int) -> Optional[List[Dict[str, Any]]]:
-    """
-    Generate quiz questions from text using Gemini API.
-    
-    Args:
-        text: Input text to generate questions from
-        count: Number of questions to generate
-        
-    Returns:
-        Optional[List[Dict]]: List of quiz questions or None on failure
-    """
-    global current_key_idx
-    
-    if not _validate_api_keys():
+    if not API_KEYS:
         return None
     
-    # Limit text length
-    text = text[:MAX_TEXT_LENGTH_FOR_AI]
-    
     prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.format(count=count)
-    
     max_attempts = len(API_KEYS)
     
     for attempt in range(max_attempts):
-        # Skip blocked keys
         if _is_key_blocked():
-            log_info(logger, f"Skipping blocked key {current_key_idx}")
             _rotate_api_key()
             continue
         
+        uploaded_file = None
         try:
             key = API_KEYS[current_key_idx]
             client = genai.Client(api_key=key)
             
+            uploaded_file = client.files.upload(file=file_path, mime_type=mime_type)
+            
             response = client.models.generate_content(
                 model=GEMINI_MODEL,
-                contents=[prompt, text],
+                contents=[uploaded_file, prompt],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=list[QuizQuestion],
                 ),
             )
             
+            # جلب عدد التوكينات الفعلي من الـ usage_metadata المطور (طلب المستخدم)
+            total_tokens = 0
+            if response.usage_metadata:
+                total_tokens = response.usage_metadata.total_token_count
+            
+            # حذف الملف فوراً للحفاظ على الخصوصية والمساحة
+            client.files.delete(name=uploaded_file.name)
+            
             result = json.loads(response.text)
-            log_info(logger, f"Generated {len(result)} questions using key {current_key_idx}")
-            return result
+            log_info(logger, f"Generated {len(result)} questions. Tokens used: {total_tokens}")
+            
+            return result, total_tokens
             
         except Exception as e:
             error_msg = str(e)
+            if uploaded_file:
+                try: client.files.delete(name=uploaded_file.name)
+                except: pass
             
             if _is_quota_error(error_msg):
                 _block_current_key(KEY_BLOCK_QUOTA_EXHAUSTED)
-                log_warning(logger, f"Quota exhausted during question generation on key {current_key_idx}")
             else:
                 _block_current_key(KEY_BLOCK_TEMPORARY_ERROR)
-                log_warning(logger, f"Error during question generation on key {current_key_idx}: {error_msg}")
             
             _rotate_api_key()
     
-    log_error(logger, "Failed to generate questions - all API keys exhausted")
     return None
