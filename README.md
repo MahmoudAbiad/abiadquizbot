@@ -98,7 +98,6 @@ create table if not exists favorite_quiz_sections (
 );
 
 create table if not exists favorite_quizzes (
-	favorite_id text primary key,
 	user_id bigint not null,
 	title text not null,
 	source_title text,
@@ -112,6 +111,7 @@ create table if not exists favorite_quizzes (
 
 - جدول `favorite_quiz_sections` مخصص للأقسام فقط.
 - جدول `favorite_quizzes` مخصص للكويزات المحفوظة فقط، ويرتبط بالقسم عبر `section_id`.
+- في النشر الحالي، يتم استخدام `created_at` كمُعرّف عملي للكويز المحفوظ إذا لم يكن هناك `favorite_id`.
 - حقل `title` داخل `favorite_quizzes` أصبح اسم الكويز المخصص الذي يختاره المستخدم قبل الحفظ.
 - حقل `source_title` يحفظ اسم المصدر الأصلي لسهولة التتبع.
 - يمكن حفظ الكويز داخل قسم أو بدون قسم، مع حد أقصى 20 قسمًا لكل مستخدم.

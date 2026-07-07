@@ -41,7 +41,7 @@ def get_favorites_keyboard(favorites: list, sort_mode: str = "latest", search_qu
     kb.extend(get_favorites_actions_keyboard(sort_mode).inline_keyboard[:-1])
     for item in favorites:
         title = item.get("title") or "كويز محفوظ"
-        favorite_id = item.get("favorite_id")
+        favorite_id = item.get("favorite_id") or item.get("created_at")
         section_title = item.get("section_title") or "عام"
         label = f"🎯 {title}"
         if section_title:

@@ -196,7 +196,6 @@ def save_favorite_quiz(
     try:
         favorite_id = uuid.uuid4().hex[:12]
         supabase.table("favorite_quizzes").insert({
-            "favorite_id": favorite_id,
             "user_id": user_id,
             "title": title,
             "source_title": source_title or title,
@@ -223,12 +222,11 @@ def list_favorite_quizzes(
             if item.get("section_id")
         }
 
-        res = supabase.table("favorite_quizzes").select("favorite_id, title, source_title, section_id, created_at").eq("user_id", user_id).execute()
+        res = supabase.table("favorite_quizzes").select("title, source_title, section_id, created_at").eq("user_id", user_id).execute()
         items = []
         for row in (res.data or []):
-            if not row.get("favorite_id"):
-                continue
             item = dict(row)
+            item["favorite_id"] = item.get("favorite_id") or item.get("created_at")
             section_title = section_map.get(item.get("section_id")) or DEFAULT_FAVORITE_SECTION_TITLE
             item["section_title"] = section_title
             items.append(item)
@@ -259,7 +257,7 @@ def can_create_more_favorite_sections(user_id: int) -> bool:
 
 def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str, Any]]:
     try:
-        res = supabase.table("favorite_quizzes").select("*").eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
+        res = supabase.table("favorite_quizzes").select("*").eq("user_id", user_id).eq("created_at", favorite_id).execute()
         if res.data:
             return res.data[0]
         return None
@@ -269,7 +267,7 @@ def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str, Any]
 
 def remove_favorite_quiz(user_id: int, favorite_id: str) -> bool:
     try:
-        supabase.table("favorite_quizzes").delete().eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
+        supabase.table("favorite_quizzes").delete().eq("user_id", user_id).eq("created_at", favorite_id).execute()
         log_info(logger, f"Removed favorite quiz: {favorite_id} for user {user_id}")
         return True
     except Exception as e:
