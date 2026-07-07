@@ -77,6 +77,32 @@ python main.py
 
 ---
 
+## 🗃️ جداول Supabase الإضافية
+
+لإتاحة ميزات **مشاركة الكويز** و**القائمة المفضلة**، أنشئ الجدولين التاليين في Supabase:
+
+```sql
+create table if not exists shared_quizzes (
+	share_id text primary key,
+	owner_id bigint not null,
+	title text not null,
+	quiz_data jsonb not null,
+	created_at timestamptz not null default now()
+);
+
+create table if not exists favorite_quizzes (
+	favorite_id text primary key,
+	user_id bigint not null,
+	title text not null,
+	quiz_data jsonb not null,
+	created_at timestamptz not null default now()
+);
+```
+
+إذا لم تُنشأ هذه الجداول، سيستمر البوت في العمل للأوامر والاختبار العادي، لكن أزرار المشاركة والمفضلة لن تحفظ البيانات بشكل دائم.
+
+---
+
 ## 📚 الوثائق:
 
 - **[AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md)** - شرح النشر على Azure

@@ -5,6 +5,7 @@ Handles user registration, points management, database queries, and quiz token c
 
 import os
 import datetime
+import uuid
 from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv, find_dotenv
 from supabase import create_client
@@ -88,10 +89,17 @@ def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dict[str,
         log_error(logger, f"Error checking daily renewal: {e}", exception=e)
         return {"points": user_data.get('points', 0), "status": "error", "referrer": None}
 
-def update_user_stats(user_id: int, points_to_deduct: int, questions_generated: int) -> Optional[int]:
+def update_user_stats(
+    user_id: int,
+    points_to_deduct: int,
+    questions_generated: Optional[int] = None,
+) -> Optional[int]:
     try:
         is_valid, error = validate_user_id(user_id)
         if not is_valid: return None
+
+        if questions_generated is None:
+            questions_generated = points_to_deduct
         
         user = supabase.table("users").select("points, total_questions").eq("user_id", user_id).execute()
         if user.data:
@@ -110,6 +118,80 @@ def update_user_stats(user_id: int, points_to_deduct: int, questions_generated: 
     except Exception as e:
         log_error(logger, f"Error updating user stats: {e}", exception=e)
         return None
+
+# ==================== Shared Quiz Operations ====================
+def create_shared_quiz_id() -> str:
+    """Create a short share identifier safe for Telegram callback/deep links."""
+    return uuid.uuid4().hex[:12]
+
+def save_shared_quiz(share_id: str, owner_id: int, title: str, quiz_data: List[Dict[str, Any]]) -> bool:
+    try:
+        supabase.table("shared_quizzes").upsert({
+            "share_id": share_id,
+            "owner_id": owner_id,
+            "title": title,
+            "quiz_data": quiz_data,
+            "created_at": datetime.datetime.utcnow().isoformat()
+        }).execute()
+        log_info(logger, f"Saved shared quiz: {share_id}")
+        return True
+    except Exception as e:
+        log_error(logger, f"Error saving shared quiz: {e}", exception=e)
+        return False
+
+def get_shared_quiz(share_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        res = supabase.table("shared_quizzes").select("*").eq("share_id", share_id).execute()
+        if res.data:
+            return res.data[0]
+        return None
+    except Exception as e:
+        log_error(logger, f"Error loading shared quiz: {e}", exception=e)
+        return None
+
+# ==================== Favorite Quiz Operations ====================
+def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str, Any]]) -> Optional[str]:
+    try:
+        favorite_id = uuid.uuid4().hex[:12]
+        supabase.table("favorite_quizzes").insert({
+            "favorite_id": favorite_id,
+            "user_id": user_id,
+            "title": title,
+            "quiz_data": quiz_data,
+            "created_at": datetime.datetime.utcnow().isoformat()
+        }).execute()
+        log_info(logger, f"Saved favorite quiz: {favorite_id} for user {user_id}")
+        return favorite_id
+    except Exception as e:
+        log_error(logger, f"Error saving favorite quiz: {e}", exception=e)
+        return None
+
+def list_favorite_quizzes(user_id: int) -> List[Dict[str, Any]]:
+    try:
+        res = supabase.table("favorite_quizzes").select("favorite_id, title, created_at").eq("user_id", user_id).order("created_at", desc=True).execute()
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error listing favorite quizzes: {e}", exception=e)
+        return []
+
+def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        res = supabase.table("favorite_quizzes").select("*").eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
+        if res.data:
+            return res.data[0]
+        return None
+    except Exception as e:
+        log_error(logger, f"Error loading favorite quiz: {e}", exception=e)
+        return None
+
+def remove_favorite_quiz(user_id: int, favorite_id: str) -> bool:
+    try:
+        supabase.table("favorite_quizzes").delete().eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
+        log_info(logger, f"Removed favorite quiz: {favorite_id} for user {user_id}")
+        return True
+    except Exception as e:
+        log_error(logger, f"Error removing favorite quiz: {e}", exception=e)
+        return False
 
 # ==================== Token Cache Operations ====================
 def get_cached_quiz(file_hash: str) -> Optional[Dict[str, Any]]:

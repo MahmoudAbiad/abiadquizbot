@@ -13,12 +13,32 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
         ref_link = f"https://t.me/{bot_username}?start={user_id}"
         kb = [
             [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
+            [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة", callback_data="favorites_menu")],
             [types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
         return types.InlineKeyboardMarkup(inline_keyboard=kb)
     except Exception as e:
         logger.error(f"Error generating main menu keyboard: {e}")
         return types.InlineKeyboardMarkup(inline_keyboard=[])
+
+def get_quiz_result_keyboard() -> types.InlineKeyboardMarkup:
+    kb = [
+        [types.InlineKeyboardButton(text="🔄 إعادة الاختبار", callback_data="quiz_replay")],
+        [types.InlineKeyboardButton(text="🔗 مشاركة الكويز", callback_data="quiz_share")],
+        [types.InlineKeyboardButton(text="⭐ حفظ في المفضلة", callback_data="quiz_favorite")],
+        [types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="quiz_home")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_favorites_keyboard(favorites: list) -> types.InlineKeyboardMarkup:
+    kb = []
+    for item in favorites:
+        title = item.get("title") or "كويز محفوظ"
+        favorite_id = item.get("favorite_id")
+        kb.append([types.InlineKeyboardButton(text=f"🎯 {title}", callback_data=f"fav_open_{favorite_id}")])
+        kb.append([types.InlineKeyboardButton(text="🗑 حذف من المفضلة", callback_data=f"fav_del_{favorite_id}")])
+    kb.append([types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_cache_choice_keyboard(points_cost: int) -> types.InlineKeyboardMarkup:
     kb = [

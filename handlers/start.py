@@ -7,9 +7,10 @@ import asyncio
 from typing import Optional
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
 from config import bot
 from keyboards import get_main_menu_keyboard
-from supabase_helper import check_or_add_user
+from supabase_helper import check_or_add_user, get_shared_quiz
 from logger import get_logger, log_warning, log_info
 from constants import ADMIN_CONTACT, MAX_PDF_PAGES
 
@@ -17,7 +18,7 @@ logger = get_logger(__name__)
 router = Router()
 
 @router.message(Command("start"))
-async def start(msg: types.Message, command: CommandObject):
+async def start(msg: types.Message, command: CommandObject, state: FSMContext):
     """
     Start command handler - greets user and displays welcome info.
     Handles referral system if user was invited by another user.
@@ -29,6 +30,16 @@ async def start(msg: types.Message, command: CommandObject):
     try:
         bot_info = await bot.get_me()
         
+        # Open shared quiz deep link if present
+        if command.args and command.args.startswith("share_"):
+            share_id = command.args.replace("share_", "", 1)
+            shared = await asyncio.to_thread(get_shared_quiz, share_id)
+            if shared:
+                from handlers.quiz import _start_loaded_quiz
+                await msg.answer(f"🔗 تم فتح كويز مشترك: {shared.get('title') or 'كويز مشترك'}")
+                await _start_loaded_quiz(msg, state, shared["quiz_data"], shared.get("title") or "كويز مشترك", origin="shared")
+                return
+
         # Extract referrer ID from command arguments
         referrer_id: Optional[int] = None
         if command.args and command.args.isdigit():
