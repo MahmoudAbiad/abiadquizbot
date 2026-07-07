@@ -9,6 +9,7 @@ from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from config import bot
+from handlers.execution import start_loaded_quiz
 from keyboards import get_main_menu_keyboard
 from supabase_helper import check_or_add_user, get_shared_quiz
 from logger import get_logger, log_warning, log_info
@@ -38,7 +39,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
                 # 🛠️ تم التعديل هنا للاستيراد من ملف التنفيذ الجديد لتفادي الأخطاء
                 from handlers.execution import _start_loaded_quiz
                 await msg.answer(f"🔗 تم فتح كويز مشترك: {shared.get('title') or 'كويز مشترك'}")
-                await _start_loaded_quiz(msg, state, shared["quiz_data"], shared.get('title') or 'كويز مشترك', origin="shared")
+                await start_loaded_quiz(msg, state, shared["quiz_data"], shared.get('title') or 'كويز مشترك', origin="shared")
                 return
 
         # Extract referrer ID from command arguments
