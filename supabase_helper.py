@@ -163,7 +163,7 @@ def count_favorite_sections(user_id: int) -> int:
 
 def list_favorite_sections(user_id: int) -> List[Dict[str, Any]]:
     try:
-        res = supabase.table("favorite_quiz_sections").select("section_id, title, created_at").eq("user_id", user_id).order("created_at", desc=False).execute()
+        res = supabase.table("favorite_quizzes").select("section_id, title, created_at").eq("user_id", user_id).order("created_at", desc=False).execute()
         return res.data or []
     except Exception as e:
         log_error(logger, f"Error listing favorite sections: {e}", exception=e)
