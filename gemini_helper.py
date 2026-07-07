@@ -31,16 +31,19 @@ current_key_idx: int = 0
 blocked_keys: Dict[int, datetime.datetime] = {}
 
 def has_gemini_api_keys() -> bool:
+    """التحقق من وجود مفاتيح ربط مبرمجة"""
     return bool(API_KEYS)
 
 # ==================== Data Models ====================
 class QuizQuestion(BaseModel):
+    """الهيكل المطور والمتوافق تماماً مع ملف الثوابت وأوامر التلقين"""
     question: str = Field(description="نص السؤال الاختياري المستخرج من المستند المرفق حصراً.")
     options: List[str] = Field(description="أربعة خيارات فريدة ومتوازنة للسؤال.")
     correct_option_id: int = Field(description="مؤشر الخيار الصحيح من 0 إلى 3.")
-    hint: str = Field(description="تلميح ذكي ومساعد يقرب الفكرة للطالب.")
+    hint: str = Field(description="تلميح ذكي ومساعد يقرب الفكرة للطالب دون إعطائه الحل المباشر.")
     explanation: str = Field(description="شرح أكاديمي مقتضب يوضح لماذا هذه الإجابة هي الصحيحة.")
 
+# ==================== Helper Functions ====================
 def _is_quota_error(error_msg: str) -> bool:
     return any(k in error_msg.lower() for k in QUOTA_ERROR_KEYWORDS)
 
@@ -52,7 +55,8 @@ def _block_current_key(hours: int) -> None:
     blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=hours)
 
 def _is_key_blocked() -> bool:
-    if current_key_idx not in blocked_keys: return False
+    if current_key_idx not in blocked_keys: 
+        return False
     if datetime.datetime.now() >= blocked_keys[current_key_idx]:
         del blocked_keys[current_key_idx]
         return False
@@ -81,7 +85,7 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             key = API_KEYS[current_key_idx]
             client = genai.Client(api_key=key)
             
-            # 🔥 تم إصلاح الخطأ: إزالة mime_type ليتم التعرف عليه تلقائياً من امتداد الملف ومنع الانهيار
+            # الرفع المباشر النظيف (تمت إزالة mime_type كمعامل مباشر لمنع الانهيار)
             uploaded_file = client.files.upload(file=file_path)
             
             response = client.models.generate_content(
@@ -97,11 +101,11 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             if response.usage_metadata:
                 total_tokens = response.usage_metadata.total_token_count
             
-            # حذف الملف فوراً من خوادم جوجل المؤقتة للحفاظ على الخصوصية
+            # حذف الملف فوراً من خوادم جوجل المؤقتة للحفاظ على المساحة والخصوصية
             client.files.delete(name=uploaded_file.name)
             
             result = json.loads(response.text)
-            log_info(logger, f"Generated successfully. Tokens: {total_tokens}")
+            log_info(logger, f"Generated successfully using key {current_key_idx}. Tokens: {total_tokens}")
             return result, total_tokens
             
         except Exception as e:
@@ -109,8 +113,10 @@ def generate_quiz_from_file(file_path: str, count: int, mime_type: str = None) -
             log_error(logger, f"❌ خطأ في مفتاح جيمني رقم {current_key_idx} أثناء المعالجة: {error_msg}")
             
             if uploaded_file:
-                try: client.files.delete(name=uploaded_file.name)
-                except: pass
+                try: 
+                    client.files.delete(name=uploaded_file.name)
+                except: 
+                    pass
             
             if _is_quota_error(error_msg):
                 _block_current_key(KEY_BLOCK_QUOTA_EXHAUSTED)
