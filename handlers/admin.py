@@ -3,7 +3,7 @@ import os
 import io
 import csv
 from aiogram import Router, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import BufferedInputFile
@@ -182,7 +182,32 @@ async def admin_cmd_fetchall(msg: types.Message):
     if not _is_admin(msg.from_user.id): return
     await render_users_page(msg, page=1)
 
+@router.message(Command("charge"))
+async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, state: FSMContext):
+    if not _is_admin(msg.from_user.id): return
+    
+    # 1. إذا كتبت الأمر وبجانبه الآيدي مباشرة (مثال: /charge 51234567)
+    if command.args:
+        target_id = command.args.strip()
+        if target_id.isdigit():
+            await msg.answer(
+                f"💰 <b>شحن رصيد للمستخدم</b> <code>{target_id}</code>\n\nاختر كمية شحن سريعة أو إدخال يدوي:", 
+                reply_markup=get_admin_charge_options_keyboard(int(target_id)), 
+                parse_mode="HTML"
+            )
+            return
 
+    # 2. إذا تم ضغط الأمر من القائمة الجانبية مباشرة دون كتابة معاملات (من القائمة)
+    # نقوم بتحويله لحالة انتظار البحث تلقائياً ليسهل عليك العمل
+    await state.set_state(AdminState.waiting_for_search_query)
+    await msg.answer(
+        "💡 <b>طريقة الشحن السريع للمطور:</b>\n"
+        "يمكنك إرسال الأمر متبوعاً بآيدي الطالب مباشرة، مثل:\n"
+        "<code>/charge 12345678</code>\n\n"
+        "🔍 أو قم بإرسال (الآيدي ID) أو (المعرف @Username) الآن للبحث عن الطالب وشحنه:",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode="HTML"
+    )
 # ==================== تفاعلات الأزرار (Callback Queries) ====================
 
 @router.callback_query(F.data == "admin_main_menu")

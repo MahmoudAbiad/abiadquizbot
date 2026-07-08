@@ -24,10 +24,11 @@ def main():
     dp.include_routers(
     start_router,
     admin_router,
+    sharing_router,
     files_router,
     execution_router,
     favorites_router,
-    sharing_router
+    
 )
     
     webhook_url = os.getenv("WEBHOOK_URL")

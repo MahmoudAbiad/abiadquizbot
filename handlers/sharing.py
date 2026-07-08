@@ -34,14 +34,17 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
 
         await state.update_data(share_id=share_id)
         bot_info = await bot.get_me()
+        
+        # 🔥 تعديل النص ليعود إلى التنسيق الحقيقي القديم والسليم الذي طلبته
         share_link = f"https://t.me/{bot_info.username}?start=share_{share_id}"
-        await call.message.answer(
-            f"🔗 تم إنشاء رابط مشاركة الكويز:\n\n{share_link}\n\nأرسله لأي شخص ليفتح الكويز مباشرة.",
-            disable_web_page_preview=True,
-            reply_markup=types.InlineKeyboardMarkup(
-                inline_keyboard=[[types.InlineKeyboardButton(text="فتح رابط المشاركة", url=share_link)]]
-            )
+        old_style_text = (
+            "تم إنشاء رابط مشاركة الكويز\n\n"
+            f"{share_link}\n"
+            "يمكنك مشاركته"
         )
+        
+        await call.message.answer(old_style_text, disable_web_page_preview=True)
+        
     except Exception as e:
         log_error(logger, f"Error in share_quiz: {e}", exception=e)
         await call.answer("❌ حدث خطأ أثناء إنشاء رابط المشاركة", show_alert=True)
@@ -60,3 +63,6 @@ async def open_shared_quiz(call: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         log_error(logger, f"Error in open_shared_quiz: {e}", exception=e)
         await call.answer("❌ تعذر فتح الكويز المشترك", show_alert=True)
+    finally:
+        # 💡 سطر جوهري لمنع تعليق الرابط عند الضغط عليه
+        await call.answer()

@@ -61,8 +61,12 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
 
     # إضافة أزرار الكويزات (زر واحد لكل كويز يفتح التفاصيل)
     for item in page_items:
-        title = item.get("title") or "كويز محفوظ"
-        favorite_id = item.get("favorite_id") or item.get("created_at")
+        # 🔥 تعديل 1: قراءة مرنة للعنوان (سواء كان title أو source_title)
+        title = item.get("title") or item.get("source_title") or "كويز محفوظ"
+        
+        # 🔥 تعديل 2: قراءة مرنة للمعرّف الفريد لتجنب الـ None (سواء كان id أو favorite_id)
+        favorite_id = item.get("id") or item.get("favorite_id") or item.get("created_at")
+        
         section_title = item.get("section_title") or "عام"
         
         label = f"📚 {title}"
