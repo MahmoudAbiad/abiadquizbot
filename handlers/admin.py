@@ -222,6 +222,7 @@ async def process_search_user(msg: types.Message, state: FSMContext):
             "👤 <b>معلومات المستخدم:</b>\n"
             f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
+            f"┣ 📝 الاسم: <b>{u['first_name']} {u.get('last_name', '')}</b>\n"
             f"┣ 💰 النقاط الحالية: <code>{u['points']}</code>\n"
             f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
         )
