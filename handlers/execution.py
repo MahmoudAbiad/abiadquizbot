@@ -210,26 +210,43 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
 async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
+        
+        # 1. الفحص السريع من الـ Session الحالي منعاً للضغط المتكرر اللحظي
         if data.get("is_saved_in_session"):
-            await call.answer("✅ الكويز محفوظ بالفعل في قسم 'عام'!", show_alert=True)
+            await call.answer("✅ هذا الكويز محفوظ بالفعل في قائمتك المفضلة!", show_alert=True)
             return
 
         questions = data.get("questions")
-        title = data.get("source_title", "كويز بدون عنوان")
+        title = data.get("source_title") or data.get("title") or "كويز بدون عنوان"
         
         if not questions:
             await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
             return
 
+        # 2. الفحص العميق من قاعدة البيانات (Supabase) للتحقق من العنوان منعاً للتكرار نهائياً
+        user_favorites = await asyncio.to_thread(list_favorite_quizzes, call.from_user.id)
+        
+        if user_favorites:
+            # نتحقق إذا كان أي كويز محفوظ يطابق العنوان الحالي
+            is_already_saved = any(
+                (fav.get("title") == title or fav.get("source_title") == title) 
+                for fav in user_favorites
+            )
+            if is_already_saved:
+                await state.update_data(is_saved_in_session=True) # تحديث الجلسة لتوفير الاستعلامات مستقبلاً
+                await call.answer("💡 هذا الكويز موجود بالفعل في قائمتك المفضلة مسبقاً!", show_alert=True)
+                return
+
+        # 3. إذا كان جديداً تماماً، يتم الحفظ بشكل طبيعي
         await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions)
         await state.update_data(is_saved_in_session=True)
         
-        await call.answer("✅ تم الحفظ السريع! تجده في 'قائمتي المفضلة' قسم 'عام'.", show_alert=True)
+        await call.answer("✅ تم الحفظ بنجاح! تجده في 'قائمتي المفضلة' قسم 'عام'.", show_alert=True)
         
     except Exception as e:
         log_error(logger, f"Error saving quiz: {e}", exception=e)
         await call.answer("❌ حدث خطأ أثناء حفظ الكويز.", show_alert=True)
-
+        
 @router.callback_query(QuizState.answering_quiz, F.data == "next_question")
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
     try:
