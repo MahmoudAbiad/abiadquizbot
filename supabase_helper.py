@@ -32,7 +32,7 @@ except Exception as e:
     raise
 
 # ==================== User Management ====================
-def check_or_add_user(user_id: int, username: str, referrer_id: Optional[int] = None) -> Dict[str, Any]:
+def check_or_add_user(user_id: int, first_name: str, last_name: str, username: str, referrer_id: Optional[int] = None) -> Dict[str, Any]:
     try:
         is_valid, error = validate_user_id(user_id)
         if not is_valid:
@@ -42,14 +42,14 @@ def check_or_add_user(user_id: int, username: str, referrer_id: Optional[int] = 
         response = supabase.table("users").select("*").eq("user_id", user_id).execute()
         
         if not response.data:
-            return _add_new_user(user_id, username, referrer_id, today)
+            return _add_new_user(user_id, first_name, last_name, username, referrer_id, today)
         
         return _check_daily_renewal(user_id, response.data[0], today)
     except Exception as e:
         log_error(logger, f"Error in check_or_add_user: {e}", exception=e)
         return {"points": 0, "status": "error", "referrer": None}
 
-def _add_new_user(user_id: int, username: str, referrer_id: Optional[int], today: str) -> Dict[str, Any]:
+def _add_new_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int], today: str) -> Dict[str, Any]:
     try:
         actual_referrer = None
         if referrer_id and str(referrer_id) != str(user_id):
@@ -62,6 +62,8 @@ def _add_new_user(user_id: int, username: str, referrer_id: Optional[int], today
         supabase.table("users").insert({
             "user_id": user_id,
             "username": username,
+            "first_name": first_name,
+            "last_name": last_name,
             "points": WELCOME_POINTS,
             "total_questions": 0,
             "referred_by": actual_referrer,
