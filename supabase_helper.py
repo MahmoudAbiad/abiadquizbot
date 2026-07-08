@@ -350,15 +350,17 @@ def admin_get_global_stats() -> Dict[str, int]:
         logger.error(f"Error getting global stats: {e}")
         return {"total_users": 0, "total_questions": 0}
 
-def admin_search_user(query: str) -> Optional[List[Dict[str, Any]]]:
+# تأكد من استيراد كل ما يلزم في الأعلى
+# لا حاجة لتغييرات كبيرة، فقط تأكد أن admin_search_user تعمل هكذا:
+
+def admin_search_user(query: str) -> Optional[list]:
     try:
         query = query.strip()
         if query.isdigit():
             res = supabase.table("users").select("*").eq("user_id", int(query)).execute()
-            return res.data
-        clean_username = query.lstrip('@')
-        res = supabase.table("users").select("*").ilike("username", f"%{clean_username}%").execute()
+        else:
+            clean_username = query.lstrip('@')
+            res = supabase.table("users").select("*").ilike("username", f"%{clean_username}%").execute()
         return res.data
     except Exception as e:
-        logger.error(f"Error searching user: {e}")
         return None

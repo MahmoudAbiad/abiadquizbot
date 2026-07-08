@@ -132,3 +132,19 @@ def get_favorite_section_keyboard(sections: list, allow_new: bool = True, allow_
 
     kb.append([types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_pagination_keyboard(current_page: int, total_pages: int, query: str) -> types.InlineKeyboardMarkup:
+    buttons = []
+    if current_page > 1:
+        buttons.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"page_{query}_{current_page-1}"))
+    if current_page < total_pages:
+        buttons.append(types.InlineKeyboardButton(text="التالي ➡️", callback_data=f"page_{query}_{current_page+1}"))
+    
+    return types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+
+# أضف هذه الدالة إلى ملف keyboards.py
+def get_admin_charge_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+    kb = [
+        [types.InlineKeyboardButton(text=f"💰 شحن رصيد للمستخدم {user_id}", callback_data=f"admin_charge_{user_id}")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
