@@ -77,7 +77,7 @@ async def process_count(msg: types.Message, state: FSMContext):
     file_path = data.get('file_path')
     
     # التحقق من الرصيد
-    user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown")
+    user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown",msg.from_user.first_name or "Unknown", msg.from_user.last_name or "Unknown" )
     if user_info["points"] < count:
         await msg.answer(ERROR_INSUFFICIENT_POINTS.format(current=user_info["points"], required=count))
         safe_file_cleanup(file_path)
