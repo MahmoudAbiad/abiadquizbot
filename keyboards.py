@@ -98,7 +98,6 @@ def get_sections_list_keyboard(sections: list) -> types.InlineKeyboardMarkup:
     for section in sections:
         section_id = section.get("section_id")
         title = section.get("title") or "قسم عام"
-        # يمكن لاحقاً إضافة Handler لالتقاط fav_sec_view_ لعرض كويزات هذا القسم فقط
         kb.append([types.InlineKeyboardButton(text=f"📁 {title}", callback_data=f"fav_sec_view_{section_id}")])
         
     kb.append([types.InlineKeyboardButton(text="⭐ عرض كل الكويزات المحفوظة", callback_data="favorites_menu")])
@@ -118,17 +117,18 @@ def get_quiz_question_keyboard(options: list, show_hint: bool = True) -> types.I
     for index, option in enumerate(options):
         kb.append([types.InlineKeyboardButton(text=option, callback_data=f"ans_{index}")])
     
-    # أزرار التحكم (التلميح والحفظ)
-    control_buttons = []
+    # وضع زر التلميح منفصلاً إذا كان متاحاً لمنع الازدحام
     if show_hint:
-        control_buttons.append(types.InlineKeyboardButton(text="💡 تلميح", callback_data="get_hint"))
-    control_buttons.append(types.InlineKeyboardButton(text="💾 حفظ الكويز", callback_data="save_quiz"))
+        kb.append([types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")])
+    
+    # 🆕 تم التعديل: صف أزرار التحكم الصغيرة أثناء الحل (إيقاف | مشاركة | حفظ)
+    control_buttons = [
+        types.InlineKeyboardButton(text="⏹ إيقاف", callback_data="quiz_stop"),
+        types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
+        types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
+    ]
     kb.append(control_buttons)
     
-    # 👇 تم إضافة زر مشاركة الكويز هنا ليظهر أثناء الحل
-    kb.append([types.InlineKeyboardButton(text="🔗 مشاركة الكويز", callback_data="quiz_share")])
-    
-    # زر الانتقال للسؤال التالي
     kb.append([types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -137,9 +137,14 @@ def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: in
     for i, opt in enumerate(options):
         prefix = "🟢 " if i == correct_opt else "🔴 " if i == selected_opt else ""
         kb.append([types.InlineKeyboardButton(text=f"{prefix}{opt}", callback_data="ignored")])
+    
     kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
-    kb.append([types.InlineKeyboardButton(text="⏹ إيقاف الكويز", callback_data="quiz_stop")])
-    kb.append([types.InlineKeyboardButton(text="⏹ مشاركة الكويز", callback_data="quiz_share")])
+    
+    # 🆕 تم التحديث: تعديل الإيموجي وجعل الأزرار متجاورة بشكل متناسق بعد الإجابة
+    kb.append([
+        types.InlineKeyboardButton(text="⏹ إيقاف الكويز", callback_data="quiz_stop"),
+        types.InlineKeyboardButton(text="🔗 مشاركة الكويز", callback_data="quiz_share")
+    ])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_favorite_section_keyboard(sections: list, allow_new: bool = True, allow_default: bool = True) -> types.InlineKeyboardMarkup:
@@ -158,7 +163,6 @@ def get_favorite_section_keyboard(sections: list, allow_new: bool = True, allow_
     kb.append([types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-# تم الاحتفاظ بها في حال كنت تستخدمها في مكان آخر (رغم أننا دمجنا Pagination في لوحة المفضلة مباشرة)
 def get_pagination_keyboard(current_page: int, total_pages: int, query: str) -> types.InlineKeyboardMarkup:
     buttons = []
     if current_page > 1:
