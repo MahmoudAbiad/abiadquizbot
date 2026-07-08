@@ -53,7 +53,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             msg.from_user.id,
             msg.from_user.username or "Unknown",
             msg.from_user.first_name,
-            msg.from_user.last_name,
+            msg.from_user.last_name or "Unknown",
             referrer_id
         )
         

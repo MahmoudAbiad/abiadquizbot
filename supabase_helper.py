@@ -42,7 +42,7 @@ def check_or_add_user(user_id: int, first_name: str, last_name: str, username: s
         response = supabase.table("users").select("*").eq("user_id", user_id).execute()
         
         if not response.data:
-            return _add_new_user(user_id, first_name, last_name, username, referrer_id, today)
+            return _add_new_user(user_id,username, first_name, last_name,  referrer_id, today)
         
         return _check_daily_renewal(user_id, response.data[0], today)
     except Exception as e:
@@ -63,7 +63,7 @@ def _add_new_user(user_id: int, username: str, first_name: str, last_name: str, 
             "user_id": user_id,
             "username": username,
             "first_name": first_name,
-            "last_name": last_name,
+            "last_name": last_name or "Unknown",
             "points": WELCOME_POINTS,
             "total_questions": 0,
             "referred_by": actual_referrer,
