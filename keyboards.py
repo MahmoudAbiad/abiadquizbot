@@ -62,18 +62,26 @@ def get_cache_choice_keyboard(points_cost: int) -> types.InlineKeyboardMarkup:
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-def get_quiz_question_keyboard(show_hint: bool = True):
-    # استخدام نص قصير جداً للزر
-    hint_button = InlineKeyboardButton(text="💡 تلميح", callback_data="get_hint")
-    save_button = InlineKeyboardButton(text="💾 حفظ الكويز", callback_data="save_quiz")
+def get_quiz_question_keyboard(options: list, show_hint: bool = True) -> types.InlineKeyboardMarkup:
+    kb = []
     
-    # وضع التلميح والحفظ في نفس السطر ليكونوا صغاراً
-    buttons = [hint_button, save_button]
+    # 1. إضافة أزرار الخيارات (الإجابات)
+    for index, option in enumerate(options):
+        # نستخدم callback_data بصيغة "ans_0", "ans_1" لكي يلتقطها ملف execution
+        kb.append([types.InlineKeyboardButton(text=option, callback_data=f"ans_{index}")])
     
-    return InlineKeyboardMarkup(inline_keyboard=[
-        buttons, # سطر واحد يحتوي على التلميح والحفظ
-        [InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
-    ])
+    # 2. إضافة أزرار التحكم (التلميح والحفظ) في سطر واحد
+    control_buttons = []
+    if show_hint:
+        control_buttons.append(types.InlineKeyboardButton(text="💡 تلميح", callback_data="get_hint"))
+    control_buttons.append(types.InlineKeyboardButton(text="💾 حفظ الكويز", callback_data="save_quiz"))
+    
+    kb.append(control_buttons)
+    
+    # 3. زر التخطي أو التالي
+    kb.append([types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")])
+    
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: int) -> types.InlineKeyboardMarkup:
     kb = []
