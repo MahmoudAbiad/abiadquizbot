@@ -131,6 +131,7 @@ async def render_users_page(event, page: int = 1):
         report += (
             f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
+            f"┣ 📝 الاسم: <b>{u.get('first_name', 'Unknown')} {u.get('last_name', 'Unknown')}</b>\n"
             f"┣ 💰 النقاط: <code>{u['points']}</code>\n"
             f"┗ 📊 الأسئلة: <code>{u.get('total_questions', 0)}</code>\n"
             f"──────────────────\n"
@@ -307,12 +308,14 @@ async def export_all_users(call: types.CallbackQuery):
         
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["User ID", "Username", "Points", "Total Questions", "Joined At"])
+        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Points", "Total Questions", "Joined At"])
         
         for u in users:
             writer.writerow([
                 u.get('user_id', ''),
                 u.get('username', 'Unknown'),
+                u.get('first_name', 'Unknown'),
+                u.get('last_name', 'Unknown'),
                 u.get('points', 0),
                 u.get('total_questions', 0),
                 u.get('joined_at', '')
