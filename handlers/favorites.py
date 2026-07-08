@@ -3,7 +3,8 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from typing import Union, Optional
 
-from config import QuizState
+# 💡 تم التحديث: استيراد كائن الـ bot لاستخدامه في توليد روابط المشاركة
+from config import bot, QuizState
 from constants import (
     MAX_FAVORITE_TITLE_LENGTH, MAX_FAVORITE_SECTIONS, DEFAULT_FAVORITE_SECTION_TITLE,
     MSG_FAVORITES_SEARCH_EMPTY, MSG_FAVORITE_NAME_PROMPT, MSG_FAVORITE_NAME_INVALID,
@@ -280,7 +281,7 @@ async def favorites_back(call: types.CallbackQuery):
 
 # ==================== معالجات الأوامر داخل الكويز ====================
 
-# 🆕 إضافة جديدة: معالج عرض تفاصيل الكويز (بدل فتحه مباشرة أو حذفه من نفس اللوحة)
+# 🔥 تم التحديث: معالج عرض تفاصيل الكويز لإدراج زر مشاركة خارجي تلقائياً
 @router.callback_query(F.data.startswith("fav_details_"))
 async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
     try:
@@ -303,7 +304,19 @@ async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
             f"ماذا تريد أن تفعل بهذا الكويز؟"
         )
         
+        # 🔗 توليد رابط مشاركة مخصص للكويز الحالي تلقائياً
+        bot_info = await bot.get_me()
+        share_param = f"quiz_{fid}"
+        share_text = f"🎯 جرب حل كويز «{title}» وتحدى نفسك معي في الدراسة!"
+        share_url = f"https://t.me/share/url?url=https://t.me/{bot_info.username}?start={share_param}&text={share_text}"
+        
         keyboard = get_favorite_details_keyboard(fid)
+        
+        # 🛠️ حقن زر المشاركة ديناميكياً في السطر الأول للوحة المفاتيح المجلوبة لمنع أي تعديل خارجي
+        keyboard.inline_keyboard.insert(0, [
+            types.InlineKeyboardButton(text="🚀 مشاركة هذا الكويز للزملاء", url=share_url)
+        ])
+        
         await call.message.edit_text(details_text, reply_markup=keyboard)
         
     except Exception as e:
@@ -312,6 +325,7 @@ async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
     finally:
         await call.answer()
 
+# 🔥 تم التحديث: تمرير معرف الكويز quiz_id لضمان بقائه في الـ State عند تشغيل الكويز من المفضلة
 @router.callback_query(F.data.startswith("fav_open_"))
 async def open_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
@@ -320,9 +334,18 @@ async def open_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
         if not favorite:
             await call.answer("❌ لم يتم العثور على هذا الكويز", show_alert=True)
             return
-        await _start_loaded_quiz(call, state, favorite["quiz_data"], favorite.get("title") or "كويز محفوظ", origin="favorite")
-    except Exception as e: log_error(logger, f"Error in open_favorite_quiz: {e}"); await call.answer("❌ تعذر فتح الكويز المحفوظ", show_alert=True)
-    finally: await call.answer()
+        # إضافة مَعلَمَة quiz_id=fid هنا تضمن عمل ميزة المشاركة حتى أثناء حل الكويز نفسه
+        await _start_loaded_quiz(
+            call, state, favorite["quiz_data"], 
+            favorite.get("title") or "كويز محفوظ", 
+            origin="favorite", 
+            quiz_id=fid # <--- تم التحديث هنا
+        )
+    except Exception as e: 
+        log_error(logger, f"Error in open_favorite_quiz: {e}")
+        await call.answer("❌ تعذر فتح الكويز المحفوظ", show_alert=True)
+    finally: 
+        await call.answer()
 
 @router.callback_query(F.data.startswith("fav_del_"))
 async def delete_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
