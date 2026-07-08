@@ -78,13 +78,14 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         q = questions[idx]
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
 
-        # 3. إنشاء أزرار التحكم السفلية
-        control_buttons = []
-        control_buttons.append(types.InlineKeyboardButton(text="💡 تلميح", callback_data="get_hint"))
-        control_buttons.append(types.InlineKeyboardButton(text="💾 حفظ الكويز", callback_data="save_quiz"))
-        
+        # 3. 🔥 تم التعديل: إنشاء أزرار التحكم السفلية المحدثة متجاورة (إيقاف | مشاركة | حفظ)
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            control_buttons,
+            [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
+            [
+                types.InlineKeyboardButton(text="⏹ إيقاف", callback_data="quiz_stop"),
+                types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
+                types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
+            ],
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
 
@@ -253,3 +254,26 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "ignored")
 async def handle_ignored_click(call: types.CallbackQuery):
     await call.answer("✅ تم تسجيل إجابتك")
+
+# 2. 🔥 تم إضافة الهاندلر الجديد هنا: معالجة ضغط زر مشاركة الكويز أثناء الحل
+@router.callback_query(QuizState.answering_quiz, F.data == "quiz_share")
+async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext):
+    try:
+        bot_info = await bot.get_me()
+        
+        # تجهيز رابط مشاركة مخصص للبوت يعتمد على إحالة المستخدم لإضافة نقاط مجانية عند دخول أصدقائه
+        share_text = "🔥 جرب حل هذا الكويز الرهيب وتحدى نفسك معي في الدراسة!"
+        share_url = f"https://t.me/share/url?url=https://t.me/{bot_info.username}?start={call.from_user.id}&text={share_text}"
+        
+        share_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🚀 أرسل الرابط الآن لأصدقائك", url=share_url)]
+        ])
+        
+        await call.message.answer(
+            "🔗 اضغط على الزر أدناه لإرسال رابط البوت وتحدي أصدقائك:",
+            reply_markup=share_kb
+        )
+    except Exception as e:
+        log_error(logger, f"Error in handle_inline_quiz_share: {e}", exception=e)
+    finally:
+        await call.answer()
