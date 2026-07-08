@@ -1,98 +1,168 @@
-"""
-Admin-specific command handlers.
-Updated with FSM for interactive user charging and existing management tools.
-"""
-
 import asyncio
 import os
+import io
+import csv
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.types import BufferedInputFile
 from supabase import create_client
 
-# الاستيرادات الخاصة بك
 from config import bot, ADMIN_ID
 from supabase_helper import admin_add_points, admin_get_global_stats, admin_search_user
-from keyboards import get_admin_charge_keyboard  # تأكد من إضافة هذه الدالة في ملف keyboards.py
+from keyboards import (
+    get_admin_dashboard_keyboard, 
+    get_admin_user_actions_keyboard, 
+    get_admin_charge_options_keyboard,
+    get_cancel_keyboard
+)
 from logger import get_logger
-from constants import SUCCESS_POINTS_CHARGED
 
 logger = get_logger(__name__)
 router = Router()
 
-# تعريف حالات الـ FSM للشحن
-class AdminChargeState(StatesGroup):
-    waiting_for_amount = State()
+# تعريف حالات الـ FSM للإدارة
+class AdminState(StatesGroup):
+    waiting_for_search_query = State()
+    waiting_for_charge_amount = State()
 
 def _is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
-# ==================== Admin Commands ====================
+# ==================== Main Dashboard ====================
 
-@router.message(Command("searchuser"))
-async def admin_get_user(msg: types.Message, command: CommandObject):
+@router.message(Command("admin"))
+async def admin_dashboard(msg: types.Message, state: FSMContext):
     if not _is_admin(msg.from_user.id):
         return
-    
-    if not command.args:
-        await msg.answer("🔍 الرجاء إدخال اليوزر أو الآيدي للبحث. مثال: `/searchuser ahmad`")
-        return
-    
-    query = command.args.strip()
+    await state.clear()
+    await msg.answer(
+        "⚙️ **لوحة تحكم الإدارة**\n\nأهلاً بك، اختر الإجراء الذي تود القيام به من القائمة أدناه:",
+        reply_markup=get_admin_dashboard_keyboard()
+    )
+
+# ==================== Cancel Action ====================
+
+@router.callback_query(F.data == "admin_cancel")
+async def admin_cancel_action(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text(
+        "❌ تم إلغاء العملية.\n\n⚙️ **لوحة تحكم الإدارة**",
+        reply_markup=get_admin_dashboard_keyboard()
+    )
+    await call.answer()
+
+# ==================== Search User Flow ====================
+
+@router.callback_query(F.data == "admin_search_prompt")
+async def prompt_search_user(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminState.waiting_for_search_query)
+    await call.message.edit_text(
+        "🔍 **بحث عن مستخدم**\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):",
+        reply_markup=get_cancel_keyboard()
+    )
+    await call.answer()
+
+@router.message(AdminState.waiting_for_search_query)
+async def process_search_user(msg: types.Message, state: FSMContext):
+    query = msg.text.strip()
     users_data = await asyncio.to_thread(admin_search_user, query)
     
     if users_data:
-        for u in users_data:
-            report = (f"🆔 الآيدي: `{u['user_id']}`\n👤 اليوزر: @{u['username']}\n💰 النقاط: {u['points']}")
-            # استخدام زر الشحن التفاعلي الجديد
-            await msg.answer(report, reply_markup=get_admin_charge_keyboard(u['user_id']))
+        # إذا وجدنا نتائج، نعرض أول نتيجة لتجنب الازدحام
+        u = users_data[0] 
+        username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بدون يوزر"
+        
+        report = (
+            "👤 **معلومات المستخدم:**\n"
+            f"┣ 🆔 الآيدي: `{u['user_id']}`\n"
+            f"┣ 👤 اليوزر: {username_str}\n"
+            f"┣ 💰 النقاط الحالية: `{u['points']}`\n"
+            f"┗ 📊 إجمالي الأسئلة المُولدة: `{u.get('total_questions', 0)}`"
+        )
+        await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']))
     else:
-        await msg.answer("❌ لم يتم العثور على نتائج.")
-
-# --- نظام الشحن التفاعلي ---
-
-@router.callback_query(F.data.startswith("admin_charge_"))
-async def start_charge_process(callback: types.CallbackQuery, state: FSMContext):
-    target_id = callback.data.split("_")[2]
-    # تخزين الآيدي في الحالة المؤقتة
-    await state.update_data(target_id=target_id)
-    await state.set_state(AdminChargeState.waiting_for_amount)
+        await msg.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard())
     
-    await callback.message.answer(f"✅ تم اختيار المستخدم `{target_id}`.\nأرسل الآن كمية النقاط (رقم فقط):")
-    await callback.answer()
+    await state.clear()
 
-@router.message(AdminChargeState.waiting_for_amount)
-async def process_amount(msg: types.Message, state: FSMContext):
+# ==================== Charge Points Flow ====================
+
+@router.callback_query(F.data.startswith("admin_charge_menu_"))
+async def show_charge_menu(call: types.CallbackQuery):
+    target_id = call.data.split("_")[3]
+    await call.message.edit_text(
+        f"💰 **شحن رصيد للمستخدم** `{target_id}`\n\nاختر كمية الشحن السريعة أو اختر إدخالاً يدوياً:",
+        reply_markup=get_admin_charge_options_keyboard(target_id)
+    )
+    await call.answer()
+
+@router.callback_query(F.data.startswith("admin_charge_quick_"))
+async def process_quick_charge(call: types.CallbackQuery):
+    parts = call.data.split("_")
+    amount = int(parts[3])
+    target_id = int(parts[4])
+    
+    new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
+    
+    if new_balance is not None:
+        await call.message.edit_text(
+            f"✅ **تم الشحن بنجاح!**\n\nالمستخدم: `{target_id}`\nالكمية المضافة: `+{amount}` 🟢\nالرصيد الجديد: `{new_balance}` 💰",
+            reply_markup=get_admin_dashboard_keyboard() # العودة للوحة
+        )
+    else:
+        await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
+
+@router.callback_query(F.data.startswith("admin_charge_manual_"))
+async def prompt_manual_charge(call: types.CallbackQuery, state: FSMContext):
+    target_id = call.data.split("_")[3]
+    await state.update_data(target_id=target_id)
+    await state.set_state(AdminState.waiting_for_charge_amount)
+    
+    await call.message.edit_text(
+        f"✍️ **شحن يدوي**\n\nأرسل عدد النقاط المراد إضافتها للمستخدم `{target_id}` (أرقام فقط):",
+        reply_markup=get_cancel_keyboard()
+    )
+    await call.answer()
+
+@router.message(AdminState.waiting_for_charge_amount)
+async def process_manual_charge(msg: types.Message, state: FSMContext):
     if not msg.text.isdigit():
-        return await msg.answer("❌ خطأ: يرجى إرسال أرقام فقط.")
+        return await msg.answer("❌ يرجى إرسال أرقام صحيحة فقط.", reply_markup=get_cancel_keyboard())
     
     amount = int(msg.text)
     data = await state.get_data()
-    target_id = data.get('target_id')
+    target_id = int(data.get('target_id'))
     
-    # تنفيذ الشحن
-    new_balance = await asyncio.to_thread(admin_add_points, int(target_id), amount)
+    new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
     
     if new_balance is not None:
-        await msg.answer(f"✅ تمت العملية!\nالمستخدم `{target_id}` حصل على {amount} نقطة.\n💰 رصيده الجديد: {new_balance}")
+        await msg.answer(
+            f"✅ **تم الشحن بنجاح!**\n\nالمستخدم: `{target_id}`\nالكمية المضافة: `+{amount}` 🟢\nالرصيد الجديد: `{new_balance}` 💰",
+            reply_markup=get_admin_dashboard_keyboard()
+        )
     else:
-        await msg.answer("❌ فشل الشحن.")
+        await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.")
     
-    # مسح الحالة لإنهاء عملية الشحن
     await state.clear()
 
-# --- باقي الأوامر الإدارية الأصلية ---
+# ==================== Stats & Exports ====================
 
-@router.message(Command("dbstats"))
-async def admin_db_stats(msg: types.Message):
-    if not _is_admin(msg.from_user.id): return
+@router.callback_query(F.data == "admin_stats")
+async def show_db_stats(call: types.CallbackQuery):
     stats = await asyncio.to_thread(admin_get_global_stats)
-    await msg.answer(f"📊 إحصائيات النظام:\n- إجمالي الطلاب: {stats['total_users']}\n- إجمالي الأسئلة: {stats['total_questions']}")
+    text = (
+        "📊 **إحصائيات النظام الحية:**\n\n"
+        f"👥 إجمالي الطلاب المسجلين: `{stats['total_users']}`\n"
+        f"📝 إجمالي الأسئلة المُولدة: `{stats['total_questions']}`\n"
+    )
+    await call.message.edit_text(text, reply_markup=get_admin_dashboard_keyboard())
+    await call.answer()
 
-@router.message(Command("fetchall"))
-async def admin_fetch_all_users(msg: types.Message):
-    if not _is_admin(msg.from_user.id): return
+@router.callback_query(F.data == "admin_export_users")
+async def export_all_users(call: types.CallbackQuery):
+    await call.message.edit_text("⏳ جاري استخراج البيانات، يرجى الانتظار...")
     
     try:
         supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
@@ -100,19 +170,32 @@ async def admin_fetch_all_users(msg: types.Message):
         users = res.data
         
         if not users:
-            return await msg.answer("📭 لا يوجد أي طلاب مسجلين.")
+            return await call.message.edit_text("📭 لا يوجد أي طلاب مسجلين.", reply_markup=get_admin_dashboard_keyboard())
         
-        report = "👥 **سجل الطلاب المسجلين بالكامل:**\n\n"
-        for idx, u in enumerate(users, 1):
-            username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بلا يوزر"
-            report += f"{idx}. 🆔 `{u['user_id']}` | 👤 {username_str} | 💰 {u['points']} ن\n"
-            
-            if len(report) > 3500: # تجنب تجاوز حد رسالة التليجرام
-                await msg.answer(report)
-                report = ""
+        # إنشاء ملف CSV في الذاكرة
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["User ID", "Username", "Points", "Total Questions", "Joined At"])
         
-        if report:
-            await msg.answer(report)
+        for u in users:
+            writer.writerow([
+                u.get('user_id', ''),
+                u.get('username', 'Unknown'),
+                u.get('points', 0),
+                u.get('total_questions', 0),
+                u.get('joined_at', '')
+            ])
             
+        csv_bytes = output.getvalue().encode('utf-8-sig') # دعم اللغة العربية
+        file = BufferedInputFile(csv_bytes, filename="users_export.csv")
+        
+        await call.message.delete()
+        await call.message.answer_document(
+            document=file, 
+            caption="📥 **تم استخراج قائمة الطلاب بالكامل.**",
+            reply_markup=get_admin_dashboard_keyboard()
+        )
+        
     except Exception as e:
-        logger.error(f"Error in admin_fetch_all_users: {e}")
+        logger.error(f"Error exporting users: {e}")
+        await call.message.edit_text("❌ حدث خطأ أثناء استخراج البيانات.", reply_markup=get_admin_dashboard_keyboard())

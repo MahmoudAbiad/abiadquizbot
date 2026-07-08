@@ -1,12 +1,9 @@
-"""
-Keyboard layouts and UI button definitions.
-Provides reusable button sets for different scenarios with compressed list comprehensions.
-"""
-
 from aiogram import types
 from logger import get_logger
 
 logger = get_logger(__name__)
+
+# ==================== User Keyboards ====================
 
 def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeyboardMarkup:
     try:
@@ -60,27 +57,18 @@ def get_cache_choice_keyboard(points_cost: int) -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
 def get_quiz_question_keyboard(options: list, show_hint: bool = True) -> types.InlineKeyboardMarkup:
     kb = []
-    
-    # 1. إضافة أزرار الخيارات (الإجابات)
     for index, option in enumerate(options):
-        # نستخدم callback_data بصيغة "ans_0", "ans_1" لكي يلتقطها ملف execution
         kb.append([types.InlineKeyboardButton(text=option, callback_data=f"ans_{index}")])
     
-    # 2. إضافة أزرار التحكم (التلميح والحفظ) في سطر واحد
     control_buttons = []
     if show_hint:
         control_buttons.append(types.InlineKeyboardButton(text="💡 تلميح", callback_data="get_hint"))
     control_buttons.append(types.InlineKeyboardButton(text="💾 حفظ الكويز", callback_data="save_quiz"))
     
     kb.append(control_buttons)
-    
-    # 3. زر التخطي أو التالي
     kb.append([types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")])
-    
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: int) -> types.InlineKeyboardMarkup:
@@ -91,7 +79,6 @@ def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: in
     kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
     kb.append([types.InlineKeyboardButton(text="⏹ إيقاف الكويز", callback_data="quiz_stop")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
 
 def get_favorites_actions_keyboard(sort_mode: str = "latest") -> types.InlineKeyboardMarkup:
     sort_latest_label = "✅ الأحدث" if sort_mode == "latest" else "⬇️ حسب الأحدث"
@@ -108,14 +95,12 @@ def get_favorites_actions_keyboard(sort_mode: str = "latest") -> types.InlineKey
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-
 def get_sections_actions_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="⭐ عرض الكويزات المحفوظة", callback_data="favorites_menu")],
         [types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
 
 def get_favorite_section_keyboard(sections: list, allow_new: bool = True, allow_default: bool = True) -> types.InlineKeyboardMarkup:
     kb = []
@@ -126,7 +111,6 @@ def get_favorite_section_keyboard(sections: list, allow_new: bool = True, allow_
 
     if allow_new:
         kb.append([types.InlineKeyboardButton(text="➕ إنشاء قسم جديد", callback_data="fav_section_new")])
-
     if allow_default:
         kb.append([types.InlineKeyboardButton(text="⏭ بدون قسم", callback_data="fav_section_default")])
 
@@ -139,12 +123,48 @@ def get_pagination_keyboard(current_page: int, total_pages: int, query: str) -> 
         buttons.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"page_{query}_{current_page-1}"))
     if current_page < total_pages:
         buttons.append(types.InlineKeyboardButton(text="التالي ➡️", callback_data=f"page_{query}_{current_page+1}"))
-    
     return types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
 
-# أضف هذه الدالة إلى ملف keyboards.py
-def get_admin_charge_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+# ==================== Admin Keyboards (New & Improved UX) ====================
+
+def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
+    """لوحة التحكم الرئيسية للإدارة"""
     kb = [
-        [types.InlineKeyboardButton(text=f"💰 شحن رصيد للمستخدم {user_id}", callback_data=f"admin_charge_{user_id}")]
+        [types.InlineKeyboardButton(text="🔍 بحث عن مستخدم", callback_data="admin_search_prompt")],
+        [
+            types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
+            types.InlineKeyboardButton(text="📥 تصدير الطلاب", callback_data="admin_export_users")
+        ],
+        [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_admin_user_actions_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+    """أزرار التحكم بعد العثور على مستخدم"""
+    kb = [
+        [types.InlineKeyboardButton(text="💰 شحن رصيد", callback_data=f"admin_charge_menu_{user_id}")],
+        [types.InlineKeyboardButton(text="🔙 رجوع للوحة", callback_data="admin_cancel")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+    """خيارات الشحن السريع واليدوي"""
+    kb = [
+        [
+            types.InlineKeyboardButton(text="➕ 50 نقطة", callback_data=f"admin_charge_quick_50_{user_id}"),
+            types.InlineKeyboardButton(text="➕ 100 نقطة", callback_data=f"admin_charge_quick_100_{user_id}")
+        ],
+        [
+            types.InlineKeyboardButton(text="➕ 500 نقطة", callback_data=f"admin_charge_quick_500_{user_id}")
+        ],
+        [types.InlineKeyboardButton(text="✍️ إدخال كمية يدوياً", callback_data=f"admin_charge_manual_{user_id}")],
+        [types.InlineKeyboardButton(text="🔙 إلغاء والرجوع", callback_data="admin_cancel")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
+    """زر خروج عام من أي حالة FSM"""
+    kb = [
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
