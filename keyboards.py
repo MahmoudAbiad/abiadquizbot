@@ -133,6 +133,7 @@ def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: in
         kb.append([types.InlineKeyboardButton(text=f"{prefix}{opt}", callback_data="ignored")])
     kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
     kb.append([types.InlineKeyboardButton(text="⏹ إيقاف الكويز", callback_data="quiz_stop")])
+    kb.append([types.InlineKeyboardButton(text="⏹ مشاركة الكويز", callback_data="quiz_share")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_favorite_section_keyboard(sections: list, allow_new: bool = True, allow_default: bool = True) -> types.InlineKeyboardMarkup:
