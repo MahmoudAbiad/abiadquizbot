@@ -58,7 +58,7 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
         return None
 
     contents = []
-    prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.format(count=count)
+    prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
     
     # 1. تجهيز المحتوى بناءً على نوع الملف
     try:
