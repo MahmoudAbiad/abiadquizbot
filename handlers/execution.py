@@ -4,7 +4,7 @@ Quiz execution module - handles answering questions, hints, and results.
 # تأكد من هذا السطر في أعلى الملف
 import asyncio
 
-from supabase_helper import update_user_stats, save_favorite_quiz
+from supabase_helper import list_favorite_quizzes, update_user_stats, save_favorite_quiz
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from typing import Union
