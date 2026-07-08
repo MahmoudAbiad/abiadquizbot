@@ -292,6 +292,17 @@ def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str, Any]
         log_error(logger, f"Error loading favorite quiz: {e}", exception=e)
         return None
 
+# 🆕 تم التحديث: جلب الكويز المفضّل باستخدام الـ UUID الفريد عالمياً (لملف start.py)
+def get_favorite_quiz_by_global_id(favorite_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        res = supabase.table("favorite_quizzes").select("*").eq("favorite_id", favorite_id).execute()
+        if res.data:
+            return res.data[0]
+        return None
+    except Exception as e:
+        log_error(logger, f"Error loading global favorite quiz: {e}", exception=e)
+        return None
+
 def remove_favorite_quiz(user_id: int, favorite_id: str) -> bool:
     try:
         # Fixed: Query via favorite_id column instead of created_at timestamp

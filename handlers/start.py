@@ -31,15 +31,20 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         bot_info = await bot.get_me()
         
         # 1. 🔥 تم التحديث: التحقق من وجود رابط مشاركة كويز (يدعم كلا البادئتين لضمان التوافق)
+       # 1. 🔥 تم التحديث: التحقق من الرابط والبحث في الجدول المناسب حسب الهيكل
         if command.args and (command.args.startswith("share_") or command.args.startswith("quiz_")):
             if command.args.startswith("share_"):
                 share_id = command.args.replace("share_", "", 1)
+                # البحث في جدول shared_quizzes
+                shared = await asyncio.to_thread(get_shared_quiz, share_id)
             else:
                 share_id = command.args.replace("quiz_", "", 1)
+                # البحث في جدول favorite_quizzes باستخدام الـ UUID الفريد
+                from supabase_helper import get_favorite_quiz_by_global_id
+                shared = await asyncio.to_thread(get_favorite_quiz_by_global_id, share_id)
                 
-            shared = await asyncio.to_thread(get_shared_quiz, share_id)
             if shared:
-                # 🔥 حماية: تسجيل أو التحقق من المستخدم في الداتابيز أولاً لمنع أخطاء الـ Database لاحقاً
+                # حماية: تسجيل أو التحقق من المستخدم في الداتابيز أولاً لمنع أخطاء الـ Database لاحقاً
                 await asyncio.to_thread(
                     check_or_add_user,
                     msg.from_user.id,
@@ -49,16 +54,16 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
                     None
                 )
                 
-                # 💡 تم التحديث: الاستدعاء الداخلي مع تمرير الـ quiz_id ليبقى في الـ State
                 from handlers.execution import _start_loaded_quiz
                 await msg.answer(f"🔗 تم فتح كويز مشترك: {shared.get('title') or 'كويز مشترك'}")
                 await _start_loaded_quiz(
                     msg, state, shared["quiz_data"], 
                     shared.get('title') or 'كويز مشترك', 
                     origin="shared", 
-                    quiz_id=share_id  # <--- تمرير المعرف هنا ضروري جداً
+                    quiz_id=share_id
                 )
                 return
+          
 
         # Extract referrer ID from command arguments
         referrer_id: Optional[int] = None
