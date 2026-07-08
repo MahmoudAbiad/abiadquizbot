@@ -247,3 +247,36 @@ async def delete_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
         else: await call.answer("❌ تعذر حذف الكويز", show_alert=True)
     except Exception as e: log_error(logger, f"Error in delete_favorite_quiz: {e}"); await call.answer("❌ تعذر حذف الكويز", show_alert=True)
     finally: await call.answer()
+
+    # في ملف favorites.py
+
+@router.callback_query(F.data.startswith("fav_details_"))
+async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
+    try:
+        fid = call.data.replace("fav_details_", "", 1)
+        favorite = await asyncio.to_thread(get_favorite_quiz, call.from_user.id, fid)
+        
+        if not favorite:
+            await call.answer("❌ الكويز غير موجود أو تم حذفه", show_alert=True)
+            return
+            
+        title = favorite.get("title", "بدون عنوان")
+        section = favorite.get("section_title", "عام")
+        questions_count = len(favorite.get("quiz_data", []))
+        
+        details_text = (
+            f"📑 **تفاصيل الكويز محفوظ:**\n\n"
+            f"📌 **العنوان:** {title}\n"
+            f"📁 **القسم:** {section}\n"
+            f"🔢 **عدد الأسئلة:** {questions_count} أسئلة\n\n"
+            f"ماذا تريد أن تفعل بهذا الكويز؟"
+        )
+        
+        keyboard = get_favorite_details_keyboard(fid)
+        await call.message.edit_text(details_text, reply_markup=keyboard)
+        
+    except Exception as e:
+        log_error(logger, f"Error in show_favorite_details: {e}")
+        await call.answer("❌ حدث خطأ", show_alert=True)
+    finally:
+        await call.answer()

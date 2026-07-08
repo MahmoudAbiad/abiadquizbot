@@ -185,6 +185,11 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
 async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
+        # إضافة متغير لمعرفة هل تم حفظه مسبقاً لتجنب التكرار
+        if data.get("is_saved_in_session"):
+            await call.answer("✅ الكويز محفوظ بالفعل في قسم 'عام'!", show_alert=True)
+            return
+
         questions = data.get("questions")
         title = data.get("source_title", "كويز بدون عنوان")
         
@@ -192,11 +197,10 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
             return
 
-        # حفظ الكويز في قاعدة البيانات
-        # نستخدم asyncio.to_thread لأن التعامل مع قاعدة البيانات عملية حظر (Blocking)
         await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions)
+        await state.update_data(is_saved_in_session=True) # منع التكرار
         
-        await call.answer("✅ تم حفظ الكويز في المفضلة بنجاح!", show_alert=True)
+        await call.answer("✅ تم الحفظ السريع! تجده في 'قائمتي المفضلة' قسم 'عام'.", show_alert=True)
         
     except Exception as e:
         log_error(logger, f"Error saving quiz: {e}", exception=e)
