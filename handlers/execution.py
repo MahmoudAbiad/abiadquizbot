@@ -35,12 +35,12 @@ async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQu
     else:
         await call_or_message.answer(text, reply_markup=menu)
 
-# 💡 هذه هي الدالة التي تسببت في الخطأ لأنها كانت مفقودة
-async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared") -> None:
+# 💡 تم التحديث: إضافة quiz_id لكي يتم حفظه في الـ State عند تشغيل أي كويز
+async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: str = "") -> None:
     await state.update_data(
         questions=quiz_data, current_index=0, score=0,
         total_count=len(quiz_data), source_title=source_title,
-        quiz_origin=origin, quiz_completed=False
+        quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id  # حفظ المعرف هنا
     )
     await state.set_state(QuizState.answering_quiz)
     if isinstance(msg_or_call, types.CallbackQuery):
@@ -78,7 +78,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         q = questions[idx]
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
 
-        # 3. 🔥 تم التعديل: إنشاء أزرار التحكم السفلية المحدثة متجاورة (إيقاف | مشاركة | حفظ)
+        # 3. إنشاء أزرار التحكم السفلية متجاورة (إيقاف | مشاركة | حفظ)
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
             [
@@ -100,7 +100,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             reply_markup=control_kb
         )
 
-        # 💡 حفظ بيانات هذا السؤال لربطه بالإجابة لاحقاً بدقة تامة (تمنع تصفير النتيجة)
+        # حفظ بيانات هذا السؤال لربطه بالإجابة لاحقاً بدقة تامة
         poll_to_quiz_map[poll_msg.poll.id] = {
             "chat_id": chat_id,
             "user_id": msg_or_call.from_user.id,
@@ -169,7 +169,6 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
     try:
         poll_id = poll_answer.poll_id
         
-        # التحقق من أن هذا التصويت تابع للكويز الحالي ومسجل لدينا
         if poll_id not in poll_to_quiz_map:
             return
 
@@ -178,7 +177,6 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         user_id = quiz_info["user_id"]
         correct_opt = quiz_info["correct_option_id"]
 
-        # 💡 الوصول للـ FSMContext الصحيح للمحادثة والمستخدم بناءً على مفتاح التخزين الفعلي
         storage_key = StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id)
         correct_state = FSMContext(storage=state.storage, key=storage_key)
 
@@ -186,10 +184,8 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         if not data or 'questions' not in data:
             return
 
-        # جلب الإجابة التي اختارها المستخدم
         selected_opt = poll_answer.option_ids[0]
 
-        # إذا كانت الإجابة صحيحة، نزيد السكور في الـ State الصحيحة والمؤكدة
         if selected_opt == correct_opt:
             score = data.get('score', 0) + 1
             await correct_state.update_data(score=score)
@@ -205,7 +201,6 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         q = data['questions'][data['current_index']]
-        # تغيير show_alert إلى False ليظهر كإشعار صغير غير مزعج
         await call.answer(f"💡 تلميح: {q['hint']}", show_alert=False)
     except Exception as e:
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
@@ -215,7 +210,6 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
 async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
-        # إضافة متغير لمعرفة هل تم حفظه مسبقاً لتجنب التكرار
         if data.get("is_saved_in_session"):
             await call.answer("✅ الكويز محفوظ بالفعل في قسم 'عام'!", show_alert=True)
             return
@@ -228,7 +222,7 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
             return
 
         await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions)
-        await state.update_data(is_saved_in_session=True) # منع التكرار
+        await state.update_data(is_saved_in_session=True)
         
         await call.answer("✅ تم الحفظ السريع! تجده في 'قائمتي المفضلة' قسم 'عام'.", show_alert=True)
         
@@ -255,22 +249,32 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
 async def handle_ignored_click(call: types.CallbackQuery):
     await call.answer("✅ تم تسجيل إجابتك")
 
-# 2. 🔥 تم إضافة الهاندلر الجديد هنا: معالجة ضغط زر مشاركة الكويز أثناء الحل
+# 🔥 تم التحديث: الهاندلر الآن يولد رابط يخص الكويز الحالي تحديداً بناءً على الـ quiz_id الخاص به
 @router.callback_query(QuizState.answering_quiz, F.data == "quiz_share")
 async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext):
     try:
         bot_info = await bot.get_me()
+        data = await state.get_data()
         
-        # تجهيز رابط مشاركة مخصص للبوت يعتمد على إحالة المستخدم لإضافة نقاط مجانية عند دخول أصدقائه
-        share_text = "🔥 جرب حل هذا الكويز الرهيب وتحدى نفسك معي في الدراسة!"
-        share_url = f"https://t.me/share/url?url=https://t.me/{bot_info.username}?start={call.from_user.id}&text={share_text}"
+        quiz_id = data.get("quiz_id", "")
+        title = data.get("source_title", "اختبار مميز")
+        
+        # إذا كان هناك معرف للكويز نقوم بإنشاء رابط مخصص له، وإلا نضع رابط عام للبوت كاحتياط
+        if quiz_id:
+            start_param = f"quiz_{quiz_id}"
+            share_text = f"🎯 جرب حل كويز «{title}» وتحدى نفسك معي في الدراسة!"
+        else:
+            start_param = f"start_{call.from_user.id}"
+            share_text = "🔥 جرب حل هذا الكويز الرهيب وتحدى نفسك معي في الدراسة!"
+            
+        share_url = f"https://t.me/share/url?url=https://t.me/{bot_info.username}?start={start_param}&text={share_text}"
         
         share_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🚀 أرسل الرابط الآن لأصدقائك", url=share_url)]
+            [types.InlineKeyboardButton(text="🚀 شارك هذا الكويز الآن", url=share_url)]
         ])
         
         await call.message.answer(
-            "🔗 اضغط على الزر أدناه لإرسال رابط البوت وتحدي أصدقائك:",
+            f"🔗 يمكنك مشاركة كويز «{title}» مع أصدقائك عبر الضغط على الزر أدناه:",
             reply_markup=share_kb
         )
     except Exception as e:
