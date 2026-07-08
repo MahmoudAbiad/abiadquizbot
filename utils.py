@@ -3,13 +3,7 @@ Utility functions for file processing and hashing.
 """
 
 import os
-import io
 import hashlib
-from typing import Optional, List, Dict, Any
-
-import fitz
-from PIL import Image
-
 from logger import get_logger, log_error, log_info
 
 logger = get_logger(__name__)
@@ -27,45 +21,6 @@ def calculate_file_hash(file_path: str) -> str:
     except Exception as e:
         log_error(logger, f"Error calculating hash for {file_path}: {e}")
         return ""
-
-def process_file_smart(file_path: str) -> List[Dict[str, Any]]:
-    """
-    Extract text from PDF pages or convert pages to images when text is not sufficient.
-
-    Returns a list of dictionaries like:
-    - {"type": "text", "content": "..."}
-    - {"type": "image", "content": b"..."}
-    """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    try:
-        doc = fitz.open(file_path)
-        final_content: List[Dict[str, Any]] = []
-
-        for page_num, page in enumerate(doc):
-            try:
-                text = page.get_text().strip()
-
-                if len(text) > 50:
-                    final_content.append({"type": "text", "content": text})
-                    log_info(logger, f"Extracted text from page {page_num + 1}")
-                else:
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                    mode = "RGBA" if pix.alpha else "RGB"
-                    img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
-                    buffer = io.BytesIO()
-                    img.save(buffer, format="PNG")
-                    final_content.append({"type": "image", "content": buffer.getvalue()})
-                    log_info(logger, f"Converted page {page_num + 1} to image")
-            except Exception as e:
-                log_error(logger, f"Error processing page {page_num + 1}: {e}", exception=e)
-
-        doc.close()
-        return final_content
-    except Exception as e:
-        log_error(logger, f"Error processing PDF file: {e}", exception=e)
-        raise
 
 def safe_file_cleanup(file_path: str) -> bool:
     """Safely delete a file with error handling."""

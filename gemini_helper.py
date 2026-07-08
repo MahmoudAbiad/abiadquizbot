@@ -21,6 +21,8 @@ from constants import (
     QUOTA_ERROR_KEYWORDS
 )
 from logger import get_logger, log_error, log_warning, log_info
+from utils import calculate_file_hash
+from supabase_helper import get_cached_quiz, save_quiz_to_cache
 
 load_dotenv()
 logger = get_logger(__name__)
@@ -33,6 +35,7 @@ if not API_KEYS and os.getenv("GEMINI_API_KEY"):
 
 blocked_keys: Dict[int, datetime.datetime] = {}
 
+# ==================== Pydantic Schemas ====================
 class QuizQuestion(BaseModel):
     question: str = Field(description="نص السؤال.")
     options: List[str] = Field(description="أربعة خيارات.")
@@ -40,6 +43,11 @@ class QuizQuestion(BaseModel):
     hint: str = Field(description="تلميح ذكي.")
     explanation: str = Field(default="", description="شرح الإجابة.")
 
+# ✅ الإصلاح 1: إنشاء موديل حاوي لتجنب خطأ الـ Schema في مكتبة genai
+class QuizResponse(BaseModel):
+    questions: List[QuizQuestion]
+
+# ==================== Helper Functions ====================
 def _get_available_key_indices() -> List[int]:
     now = datetime.datetime.now()
     available = []
@@ -49,29 +57,37 @@ def _get_available_key_indices() -> List[int]:
             available.append(idx)
     return available
 
+# ==================== Main Generation Function ====================
 async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[str, Any]]]:
     """
-    الدالة الرئيسية الموحدة: تعالج الملف (PDF أو صورة) وترسل الطلب لـ Gemini.
+    الدالة الرئيسية: تعالج الملف (PDF أو صورة) وترسل الطلب لـ Gemini.
     """
     if not API_KEYS: 
         log_error(logger, "لم يتم العثور على مفاتيح API.")
         return None
 
+    # ✅ الإصلاح 2: تفعيل نظام الكاش قبل إرسال أي طلب لـ API
+    file_hash = calculate_file_hash(file_path)
+    cached_data = get_cached_quiz(file_hash)
+    if cached_data:
+        log_info(logger, f"Cache Hit! Returning cached questions for hash: {file_hash}")
+        return cached_data["questions_data"]
+
     contents = []
     prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
     
-    # 1. تجهيز المحتوى بناءً على نوع الملف
+    # تجهيز المحتوى بناءً على نوع الملف
     try:
-        if file_path.lower().endswith(('.pdf')):
+        if file_path.lower().endswith('.pdf'):
             doc = fitz.open(file_path)
             total_text = "".join([page.get_text() for page in doc])
             doc.close()
             
-            # إذا كان الـ PDF يحتوي على نص نصي
+            # إذا كان الـ PDF يحتوي على نص مقروء
             if len(total_text.strip()) > 200:
                 contents = [prompt, total_text[:MAX_TEXT_LENGTH_FOR_AI]]
             else:
-                # PDF ممسوح ضوئياً (Scanned)
+                # PDF ممسوح ضوئياً (Scanned) - نرسله لـ Gemini ليتعامل معه كصورة/مستند
                 with open(file_path, "rb") as f:
                     contents = [types.Part.from_bytes(data=f.read(), mime_type="application/pdf"), prompt]
         else:
@@ -79,12 +95,12 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
             with open(file_path, "rb") as f:
                 contents = [types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"), prompt]
     except Exception as e:
-        log_error(logger, f"خطأ في معالجة الملف: {e}")
+        log_error(logger, f"خطأ في قراءة الملف: {e}")
         return None
 
-    # 2. إرسال الطلب مع تدوير المفاتيح
+    # إرسال الطلب مع تدوير المفاتيح
     max_attempts = len(API_KEYS)
-    for _ in range(max_attempts):
+    for attempt in range(max_attempts):
         available = _get_available_key_indices()
         if not available: 
             blocked_keys.clear()
@@ -100,15 +116,29 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
                 contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json", 
-                    response_schema=list[QuizQuestion]
+                    response_schema=QuizResponse,  # استخدام الموديل الحاوي هنا
+                    temperature=0.7
                 ),
             )
+            
+            # استخراج مصفوفة الأسئلة من الرد
             result = json.loads(response.text)
-            return result
+            questions = result.get("questions", [])
+            
+            # حفظ النتيجة في الكاش للمرات القادمة
+            if questions:
+                save_quiz_to_cache(file_hash, questions, 0)
+                
+            return questions
+            
         except Exception as e:
             error_msg = str(e).lower()
-            block_time = KEY_BLOCK_QUOTA_EXHAUSTED if any(k in error_msg for k in QUOTA_ERROR_KEYWORDS) else KEY_BLOCK_TEMPORARY_ERROR
-            blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(hours=block_time)
-            log_warning(logger, f"فشل المفتاح {idx}: {e}")
+            log_warning(logger, f"فشل المفتاح {idx} في المحاولة {attempt + 1}: {e}")
+            
+            # ✅ الإصلاح 3: فصل حساب وقت الحظر (ساعات مقابل دقائق)
+            if any(k in error_msg for k in QUOTA_ERROR_KEYWORDS):
+                blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(hours=KEY_BLOCK_QUOTA_EXHAUSTED)
+            else:
+                blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(minutes=KEY_BLOCK_TEMPORARY_ERROR)
             
     return None
