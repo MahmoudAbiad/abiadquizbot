@@ -31,38 +31,44 @@ processing_users: set[int] = set()
 
 @router.message(F.document | F.photo)
 async def handle_media(msg: types.Message, state: FSMContext):
-    """
-    Handle both document and photo uploads in one place.
-    """
     try:
-        # تحديد المسار ونوع الملف
+        # فحص الحالة الحالية لحماية الكويز القائم
+        current_state = await state.get_state()
+        if current_state == QuizState.answering_quiz:
+            await msg.answer("⚠️ لديك اختبار قائم حالياً. يرجى إكمال الاختبار أو إيقافه أولاً قبل رفع ملفات جديدة.")
+            return
+
         ensure_directory_exists(DOWNLOADS_DIR)
         user_id = msg.from_user.id
         
+        # 1. التحقق من الحجم قبل التنزيل (صمام أمان)
         if msg.document:
+            is_valid, error = validate_file_size(msg.document.file_size, "document")
+            if not is_valid:
+                await msg.answer(error)
+                return
+            
             file_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{msg.document.file_name}")
             await bot.download(msg.document, destination=file_path)
-            is_valid, error = validate_file_size(msg.document.file_size, "document")
         else:
             photo = msg.photo[-1]
-            file_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{photo.file_id}.jpg")
-            await bot.download_file((await bot.get_file(photo.file_id)).file_path, file_path)
             is_valid, error = validate_file_size(photo.file_size, "photo")
-
-        if not is_valid:
-            await msg.answer(error)
-            safe_file_cleanup(file_path)
-            return
+            if not is_valid:
+                await msg.answer(error)
+                return
+                
+            file_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{photo.file_id}.jpg")
+            # استخدام Download المباشر والأسرع
+            await bot.download(photo, destination=file_path)
 
         # تخزين البيانات والطلب من المستخدم تحديد عدد الأسئلة
         await state.update_data(file_path=file_path, source_title=f"ملف_{user_id}")
         await state.set_state(QuizState.waiting_for_count)
-        await msg.answer("✅ تم رفع الملف! كم سؤال تريد استخراجه؟ (مثلاً: 10)")
+        await msg.answer("✅ تم رفع الملف بنجاح! كم سؤال تريد استخراجه من هذا المحتوى؟")
 
     except Exception as e:
         log_error(logger, f"Error in handle_media: {e}", exception=e)
-        await msg.answer("❌ حدث خطأ أثناء رفع الملف.")
-
+        await msg.answer("❌ حدث خطأ غير متوقع أثناء معالجة الملف.")
 # ==================== Question Count Handler ====================
 
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
@@ -103,7 +109,7 @@ async def _run_quiz_flow(msg, file_path, count, state, processing_msg):
         quiz_data = await generate_quiz_smart(file_path=file_path, count=count)
         
         if not quiz_data:
-            await processing_msg.edit_text("❌ تعذر توليد الأسئلة. قد يكون الملف غير واضح أو يحتاج لتنسيق أفضل.")
+            await processing_msg.edit_text("هناك ضغط على السيرفر، يرجى المحاولة بعد قليل")
             return
 
         # تحديث الإحصائيات وبدء الكويز
@@ -122,4 +128,4 @@ async def _run_quiz_flow(msg, file_path, count, state, processing_msg):
             processing_users.discard(msg.from_user.id)
             await state.update_data(quiz_processing=False)
 
-files_router = router
+files_router = routerى

@@ -158,8 +158,10 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         await call.answer()
 
 @router.callback_query(F.data == "quiz_home")
-async def quiz_home(call: types.CallbackQuery):
+async def quiz_home(call: types.CallbackQuery, state: FSMContext):
     try:
+        # تصفير الحالة تماماً ليعود الطالب لوضع الاستعداد الطبيعي
+        await state.clear() 
         await _send_main_menu(call, call.from_user.id)
     finally:
         await call.answer()
