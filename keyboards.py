@@ -114,15 +114,21 @@ def get_cache_choice_keyboard(points_cost: int) -> types.InlineKeyboardMarkup:
 
 def get_quiz_question_keyboard(options: list, show_hint: bool = True) -> types.InlineKeyboardMarkup:
     kb = []
+    # إضافة خيارات الإجابة
     for index, option in enumerate(options):
         kb.append([types.InlineKeyboardButton(text=option, callback_data=f"ans_{index}")])
     
+    # أزرار التحكم (التلميح والحفظ)
     control_buttons = []
     if show_hint:
         control_buttons.append(types.InlineKeyboardButton(text="💡 تلميح", callback_data="get_hint"))
     control_buttons.append(types.InlineKeyboardButton(text="💾 حفظ الكويز", callback_data="save_quiz"))
-    
     kb.append(control_buttons)
+    
+    # 👇 تم إضافة زر مشاركة الكويز هنا ليظهر أثناء الحل
+    kb.append([types.InlineKeyboardButton(text="🔗 مشاركة الكويز", callback_data="quiz_share")])
+    
+    # زر الانتقال للسؤال التالي
     kb.append([types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
