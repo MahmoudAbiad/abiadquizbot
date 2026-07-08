@@ -32,7 +32,7 @@ except Exception as e:
     raise
 
 # ==================== User Management ====================
-def check_or_add_user(user_id: int, first_name: str, last_name: str, username: str, referrer_id: Optional[int] = None) -> Dict[str, Any]:
+def check_or_add_user(user_id: int,username: str, first_name: str, last_name: str,  referrer_id: Optional[int] = None) -> Dict[str, Any]:
     try:
         is_valid, error = validate_user_id(user_id)
         if not is_valid:
