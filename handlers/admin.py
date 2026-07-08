@@ -3,10 +3,11 @@ import os
 import io
 import csv
 from aiogram import Router, types, F
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import BufferedInputFile
+from aiogram.exceptions import TelegramBadRequest
 from supabase import create_client
 
 from config import bot, ADMIN_ID
@@ -28,7 +29,15 @@ class AdminState(StatesGroup):
     waiting_for_charge_amount = State()
 
 def _is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+    # تحويل القيم لنصوص لضمان مطابقتها في حال كان الآيدي محفوظ كـ String في بيئة التشغيل
+    return str(user_id) == str(ADMIN_ID)
+
+# دالة مساعدة آمنة لتعديل الرسائل لتجنب خطأ (Message is not modified)
+async def safe_edit_text(message: types.Message, text: str, reply_markup=None):
+    try:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass # تجاهل الخطأ بصمت إذا كان النص مطابقاً للنص الحالي
 
 # ==================== Main Dashboard ====================
 
@@ -38,8 +47,9 @@ async def admin_dashboard(msg: types.Message, state: FSMContext):
         return
     await state.clear()
     await msg.answer(
-        "⚙️ **لوحة تحكم الإدارة**\n\nأهلاً بك، اختر الإجراء الذي تود القيام به من القائمة أدناه:",
-        reply_markup=get_admin_dashboard_keyboard()
+        "⚙️ <b>لوحة تحكم الإدارة</b>\n\nأهلاً بك، اختر الإجراء الذي تود القيام به من القائمة أدناه:",
+        reply_markup=get_admin_dashboard_keyboard(),
+        parse_mode="HTML"
     )
 
 # ==================== Cancel Action ====================
@@ -47,8 +57,9 @@ async def admin_dashboard(msg: types.Message, state: FSMContext):
 @router.callback_query(F.data == "admin_cancel")
 async def admin_cancel_action(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text(
-        "❌ تم إلغاء العملية.\n\n⚙️ **لوحة تحكم الإدارة**",
+    await safe_edit_text(
+        call.message,
+        "❌ تم إغلاق القائمة.\n\n⚙️ <b>لوحة تحكم الإدارة</b>",
         reply_markup=get_admin_dashboard_keyboard()
     )
     await call.answer()
@@ -58,8 +69,9 @@ async def admin_cancel_action(call: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "admin_search_prompt")
 async def prompt_search_user(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminState.waiting_for_search_query)
-    await call.message.edit_text(
-        "🔍 **بحث عن مستخدم**\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):",
+    await safe_edit_text(
+        call.message,
+        "🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):",
         reply_markup=get_cancel_keyboard()
     )
     await call.answer()
@@ -70,18 +82,17 @@ async def process_search_user(msg: types.Message, state: FSMContext):
     users_data = await asyncio.to_thread(admin_search_user, query)
     
     if users_data:
-        # إذا وجدنا نتائج، نعرض أول نتيجة لتجنب الازدحام
         u = users_data[0] 
         username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بدون يوزر"
         
         report = (
-            "👤 **معلومات المستخدم:**\n"
-            f"┣ 🆔 الآيدي: `{u['user_id']}`\n"
+            "👤 <b>معلومات المستخدم:</b>\n"
+            f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
-            f"┣ 💰 النقاط الحالية: `{u['points']}`\n"
-            f"┗ 📊 إجمالي الأسئلة المُولدة: `{u.get('total_questions', 0)}`"
+            f"┣ 💰 النقاط الحالية: <code>{u['points']}</code>\n"
+            f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
         )
-        await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']))
+        await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
     else:
         await msg.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard())
     
@@ -92,8 +103,9 @@ async def process_search_user(msg: types.Message, state: FSMContext):
 @router.callback_query(F.data.startswith("admin_charge_menu_"))
 async def show_charge_menu(call: types.CallbackQuery):
     target_id = call.data.split("_")[3]
-    await call.message.edit_text(
-        f"💰 **شحن رصيد للمستخدم** `{target_id}`\n\nاختر كمية الشحن السريعة أو اختر إدخالاً يدوياً:",
+    await safe_edit_text(
+        call.message,
+        f"💰 <b>شحن رصيد للمستخدم</b> <code>{target_id}</code>\n\nاختر كمية الشحن السريعة أو اختر إدخالاً يدوياً:",
         reply_markup=get_admin_charge_options_keyboard(target_id)
     )
     await call.answer()
@@ -107,9 +119,10 @@ async def process_quick_charge(call: types.CallbackQuery):
     new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
     
     if new_balance is not None:
-        await call.message.edit_text(
-            f"✅ **تم الشحن بنجاح!**\n\nالمستخدم: `{target_id}`\nالكمية المضافة: `+{amount}` 🟢\nالرصيد الجديد: `{new_balance}` 💰",
-            reply_markup=get_admin_dashboard_keyboard() # العودة للوحة
+        await safe_edit_text(
+            call.message,
+            f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰",
+            reply_markup=get_admin_dashboard_keyboard()
         )
     else:
         await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
@@ -120,8 +133,9 @@ async def prompt_manual_charge(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(target_id=target_id)
     await state.set_state(AdminState.waiting_for_charge_amount)
     
-    await call.message.edit_text(
-        f"✍️ **شحن يدوي**\n\nأرسل عدد النقاط المراد إضافتها للمستخدم `{target_id}` (أرقام فقط):",
+    await safe_edit_text(
+        call.message,
+        f"✍️ <b>شحن يدوي</b>\n\nأرسل عدد النقاط المراد إضافتها للمستخدم <code>{target_id}</code> (أرقام فقط):",
         reply_markup=get_cancel_keyboard()
     )
     await call.answer()
@@ -139,8 +153,9 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
     
     if new_balance is not None:
         await msg.answer(
-            f"✅ **تم الشحن بنجاح!**\n\nالمستخدم: `{target_id}`\nالكمية المضافة: `+{amount}` 🟢\nالرصيد الجديد: `{new_balance}` 💰",
-            reply_markup=get_admin_dashboard_keyboard()
+            f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰",
+            reply_markup=get_admin_dashboard_keyboard(),
+            parse_mode="HTML"
         )
     else:
         await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.")
@@ -153,26 +168,29 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
 async def show_db_stats(call: types.CallbackQuery):
     stats = await asyncio.to_thread(admin_get_global_stats)
     text = (
-        "📊 **إحصائيات النظام الحية:**\n\n"
-        f"👥 إجمالي الطلاب المسجلين: `{stats['total_users']}`\n"
-        f"📝 إجمالي الأسئلة المُولدة: `{stats['total_questions']}`\n"
+        "📊 <b>إحصائيات النظام الحية:</b>\n\n"
+        f"👥 إجمالي الطلاب المسجلين: <code>{stats['total_users']}</code>\n"
+        f"📝 إجمالي الأسئلة المُولدة: <code>{stats['total_questions']}</code>\n"
     )
-    await call.message.edit_text(text, reply_markup=get_admin_dashboard_keyboard())
+    await safe_edit_text(call.message, text, reply_markup=get_admin_dashboard_keyboard())
     await call.answer()
+
+# دالة مساعدة لتصدير البيانات بشكل غير متزامن
+def fetch_users_sync():
+    supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+    res = supabase.table("users").select("*").order("joined_at", desc=True).execute()
+    return res.data
 
 @router.callback_query(F.data == "admin_export_users")
 async def export_all_users(call: types.CallbackQuery):
-    await call.message.edit_text("⏳ جاري استخراج البيانات، يرجى الانتظار...")
+    await safe_edit_text(call.message, "⏳ جاري استخراج البيانات، يرجى الانتظار...")
     
     try:
-        supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-        res = supabase.table("users").select("*").order("joined_at", desc=True).execute()
-        users = res.data
+        users = await asyncio.to_thread(fetch_users_sync)
         
         if not users:
-            return await call.message.edit_text("📭 لا يوجد أي طلاب مسجلين.", reply_markup=get_admin_dashboard_keyboard())
+            return await safe_edit_text(call.message, "📭 لا يوجد أي طلاب مسجلين.", reply_markup=get_admin_dashboard_keyboard())
         
-        # إنشاء ملف CSV في الذاكرة
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(["User ID", "Username", "Points", "Total Questions", "Joined At"])
@@ -186,16 +204,24 @@ async def export_all_users(call: types.CallbackQuery):
                 u.get('joined_at', '')
             ])
             
-        csv_bytes = output.getvalue().encode('utf-8-sig') # دعم اللغة العربية
+        csv_bytes = output.getvalue().encode('utf-8-sig')
         file = BufferedInputFile(csv_bytes, filename="users_export.csv")
         
-        await call.message.delete()
+        try:
+            await call.message.delete()
+        except TelegramBadRequest:
+            pass # تجاوز الخطأ إذا كانت الرسالة قديمة ولا يمكن حذفها
+            
         await call.message.answer_document(
             document=file, 
-            caption="📥 **تم استخراج قائمة الطلاب بالكامل.**",
-            reply_markup=get_admin_dashboard_keyboard()
+            caption="📥 <b>تم استخراج قائمة الطلاب بالكامل.</b>",
+            reply_markup=get_admin_dashboard_keyboard(),
+            parse_mode="HTML"
         )
         
     except Exception as e:
         logger.error(f"Error exporting users: {e}")
-        await call.message.edit_text("❌ حدث خطأ أثناء استخراج البيانات.", reply_markup=get_admin_dashboard_keyboard())
+        try:
+            await safe_edit_text(call.message, "❌ حدث خطأ أثناء استخراج البيانات.", reply_markup=get_admin_dashboard_keyboard())
+        except TelegramBadRequest:
+            await call.message.answer("❌ حدث خطأ أثناء استخراج البيانات.", reply_markup=get_admin_dashboard_keyboard())
