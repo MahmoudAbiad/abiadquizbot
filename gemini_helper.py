@@ -43,7 +43,6 @@ class QuizQuestion(BaseModel):
     hint: str = Field(description="تلميح ذكي.")
     explanation: str = Field(default="", description="شرح الإجابة.")
 
-# ✅ الإصلاح 1: إنشاء موديل حاوي لتجنب خطأ الـ Schema في مكتبة genai
 class QuizResponse(BaseModel):
     questions: List[QuizQuestion]
 
@@ -59,16 +58,14 @@ def _get_available_key_indices() -> List[int]:
 
 # ==================== Main Generation Function ====================
 async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[str, Any]]]:
-    """
-    الدالة الرئيسية: تعالج الملف (PDF أو صورة) وترسل الطلب لـ Gemini.
-    """
     if not API_KEYS: 
         log_error(logger, "لم يتم العثور على مفاتيح API.")
         return None
 
-    # ✅ الإصلاح 2: تفعيل نظام الكاش قبل إرسال أي طلب لـ API
-    file_hash = calculate_file_hash(file_path)
-    cached_data = get_cached_quiz(file_hash)
+    # ✅ حل العثرة 1: تشغيل الدالات المتزامنة في Threads منفصلة لحماية الـ Event Loop من التجمد
+    file_hash = await asyncio.to_thread(calculate_file_hash, file_path)
+    cached_data = await asyncio.to_thread(get_cached_quiz, file_hash)
+    
     if cached_data:
         log_info(logger, f"Cache Hit! Returning cached questions for hash: {file_hash}")
         return cached_data["questions_data"]
@@ -76,29 +73,24 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
     contents = []
     prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
     
-    # تجهيز المحتوى بناءً على نوع الملف
     try:
         if file_path.lower().endswith('.pdf'):
             doc = fitz.open(file_path)
             total_text = "".join([page.get_text() for page in doc])
             doc.close()
             
-            # إذا كان الـ PDF يحتوي على نص مقروء
             if len(total_text.strip()) > 200:
                 contents = [prompt, total_text[:MAX_TEXT_LENGTH_FOR_AI]]
             else:
-                # PDF ممسوح ضوئياً (Scanned) - نرسله لـ Gemini ليتعامل معه كصورة/مستند
                 with open(file_path, "rb") as f:
                     contents = [types.Part.from_bytes(data=f.read(), mime_type="application/pdf"), prompt]
         else:
-            # معالجة الصور
             with open(file_path, "rb") as f:
                 contents = [types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"), prompt]
     except Exception as e:
         log_error(logger, f"خطأ في قراءة الملف: {e}")
         return None
 
-    # إرسال الطلب مع تدوير المفاتيح
     max_attempts = len(API_KEYS)
     for attempt in range(max_attempts):
         available = _get_available_key_indices()
@@ -111,23 +103,27 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
         
         try:
             client = genai.Client(api_key=API_KEYS[idx])
-            response = await client.aio.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json", 
-                    response_schema=QuizResponse,  # استخدام الموديل الحاوي هنا
-                    temperature=0.7
+            
+            # ✅ إضافة مهلة زمنية للطلب لمنع التعليق اللانهائي في حال وجود مشاكل شبكية
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json", 
+                        response_schema=QuizResponse,
+                        temperature=0.7
+                    ),
                 ),
+                timeout=45.0  # 45 ثانية كحد أقصى للرد
             )
             
-            # استخراج مصفوفة الأسئلة من الرد
             result = json.loads(response.text)
             questions = result.get("questions", [])
             
-            # حفظ النتيجة في الكاش للمرات القادمة
             if questions:
-                save_quiz_to_cache(file_hash, questions, 0)
+                # ✅ تشغيل دالة حفظ الكاش في Thread منفصل أيضاً
+                await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, 0)
                 
             return questions
             
@@ -135,7 +131,6 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
             error_msg = str(e).lower()
             log_warning(logger, f"فشل المفتاح {idx} في المحاولة {attempt + 1}: {e}")
             
-            # ✅ الإصلاح 3: فصل حساب وقت الحظر (ساعات مقابل دقائق)
             if any(k in error_msg for k in QUOTA_ERROR_KEYWORDS):
                 blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(hours=KEY_BLOCK_QUOTA_EXHAUSTED)
             else:
