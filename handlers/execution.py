@@ -52,6 +52,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         questions = data['questions']
         idx = data['current_index']
         
+        # 1. التحقق من انتهاء الاختبار (يبقى كما هو)
         if idx >= len(questions):
             score = data['score']
             total = data['total_count']
@@ -69,14 +70,31 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             await state.update_data(quiz_completed=True)
             return
         
+        # 2. جلب بيانات السؤال الحالي
         q = questions[idx]
-        text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n\n{q['question']}"
-        keyboard = get_quiz_question_keyboard(q['options'])
+        chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
 
-        if isinstance(msg_or_call, types.Message):
-            await msg_or_call.answer(text, reply_markup=keyboard)
-        else:
-            await msg_or_call.message.answer(text, reply_markup=keyboard)
+        # 3. إنشاء أزرار التحكم السفلية فقط (بدون خيارات الإجابة لأنها ستكون داخل الـ Poll)
+        control_buttons = []
+        control_buttons.append(types.InlineKeyboardButton(text="💡 تلميح", callback_data="get_hint"))
+        control_buttons.append(types.InlineKeyboardButton(text="💾 حفظ الكويز", callback_data="save_quiz"))
+        
+        control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            control_buttons,
+            [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
+        ])
+
+        # 4. إرسال السؤال كـ Poll رسمي يدعم تعدد الأسطر
+        await bot.send_poll(
+            chat_id=chat_id,
+            question=f"📝 السؤال {idx + 1} من {len(questions)}:\n{q['question']}",
+            options=q['options'],
+            type="quiz",
+            correct_option_id=int(q['correct_option_id']),
+            explanation=q.get("explanation") or "إجابة صحيحة!",
+            reply_markup=control_kb
+        )
+
     except Exception as e:
         log_error(logger, f"Error in send_question: {e}", exception=e)
 
@@ -133,42 +151,31 @@ async def quiz_home(call: types.CallbackQuery):
     finally:
         await call.answer()
 
-@router.callback_query(QuizState.answering_quiz, F.data.startswith("ans_"))
-async def handle_answer(call: types.CallbackQuery, state: FSMContext):
+@router.poll_answer()
+async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
     try:
         data = await state.get_data()
+        if not data or 'questions' not in data:
+            return
+
         questions = data['questions']
         idx = data['current_index']
         q = questions[idx]
-        
-        selected_opt = int(call.data.split("_")[1])
-        correct_opt = q['correct_option_id']
-        score = data['score']
-        is_correct = selected_opt == correct_opt
-        
-        if is_correct:
-            score += 1
-            await state.update_data(score=score)
-            status_text = "✅ إجابة صحيحة وممتازة!"
-            log_info(logger, f"Correct answer: {call.from_user.id}, Q{idx+1}")
-        else:
-            status_text = f"❌ إجابة خاطئة!\n💡 الإجابة الصحيحة هي: {q['options'][correct_opt]}"
-            log_info(logger, f"Incorrect answer: {call.from_user.id}, Q{idx+1}")
 
-        explanation = q.get("explanation") or "لا يوجد شرح إضافي لهذا السؤال."
-        new_kb = get_quiz_answered_keyboard(q['options'], correct_opt, selected_opt)
-        
-        updated_text = (
-            f"📝 السؤال {idx + 1} من {len(questions)}:\n\n"
-            f"{q['question']}\n\n"
-            f"📊 {status_text}\n\n"
-            f"📘 الشرح: {explanation}"
-        )
-        await call.message.edit_text(updated_text, reply_markup=new_kb)
+        # جلب الإجابة التي اختارها المستخدم
+        selected_opt = poll_answer.option_ids[0]
+        correct_opt = int(q['correct_option_id'])
+
+        # إذا كانت الإجابة صحيحة، نزيد السكور في الـ State
+        if selected_opt == correct_opt:
+            score = data.get('score', 0) + 1
+            await state.update_data(score=score)
+            log_info(logger, f"Correct poll answer: {poll_answer.user.id}, Q{idx+1}")
+        else:
+            log_info(logger, f"Incorrect poll answer: {poll_answer.user.id}, Q{idx+1}")
+
     except Exception as e:
-        log_error(logger, f"Error in handle_answer: {e}", exception=e)
-    finally:
-        await call.answer()
+        log_error(logger, f"Error in handle_poll_answer: {e}", exception=e)
 
 @router.callback_query(QuizState.answering_quiz, F.data == "get_hint")
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
