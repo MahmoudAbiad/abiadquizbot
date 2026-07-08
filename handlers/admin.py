@@ -1,15 +1,9 @@
-"""
-Admin-specific command handlers.
-Updated with robust TelegramBadRequest handling, Pagination, and CSV Exports.
-"""
-
 import asyncio
 import os
-import csv
 import io
-import html
+import csv
 from aiogram import Router, types, F
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import BufferedInputFile
@@ -23,65 +17,43 @@ from logger import get_logger
 logger = get_logger(__name__)
 router = Router()
 
-# ==================== FSM States ====================
+# تعريف حالات الـ FSM للإدارة
 class AdminState(StatesGroup):
-    waiting_for_amount = State()
     waiting_for_search_query = State()
+    waiting_for_charge_amount = State()
 
 def _is_admin(user_id: int) -> bool:
     return str(user_id) == str(ADMIN_ID)
 
-# ==================== Safe Edit Function (The Fix) ====================
-async def safe_edit_text(message: types.Message, text: str, reply_markup=None, parse_mode="HTML"):
-    """دالة ذكية لتعديل الرسائل وتجنب أخطاء تليجرام عند التعامل مع الملفات أو النصوص المتطابقة"""
+# دالة مساعدة آمنة لتعديل الرسائل لتجنب خطأ الـ Telegram التكراري
+async def safe_edit_text(message: types.Message, text: str, reply_markup=None):
     try:
-        await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except TelegramBadRequest as e:
-        err_str = str(e).lower()
-        if "message is not modified" in err_str:
-            pass # تجاهل إذا كان النص مطابقاً
-        elif "there is no text in the message to edit" in err_str:
-            # إذا كانت الرسالة ملفاً (مثل CSV) ولا يمكن تعديل نصها، نحذفها ونرسل رسالة جديدة
-            try:
-                await message.delete()
-            except:
-                pass
-            await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        else:
-            logger.error(f"TelegramBadRequest in safe_edit_text: {e}")
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
 
-# ==================== Keyboards ====================
+# دالة مساعدة لجلب كافة المستخدمين من قاعدة البيانات
+def fetch_users_sync():
+    supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+    res = supabase.table("users").select("*").order("joined_at", desc=True).execute()
+    return res.data
+
+# ==================== لوحات الأزرار (Keyboards) المدمجة ====================
+
 def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
-        [types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_page_1")],
+        [types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1")],
         [types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
-         types.InlineKeyboardButton(text="📥 تصدير CSV", callback_data="admin_export_csv")],
+         types.InlineKeyboardButton(text="📥 تصدير CSV", callback_data="admin_export_users")],
         [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
-    ]
-    return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
-def get_admin_users_keyboard(current_page: int, total_pages: int) -> types.InlineKeyboardMarkup:
-    buttons = []
-    if current_page > 1:
-        buttons.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"admin_page_{current_page-1}"))
-    
-    buttons.append(types.InlineKeyboardButton(text=f"📄 {current_page} / {total_pages}", callback_data="admin_page_noop"))
-    
-    if current_page < total_pages:
-        buttons.append(types.InlineKeyboardButton(text="التالي ➡️", callback_data=f"admin_page_{current_page+1}"))
-    
-    kb = [
-        buttons,
-        [types.InlineKeyboardButton(text="📥 تصدير السجل بالكامل (CSV)", callback_data="admin_export_csv")],
-        [types.InlineKeyboardButton(text="⚙️ العودة للوحة", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_user_actions_keyboard(target_id: int) -> types.InlineKeyboardMarkup:
     kb = [
-        [types.InlineKeyboardButton(text="💰 شحن نقاط", callback_data=f"admin_charge_menu_{target_id}")],
-        [types.InlineKeyboardButton(text="⚙️ العودة للوحة", callback_data="admin_main_menu")]
+        [types.InlineKeyboardButton(text="💰 شحن نقاط للمستخدم", callback_data=f"admin_charge_menu_{target_id}")],
+        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -98,36 +70,115 @@ def get_admin_charge_options_keyboard(target_id: int) -> types.InlineKeyboardMar
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
-    return types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="❌ إلغاء العملية", callback_data="admin_main_menu")]
-    ])
+    kb = [[types.InlineKeyboardButton(text="❌ إلغاء العملية", callback_data="admin_main_menu")]]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def build_users_page_text(users_slice: list, start_idx: int, total_users: int) -> str:
-    report = f"👥 <b>سجل الطلاب المسجلين (الإجمالي: {total_users}):</b>\n\n"
-    for idx, u in enumerate(users_slice, start_idx):
-        username = u.get('username')
-        username_str = f"@{html.escape(username)}" if username and username != "Unknown" else "بلا يوزر"
-        user_id = u.get('user_id')
-        points = u.get('points', 0)
-        report += f"<b>{idx}.</b> 🆔 <code>{user_id}</code> | 👤 {username_str} | 💰 <b>{points}</b> ن\n"
-    return report
 
-# ==================== Core Handlers ====================
+# ==================== الموجهات المركزية (Renderers) ====================
+
+async def render_admin_dashboard(event, state: FSMContext = None):
+    if state:
+        await state.clear()
+    text = "⚙️ <b>لوحة تحكم الإدارة</b>\n\nأهلاً بك، اختر الإجراء الذي تود القيام به من القائمة أدناه:"
+    reply_markup = get_admin_dashboard_keyboard()
+    
+    if isinstance(event, types.Message):
+        await event.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+    elif isinstance(event, types.CallbackQuery):
+        await safe_edit_text(event.message, text, reply_markup=reply_markup)
+        await event.answer()
+
+async def render_users_page(event, page: int = 1):
+    users = await asyncio.to_thread(fetch_users_sync)
+    if not users:
+        text = "📭 لا يوجد أي طلاب مسجلين حالياً."
+        if isinstance(event, types.Message):
+            await event.answer(text, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
+        elif isinstance(event, types.CallbackQuery):
+            await safe_edit_text(event.message, text, reply_markup=get_admin_dashboard_keyboard())
+            await event.answer()
+        return
+
+    total_users = len(users)
+    per_page = 5
+    total_pages = (total_users + per_page - 1) // per_page
+    
+    if page < 1: page = 1
+    if page > total_pages: page = total_pages
+    
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    page_users = users[start_idx:end_idx]
+    
+    report = f"👥 <b>سجل الطلاب المسجلين ({page} من {total_pages}):</b>\n\n"
+    for idx, u in enumerate(page_users, start=start_idx + 1):
+        username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بدون يوزر"
+        report += (
+            f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
+            f"┣ 👤 اليوزر: {username_str}\n"
+            f"┣ 💰 النقاط: <code>{u['points']}</code>\n"
+            f"┗ 📊 الأسئلة: <code>{u.get('total_questions', 0)}</code>\n"
+            f"──────────────────\n"
+        )
+        
+    kb = []
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"admin_users_page_{page-1}"))
+    if page < total_pages:
+        nav_buttons.append(types.InlineKeyboardButton(text="التالي ➡️", callback_data=f"admin_users_page_{page+1}"))
+    if nav_buttons:
+        kb.append(nav_buttons)
+        
+    kb.append([types.InlineKeyboardButton(text="📥 تصدير هذه القائمة كاملة كـ CSV", callback_data="admin_export_users")])
+    kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+    reply_markup = types.InlineKeyboardMarkup(inline_keyboard=kb)
+    
+    if isinstance(event, types.Message):
+        await event.answer(report, reply_markup=reply_markup, parse_mode="HTML")
+    elif isinstance(event, types.CallbackQuery):
+        await safe_edit_text(event.message, report, reply_markup=reply_markup)
+        await event.answer()
+
+
+# ==================== الأوامر النصية (دعم القائمة الجانبية للبوت) ====================
 
 @router.message(Command("admin"))
 async def admin_cmd_dashboard(msg: types.Message, state: FSMContext):
     if not _is_admin(msg.from_user.id): return
-    await state.clear()
-    text = "⚙️ <b>لوحة تحكم الإدارة</b>\n\nأهلاً بك، اختر الإجراء الذي تود القيام به من القائمة أدناه:"
+    await render_admin_dashboard(msg, state)
+
+@router.message(Command("searchuser"))
+async def admin_cmd_search(msg: types.Message, state: FSMContext):
+    if not _is_admin(msg.from_user.id): return
+    await state.set_state(AdminState.waiting_for_search_query)
+    await msg.answer("🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
+
+@router.message(Command("dbstats"))
+async def admin_cmd_stats(msg: types.Message):
+    if not _is_admin(msg.from_user.id): return
+    stats = await asyncio.to_thread(admin_get_global_stats)
+    text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة: <code>{stats['total_questions']}</code>\n"
     await msg.answer(text, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
+
+@router.message(Command("fetchall"))
+async def admin_cmd_fetchall(msg: types.Message):
+    if not _is_admin(msg.from_user.id): return
+    await render_users_page(msg, page=1)
+
+
+# ==================== تفاعلات الأزرار (Callback Queries) ====================
 
 @router.callback_query(F.data == "admin_main_menu")
 async def admin_callback_main_menu(call: types.CallbackQuery, state: FSMContext):
     if not _is_admin(call.from_user.id): return
-    await state.clear()
-    text = "⚙️ <b>لوحة تحكم الإدارة</b>\n\nأهلاً بك، اختر الإجراء الذي تود القيام به من القائمة أدناه:"
-    await safe_edit_text(call.message, text, reply_markup=get_admin_dashboard_keyboard())
-    await call.answer()
+    await render_admin_dashboard(call, state)
+
+@router.callback_query(F.data.startswith("admin_users_page_"))
+async def admin_callback_users_page(call: types.CallbackQuery):
+    if not _is_admin(call.from_user.id): return
+    page = int(call.data.split("_")[3])
+    await render_users_page(call, page=page)
 
 @router.callback_query(F.data == "admin_cancel")
 async def admin_cancel_action(call: types.CallbackQuery, state: FSMContext):
@@ -136,39 +187,22 @@ async def admin_cancel_action(call: types.CallbackQuery, state: FSMContext):
     await safe_edit_text(call.message, "❌ تم إغلاق لوحة الإدارة.")
     await call.answer()
 
-# --- Search Flow ---
-
-@router.message(Command("searchuser"))
-async def cmd_search_user(msg: types.Message, command: CommandObject):
-    if not _is_admin(msg.from_user.id): return
-    if not command.args:
-        return await msg.answer("🔍 الرجاء إدخال اليوزر أو الآيدي للبحث. مثال: `/searchuser ahmad`")
-    
-    await execute_search(msg, command.args.strip())
-
 @router.callback_query(F.data == "admin_search_prompt")
-async def prompt_search_user(call: types.CallbackQuery, state: FSMContext):
+async def callback_search_prompt(call: types.CallbackQuery, state: FSMContext):
     if not _is_admin(call.from_user.id): return
     await state.set_state(AdminState.waiting_for_search_query)
-    await safe_edit_text(
-        call.message,
-        "🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):",
-        reply_markup=get_cancel_keyboard()
-    )
+    await safe_edit_text(call.message, "🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):", reply_markup=get_cancel_keyboard())
     await call.answer()
 
 @router.message(AdminState.waiting_for_search_query)
 async def process_search_user(msg: types.Message, state: FSMContext):
     if not _is_admin(msg.from_user.id): return
-    await state.clear()
-    await execute_search(msg, msg.text.strip())
-
-async def execute_search(message: types.Message, query: str):
+    query = msg.text.strip()
     users_data = await asyncio.to_thread(admin_search_user, query)
+    
     if users_data:
-        u = users_data[0]
-        username = u.get('username')
-        username_str = f"@{html.escape(username)}" if username and username != "Unknown" else "بدون يوزر"
+        u = users_data[0] 
+        username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بدون يوزر"
         report = (
             "👤 <b>معلومات المستخدم:</b>\n"
             f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
@@ -176,21 +210,18 @@ async def execute_search(message: types.Message, query: str):
             f"┣ 💰 النقاط الحالية: <code>{u['points']}</code>\n"
             f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
         )
-        await message.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
+        await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
     else:
-        await message.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard())
+        await msg.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
+    await state.clear()
 
-# --- Charge Flow ---
+# ==================== مسار شحن الرصيد ====================
 
 @router.callback_query(F.data.startswith("admin_charge_menu_"))
 async def show_charge_menu(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id): return
     target_id = call.data.split("_")[3]
-    await safe_edit_text(
-        call.message,
-        f"💰 <b>شحن رصيد للمستخدم</b> <code>{target_id}</code>\n\nاختر كمية الشحن السريعة أو اختر إدخالاً يدوياً:",
-        reply_markup=get_admin_charge_options_keyboard(target_id)
-    )
+    await safe_edit_text(call.message, f"💰 <b>شحن رصيد للمخدم</b> <code>{target_id}</code>\n\nاختر كمية شحن سريعة أو إدخال يدوي:", reply_markup=get_admin_charge_options_keyboard(target_id))
     await call.answer()
 
 @router.callback_query(F.data.startswith("admin_charge_quick_"))
@@ -202,11 +233,7 @@ async def process_quick_charge(call: types.CallbackQuery):
     
     new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
     if new_balance is not None:
-        await safe_edit_text(
-            call.message,
-            f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰",
-            reply_markup=get_admin_dashboard_keyboard()
-        )
+        await safe_edit_text(call.message, f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard())
     else:
         await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
 
@@ -215,20 +242,15 @@ async def prompt_manual_charge(call: types.CallbackQuery, state: FSMContext):
     if not _is_admin(call.from_user.id): return
     target_id = call.data.split("_")[3]
     await state.update_data(target_id=target_id)
-    await state.set_state(AdminState.waiting_for_amount)
-    
-    await safe_edit_text(
-        call.message,
-        f"✍️ <b>شحن يدوي</b>\n\nأرسل عدد النقاط المراد إضافتها للمستخدم <code>{target_id}</code> (أرقام فقط):",
-        reply_markup=get_cancel_keyboard()
-    )
+    await state.set_state(AdminState.waiting_for_charge_amount)
+    await safe_edit_text(call.message, f"✍️ <b>شحن يدوي</b>\n\nأرسل عدد النقاط المراد إضافتها للمستخدم <code>{target_id}</code>:", reply_markup=get_cancel_keyboard())
     await call.answer()
 
-@router.message(AdminState.waiting_for_amount)
+@router.message(AdminState.waiting_for_charge_amount)
 async def process_manual_charge(msg: types.Message, state: FSMContext):
     if not _is_admin(msg.from_user.id): return
     if not msg.text.isdigit():
-        return await msg.answer("❌ يرجى إرسال أرقام صحيحة فقط.", reply_markup=get_cancel_keyboard())
+        return await msg.answer("❌ يرجى إرسال أرقام صحيحة فقط.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
     
     amount = int(msg.text)
     data = await state.get_data()
@@ -236,126 +258,61 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
     
     new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
     if new_balance is not None:
-        await msg.answer(
-            f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰",
-            reply_markup=get_admin_dashboard_keyboard(),
-            parse_mode="HTML"
-        )
+        await msg.answer(f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
     else:
-        await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_cancel_keyboard())
+        await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
     await state.clear()
 
-# --- Stats & Exports Flow ---
-
-@router.message(Command("dbstats"))
-async def cmd_db_stats(msg: types.Message):
-    if not _is_admin(msg.from_user.id): return
-    stats = await asyncio.to_thread(admin_get_global_stats)
-    text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة: <code>{stats['total_questions']}</code>"
-    await msg.answer(text, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
-
 @router.callback_query(F.data == "admin_stats")
-async def callback_db_stats(call: types.CallbackQuery):
+async def show_db_stats(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id): return
     stats = await asyncio.to_thread(admin_get_global_stats)
-    text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة: <code>{stats['total_questions']}</code>"
+    text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب المسجلين: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة المُولدة: <code>{stats['total_questions']}</code>\n"
     await safe_edit_text(call.message, text, reply_markup=get_admin_dashboard_keyboard())
     await call.answer()
 
-@router.message(Command("fetchall"))
-async def cmd_fetch_all(msg: types.Message):
-    if not _is_admin(msg.from_user.id): return
-    await render_users_page_logic(msg, 1)
+# ==================== تصدير البيانات إلى ملف CSV ====================
 
-@router.callback_query(F.data.startswith("admin_page_"))
-async def callback_fetch_all_pages(call: types.CallbackQuery):
+@router.callback_query(F.data == "admin_export_users")
+async def export_all_users(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id): return
-    page_str = call.data.split("_")[2]
-    if page_str == "noop":
-        return await call.answer()
-    await render_users_page_logic(call, int(page_str))
-    await call.answer()
-
-async def render_users_page_logic(event, page: int):
-    try:
-        supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-        res = supabase.table("users").select("*").order("joined_at", desc=True).execute()
-        users = res.data
-        
-        if not users:
-            text = "📭 لا يوجد أي طلاب مسجلين."
-            if isinstance(event, types.Message):
-                return await event.answer(text, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
-            else:
-                return await safe_edit_text(event.message, text, reply_markup=get_admin_dashboard_keyboard())
-
-        PER_PAGE = 5
-        total_pages = (len(users) + PER_PAGE - 1) // PER_PAGE
-        
-        if page < 1: page = 1
-        if page > total_pages: page = total_pages
-            
-        start_idx = (page - 1) * PER_PAGE
-        end_idx = start_idx + PER_PAGE
-        users_slice = users[start_idx:end_idx]
-        
-        report = build_users_page_text(users_slice, start_idx + 1, len(users))
-        kb = get_admin_users_keyboard(page, total_pages)
-        
-        if isinstance(event, types.Message):
-            await event.answer(text=report, reply_markup=kb, parse_mode="HTML")
-        else:
-            await safe_edit_text(event.message, report, reply_markup=kb)
-            
-    except Exception as e:
-        logger.error(f"Error in render_users_page_logic: {e}")
-
-@router.callback_query(F.data == "admin_export_csv")
-async def admin_export_users_csv(call: types.CallbackQuery):
-    if not _is_admin(call.from_user.id): return
-    await call.answer("⏳ جاري تحضير ملف CSV...")
+    await safe_edit_text(call.message, "⏳ جاري استخراج البيانات وبناء ملف الـ CSV، يرجى الانتظار...")
     
     try:
-        supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-        res = supabase.table("users").select("*").order("joined_at", desc=True).execute()
-        users = res.data
-        
+        users = await asyncio.to_thread(fetch_users_sync)
         if not users:
-            return await safe_edit_text(call.message, "📭 لا يوجد طلاب مسجلين لتصديرهم.", reply_markup=get_admin_dashboard_keyboard())
+            return await safe_edit_text(call.message, "📭 لا يوجد طلاب لتصديرهم.", reply_markup=get_admin_dashboard_keyboard())
         
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["Index", "User ID", "Username", "Points", "Joined At"])
+        writer.writerow(["User ID", "Username", "Points", "Total Questions", "Joined At"])
         
-        for idx, u in enumerate(users, 1):
+        for u in users:
             writer.writerow([
-                idx,
-                u.get("user_id"),
-                u.get("username", "Unknown"),
-                u.get("points", 0),
-                u.get("joined_at", "")
+                u.get('user_id', ''),
+                u.get('username', 'Unknown'),
+                u.get('points', 0),
+                u.get('total_questions', 0),
+                u.get('joined_at', '')
             ])
             
-        csv_data = output.getvalue().encode('utf-8-sig') # لدعم اللغة العربية في اكسيل
-        output.close()
+        csv_bytes = output.getvalue().encode('utf-8-sig')
+        file = BufferedInputFile(csv_bytes, filename="students_report.csv")
         
-        input_file = BufferedInputFile(csv_data, filename="students_report.csv")
-        
-        # نقوم بمسح الرسالة الحالية (إذا لم تكن ملفاً سابقاً)
         try:
             await call.message.delete()
-        except:
+        except TelegramBadRequest:
             pass
             
         await call.message.answer_document(
-            document=input_file,
-            caption="📊 <b>تم تصدير سجل الطلاب بنجاح.</b>",
+            document=file, 
+            caption="📥 <b>تم استخراج ملف سجل الطلاب بنجاح وبشكل آمن!</b>",
             reply_markup=get_admin_dashboard_keyboard(),
             parse_mode="HTML"
         )
     except Exception as e:
-        logger.error(f"Error exporting CSV: {e}")
+        logger.error(f"Error exporting users: {e}")
         try:
             await safe_edit_text(call.message, "❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
-        except:
+        except TelegramBadRequest:
             await call.message.answer("❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
