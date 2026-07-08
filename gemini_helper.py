@@ -28,20 +28,13 @@ class QuizQuestion(BaseModel):
     hint: str = Field(description="تلميح ذكي للطالب.")
     was_corrupted_text_fixed: bool = Field(description="تكون true إذا تم تصحيح أخطاء النص.")
 
-def _extract_content_sync(file_bytes, mime_type, key):
-    client = genai.Client(api_key=key)
-    response = client.models.generate_content(
-        model='gemini-2.0-flash',
-        contents=[
-            types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-            "استخرج النص من هذا الملف بدقة عالية. أخرج النص فقط."
-        ]
-    )
-    return response.text
+# ✅ الإصلاح 1: إضافة الموديل الحاوي لمنع انهيار مكتبة GenAI
+class QuizResponse(BaseModel):
+    questions: list[QuizQuestion]
 
 async def extract_content(file_bytes, mime_type="image/jpeg"):
     """
-    استخراج النص من أي ملف (صورة أو PDF) عبر Gemini بأسلوب غير متزامن.
+    استخراج النص من أي ملف (صورة أو PDF) عبر Gemini بأسلوب غير متزامن بالكامل (Native Async).
     """
     global current_key_idx
     
@@ -58,8 +51,25 @@ async def extract_content(file_bytes, mime_type="image/jpeg"):
             key = API_KEYS[current_key_idx]
             
         try:
-            return await asyncio.to_thread(_extract_content_sync, file_bytes, mime_type, key)
+            client = genai.Client(api_key=key)
+            # ✅ الإصلاح 2: استخدام العميل غير المتزامن (aio) مع مهلة 45 ثانية لمنع التعليق
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=[
+                        types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+                        "استخرج النص من هذا الملف بدقة عالية. أخرج النص فقط."
+                    ]
+                ),
+                timeout=45.0
+            )
+            return response.text
             
+        except asyncio.TimeoutError:
+            async with _lock:
+                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
+                current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+                
         except Exception as e:
             error_msg = str(e).lower()
             async with _lock:
@@ -67,23 +77,10 @@ async def extract_content(file_bytes, mime_type="image/jpeg"):
                     blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
                 else:
                     blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
-                
                 current_key_idx = (current_key_idx + 1) % len(API_KEYS)
             
     return "❌ فشلت جميع المحاولات."
 
-def _get_questions_sync(text, count, key):
-    prompt = f"أنت خبير تعليمي، استخرج {count} أسئلة اختيار من متعدد من هذا النص: {text}"
-    client = genai.Client(api_key=key)
-    response = client.models.generate_content(
-        model='gemini-2.0-flash',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=list[QuizQuestion],
-        ),
-    )
-    return json.loads(response.text)
 
 async def get_questions_from_text(text, count):
     """توليد الأسئلة بصيغة JSON مع تدوير المفاتيح بأسلوب غير متزامن"""
@@ -91,6 +88,12 @@ async def get_questions_from_text(text, count):
     
     if not API_KEYS:
         return []
+
+    # ✅ الإصلاح 3: إضافة مخرج طوارئ للنموذج لمنعه من التأليف في حال كان النص فارغاً أو غير مفيد
+    prompt = (
+        f"أنت خبير تعليمي، استخرج {count} أسئلة اختيار من متعدد من هذا النص:\n\n{text}\n\n"
+        "ملاحظة هامة: إذا كان النص غير مفهوم أو لا يحتوي على معلومات تعليمية، أرجع مصفوفة أسئلة فارغة تماماً."
+    )
 
     now = datetime.datetime.now()
     
@@ -102,8 +105,30 @@ async def get_questions_from_text(text, count):
             key = API_KEYS[current_key_idx]
             
         try:
-            return await asyncio.to_thread(_get_questions_sync, text, count, key)
+            client = genai.Client(api_key=key)
+            # ✅ استخدام العميل غير المتزامن والموديل الحاوي
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=QuizResponse,  # 👈 استخدام الموديل الحاوي هنا
+                        temperature=0.7
+                    ),
+                ),
+                timeout=45.0
+            )
             
+            # استخراج الأسئلة من الكائن الحاوي
+            result = json.loads(response.text)
+            return result.get("questions", [])
+            
+        except asyncio.TimeoutError:
+            async with _lock:
+                blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
+                current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+                
         except Exception as e:
             error_msg = str(e).lower()
             async with _lock:
@@ -111,7 +136,6 @@ async def get_questions_from_text(text, count):
                     blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(hours=24)
                 else:
                     blocked_keys[current_key_idx] = datetime.datetime.now() + datetime.timedelta(minutes=2)
-                
                 current_key_idx = (current_key_idx + 1) % len(API_KEYS)
             
     return []
