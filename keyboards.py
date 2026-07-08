@@ -60,11 +60,20 @@ def get_cache_choice_keyboard(points_cost: int) -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_quiz_question_keyboard(options: list) -> types.InlineKeyboardMarkup:
-    kb = [[types.InlineKeyboardButton(text=opt, callback_data=f"ans_{i}")] for i, opt in enumerate(options)]
-    kb.append([types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")])
-    kb.append([types.InlineKeyboardButton(text="⏹ إيقاف الكويز", callback_data="quiz_stop")])
-    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def get_quiz_question_keyboard(show_hint: bool = True):
+    # استخدام نص قصير جداً للزر
+    hint_button = InlineKeyboardButton(text="💡 تلميح", callback_data="get_hint")
+    save_button = InlineKeyboardButton(text="💾 حفظ الكويز", callback_data="save_quiz")
+    
+    # وضع التلميح والحفظ في نفس السطر ليكونوا صغاراً
+    buttons = [hint_button, save_button]
+    
+    return InlineKeyboardMarkup(inline_keyboard=[
+        buttons, # سطر واحد يحتوي على التلميح والحفظ
+        [InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
+    ])
 
 def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: int) -> types.InlineKeyboardMarkup:
     kb = []

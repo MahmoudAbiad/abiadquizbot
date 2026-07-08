@@ -1,6 +1,10 @@
 """
 Quiz execution module - handles answering questions, hints, and results.
 """
+# تأكد من هذا السطر في أعلى الملف
+import asyncio
+
+from supabase_helper import update_user_stats, save_favorite_quiz
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from typing import Union
@@ -171,10 +175,32 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         q = data['questions'][data['current_index']]
-        await call.answer(f"💡 تلميح: {q['hint']}", show_alert=True)
+        # تغيير show_alert إلى False ليظهر كإشعار صغير غير مزعج
+        await call.answer(f"💡 تلميح: {q['hint']}", show_alert=False)
     except Exception as e:
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
-        await call.answer("❌ خطأ في جلب التلميح")
+        await call.answer("❌ خطأ في جلب التلميح", show_alert=True)
+
+@router.callback_query(QuizState.answering_quiz, F.data == "save_quiz")
+async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        questions = data.get("questions")
+        title = data.get("source_title", "كويز بدون عنوان")
+        
+        if not questions:
+            await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
+            return
+
+        # حفظ الكويز في قاعدة البيانات
+        # نستخدم asyncio.to_thread لأن التعامل مع قاعدة البيانات عملية حظر (Blocking)
+        await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions)
+        
+        await call.answer("✅ تم حفظ الكويز في المفضلة بنجاح!", show_alert=True)
+        
+    except Exception as e:
+        log_error(logger, f"Error saving quiz: {e}", exception=e)
+        await call.answer("❌ حدث خطأ أثناء حفظ الكويز.", show_alert=True)
 
 @router.callback_query(QuizState.answering_quiz, F.data == "next_question")
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
