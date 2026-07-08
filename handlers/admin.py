@@ -38,6 +38,21 @@ def fetch_users_sync():
     res = supabase.table("users").select("*").order("joined_at", desc=True).execute()
     return res.data
 
+# دالة مساعدة لإرسال إشعار لبق للمستخدم عند شحن نقاطه
+async def send_points_notification(target_id: int, amount: int, new_balance: int):
+    try:
+        user_text = (
+            "🎉 <b>أخبار سارة! تم تحديث رصيدك</b>\n\n"
+            f"عزيزي الطالب، تم إضافة <code>{amount}</code> نقاط جديدة إلى حسابك بنجاح. ✨\n\n"
+            f"🟢 <b>الكمية المضافة:</b> <code>+{amount}</code>\n"
+            f"💰 <b>رصيدك الحالي أصبح:</b> <code>{new_balance}</code> نقطة\n\n"
+            "نتمنى لك رحلة تعليمية ممتعة ومليئة بالتوفيق والنجاح! 🚀"
+        )
+        await bot.send_message(chat_id=target_id, text=user_text, parse_mode="HTML")
+        logger.info(f"Notification sent successfully to user {target_id}")
+    except Exception as e:
+        logger.error(f"Could not send notification to user {target_id}: {e}")
+
 # ==================== لوحات الأزرار (Keyboards) المدمجة ====================
 
 def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
@@ -221,7 +236,7 @@ async def process_search_user(msg: types.Message, state: FSMContext):
 async def show_charge_menu(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id): return
     target_id = call.data.split("_")[3]
-    await safe_edit_text(call.message, f"💰 <b>شحن رصيد للمخدم</b> <code>{target_id}</code>\n\nاختر كمية شحن سريعة أو إدخال يدوي:", reply_markup=get_admin_charge_options_keyboard(target_id))
+    await safe_edit_text(call.message, f"💰 <b>شحن رصيد للمستخدم</b> <code>{target_id}</code>\n\nاختر كمية شحن سريعة أو إدخال يدوي:", reply_markup=get_admin_charge_options_keyboard(target_id))
     await call.answer()
 
 @router.callback_query(F.data.startswith("admin_charge_quick_"))
@@ -234,6 +249,9 @@ async def process_quick_charge(call: types.CallbackQuery):
     new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
     if new_balance is not None:
         await safe_edit_text(call.message, f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard())
+        
+        # إرسال إشعار للمستخدم هنا
+        await send_points_notification(target_id, amount, new_balance)
     else:
         await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
 
@@ -259,6 +277,9 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
     new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
     if new_balance is not None:
         await msg.answer(f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
+        
+        # إرسال إشعار للمخدم/المستخدم هنا
+        await send_points_notification(target_id, amount, new_balance)
     else:
         await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
     await state.clear()
