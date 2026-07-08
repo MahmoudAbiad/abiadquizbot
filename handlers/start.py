@@ -30,15 +30,34 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
     try:
         bot_info = await bot.get_me()
         
-        # Open shared quiz deep link if present
-        if command.args and command.args.startswith("share_"):
-            share_id = command.args.replace("share_", "", 1)
+        # 1. 🔥 تم التحديث: التحقق من وجود رابط مشاركة كويز (يدعم كلا البادئتين لضمان التوافق)
+        if command.args and (command.args.startswith("share_") or command.args.startswith("quiz_")):
+            if command.args.startswith("share_"):
+                share_id = command.args.replace("share_", "", 1)
+            else:
+                share_id = command.args.replace("quiz_", "", 1)
+                
             shared = await asyncio.to_thread(get_shared_quiz, share_id)
             if shared:
-                # 💡 الاستدعاء الداخلي بالاسم الصحيح (مع الشرطة السفلية)
+                # 🔥 حماية: تسجيل أو التحقق من المستخدم في الداتابيز أولاً لمنع أخطاء الـ Database لاحقاً
+                await asyncio.to_thread(
+                    check_or_add_user,
+                    msg.from_user.id,
+                    msg.from_user.username or "Unknown",
+                    msg.from_user.first_name,
+                    msg.from_user.last_name or "Unknown",
+                    None
+                )
+                
+                # 💡 تم التحديث: الاستدعاء الداخلي مع تمرير الـ quiz_id ليبقى في الـ State
                 from handlers.execution import _start_loaded_quiz
                 await msg.answer(f"🔗 تم فتح كويز مشترك: {shared.get('title') or 'كويز مشترك'}")
-                await _start_loaded_quiz(msg, state, shared["quiz_data"], shared.get('title') or 'كويز مشترك', origin="shared")
+                await _start_loaded_quiz(
+                    msg, state, shared["quiz_data"], 
+                    shared.get('title') or 'كويز مشترك', 
+                    origin="shared", 
+                    quiz_id=share_id  # <--- تمرير المعرف هنا ضروري جداً
+                )
                 return
 
         # Extract referrer ID from command arguments
@@ -110,9 +129,6 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
 async def show_recharge_info(call: types.CallbackQuery):
     """
     Show recharge information and contact details.
-    
-    Args:
-        call: Callback query object
     """
     try:
         recharge_text = (
@@ -136,7 +152,6 @@ async def show_recharge_info(call: types.CallbackQuery):
             "يرجى المحاولة مرة أخرى.",
             parse_mode="HTML"
         )
-    
     finally:
         await call.answer()
 
