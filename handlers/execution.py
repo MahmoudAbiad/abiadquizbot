@@ -22,7 +22,7 @@ from constants import MSG_QUIZ_STOPPED
 from keyboards import (
     get_main_menu_keyboard, get_quiz_result_keyboard, 
 )
-from logger import get_logger, log_error, log_info
+from logger import get_logger, log_error, log_info, log_warning
 
 logger = get_logger(__name__)
 
@@ -199,6 +199,7 @@ async def quiz_home(call: types.CallbackQuery, state: FSMContext):
         await call.answer()
 
 @router.poll_answer()
+@router.poll_answer()
 async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
     try:
         poll_id = poll_answer.poll_id
@@ -210,25 +211,33 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         user_id = quiz_info["user_id"]
         correct_opt = quiz_info["correct_option_id"]
 
-        bot_id = int(bot.token.split(":")[0])
+        # ✅ الحل: استخدم bot.id بدلاً من تقسيم التوكن يدوياً
+        bot_id = bot.id 
+        
         storage_key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=user_id)
         correct_state = FSMContext(storage=state.storage, key=storage_key)
 
         data = await correct_state.get_data()
+        
+        # إضافة سجل للتحقق (Debug Log)
+        log_info(logger, f"البيانات المسترجعة للمستخدم {user_id}: {data}")
+
         if not data or 'questions' not in data:
+            log_warning(logger, f"⚠️ لم يتم العثور على بيانات الـ FSM للمستخدم {user_id}")
             return
 
         selected_opt = poll_answer.option_ids[0]
 
         if selected_opt == correct_opt:
-            score = data.get('score', 0) + 1
-            await correct_state.update_data(score=score)
-            log_info(logger, f"Correct poll answer: {user_id}, Q{quiz_info['index']+1}")
+            current_score = data.get('score', 0)
+            new_score = current_score + 1
+            await correct_state.update_data(score=new_score)
+            log_info(logger, f"✅ تم تحديث النتيجة للمستخدم {user_id}: {new_score}")
         else:
-            log_info(logger, f"Incorrect poll answer: {user_id}, Q{quiz_info['index']+1}")
+            log_info(logger, f"❌ إجابة خاطئة للمستخدم {user_id}")
 
     except Exception as e:
-        log_error(logger, f"Error in handle_poll_answer: {e}", exception=e)
+        log_error(logger, f"❌ خطأ في handle_poll_answer: {e}", exception=e)
         
 @router.callback_query(QuizState.answering_quiz, F.data == "get_hint")
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
@@ -448,11 +457,11 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
         await msg.answer(f"✅ **تم إنشاء القسم وحفظ الاختبار بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم الجديد: `{section_title}`", parse_mode="Markdown")
         
         # 🛠 [إصلاح ذكي]: التحقق لمنع تعليق حالة المستخدم بعد الحفظ النهائي
+# الكود المصحح الجديد ✨:
         if data.get("quiz_completed"):
             await state.set_state(None)
         else:
-            prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
-            await state.set_state(prev_state)
+            await state.set_state(QuizState.answering_quiz)
             
     except Exception as e:
         log_error(logger, f"Error in creating section and saving: {e}", exception=e)
