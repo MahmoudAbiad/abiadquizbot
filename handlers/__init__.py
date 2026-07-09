@@ -9,6 +9,7 @@ from handlers.files import files_router
 from handlers.execution import router as execution_router
 from handlers.favorites import router as favorites_router
 from handlers.sharing import router as sharing_router
+from handlers.leaderboard import router as leaderboard_router
 
 __all__ = [
     "start_router", 
