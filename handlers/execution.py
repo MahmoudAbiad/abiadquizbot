@@ -351,8 +351,7 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
         if data.get("quiz_completed"):
             await state.set_state(None)
         else:
-            prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
-            await state.set_state(prev_state)
+            await state.set_state(QuizState.answering_quiz)
             
     except Exception as e:
         log_error(logger, f"Error saving to general: {e}", exception=e)
