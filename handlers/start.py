@@ -10,7 +10,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from config import bot
 from keyboards import get_main_menu_keyboard
-from supabase_helper import check_or_add_user, get_shared_quiz
+from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id
 from logger import get_logger, log_warning, log_info
 from constants import ADMIN_CONTACT, MAX_PDF_PAGES
 
@@ -39,8 +39,6 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
                 shared = await asyncio.to_thread(get_shared_quiz, share_id)
             else:
                 share_id = command.args.replace("quiz_", "", 1)
-                # 🆕 استدعاء الدالتين
-                from supabase_helper import get_favorite_quiz_by_global_id, get_shared_quiz
                 
                 # 1. البحث في جدول المفضلة أولاً
                 shared = await asyncio.to_thread(get_favorite_quiz_by_global_id, share_id)
