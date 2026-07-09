@@ -102,7 +102,7 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
             
             response = await asyncio.wait_for(
                 groq_client.chat.completions.create(
-                    model="llama-3.2-11b-vision-preview",
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
                     messages=[
                         {
                             "role": "user",
