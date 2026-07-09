@@ -204,6 +204,7 @@ async def quiz_home(call: types.CallbackQuery, state: FSMContext):
 
 @router.poll_answer()
 async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
+    log_info(logger, "🚀 تم استدعاء دالة handle_poll_answer بنجاح!")
     try:
         poll_id = poll_answer.poll_id
         
@@ -225,7 +226,7 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
             
         # [تعديل هام]: تحويل إجابة الطالب إلى Integer
         selected_opt = int(poll_answer.option_ids[0])
-        log_info(logger, f"🔍 DEBUG: الطالب اختار: {selected_opt} | الصحيح هو: {correct_opt}")
+
         # طباعة للتصحيح (ستظهر في السجلات لتتأكد من الحل)
         log_info(logger, f"🔍 DEBUG: الطالب اختار {selected_opt} | الصحيح هو {correct_opt}")
 
