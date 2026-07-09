@@ -24,6 +24,8 @@ class QuizState(StatesGroup):
     saving_favorite_section_name = State()  # انتظار اسم القسم الجديد
     searching_favorites = State()  # انتظار كلمة البحث داخل المفضلة
     waiting_for_cache_decision = State() # معالجة قرار الكاش
+    waiting_for_custom_name = State()       # استقبال الاسم المخصص
+    waiting_for_new_section_title = State() # استقبال اسم القسم الجديد
 
 # ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:

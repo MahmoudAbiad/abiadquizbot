@@ -3,7 +3,14 @@ Quiz execution module - handles answering questions, hints, and results.
 """
 import asyncio
 
-from supabase_helper import list_favorite_quizzes, update_user_stats, save_favorite_quiz
+# 🆕 تم تحديث الاستيراد ليشمل دالات الأقسام من قاعدة البيانات
+from supabase_helper import (
+    list_favorite_quizzes, 
+    update_user_stats, 
+    save_favorite_quiz,
+    list_favorite_sections,
+    create_favorite_section
+)
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from typing import Union
@@ -34,10 +41,12 @@ async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQu
         await call_or_message.answer(text, reply_markup=menu)
 
 async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: str = "") -> None:
+    # 🆕 تم إضافة تصفير حالة الحفظ (is_saved_in_session=False) لضمان عدم تداخل الكويزات الجديدة
     await state.update_data(
         questions=quiz_data, current_index=0, score=0,
         total_count=len(quiz_data), source_title=source_title,
-        quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id
+        quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
+        is_saved_in_session=False
     )
     await state.set_state(QuizState.answering_quiz)
     if isinstance(msg_or_call, types.CallbackQuery):
@@ -179,7 +188,6 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         user_id = quiz_info["user_id"]
         correct_opt = quiz_info["correct_option_id"]
 
-        # ✅ إصلاح حرج: استخراج المعرف الرياضي للبوت من التوكن مباشرة لتجنب قيم الـ None المطروحة في السيرفر السحابي
         bot_id = int(bot.token.split(":")[0])
         storage_key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=user_id)
         correct_state = FSMContext(storage=state.storage, key=storage_key)
@@ -210,8 +218,11 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
         await call.answer("❌ خطأ في جلب التلميح", show_alert=True)
 
+
+# ==================== 🆕 معالج حفظ الكويز التفاعلي الذكي ====================
+
 @router.callback_query(F.data.in_({"save_quiz", "quiz_favorite"}))
-async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
+async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         if data.get("is_saved_in_session"):
@@ -219,40 +230,210 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
             return
 
         questions = data.get("questions")
-        title = data.get("source_title") or data.get("title") or "كويز بدون عنوان"
         quiz_id = data.get("quiz_id")
         
         if not questions:
             await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
             return
 
+        # فحص أولي لمنع التكرار المعتمد على المعرف الفريد
         user_favorites = await asyncio.to_thread(list_favorite_quizzes, call.from_user.id)
-        
         is_already_saved = False
-        if user_favorites:
-            # 💡 الإصلاح الذكي هنا:
-            if quiz_id and str(quiz_id).strip():
-                # إذا كان الكويز قادماً من رابط مشاركة أو له معرف فريد، نتحقق بالمعرف فقط وهو الأدق
-                is_already_saved = any(fav.get("quiz_id") == quiz_id for fav in user_favorites)
-            else:
-                # إذا كان الكويز جديداً ومولداً للتو (quiz_id فارغ)، لا نتحقق بالاسم مطلقاً في قاعدة البيانات
-                # لأن المستخدم قد يولد كويزات مختلفة الأسئلة تماماً وتحمل نفس اسم المادة أو الملف
-                # نكتفي هنا بالاعتماد على الـ is_saved_in_session لمنع التكرار في نفس الوقت
-                is_already_saved = False
+        if user_favorites and quiz_id and str(quiz_id).strip():
+            is_already_saved = any(fav.get("quiz_id") == quiz_id for fav in user_favorites)
 
         if is_already_saved:
             await state.update_data(is_saved_in_session=True)
             await call.answer("💡 هذا الكويز موجود بالفعل في قائمتك المفضلة مسبقاً!", show_alert=True)
             return
 
-        # حفظ الكويز في قاعدة البيانات
-        await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions, quiz_id=quiz_id)
-        await state.update_data(is_saved_in_session=True)
-        await call.answer("✅ تم الحفظ بنجاح! تجده في 'قائمتي المفضلة' قسم 'عام'.", show_alert=True)
-        
+        # 🔒 حفظ حالة الكويز الحالية للعودة إليها بعد انتهاء ساحر الحفظ
+        current_status = await state.get_state()
+        await state.update_data(prev_quiz_state=current_status)
+
+        # خطوة 1: تخيير المستخدم بين الاسم الافتراضي أو المخصص
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="📄 حفظ بالاسم الحالي", callback_data="save_name_current")],
+            [types.InlineKeyboardButton(text="✏️ حفظ باسم مخصص", callback_data="save_name_custom")]
+        ])
+
+        await call.message.answer("📝 **خطوة 1 من 2: تسمية الاختبار**\n\nكيف تود تسمية هذا الكويز في المفضلة؟", reply_markup=kb, parse_mode="Markdown")
+
     except Exception as e:
-        log_error(logger, f"Error saving quiz: {e}", exception=e)
+        log_error(logger, f"Error starting save wizard: {e}", exception=e)
+        await call.answer("❌ حدث خطأ أثناء بدء عملية الحفظ.", show_alert=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "save_name_current")
+async def save_name_current_handler(call: types.CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        title = data.get("source_title") or data.get("title") or "كويز بدون عنوان"
+        await state.update_data(final_save_title=title)
+        
+        # الانتقال مباشرة للخطوة الثانية (تصنيف الأقسام)
+        await _prompt_section_selection(call.message, state)
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        log_error(logger, f"Error in save_name_current: {e}", exception=e)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "save_name_custom")
+async def save_name_custom_handler(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await state.set_state(QuizState.waiting_for_custom_name)
+        await call.message.edit_text("✏️ **أرسل الآن الاسم المخصص** الذي تريده لهذا الاختبار في رسالة نصية:")
+    except Exception as e:
+        log_error(logger, f"Error in save_name_custom: {e}", exception=e)
+    finally:
+        await call.answer()
+
+
+@router.message(QuizState.waiting_for_custom_name, F.text)
+async def process_custom_name(msg: types.Message, state: FSMContext):
+    try:
+        custom_title = msg.text.strip()
+        if not custom_title:
+            await msg.answer("❌ الاسم المرسل غير صالح، يرجى إرسال اسم نصي واضح:")
+            return
+            
+        await state.update_data(final_save_title=custom_title)
+        await _prompt_section_selection(msg, state)
+    except Exception as e:
+        log_error(logger, f"Error in process_custom_name: {e}", exception=e)
+
+
+async def _prompt_section_selection(msg_or_call_msg: types.Message, state: FSMContext):
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🌐 حفظ في قسم عام", callback_data="save_sec_general")],
+        [types.InlineKeyboardButton(text="📁 حفظ ضمن قسم مخصص", callback_data="save_sec_choose")]
+    ])
+    await msg_or_call_msg.answer("📁 **خطوة 2 من 2: تصنيف مكان الحفظ**\n\nأين تريد تصنيف هذا الاختبار في المفضلة؟", reply_markup=kb, parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "save_sec_general")
+async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        title = data.get("final_save_title") or "كويز بدون عنوان"
+        questions = data.get("questions")
+        quiz_id = data.get("quiz_id")
+        
+        await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions, None, None, quiz_id)
+        await state.update_data(is_saved_in_session=True)
+        
+        await call.message.edit_text(f"✅ **تم الحفظ بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم: `عام`", parse_mode="Markdown")
+        
+        # 🔄 استعادة حالة الكويز ومتابعة الاختبار من نفس النقطة
+        prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
+        await state.set_state(prev_state)
+    except Exception as e:
+        log_error(logger, f"Error saving to general: {e}", exception=e)
         await call.answer("❌ حدث خطأ أثناء حفظ الكويز.", show_alert=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "save_sec_choose")
+async def handle_save_choose_section(call: types.CallbackQuery, state: FSMContext):
+    try:
+        user_id = call.from_user.id
+        sections = await asyncio.to_thread(list_favorite_sections, user_id)
+        
+        inline_keyboard = []
+        if sections:
+            for sec in sections:
+                inline_keyboard.append([
+                    types.InlineKeyboardButton(text=f"📁 {sec['title']}", callback_data=f"save_to_sec_{sec['section_id']}")
+                ])
+        
+        inline_keyboard.append([types.InlineKeyboardButton(text="➕ إنشاء قسم جديد واختياره", callback_data="save_sec_create_new")])
+        inline_keyboard.append([types.InlineKeyboardButton(text="🌐 إلغاء وحفظ في عام", callback_data="save_sec_general")])
+        
+        kb = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+        await call.message.edit_text("📂 **اختر أحد أقسامك المفضلة الحالية لتصنيف الاختبار داخله:**", reply_markup=kb, parse_mode="Markdown")
+    except Exception as e:
+        log_error(logger, f"Error showing sections: {e}", exception=e)
+        await call.answer("❌ تعذر جلب قائمة الأقsections حالياً.", show_alert=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data.startswith("save_to_sec_"))
+async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMContext):
+    try:
+        section_id = call.data.replace("save_to_sec_", "")
+        data = await state.get_data()
+        title = data.get("final_save_title") or "كويز بدون عنوان"
+        questions = data.get("questions")
+        quiz_id = data.get("quiz_id")
+        
+        await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions, section_id, None, quiz_id)
+        await state.update_data(is_saved_in_session=True)
+        
+        await call.message.edit_text(f"✅ **تم حفظ الاختبار بنجاح ضمن القسم المختار!**\n\n📦 الاسم: `{title}`", parse_mode="Markdown")
+        
+        prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
+        await state.set_state(prev_state)
+    except Exception as e:
+        log_error(logger, f"Error saving to existing section: {e}", exception=e)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "save_sec_create_new")
+async def handle_request_new_section(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await state.set_state(QuizState.waiting_for_new_section_title)
+        await call.message.edit_text("➕ **أرسل الآن اسم القسم الجديد** المراد إنشاؤه لتصنيف الكويز داخله:")
+    except Exception as e:
+        log_error(logger, f"Error in request new section: {e}", exception=e)
+    finally:
+        await call.answer()
+
+
+@router.message(QuizState.waiting_for_new_section_title, F.text)
+async def process_new_section_title_and_save(msg: types.Message, state: FSMContext):
+    try:
+        section_title = msg.text.strip()
+        if not section_title:
+            await msg.answer("❌ اسم القسم غير صالح، يرجى إدخال نص واضح:")
+            return
+            
+        user_id = msg.from_user.id
+        data = await state.get_data()
+        title = data.get("final_save_title") or "كويز بدون عنوان"
+        questions = data.get("questions")
+        quiz_id = data.get("quiz_id")
+        
+        # 1. إنشاء القسم الجديد في قاعدة البيانات والحصول على معرفه الـ UUID
+        new_section_id = await asyncio.to_thread(create_favorite_section, user_id, section_title)
+        
+        if not new_section_id:
+            await msg.answer("⚠️ تعذر إنشاء القسم، تم تحويل مسار الحفظ تلقائياً إلى 'عام'.")
+            new_section_id = None
+            
+        # 2. ربط وحفظ الكويز بالقسم الجديد مباشرة
+        await asyncio.to_thread(save_favorite_quiz, user_id, title, questions, new_section_id, None, quiz_id)
+        await state.update_data(is_saved_in_session=True)
+        
+        await msg.answer(f"✅ **تم إنشاء القسم وحفظ الاختبار بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم الجديد: `{section_title}`", parse_mode="Markdown")
+        
+        # 🔄 العودة الآمنة للكويز القائم لإكماله
+        prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
+        await state.set_state(prev_state)
+    except Exception as e:
+        log_error(logger, f"Error in creating section and saving: {e}", exception=e)
+
+# ==================== 🔚 نهاية معالجات الحفظ الذكية ====================
+
 
 @router.callback_query(QuizState.answering_quiz, F.data == "next_question")
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
