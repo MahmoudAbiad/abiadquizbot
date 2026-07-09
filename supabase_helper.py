@@ -381,3 +381,79 @@ def admin_search_user(query: str) -> Optional[list]:
         return res.data
     except Exception as e:
         return None
+    
+    # ==================== Quiz Scores & Leaderboard Operations ====================
+
+def get_or_update_high_score(user_id: int, quiz_id: str, current_score: int, total_questions: int) -> Dict[str, Any]:
+    """
+    جلب النتيجة السابقة للطالب (إن وجدت) وتحديثها إذا كانت النتيجة الحالية أعلى.
+    تعيد قاموساً يحتوي على النتيجة السابقة وأعلى نتيجة حالية.
+    """
+    try:
+        # البحث عن النتيجة السابقة
+        res = supabase.table("quiz_scores").select("*").eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
+        
+        previous_score = None
+        new_highest = current_score
+        is_public = False
+        
+        if res.data:
+            existing = res.data[0]
+            previous_score = existing["highest_score"]
+            is_public = existing["is_public"]
+            
+            # التحديث فقط إذا كانت النتيجة الجديدة أعلى
+            if current_score > previous_score:
+                supabase.table("quiz_scores").update({
+                    "highest_score": current_score,
+                    "total_questions": total_questions,
+                    "updated_at": datetime.datetime.utcnow().isoformat()
+                }).eq("score_id", existing["score_id"]).execute()
+            else:
+                new_highest = previous_score # الاحتفاظ بالنتيجة القديمة لأنها أعلى
+        else:
+            # إدخال سجل جديد إذا كانت هذه أول مرة يحل فيها الكويز
+            supabase.table("quiz_scores").insert({
+                "quiz_id": quiz_id,
+                "user_id": user_id,
+                "highest_score": current_score,
+                "total_questions": total_questions,
+                "is_public": False
+            }).execute()
+            
+        return {
+            "previous_score": previous_score,
+            "highest_score": new_highest,
+            "is_public": is_public
+        }
+    except Exception as e:
+        log_error(logger, f"Error updating high score: {e}", exception=e)
+        return {"previous_score": None, "highest_score": current_score, "is_public": False}
+
+
+def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
+    """تغيير حالة النتيجة لتصبح عامة وتظهر في لوحة الشرف"""
+    try:
+        supabase.table("quiz_scores").update({"is_public": True}).eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
+        return True
+    except Exception as e:
+        log_error(logger, f"Error publishing score: {e}", exception=e)
+        return False
+
+
+def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
+    """جلب أعلى 5 نتائج علنية لهذا الكويز مع أسماء الطلاب"""
+    try:
+        # استخدام Join في Supabase لجلب بيانات المستخدم مع النتيجة
+        res = supabase.table("quiz_scores") \
+            .select("highest_score, total_questions, users(first_name, last_name)") \
+            .eq("quiz_id", quiz_id) \
+            .eq("is_public", True) \
+            .order("highest_score", desc=True) \
+            .limit(5) \
+            .execute()
+            
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error getting leaderboard: {e}", exception=e)
+        return []

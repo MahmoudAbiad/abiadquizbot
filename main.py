@@ -9,7 +9,7 @@ import asyncio
 import uvicorn
 from logger import get_logger
 from config import bot, dp
-from handlers import start_router, admin_router, files_router, execution_router, favorites_router, sharing_router
+from handlers import start_router, admin_router, files_router, execution_router, favorites_router, sharing_router,leaderboard_router
 from middlewares import ThrottlingMiddleware
 from aiogram import types
 import logging
@@ -34,7 +34,7 @@ def main():
     files_router,
     execution_router,
     favorites_router,
-    
+    leaderboard_router,
 )
     
     webhook_url = os.getenv("WEBHOOK_URL")

@@ -18,13 +18,20 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
         logger.error(f"Error generating main menu keyboard: {e}")
         return types.InlineKeyboardMarkup(inline_keyboard=[])
 
-def get_quiz_result_keyboard() -> types.InlineKeyboardMarkup:
+def get_quiz_result_keyboard(quiz_id: str = None, is_score_public: bool = False) -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="🔄 إعادة الاختبار", callback_data="quiz_replay")],
         [types.InlineKeyboardButton(text="🔗 مشاركة الكويز", callback_data="quiz_share")],
-        [types.InlineKeyboardButton(text="⭐ حفظ في المفضلة", callback_data="quiz_favorite")],
-        [types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="quiz_home")]
+        [types.InlineKeyboardButton(text="⭐ حفظ في المفضلة", callback_data="quiz_favorite")]
     ]
+    
+    # إضافة أزرار لوحة الشرف إذا كان الكويز محفوظاً وله ID
+    if quiz_id:
+        if not is_score_public:
+            kb.append([types.InlineKeyboardButton(text="📢 مشاركة نتيجتي في لوحة الشرف", callback_data=f"publish_score_{quiz_id}")])
+        kb.append([types.InlineKeyboardButton(text="🏆 عرض لوحة الشرف (Top 5)", callback_data=f"leaderboard_{quiz_id}")])
+        
+    kb.append([types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="quiz_home")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_start_keyboard() -> types.InlineKeyboardMarkup:

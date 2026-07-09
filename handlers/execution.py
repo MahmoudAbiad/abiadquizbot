@@ -62,20 +62,46 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         idx = data['current_index']
         
         # 1. التحقق من انتهاء الاختبار
+# 1. التحقق من انتهاء الاختبار
         if idx >= len(questions):
             score = data['score']
             total = data['total_count']
+            quiz_id = data.get('quiz_id')
+            user_id = state.key.user_id
             chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
             
             percentage = (score / total * 100) if total > 0 else 0
+            
+            # --- منطق حفظ وجلب النتيجة الأعلى ---
+            previous_score_text = ""
+            is_public = False
+            
+            if quiz_id and quiz_id.strip():
+                from supabase_helper import get_or_update_high_score
+                score_data = await asyncio.to_thread(get_or_update_high_score, user_id, quiz_id, score, total)
+                is_public = score_data["is_public"]
+                
+                if score_data["previous_score"] is not None:
+                    prev_score = score_data["previous_score"]
+                    highest = score_data["highest_score"]
+                    previous_score_text = f"\n🕒 نتيجتك السابقة: **{prev_score}**"
+                    if score > prev_score:
+                        previous_score_text += f"\n🎉 **رقم قياسي جديد لك!**"
+                    previous_score_text += f"\n🏆 أعلى نتيجة مسجلة لك: **{highest}** من **{total}**\n"
+            # -------------------------------------
+
             result_text = (
                 f"🏁 **اكتمل الاختبار بنجاح!**\n\n"
-                f"🎯 نتيجتك النهائية: **{score}** من **{total}**\n"
-                f"📊 النسبة المئوية: **{percentage:.1f}%**\n\n"
+                f"🎯 نتيجتك الحالية: **{score}** من **{total}**\n"
+                f"📊 النسبة المئوية: **{percentage:.1f}%**\n"
+                f"{previous_score_text}\n"
                 f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
             )
             
-            await bot.send_message(chat_id, result_text, reply_markup=get_quiz_result_keyboard(), parse_mode="Markdown")
+            # إرسال النتيجة مع الكيبورد الجديد
+            keyboard = get_quiz_result_keyboard(quiz_id=quiz_id, is_score_public=is_public)
+            await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="Markdown")
+            
             log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
             await state.update_data(quiz_completed=True)
             await state.set_state(None)
