@@ -7,6 +7,7 @@ import os
 import asyncio
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
+from pymupdf import message
 
 from config import bot, QuizState
 from constants import (
@@ -33,9 +34,10 @@ processing_users: set[int] = set()
 async def handle_media(msg: types.Message, state: FSMContext):
     try:
         # فحص الحالة الحالية لحماية الكويز القائم
-        current_state = await state.get_state()
-        if current_state == QuizState.answering_quiz:
-            await msg.answer("⚠️ لديك اختبار قائم حالياً. يرجى إكمال الاختبار أو إيقافه أولاً قبل رفع ملفات جديدة.")
+      # ✅ الفحص الصحيح: نتحقق هل المستخدم "في منتصف حل الأسئلة فعلياً" أم لا
+        current_status = await state.get_state()
+        if current_status == QuizState.answering_quiz:
+            await msg.answer("⚠️ **لديك اختبار قائم حالياً.** يرجى إكمال الاختبار أو الضغط على زر (⏹ إيقاف) أولاً قبل رفع ملفات أو صور جديدة.", parse_mode="Markdown")
             return
 
         ensure_directory_exists(DOWNLOADS_DIR)
