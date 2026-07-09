@@ -87,16 +87,22 @@ async def handle_media(msg: types.Message, state: FSMContext):
             file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
 
         # معالجة المستندات بجميع أنواعها
+# ==================== معالجة المستندات بجميع أنواعها ====================
         else:
             is_valid, error = validate_file_size(msg.document.file_size, "document")
             if not is_valid:
                 await msg.answer(error)
                 return
             
-            full_file_name = msg.document.file_name or "مستند"
-            file_title, _ = os.path.splitext(full_file_name)
+            # 1. الاحتفاظ بالاسم الأصلي بدون امتداد ليكون عنواناً للكويز
+            full_file_name = msg.document.file_name or "document.pdf"
+            file_title, ext = os.path.splitext(full_file_name)
             
-            f_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{msg.document.file_name}")
+            # 2. التعديل الجوهري ✨: استخدام file_id والامتداد الأصلي لتفادي مشاكل اللغة العربية والمسافات
+            safe_file_name = f"{user_id}_{msg.document.file_id}{ext}"
+            f_path = os.path.join(DOWNLOADS_DIR, safe_file_name)
+            
+            # 3. تحميل الملف بالاسم الآمن الجديد
             await bot.download(msg.document, destination=f_path)
             file_paths = [f_path]
             file_hash = await asyncio.to_thread(calculate_file_hash, f_path)
