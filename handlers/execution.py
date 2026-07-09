@@ -199,11 +199,11 @@ async def quiz_home(call: types.CallbackQuery, state: FSMContext):
         await call.answer()
 
 @router.poll_answer()
-@router.poll_answer()
 async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
     try:
         poll_id = poll_answer.poll_id
         if poll_id not in poll_to_quiz_map:
+            log_info(logger, f"⚠️ Poll ID {poll_id} غير موجود في الخريطة!")
             return
 
         quiz_info = poll_to_quiz_map[poll_id]
@@ -211,19 +211,18 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         user_id = quiz_info["user_id"]
         correct_opt = quiz_info["correct_option_id"]
 
-        # ✅ الحل: استخدم bot.id بدلاً من تقسيم التوكن يدوياً
-        bot_id = bot.id 
+        # 🛠 الحل الجذري: لا تبنِ المفتاح يدوياً، استخدم الـ storage المباشر لـ Dispatcher
+        # نقوم بإنشاء مفتاح التخزين المعتمد على نفس معايير الـ FSM
+        from config import dp # تأكد من استيراد dp من config
+        storage_key = StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id)
         
-        storage_key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=user_id)
-        correct_state = FSMContext(storage=state.storage, key=storage_key)
-
-        data = await correct_state.get_data()
+        # جلب البيانات مباشرة من الـ storage
+        data = await dp.storage.get_data(key=storage_key)
         
-        # إضافة سجل للتحقق (Debug Log)
-        log_info(logger, f"البيانات المسترجعة للمستخدم {user_id}: {data}")
+        log_info(logger, f"📊 البيانات المسترجعة لـ {user_id}: {data}")
 
         if not data or 'questions' not in data:
-            log_warning(logger, f"⚠️ لم يتم العثور على بيانات الـ FSM للمستخدم {user_id}")
+            log_info(logger, f"⚠️ لا توجد بيانات كويز للمستخدم {user_id}")
             return
 
         selected_opt = poll_answer.option_ids[0]
@@ -231,14 +230,14 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         if selected_opt == correct_opt:
             current_score = data.get('score', 0)
             new_score = current_score + 1
-            await correct_state.update_data(score=new_score)
-            log_info(logger, f"✅ تم تحديث النتيجة للمستخدم {user_id}: {new_score}")
+            await dp.storage.update_data(key=storage_key, data={'score': new_score})
+            log_info(logger, f"✅ إجابة صحيحة! تم تحديث النتيجة لـ {user_id} لتصبح {new_score}")
         else:
             log_info(logger, f"❌ إجابة خاطئة للمستخدم {user_id}")
 
     except Exception as e:
         log_error(logger, f"❌ خطأ في handle_poll_answer: {e}", exception=e)
-        
+
 @router.callback_query(QuizState.answering_quiz, F.data == "get_hint")
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
