@@ -15,6 +15,7 @@ from constants import (
     ERROR_INSUFFICIENT_POINTS
 )
 # 🆕 تم إضافة استيراد الدالة لحساب الهاش من ملف الـ utils
+from gemini_helper import generate_quiz_smart
 from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
 # 🆕 تم إضافة استيراد دالة جلب الكاش من ملف الـ supabase_helper
 from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz
