@@ -14,9 +14,10 @@ from constants import (
     SUCCESS_FILE_UPLOADED, SUCCESS_PHOTO_UPLOADED, MSG_PROCESSING,
     ERROR_INSUFFICIENT_POINTS
 )
-from utils import safe_file_cleanup, ensure_directory_exists
-from gemini_helper import generate_quiz_smart  # الدالة الموحدة الجديدة
-from supabase_helper import check_or_add_user, update_user_stats
+# 🆕 تم إضافة استيراد الدالة لحساب الهاش من ملف الـ utils
+from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
+# 🆕 تم إضافة استيراد دالة جلب الكاش من ملف الـ supabase_helper
+from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz
 from keyboards import get_main_menu_keyboard
 from validators import validate_file_size, validate_question_count
 from logger import get_logger, log_error, log_info, log_warning
@@ -49,7 +50,7 @@ async def handle_media(msg: types.Message, state: FSMContext):
                 await msg.answer(error)
                 return
             
-            # 🆕 [تعديل] استخراج اسم الملف الأصلي وتنظيفه من الامتداد (مثل .pdf)
+            # [تعديل] استخراج اسم الملف الأصلي وتنظيفه من الامتداد (مثل .pdf)
             full_file_name = msg.document.file_name or "كويز من ملف"
             file_title, _ = os.path.splitext(full_file_name)
             
@@ -62,12 +63,45 @@ async def handle_media(msg: types.Message, state: FSMContext):
                 await msg.answer(error)
                 return
                 
-            # 🆕 [تعديل] تعيين اسم افتراضي مخصص ومناسب للصور
+            # [تعديل] تعيين اسم افتراضي مخصص ومناسب للصور
             file_title = "كويز من صورة"
             file_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{photo.file_id}.jpg")
             await bot.download(photo, destination=file_path)
 
-        # 🆕 [تعديل] تخزين اسم الملف النظيف في الـ source_title بدلاً من الاسم الموحد القديم
+        # 🆕 [ميزة الكاش الذكي]: فحص الهاش والتحقق هل تمت معالجة هذا الملف مسبقاً أم لا
+        file_hash = await asyncio.to_thread(calculate_file_hash, file_path)
+        cached_data = await asyncio.to_thread(get_cached_quiz, file_hash)
+
+        if cached_data and cached_data.get("questions_data"):
+            questions_data = cached_data["questions_data"]
+            q_count = len(questions_data)
+            cache_cost = round(q_count * 0.1, 1)  # حساب تكلفة الـ 10% بدقة عشارية
+
+            # تخزين البيانات مؤقتاً في جلسة المستخدم الحالية
+            await state.update_data(
+                file_path=file_path, 
+                source_title=file_title,
+                cached_questions=questions_data,
+                cache_cost=cache_cost
+            )
+
+            # بناء لوحة الاختيارات (أزرار إنلاين) للمستخدم
+            kb = types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text=f"🎰 كويز جاهز ({cache_cost} نقطة)", callback_data="cache_action_yes")],
+                [types.InlineKeyboardButton(text="🧠 توليد أسئلة جديدة (تكلفة كاملة)", callback_data="cache_action_no")]
+            ])
+
+            await state.set_state(QuizState.waiting_for_cache_decision)
+            await msg.answer(
+                f"💡 **هذا الملف تمت معالجته مسبقاً في السيرفر!**\n\n"
+                f"📦 يحتوي على **{q_count}** سؤال جاهز تماماً.\n"
+                f"🏷️ **عرض التوفير:** يمكنك خوض هذا الاختبار فوراً بتكلفة **{cache_cost}** نقاط فقط بدلاً من {q_count} نقطة!",
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+            return
+
+        # [تعديل] تخزين اسم الملف النظيف في الـ source_title بدلاً من الاسم الموحد القديم (السير الطبيعي)
         await state.update_data(file_path=file_path, source_title=file_title)
         await state.set_state(QuizState.waiting_for_count)
         await msg.answer("✅ تم رفع الملف بنجاح! كم سؤال تريد استخراجه من هذا المحتوى؟")
@@ -75,6 +109,56 @@ async def handle_media(msg: types.Message, state: FSMContext):
     except Exception as e:
         log_error(logger, f"Error in handle_media: {e}", exception=e)
         await msg.answer("❌ حدث خطأ غير متوقع أثناء معالجة الملف.")
+
+
+# ==================== Cache Decision Handlers ====================
+
+@router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_yes")
+async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        questions = data.get("cached_questions")
+        cost = data.get("cache_cost", 0)
+        source_title = data.get("source_title", "كويز من ملف")
+        file_path = data.get("file_path")
+
+        # التحقق من رصيد المستخدم الحالي
+        user_info = await asyncio.to_thread(check_or_add_user, call.from_user.id, call.from_user.username or "Unknown", call.from_user.first_name or "Unknown", call.from_user.last_name or "Unknown")
+        if user_info["points"] < cost:
+            await call.answer(f"❌ نقاطك غير كافية! تكلفة الاختبار {cost} ورصيدك {user_info['points']}", show_alert=True)
+            safe_file_cleanup(file_path)
+            await state.clear()
+            return
+
+        # الخصم المخفض بنسبة 10% من قاعدة البيانات وتحديث إحصائيات المستخدم بالأسئلة المستخرجة
+        await asyncio.to_thread(update_user_stats, call.from_user.id, cost, len(questions))
+
+        from handlers.execution import _start_loaded_quiz
+        # تشغيل الكويز المستخرج مباشرة من الكاش للمستخدم
+        await _start_loaded_quiz(call.message, state, questions, source_title, origin="cached_file")
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+
+    except Exception as e:
+        log_error(logger, f"Error processing cache acceptance: {e}", exception=e)
+        await call.answer("❌ حدث خطأ تقني أثناء تحميل الاختبار.", show_alert=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
+async def handle_cache_no(call: types.CallbackQuery, state: FSMContext):
+    try:
+        # الانتقال للمسار التقليدي وسؤال المستخدم عن عدد الأسئلة المطلوبة
+        await state.set_state(QuizState.waiting_for_count)
+        await call.message.edit_text("🔄 رائع، سيتم تجاهل الكاش وتوليد أسئلة جديدة كلياً عبر الذكاء الاصطناعي.\n\n📝 **كم سؤال تريد استخراجه من هذا المحتوى؟**", parse_mode="Markdown")
+    except Exception as e:
+        log_error(logger, f"Error declining cache: {e}", exception=e)
+    finally:
+        await call.answer()
+
 
 # ==================== Question Count Handler ====================
 
@@ -113,12 +197,12 @@ async def _run_quiz_flow(msg, file_path, count, state, processing_msg):
     سير العمل الموحد: توليد الأسئلة ثم البدء.
     """
     try:
-        # 🆕 [تعديل] جلب اسم الملف الديناميكي الذي حفظناه في الخطوة السابقة من الـ State
+        # [تعديل] جلب اسم الملف الديناميكي الذي حفظناه في الخطوة السابقة من الـ State
         data = await state.get_data()
         source_title = data.get('source_title', "كويز من ملف")
 
-        # استدعاء الدالة الذكية (Gemini) مباشرة
-        quiz_data = await generate_quiz_smart(file_path=file_path, count=count)
+        # استدعاء الدالة الذكية (Gemini) مباشرة مع تمرير العلم skip_cache=True لتوليد كويز جديد كلياً
+        quiz_data = await generate_quiz_smart(file_path=file_path, count=count, skip_cache=True)
         
         if not quiz_data:
             await processing_msg.edit_text("هناك ضغط على السيرفر، يرجى المحاولة بعد قليل")
@@ -128,7 +212,7 @@ async def _run_quiz_flow(msg, file_path, count, state, processing_msg):
         await asyncio.to_thread(update_user_stats, msg.from_user.id, len(quiz_data), len(quiz_data))
         
         from handlers.execution import _start_loaded_quiz
-        # 🆕 [تعديل] تمرير متغير source_title الديناميكي هنا بدلاً من الكلمة الثابتة
+        # [تعديل] تمرير متغير source_title الديناميكي هنا بدلاً من الكلمة الثابتة
         await _start_loaded_quiz(msg, state, quiz_data, source_title, origin="file")
         await processing_msg.delete()
 

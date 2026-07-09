@@ -57,18 +57,20 @@ def _get_available_key_indices() -> List[int]:
     return available
 
 # ==================== Main Generation Function ====================
-async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[str, Any]]]:
+async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = False) -> Optional[List[Dict[str, Any]]]:
     if not API_KEYS: 
         log_error(logger, "لم يتم العثور على مفاتيح API.")
         return None
 
     # تشغيل الدالات المتزامنة في Threads منفصلة لحماية الـ Event Loop من التجمد
     file_hash = await asyncio.to_thread(calculate_file_hash, file_path)
-    cached_data = await asyncio.to_thread(get_cached_quiz, file_hash)
     
-    if cached_data:
-        log_info(logger, f"Cache Hit! Returning cached questions for hash: {file_hash}")
-        return cached_data["questions_data"]
+    # 🆕 تعديل: التحقق من الكاش يتم فقط إذا لم يطلب المستخدم التوليد الفعلي الجديد
+    if not skip_cache:
+        cached_data = await asyncio.to_thread(get_cached_quiz, file_hash)
+        if cached_data:
+            log_info(logger, f"Cache Hit! Returning cached questions for hash: {file_hash}")
+            return cached_data["questions_data"]
 
     contents = []
     prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
@@ -118,9 +120,7 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
                 timeout=600.0
             )
             
-            # الحل: الاعتماد على response.parsed الذي توفره المكتبة الحديثة
             if response.parsed and hasattr(response.parsed, 'questions'):
-                
                 # 1. تحويل كائنات Pydantic إلى قواميس (Dicts) لتقبلها Supabase بأمان
                 questions = [q.model_dump() for q in response.parsed.questions]
                 
