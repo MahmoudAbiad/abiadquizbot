@@ -163,6 +163,8 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext):
 
 # ==================== Question Count Handler ====================
 
+# ==================== Question Count Handler ====================
+
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
 async def process_count(msg: types.Message, state: FSMContext):
     count = int(msg.text)
@@ -175,14 +177,49 @@ async def process_count(msg: types.Message, state: FSMContext):
     file_path = data.get('file_path')
     
     # التحقق من الرصيد
-    user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown",msg.from_user.first_name or "Unknown", msg.from_user.last_name or "Unknown" )
+    user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown", msg.from_user.first_name or "Unknown", msg.from_user.last_name or "Unknown")
     if user_info["points"] < count:
         await msg.answer(ERROR_INSUFFICIENT_POINTS.format(current=user_info["points"], required=count))
         safe_file_cleanup(file_path)
         await state.clear()
         return
 
-    # بدء المعالجة
+    # 🆕 [ميزتك الجديدة]: فحص عدد الصفحات قبل بدء معالجة الملف
+    if file_path.lower().endswith('.pdf'):
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            pages_total = len(doc)
+            doc.close()
+            
+            if pages_total > 15:
+                # حفظ عدد الأسئلة مؤقتاً في جلسة المستخدم للمتابعة لاحقاً
+                await state.update_data(pending_count=count)
+                
+                # بناء أزرار المتابعة أو التراجع
+                kb = types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="✅ المتابعة (أول 15 صفحة فقط)", callback_data="limit_action_continue")],
+                    [types.InlineKeyboardButton(text="❌ التراجع وإلغاء الطلب", callback_data="limit_action_cancel")]
+                ])
+                
+                # نقل المستخدم لحالة انتظار قرار الحجم
+                await state.set_state(QuizState.waiting_for_cache_decision) # يمكن استخدام نفس الحالة المؤقتة أو إضافة واحدة جديدة في config
+                await msg.answer(
+                    f"⚠️ **تنبيه بخصوص حجم الملف:**\n\n"
+                    f"الملف المرفوع يحتوي على **{pages_total}** صفحة. نظراً للضغط الحالي على سيرفرات الذكاء الاصطناعي، نحن غير قادرين على معالجة سوى 15 صفحة فقط من الملف.\n\n"
+                    f"سيقوم النظام بقراءة **أول 15 صفحة فقط** وتوليد الأسئلة منها. هل ترغب في المتابعة أم التراجع؟",
+                    reply_markup=kb
+                )
+                return
+        except Exception as e:
+            log_error(logger, f"خطأ أثناء فحص عدد الصفحات: {e}")
+
+    # إذا كان الملف أقل من 15 صفحة، يستمر السير الطبيعي فوراً
+    await trigger_quiz_generation(msg, file_path, count, state)
+
+
+# 🆕 دالة مساعدة لبدء التوليد الفعلي منعاً لتكرار الكود
+async def trigger_quiz_generation(msg: types.Message, file_path: str, count: int, state: FSMContext):
     async with processing_users_lock:
         if msg.from_user.id in processing_users:
             await msg.answer("⏳ جاري المعالجة، انتظر قليلاً...")
@@ -191,6 +228,38 @@ async def process_count(msg: types.Message, state: FSMContext):
 
     processing_msg = await msg.answer(MSG_PROCESSING)
     asyncio.create_task(_run_quiz_flow(msg, file_path, count, state, processing_msg))
+
+
+# 🆕 مستقبلات الأزرار الجديدة للتعامل مع قرار الـ 15 صفحة
+@router.callback_query(F.data == "limit_action_continue")
+async def handle_limit_continue(call: types.CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        file_path = data.get('file_path')
+        count = data.get('pending_count')
+        
+        await call.message.edit_text("🔄 جاري التوجيه ومعالجة أول 15 صفحة من المستند...")
+        await trigger_quiz_generation(call.message, file_path, count, state)
+    except Exception as e:
+        log_error(logger, f"Error in limit continue callback: {e}")
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "limit_action_cancel")
+async def handle_limit_cancel(call: types.CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        file_path = data.get('file_path')
+        
+        safe_file_cleanup(file_path)
+        await state.clear()
+        
+        await call.message.edit_text("❌ تم إلغاء العملية بنجاح بناءً على طلبك. يمكنك رفع ملف آخر في أي وقت.")
+    except Exception as e:
+        log_error(logger, f"Error in limit cancel callback: {e}")
+    finally:
+        await call.answer()
 
 
 async def _run_quiz_flow(msg, file_path, count, state, processing_msg):

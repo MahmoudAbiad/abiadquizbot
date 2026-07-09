@@ -1,6 +1,7 @@
 """
 AI integration for quiz generation.
 Hybrid API Flow: Routes PDFs to Gemini and Photos to Groq.
+Includes advanced Fallback for Scanned PDFs to Groq Vision (Supports up to 15 compressed pages).
 """
 
 import os
@@ -13,7 +14,7 @@ import base64
 from typing import Optional, List, Dict, Any
 from google import genai
 from google.genai import types
-from groq import AsyncGroq  # استيراد مكتبة غروك المزامنة للسرعة
+from groq import AsyncGroq
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -36,8 +37,6 @@ if not API_KEYS and os.getenv("GEMINI_API_KEY"):
     API_KEYS = [os.getenv("GEMINI_API_KEY")]
 
 blocked_keys: Dict[int, datetime.datetime] = {}
-
-# إعداد مفتاح غروك
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # ==================== Pydantic Schemas ====================
@@ -63,7 +62,6 @@ def _get_available_key_indices() -> List[int]:
 
 # ==================== Main Generation Function ====================
 async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = False) -> Optional[List[Dict[str, Any]]]:
-    # حساب الهاش وفحص الكاش أولاً (ينطبق على الصور والملفات)
     file_hash = await asyncio.to_thread(calculate_file_hash, file_path)
     
     if not skip_cache:
@@ -72,34 +70,33 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
             log_info(logger, f"Cache Hit! Returning cached questions for hash: {file_hash}")
             return cached_data["questions_data"]
 
+    prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
+    
+    # صياغة تعليمات المخرجات لـ Groq
+    groq_instructions = (
+        f"{prompt}\n\n"
+        "⚠️ تنبيه صارم: يجب أن تكون المخرجات عبارة عن كائن JSON صالح تماماً، يحتوي على حقل رئيسي باسم 'questions' وهو عبارة عن مصفوفة، وكل عنصر داخل المصفوفة يحتوي حصراً على الحقول التالية باللغة العربية:\n"
+        "- question\n"
+        "- options (مصفوفة من 4 خيارات)\n"
+        "- correct_option_id (رقم من 0 إلى 3)\n"
+        "- hint\n"
+        "- explanation"
+    )
+
     # ====================================================
-    # 📸 أولاً: مسار معالجة الصور عبر Groq (إذا لم يكن الملف PDF)
+    # 📸 أولاً: مسار معالجة الصور عبر Groq 
     # ====================================================
     if not file_path.lower().endswith('.pdf'):
         if not GROQ_API_KEY:
-            log_error(logger, "خطأ: لم يتم العثور على مفتاح GROQ_API_KEY في المتغيرات.")
+            log_error(logger, "خطأ: لم يتم العثور على مفتاح GROQ_API_KEY.")
             return None
         
         log_info(logger, f"توجيه الطلب إلى Groq لمعالجة الصورة: {file_path}")
         try:
-            # تحويل الصورة إلى Base64 ليقبلها نموذج الرؤية في غروك
             with open(file_path, "rb") as img_file:
                 base64_image = base64.b64encode(img_file.read()).decode('utf-8')
             
             groq_client = AsyncGroq(api_key=GROQ_API_KEY)
-            prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
-            
-            # صياغة تعليمات صارمة لـ Groq ليعيد كود JSON متوافق مع المخطط تماماً
-            groq_prompt = (
-                f"{prompt}\n\n"
-                "⚠️ تنبيه صارم: يجب أن تكون المخرجات عبارة عن كائن JSON صالح تماماً، يحتوي على حقل رئيسي باسم 'questions' وهو عبارة عن مصفوفة، وكل عنصر داخل المصفوفة يحتوي حصراً على الحقول التالية باللغة العربية:\n"
-                "- question\n"
-                "- options (مصفوفة من 4 خيارات)\n"
-                "- correct_option_id (رقم من 0 إلى 3)\n"
-                "- hint\n"
-                "- explanation"
-            )
-            
             response = await asyncio.wait_for(
                 groq_client.chat.completions.create(
                     model="meta-llama/llama-4-scout-17b-16e-instruct",
@@ -107,33 +104,22 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": groq_prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{base64_image}"
-                                    }
-                                }
+                                {"type": "text", "text": groq_instructions},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                             ]
                         }
                     ],
-                    response_format={"type": "json_object"},  # تفعيل نمط جيTemplate المنظم
+                    response_format={"type": "json_object"},
                     temperature=0.7
                 ),
                 timeout=45.0
             )
             
-            # معالجة استجابة غروك وتحويلها البنيوي
-            content = response.choices[0].message.content
-            parsed_json = json.loads(content)
-            
-            # التحقق والمطابقة مع سكيما Pydantic لضمان سلامة البيانات قبل الكاش
+            parsed_json = json.loads(response.choices[0].message.content)
             validated_response = QuizResponse(**parsed_json)
             questions = [q.model_dump() for q in validated_response.questions]
             
             total_tokens = response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
-            
-            # حفظ في الكاش
             await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, total_tokens)
             return questions
             
@@ -142,75 +128,132 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
             return None
 
     # ====================================================
-    # 📄 ثانياً: مسار معالجة ملفات الـ PDF عبر Gemini (الكود الأصلي)
+    # 📄 ثانياً: مسار ملفات الـ PDF (جيميني أولاً كخيار أساسي)
     # ====================================================
-    if not API_KEYS: 
-        log_error(logger, "لم يتم العثور على مفاتيح Gemini API.")
-        return None
-
     log_info(logger, f"توجيه الطلب إلى Gemini لمعالجة مستند PDF: {file_path}")
     contents = []
-    prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
+    total_text = ""
+    is_scanned = False
     
     try:
         doc = fitz.open(file_path)
         total_text = "".join([page.get_text() for page in doc])
         doc.close()
         
-        if len(total_text.strip()) > 200:
+        # إذا كان النص المستخرج شبه معدوم، فهذا يعني أن الملف ممسوح ضوئياً (Scanned)
+        if len(total_text.strip()) < 100:
+            is_scanned = True
+            log_warning(logger, "الملف يبدو ممسوحاً ضوئياً (Scanned PDF).")
+        
+        if not is_scanned and len(total_text.strip()) > 200:
             contents = [prompt, total_text[:MAX_TEXT_LENGTH_FOR_AI]]
         else:
+            # إرسال بايتات الملف كاملة لجيميني (جيميني يمتلك OCR داخلي للملفات)
             with open(file_path, "rb") as f:
                 contents = [types.Part.from_bytes(data=f.read(), mime_type="application/pdf"), prompt]
     except Exception as e:
         log_error(logger, f"خطأ في قراءة الملف عبر Gemini: {e}")
         return None
 
-    max_attempts = len(API_KEYS)
-    for attempt in range(max_attempts):
-        available = _get_available_key_indices()
-        if not available: 
-            blocked_keys.clear()
-            available = list(range(len(API_KEYS)))
-        
-        idx = random.choice(available)
-        await asyncio.sleep(random.uniform(0.5, 1.5))
-        
-        try:
-            client = genai.Client(api_key=API_KEYS[idx])
+    # محاولة إرسال الملف إلى جيميني
+    if API_KEYS:
+        max_attempts = len(API_KEYS)
+        for attempt in range(max_attempts):
+            available = _get_available_key_indices()
+            if not available: 
+                blocked_keys.clear()
+                available = list(range(len(API_KEYS)))
             
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json", 
-                        response_schema=QuizResponse,
-                        temperature=0.7
+            idx = random.choice(available)
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            
+            try:
+                client = genai.Client(api_key=API_KEYS[idx])
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=GEMINI_MODEL,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json", 
+                            response_schema=QuizResponse,
+                            temperature=0.7
+                        ),
                     ),
+                    timeout=45.0
+                )
+                
+                if response.parsed and hasattr(response.parsed, 'questions'):
+                    questions = [q.model_dump() for q in response.parsed.questions]
+                    total_tokens = response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') and response.usage_metadata else 0
+                    await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, total_tokens)
+                    return questions
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                log_warning(logger, f"فشل مفتاح جيميني {idx} في المحاولة {attempt + 1}: {e}")
+                
+                if any(k in error_msg for k in QUOTA_ERROR_KEYWORDS):
+                    blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(hours=KEY_BLOCK_QUOTA_EXHAUSTED)
+                else:
+                    blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(minutes=KEY_BLOCK_TEMPORARY_ERROR)
+
+    # ====================================================
+    # 🚀 الخيار البديل الذكي (Fallback) إلى Groq في حال فشل جيميني
+    # ====================================================
+    if GROQ_API_KEY:
+        log_warning(logger, "⚠️ تفعل نظام الإنقاذ: جاري تحويل الطلب إلى Groq...")
+        try:
+            groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+            groq_messages_content = [{"type": "text", "text": groq_instructions}]
+            
+            if is_scanned:
+                # 💥 الخدعة الذكية: تحويل أول 15 صفحة وضغطها بشكل خارق لتناسب حجم طلب غروك الآمن
+                log_info(logger, "جاري تحويل أول 15 صفحة من الـ PDF الممسوح ضوئياً وضغطها لـ Groq Vision...")
+                doc = fitz.open(file_path)
+                
+                # تعيين الحد الأقصى الجديد إلى 15 صفحة
+                max_pages = min(len(doc), 15)
+                
+                # إعداد مصفوفة خفض الدقة بنسبة 40% لتصغير مساحة بيكسلات الصورة
+                matrix = fitz.Matrix(0.6, 0.6)
+                
+                for i in range(max_pages):
+                    page = doc[i]
+                    pix = page.get_pixmap(matrix=matrix)  # تحويل الصفحة لصورة بالدقة الجديدة
+                    img_bytes = pix.tobytes("jpeg", quality=50)  # ضغط جودة الـ JPEG إلى 50% لتوفير المساحة الخارقة
+                    
+                    base64_page = base64.b64encode(img_bytes).decode('utf-8')
+                    groq_messages_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_page}"}
+                    })
+                doc.close()
+            else:
+                # إذا كان الملف نصي عادي وجيميني فقط مضغوط، نرسل النص كالعادة
+                groq_messages_content.append({"type": "text", "text": f"\n\nالمحتوى النصي للمستند:\n{total_text[:MAX_TEXT_LENGTH_FOR_AI]}"})
+            
+            # تمديد المهلة الزمنية إلى 90 ثانية لتتسع لمعالجة وتحليل الـ 15 صورة بأريحية
+            response = await asyncio.wait_for(
+                groq_client.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    messages=[{"role": "user", "content": groq_messages_content}],
+                    response_format={"type": "json_object"},
+                    temperature=0.7
                 ),
-                timeout=45.0
+                timeout=90.0
             )
             
-            if response.parsed and hasattr(response.parsed, 'questions'):
-                questions = [q.model_dump() for q in response.parsed.questions]
-                
-                total_tokens = 0
-                if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                    total_tokens = response.usage_metadata.total_token_count
-                    
-                await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, total_tokens)
-                return questions
+            parsed_json = json.loads(response.choices[0].message.content)
+            validated_response = QuizResponse(**parsed_json)
+            questions = [q.model_dump() for q in validated_response.questions]
             
-            return []
+            total_tokens = response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
+            await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, total_tokens)
             
-        except Exception as e:
-            error_msg = str(e).lower()
-            log_warning(logger, f"فشل مفتاح جيميني {idx} في المحاولة {attempt + 1}: {e}")
+            log_info(logger, "✅ تم إنقاذ الملف الممسوح ضوئياً وتوليد الأسئلة عبر Groq بنجاح باهر!")
+            return questions
             
-            if any(k in error_msg for k in QUOTA_ERROR_KEYWORDS):
-                blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(hours=KEY_BLOCK_QUOTA_EXHAUSTED)
-            else:
-                blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(minutes=KEY_BLOCK_TEMPORARY_ERROR)
-            
+        except Exception as groq_err:
+            log_error(logger, f"❌ حتى الخيار البديل (Groq) فشل في معالجة الملف: {groq_err}")
+
     return None
