@@ -67,12 +67,11 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
                 f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
             )
             
-            # تفعيل الـ Markdown لظهور الخط العريض بشكل صحيح
             await bot.send_message(chat_id, result_text, reply_markup=get_quiz_result_keyboard(), parse_mode="Markdown")
             log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
             await state.update_data(quiz_completed=True)
             
-            # ✅ الحل الهندسي: تصفير الحالة فقط (set_state(None)) دون حذف البيانات (clear) ليتمكن من معالجة صور جديدة وتظل الأزرار تعمل!
+            # تحرير الحالة للسماح بملفات جديدة مع الحفاظ على البيانات للأزرار الأخرى
             await state.set_state(None)
             return
         
@@ -125,7 +124,7 @@ async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext)
 @router.callback_query(F.data == "quiz_stop")
 async def stop_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
-        await state.clear() # هنا نمسح بالكامل لأن المستخدم اختار الإيقاف الفعلي بنفسه
+        await state.clear() 
         try:
             await call.message.delete()
         except Exception:
@@ -147,7 +146,6 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ لا يوجد كويز محفوظ لإعادة تشغيله", show_alert=True)
             return
         
-        # ✅ تحديث: إعادتهم لحالة الاختبار قبل البدء لتأمين تسلسل الأسئلة
         await state.set_state(QuizState.answering_quiz)
         await state.update_data(current_index=0, score=0, quiz_completed=False)
         try:
@@ -181,7 +179,9 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         user_id = quiz_info["user_id"]
         correct_opt = quiz_info["correct_option_id"]
 
-        storage_key = StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id)
+        # ✅ إصلاح حرج: استخراج المعرف الرياضي للبوت من التوكن مباشرة لتجنب قيم الـ None المطروحة في السيرفر السحابي
+        bot_id = int(bot.token.split(":")[0])
+        storage_key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=user_id)
         correct_state = FSMContext(storage=state.storage, key=storage_key)
 
         data = await correct_state.get_data()
@@ -210,7 +210,6 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
         await call.answer("❌ خطأ في جلب التلميح", show_alert=True)
 
-# ✅ تحديث: إزالة الفلتر المقيّد للحالة واستقبال الحدثين (save_quiz أثناء الحل و quiz_favorite عند النهاية)
 @router.callback_query(F.data.in_({"save_quiz", "quiz_favorite"}))
 async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
@@ -221,6 +220,7 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
 
         questions = data.get("questions")
         title = data.get("source_title") or data.get("title") or "كويز بدون عنوان"
+        quiz_id = data.get("quiz_id")  # 🆕 1. جلب معرف الكويز الفريد المخزن في الـ State
         
         if not questions:
             await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
@@ -228,8 +228,10 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
 
         user_favorites = await asyncio.to_thread(list_favorite_quizzes, call.from_user.id)
         if user_favorites:
+            # 🆕 2. تحديث شرط التحقق: يقارن بالـ ID أولاً، أو بالاسم بشرط ألا يكون الاسم التلقائي العام
             is_already_saved = any(
-                (fav.get("title") == title or fav.get("source_title") == title) 
+                (quiz_id and fav.get("quiz_id") == quiz_id) or 
+                (fav.get("title") == title and title != "كويز بدون عنوان")
                 for fav in user_favorites
             )
             if is_already_saved:
@@ -237,7 +239,8 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
                 await call.answer("💡 هذا الكويز موجود بالفعل في قائمتك المفضلة مسبقاً!", show_alert=True)
                 return
 
-        await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions)
+        # 🆕 3. تمرير الـ quiz_id هنا كـ Keyword Argument ليتم حفظه في قاعدة البيانات
+        await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions, quiz_id=quiz_id)
         await state.update_data(is_saved_in_session=True)
         await call.answer("✅ تم الحفظ بنجاح! تجده في 'قائمتي المفضلة' قسم 'عام'.", show_alert=True)
         
@@ -264,7 +267,6 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
 async def handle_ignored_click(call: types.CallbackQuery):
     await call.answer("✅ تم تسجيل إجابتك")
 
-# ✅ تحديث: إزالة الفلتر المقيّد للحالة ليعمل زر المشاركة من شاشة النهاية بامتياز
 @router.callback_query(F.data == "quiz_share")
 async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext):
     try:

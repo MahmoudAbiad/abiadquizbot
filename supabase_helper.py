@@ -194,11 +194,12 @@ def save_favorite_quiz(
     quiz_data: List[Dict[str, Any]],
     section_id: Optional[str] = None,
     source_title: Optional[str] = None,
+    quiz_id: Optional[str] = None,  # 🆕 أضفنا هذا المعامل لاستقبال معرف الكويز الفريد
 ) -> Optional[str]:
     try:
         favorite_id = uuid.uuid4().hex[:12]
         payload = {
-            "favorite_id": favorite_id,  # Fixed: Added identifier string directly into payload
+            "favorite_id": favorite_id,
             "user_id": user_id,
             "title": title,
             "source_title": source_title or title,
@@ -207,11 +208,13 @@ def save_favorite_quiz(
         }
         if section_id is not None:
             payload["section_id"] = section_id
+            
+        if quiz_id is not None:  # 🆕 تخزين المعرف في قاعدة البيانات إن وجد
+            payload["quiz_id"] = quiz_id
 
         try:
             supabase.table("favorite_quizzes").insert(payload).execute()
         except Exception as insert_error:
-            # Safer parsing for APIError objects or standard string errors
             error_text = getattr(insert_error, 'message', str(insert_error))
             if section_id is not None and "section_id" in error_text and "favorite_quizzes" in error_text:
                 payload.pop("section_id", None)
@@ -240,18 +243,19 @@ def list_favorite_quizzes(
         }
 
         try:
-            res = supabase.table("favorite_quizzes").select("favorite_id, title, source_title, section_id, created_at").eq("user_id", user_id).execute()
+            # 🆕 قمنا بإضافة quiz_id هنا لجلبها من قاعدة البيانات
+            res = supabase.table("favorite_quizzes").select("favorite_id, quiz_id, title, source_title, section_id, created_at").eq("user_id", user_id).execute()
         except Exception as select_error:
             error_text = getattr(select_error, 'message', str(select_error))
             if "section_id" in error_text and "favorite_quizzes" in error_text:
-                res = supabase.table("favorite_quizzes").select("favorite_id, title, source_title, created_at").eq("user_id", user_id).execute()
+                # 🆕 قمنا بإضافة quiz_id هنا أيضاً في حالة الفولباك (Fallback)
+                res = supabase.table("favorite_quizzes").select("favorite_id, quiz_id, title, source_title, created_at").eq("user_id", user_id).execute()
             else:
                 raise
 
         items = []
         for row in (res.data or []):
             item = dict(row)
-            # Safe tracking fallback options
             item["favorite_id"] = item.get("favorite_id") or item.get("created_at")
             section_title = section_map.get(item.get("section_id")) or DEFAULT_FAVORITE_SECTION_TITLE
             item["section_title"] = section_title
