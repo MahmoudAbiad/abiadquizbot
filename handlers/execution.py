@@ -23,11 +23,10 @@ from keyboards import (
     get_main_menu_keyboard, get_quiz_result_keyboard, 
 )
 from logger import get_logger, log_error, log_info, log_warning
+import json # للتعامل مع البيانات قبل حفظها في Redis
+from config import redis_client # لاستخدام المخزن الدائم
 
 logger = get_logger(__name__)
-
-# قاموس عام للربط بين معرف السؤال (poll_id) وبيانات الكويز والمحادثة
-poll_to_quiz_map = {}
 
 router = Router()
 
@@ -112,7 +111,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
 
-        # 4. إرسال السؤال كـ Poll رسمي بالبيانات النظيفة والمقتطعة بأمان
+# 1. إرسال السؤال كـ Poll رسمي بالبيانات النظيفة
         poll_msg = await bot.send_poll(
             chat_id=chat_id,
             question=clean_question,
@@ -123,13 +122,18 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             reply_markup=control_kb
         )
 
-        poll_to_quiz_map[poll_msg.poll.id] = {
+        # 2. الآن نستخرج الـ poll_id الحقيقي من رسالة الـ Poll التي أرسلناها للتو
+        poll_id = poll_msg.poll.id
+
+        # 3. نجهز البيانات التي نريد حفظها
+        quiz_data = {
             "chat_id": chat_id,
             "user_id": user_id,
-            "correct_option_id": int(q['correct_option_id']),
-            "index": idx
+            "correct_option_id": int(q['correct_option_id']) # تأكد أنك تستخدم القيمة الصحيحة من q
         }
 
+        # 4. نحفظ البيانات في Redis باستخدام الـ poll_id الصحيح
+        await redis_client.set(f"poll:{poll_id}", json.dumps(quiz_data), ex=7200)
     except Exception as e:
         log_error(logger, f"Error in send_question: {e}", exception=e)
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
@@ -202,42 +206,45 @@ async def quiz_home(call: types.CallbackQuery, state: FSMContext):
 async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
     try:
         poll_id = poll_answer.poll_id
-        if poll_id not in poll_to_quiz_map:
-            log_info(logger, f"⚠️ Poll ID {poll_id} غير موجود في الخريطة!")
+        
+        # 1. محاولة استرجاع بيانات السؤال من Redis
+        data_json = await redis_client.get(f"poll:{poll_id}")
+        
+        if not data_json:
+            # إذا لم نجد البيانات، فهذا يعني أن الكويز قديم أو تم مسحه من Redis
+            log_warning(logger, f"⚠️ لا توجد بيانات للكويز {poll_id} في الذاكرة (ربما انتهت صلاحيته).")
             return
 
-        quiz_info = poll_to_quiz_map[poll_id]
-        chat_id = quiz_info["chat_id"]
-        user_id = quiz_info["user_id"]
+        # 2. تحويل البيانات من نص (JSON) إلى قاموس (Dictionary)
+        quiz_info = json.loads(data_json)
+        
+        # استخراج البيانات المخزنة
         correct_opt = quiz_info["correct_option_id"]
+        user_id = quiz_info["user_id"]
+        # chat_id = quiz_info["chat_id"] # يمكنك استخدامه إذا أردت إرسال رسائل خاصة بعد الإجابة
 
-        # 🛠 الحل الجذري: لا تبنِ المفتاح يدوياً، استخدم الـ storage المباشر لـ Dispatcher
-        # نقوم بإنشاء مفتاح التخزين المعتمد على نفس معايير الـ FSM
-        from config import dp # تأكد من استيراد dp من config
-        storage_key = StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id)
-        
-        # جلب البيانات مباشرة من الـ storage
-        data = await dp.storage.get_data(key=storage_key)
-        
-        log_info(logger, f"📊 البيانات المسترجعة لـ {user_id}: {data}")
-
-        if not data or 'questions' not in data:
-            log_info(logger, f"⚠️ لا توجد بيانات كويز للمستخدم {user_id}")
+        # 3. التحقق من الإجابة
+        # تأكد أن المستخدم اختار إجابة (option_ids تحتوي على رقم الخيار)
+        if not poll_answer.option_ids:
             return
-
+            
         selected_opt = poll_answer.option_ids[0]
 
+        # 4. معالجة النتيجة وتحديث الـ State
         if selected_opt == correct_opt:
-            current_score = data.get('score', 0)
-            new_score = current_score + 1
-            await dp.storage.update_data(key=storage_key, data={'score': new_score})
-            log_info(logger, f"✅ إجابة صحيحة! تم تحديث النتيجة لـ {user_id} لتصبح {new_score}")
+            # جلب النتيجة الحالية من الـ State (المخزنة أيضاً في Redis)
+            current_data = await state.get_data()
+            current_score = current_data.get('score', 0)
+            
+            # تحديث النتيجة
+            await state.update_data(score=current_score + 1)
+            log_info(logger, f"✅ إجابة صحيحة للمستخدم {user_id}. النتيجة الجديدة: {current_score + 1}")
         else:
-            log_info(logger, f"❌ إجابة خاطئة للمستخدم {user_id}")
+            log_info(logger, f"❌ إجابة خاطئة للمستخدم {user_id}.")
 
     except Exception as e:
-        log_error(logger, f"❌ خطأ في handle_poll_answer: {e}", exception=e)
-
+        log_error(logger, f"❌ خطأ فادح في معالجة الإجابة (handle_poll_answer): {e}", exception=e)
+        
 @router.callback_query(QuizState.answering_quiz, F.data == "get_hint")
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:

@@ -6,7 +6,9 @@ Moved set_bot_commands here to prevent circular imports between main and webhook
 
 import os
 from aiogram import Bot, Dispatcher, types
-from aiogram.fsm.storage.memory import MemoryStorage
+# إضافة مكتبات Redis
+from aiogram.fsm.storage.redis import RedisStorage
+from redis.asyncio import Redis
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 from logger import get_logger
@@ -47,11 +49,19 @@ def _get_admin_id() -> int:
 
 # ==================== Initialization ====================
 try:
+    # إعداد الاتصال بـ Redis
+    # يقوم بقراءة REDIS_URL من بيئة Railway، وإذا لم يجده يستخدم المحلي للتطوير
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    redis_client = Redis.from_url(redis_url)
+    
+    # إعداد التخزين الدائم (RedisStorage)
+    storage = RedisStorage(redis=redis_client)
+    
     bot = Bot(token=_get_bot_token())
-    # استخدام MemoryStorage (يمكن ترقيته مستقبلاً لـ RedisStorage لحفظ الجلسات عند إعادة التشغيل)
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=storage) # ربط الـ Dispatcher بـ Redis
+    
     ADMIN_ID: int = _get_admin_id()
-    logger.info(f"Bot initialized successfully. Admin ID: {ADMIN_ID if ADMIN_ID else 'Not set'}")
+    logger.info(f"Bot initialized successfully with Redis. Admin ID: {ADMIN_ID if ADMIN_ID else 'Not set'}")
 except Exception as e:
     logger.critical(f"Failed to initialize bot components: {e}")
     raise
