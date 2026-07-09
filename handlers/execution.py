@@ -57,6 +57,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         idx = data['current_index']
         
         # 1. التحقق من انتهاء الاختبار
+        # 1. التحقق من انتهاء الاختبار
         if idx >= len(questions):
             score = data['score']
             total = data['total_count']
@@ -69,9 +70,19 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
                 f"📊 النسبة المئوية: **{percentage:.1f}%**\n\n"
                 f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
             )
-            await bot.send_message(chat_id, result_text, reply_markup=get_quiz_result_keyboard())
+            
+            # 🔥 إضافة parse_mode ليتم تنسيق النجوم كخط عريض
+            await bot.send_message(
+                chat_id, 
+                result_text, 
+                reply_markup=get_quiz_result_keyboard(),
+                parse_mode="Markdown" 
+            )
+            
             log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
-            await state.update_data(quiz_completed=True)
+            
+            # 🔥 السطر الأهم: تفريغ حالة المستخدم بالكامل ليتمكن من رفع صور وملفات جديدة
+            await state.clear()
             return
         
         # 2. جلب بيانات السؤال الحالي
