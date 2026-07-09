@@ -7,6 +7,7 @@ import os
 import asyncio
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter  # تم استيراد الفلتر لضبط الحالات بشكل صحيح
 
 from config import bot, QuizState
 from constants import (
@@ -140,12 +141,9 @@ async def handle_media(msg: types.Message, state: FSMContext):
 
 # ==================== Text Handler (Groq Exclusive) ====================
 
-@router.message(F.text & ~F.text.startswith('/'))
+# تم ربطه بـ StateFilter(None) لضمان عدم اعتراض الأرقام أو الردود أثناء الحالات الأخرى
+@router.message(StateFilter(None), F.text, ~F.text.startswith('/'))
 async def handle_pure_text(msg: types.Message, state: FSMContext):
-    current_status = await state.get_state()
-    if current_status in [QuizState.answering_quiz, QuizState.waiting_for_count, QuizState.waiting_for_cache_decision]:
-        return  # تجاهل النصوص العادية إذا كان في حالة معينة
-    
     # استقبال النص وحفظه
     text_content = msg.text.strip()
     if len(text_content) < 30:
@@ -199,6 +197,7 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext):
 
 # ==================== Question Count Handler ====================
 
+# المعالج الأساسي عند استقبال رقم صحيح في حالة انتظار العدد
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
 async def process_count(msg: types.Message, state: FSMContext):
     count = int(msg.text)
@@ -242,6 +241,14 @@ async def process_count(msg: types.Message, state: FSMContext):
 
     await trigger_quiz_generation(msg, msg.from_user.id, count, state)
 
+
+# معالج الأخطاء: يعمل إذا أرسل المستخدم نصاً عادياً بدلاً من الرقم أثناء حالة انتظار العدد
+@router.message(QuizState.waiting_for_count)
+async def process_count_invalid(msg: types.Message):
+    await msg.answer("⚠️ **الرجاء إرسال رقم صحيح فقط** (مثال: 5 أو 10) وتجنب كتابة الكلمات لتحديد عدد الأسئلة!")
+
+
+# ====================================================================
 
 async def trigger_quiz_generation(msg_obj: types.Message, user_id: int, count: int, state: FSMContext):
     async with processing_users_lock:

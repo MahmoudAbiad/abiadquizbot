@@ -1,9 +1,11 @@
 """
 Quiz execution module - handles answering questions, hints, and results.
+Resilient to Telegram Poll string limitations.
 """
 import asyncio
+from typing import Union
 
-# 🆕 تم تحديث الاستيراد ليشمل دالات الأقسام من قاعدة البيانات
+# استيراد دالات الأقسام من قاعدة البيانات
 from supabase_helper import (
     list_favorite_quizzes, 
     update_user_stats, 
@@ -13,7 +15,7 @@ from supabase_helper import (
 )
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
-from typing import Union
+from aiogram.fsm.storage.base import StorageKey
 
 from config import bot, QuizState
 from constants import MSG_QUIZ_STOPPED
@@ -24,11 +26,9 @@ from logger import get_logger, log_error, log_info
 
 logger = get_logger(__name__)
 
-from aiogram.fsm.storage.base import StorageKey
 # قاموس عام للربط بين معرف السؤال (poll_id) وبيانات الكويز والمحادثة
 poll_to_quiz_map = {}
 
-# 💡 تعريف الراوتر الأساسي للملف
 router = Router()
 
 async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
@@ -41,7 +41,6 @@ async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQu
         await call_or_message.answer(text, reply_markup=menu)
 
 async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: str = "") -> None:
-    # 🆕 تم إضافة تصفير حالة الحفظ (is_saved_in_session=False) لضمان عدم تداخل الكويزات الجديدة
     await state.update_data(
         questions=quiz_data, current_index=0, score=0,
         total_count=len(quiz_data), source_title=source_title,
@@ -57,6 +56,7 @@ async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQue
     await send_question(msg_or_call, state)
 
 async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext) -> None:
+    idx = 0
     try:
         data = await state.get_data()
         questions = data['questions']
@@ -79,14 +79,27 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             await bot.send_message(chat_id, result_text, reply_markup=get_quiz_result_keyboard(), parse_mode="Markdown")
             log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
             await state.update_data(quiz_completed=True)
-            
-            # تحرير الحالة للسماح بملفات جديدة مع الحفاظ على البيانات للأزرار الأخرى
             await state.set_state(None)
             return
         
-        # 2. جلب بيانات السؤال الحالي
+        # 2. جلب بيانات السؤال الحالي وتأمين الهويات
         q = questions[idx]
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
+        
+        # 🔐 حل مشكلة معرف البوت: جلب معرف الطالب الحقيقي دائماً من مفتاح الـ FSM المتصل بالعملية
+        user_id = state.key.user_id
+
+        # ⚙️ [حصن الحماية] معالجة واقتطاع النصوص للامتثال لقيود تليجرام الصارمة لضمان الاستقرار الإرسالي
+        raw_question = f"📝 السؤال {idx + 1} من {len(questions)}:\n{q['question']}"
+        clean_question = raw_question if len(raw_question) <= 300 else raw_question[:297] + "..."
+        
+        clean_options = []
+        for opt in q['options']:
+            opt_str = str(opt).strip()
+            clean_options.append(opt_str if len(opt_str) <= 100 else opt_str[:97] + "...")
+            
+        raw_explanation = q.get("explanation") or "إجابة صحيحة!"
+        clean_explanation = raw_explanation if len(raw_explanation) <= 200 else raw_explanation[:197] + "..."
 
         # 3. إنشاء أزرار التحكم السفلية
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -99,26 +112,40 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
 
-        # 4. إرسال السؤال كـ Poll رسمي
+        # 4. إرسال السؤال كـ Poll رسمي بالبيانات النظيفة والمقتطعة بأمان
         poll_msg = await bot.send_poll(
             chat_id=chat_id,
-            question=f"📝 السؤال {idx + 1} من {len(questions)}:\n{q['question']}",
-            options=q['options'],
+            question=clean_question,
+            options=clean_options,
             type="quiz",
             correct_option_id=int(q['correct_option_id']),
-            explanation=q.get("explanation") or "إجابة صحيحة!",
+            explanation=clean_explanation,
             reply_markup=control_kb
         )
 
         poll_to_quiz_map[poll_msg.poll.id] = {
             "chat_id": chat_id,
-            "user_id": msg_or_call.from_user.id,
+            "user_id": user_id,
             "correct_option_id": int(q['correct_option_id']),
             "index": idx
         }
 
     except Exception as e:
         log_error(logger, f"Error in send_question: {e}", exception=e)
+        # كسر الصمت المطبق: إرسال واجهة تفاعلية بديلة للمستخدم ليتجاوز المشكلة إن حدثت
+        chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ **نعتذر منك، واجه النظام مشكلة تقنية في عرض السؤال رقم ({idx + 1}) كـ Poll.**\n\n"
+                     f"📌 السبب الغالب يعود لطول صياغة السؤال أو الخيارات القادمة من الموديل.\n"
+                     f"⏩ يمكنك تخطي هذا السؤال مباشرة لعدم عرقلة اختبارك.",
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="تخطي هذا السؤال والانتقال للتالي ➡️", callback_data="next_question")]
+                ])
+            )
+        except Exception:
+            pass
 
 @router.callback_query(QuizState.answering_quiz, F.data == "start_first_question")
 async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext):
@@ -134,10 +161,8 @@ async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext)
 async def stop_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         await state.clear() 
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
+        try: await call.message.delete()
+        except Exception: pass
         await _send_main_menu(call, call.from_user.id)
         await call.message.answer(MSG_QUIZ_STOPPED)
     except Exception as e:
@@ -157,10 +182,8 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         
         await state.set_state(QuizState.answering_quiz)
         await state.update_data(current_index=0, score=0, quiz_completed=False)
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
+        try: await call.message.delete()
+        except Exception: pass
         await send_question(call, state)
     except Exception as e:
         log_error(logger, f"Error in replay_quiz: {e}", exception=e)
@@ -219,7 +242,7 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
         await call.answer("❌ خطأ في جلب التلميح", show_alert=True)
 
 
-# ==================== 🆕 معالج حفظ الكويز التفاعلي الذكي ====================
+# ==================== معالج حفظ الكويز التفاعلي الذكي ====================
 
 @router.callback_query(F.data.in_({"save_quiz", "quiz_favorite"}))
 async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
@@ -236,7 +259,6 @@ async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
             return
 
-        # فحص أولي لمنع التكرار المعتمد على المعرف الفريد
         user_favorites = await asyncio.to_thread(list_favorite_quizzes, call.from_user.id)
         is_already_saved = False
         if user_favorites and quiz_id and str(quiz_id).strip():
@@ -247,11 +269,9 @@ async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
             await call.answer("💡 هذا الكويز موجود بالفعل في قائمتك المفضلة مسبقاً!", show_alert=True)
             return
 
-        # 🔒 حفظ حالة الكويز الحالية للعودة إليها بعد انتهاء ساحر الحفظ
         current_status = await state.get_state()
         await state.update_data(prev_quiz_state=current_status)
 
-        # خطوة 1: تخيير المستخدم بين الاسم الافتراضي أو المخصص
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="📄 حفظ بالاسم الحالي", callback_data="save_name_current")],
             [types.InlineKeyboardButton(text="✏️ حفظ باسم مخصص", callback_data="save_name_custom")]
@@ -273,12 +293,9 @@ async def save_name_current_handler(call: types.CallbackQuery, state: FSMContext
         title = data.get("source_title") or data.get("title") or "كويز بدون عنوان"
         await state.update_data(final_save_title=title)
         
-        # الانتقال مباشرة للخطوة الثانية (تصنيف الأقسام)
         await _prompt_section_selection(call.message, state)
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
+        try: await call.message.delete()
+        except Exception: pass
     except Exception as e:
         log_error(logger, f"Error in save_name_current: {e}", exception=e)
     finally:
@@ -331,7 +348,6 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
         
         await call.message.edit_text(f"✅ **تم الحفظ بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم: `عام`", parse_mode="Markdown")
         
-        # 🔄 استعادة حالة الكويز ومتابعة الاختبار من نفس النقطة
         prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
         await state.set_state(prev_state)
     except Exception as e:
@@ -361,7 +377,7 @@ async def handle_save_choose_section(call: types.CallbackQuery, state: FSMContex
         await call.message.edit_text("📂 **اختر أحد أقسامك المفضلة الحالية لتصنيف الاختبار داخله:**", reply_markup=kb, parse_mode="Markdown")
     except Exception as e:
         log_error(logger, f"Error showing sections: {e}", exception=e)
-        await call.answer("❌ تعذر جلب قائمة الأقsections حالياً.", show_alert=True)
+        await call.answer("❌ تعذر جلب قائمة الأقسام حالياً.", show_alert=True)
     finally:
         await call.answer()
 
@@ -413,26 +429,20 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
         questions = data.get("questions")
         quiz_id = data.get("quiz_id")
         
-        # 1. إنشاء القسم الجديد في قاعدة البيانات والحصول على معرفه الـ UUID
         new_section_id = await asyncio.to_thread(create_favorite_section, user_id, section_title)
-        
         if not new_section_id:
             await msg.answer("⚠️ تعذر إنشاء القسم، تم تحويل مسار الحفظ تلقائياً إلى 'عام'.")
             new_section_id = None
             
-        # 2. ربط وحفظ الكويز بالقسم الجديد مباشرة
         await asyncio.to_thread(save_favorite_quiz, user_id, title, questions, new_section_id, None, quiz_id)
         await state.update_data(is_saved_in_session=True)
         
         await msg.answer(f"✅ **تم إنشاء القسم وحفظ الاختبار بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم الجديد: `{section_title}`", parse_mode="Markdown")
         
-        # 🔄 العودة الآمنة للكويز القائم لإكماله
         prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
         await state.set_state(prev_state)
     except Exception as e:
         log_error(logger, f"Error in creating section and saving: {e}", exception=e)
-
-# ==================== 🔚 نهاية معالجات الحفظ الذكية ====================
 
 
 @router.callback_query(QuizState.answering_quiz, F.data == "next_question")
@@ -440,10 +450,8 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         await state.update_data(current_index=data['current_index'] + 1)
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
+        try: await call.message.delete()
+        except Exception: pass
         await send_question(call, state)
     except Exception as e:
         log_error(logger, f"Error in handle_next: {e}", exception=e)
@@ -483,3 +491,5 @@ async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext)
         log_error(logger, f"Error in handle_inline_quiz_share: {e}", exception=e)
     finally:
         await call.answer()
+
+execution_router = router
