@@ -400,11 +400,11 @@ async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMC
         await call.message.edit_text(f"✅ **تم حفظ الاختبار بنجاح ضمن القسم المختار!**\n\n📦 الاسم: `{title}`", parse_mode="Markdown")
         
         # 🛠 [إصلاح ذكي]: التحقق لمنع تعليق حالة المستخدم بعد الحفظ النهائي
+# الكود المصحح الجديد ✨:
         if data.get("quiz_completed"):
             await state.set_state(None)
         else:
-            prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
-            await state.set_state(prev_state)
+            await state.set_state(QuizState.answering_quiz)
             
     except Exception as e:
         log_error(logger, f"Error saving to existing section: {e}", exception=e)
