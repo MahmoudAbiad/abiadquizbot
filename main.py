@@ -12,6 +12,12 @@ from config import bot, dp
 from handlers import start_router, admin_router, files_router, execution_router, favorites_router, sharing_router
 from middlewares import ThrottlingMiddleware
 from aiogram import types
+import logging
+
+# جعل المكتبات الخارجية تظهر التحذيرات والأخطاء فقط وتتجاهل الـ DEBUG والـ INFO
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("hpack").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = get_logger(__name__)
 

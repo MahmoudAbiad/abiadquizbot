@@ -101,13 +101,28 @@ async def generate_quiz_smart(
     # ----------------------------------------------------
     # 📄 ثانياً: مسار جميع أنواع الملفات والوسائط والالبومات -> جيميني حصرياً
     # ----------------------------------------------------
+    # ----------------------------------------------------
+    # 📄 ثانياً: مسار جميع أنواع الملفات والوسائط والالبومات -> جيميني حصرياً
+    # ----------------------------------------------------
     if not file_paths: return None
     
     log_info(logger, f"توجيه الملفات والوسائط المرفوعة ({len(file_paths)} ملف) حصرياً إلى Gemini...")
     
-    # حساب هاش للعملية (يتم استخدام أول ملف للمقارنة أو دمج الهاشات)
-    file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
-    
+    # 🛠️ إصلاح: حساب هاش مجمع لكل الملفات لضمان دقة الكاش في حال الألبومات والصور المتعددة
+    try:
+        hashes = [await asyncio.to_thread(calculate_file_hash, path) for path in file_paths]
+        file_hash = "-".join(hashes) if len(hashes) > 1 else hashes[0]
+    except Exception as hash_err:
+        log_error(logger, f"خطأ أثناء حساب الهاش للملفات: {hash_err}")
+        file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
+
+    # 🧠 أولاً: التحقق من الكاش في Supabase قبل استهلاك الـ API والرفع
+    if not skip_cache:
+        cached_quiz = await asyncio.to_thread(get_cached_quiz, file_hash)
+        if cached_quiz:
+            log_info(logger, "⚡ تم العثور على الكويز في الكاش (Supabase)! إرجاع النتيجة فوراً بدون استهلاك API.")
+            return cached_quiz
+
     # قراءة وتهيئة الملفات لرفعها عبر الـ Gemini File API
     contents = [prompt]
     uploaded_gemini_files = []
@@ -131,7 +146,7 @@ async def generate_quiz_smart(
         else:
             target_paths = file_paths
 
-        # تجهيز ورفع كل الملفات لـ جيميني (سواء كانت صور متعددة أو مستندات متنوعة)
+        # تجهيز ورفع كل الملفات لـ جيميني
         if API_KEYS:
             max_attempts = min(len(API_KEYS), 2)
             for attempt in range(max_attempts):
@@ -146,7 +161,7 @@ async def generate_quiz_smart(
                 try:
                     client = genai.Client(api_key=API_KEYS[idx])
                     
-                    # رفع كافة الملفات والوسائط دفعة واحدة إلى مساحة تخزين Gemini الفعالة
+                    # رفع كافة الملفات والوسائط دفعة واحدة إلى مساحة تخزين Gemini
                     for path in target_paths:
                         g_file = await asyncio.to_thread(client.files.upload, file=path)
                         uploaded_gemini_files.append(g_file)
@@ -176,6 +191,8 @@ async def generate_quiz_smart(
                     if response.parsed and hasattr(response.parsed, 'questions'):
                         questions = [q.model_dump() for q in response.parsed.questions]
                         total_tokens = response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') and response.usage_metadata else 0
+                        
+                        # حفظ النتيجة في الكاش للاستخدام المستقبلي
                         await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, total_tokens)
                         return questions
                     
