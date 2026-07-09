@@ -207,44 +207,44 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
     try:
         poll_id = poll_answer.poll_id
         
-        # 1. محاولة استرجاع بيانات السؤال من Redis
+        # استرجاع البيانات من Redis
         data_json = await redis_client.get(f"poll:{poll_id}")
         
         if not data_json:
-            # إذا لم نجد البيانات، فهذا يعني أن الكويز قديم أو تم مسحه من Redis
-            log_warning(logger, f"⚠️ لا توجد بيانات للكويز {poll_id} في الذاكرة (ربما انتهت صلاحيته).")
+            log_warning(logger, f"⚠️ لم يتم العثور على بيانات للكويز {poll_id} في Redis")
             return
 
-        # 2. تحويل البيانات من نص (JSON) إلى قاموس (Dictionary)
         quiz_info = json.loads(data_json)
         
-        # استخراج البيانات المخزنة
-        correct_opt = quiz_info["correct_option_id"]
-        user_id = quiz_info["user_id"]
-        # chat_id = quiz_info["chat_id"] # يمكنك استخدامه إذا أردت إرسال رسائل خاصة بعد الإجابة
-
-        # 3. التحقق من الإجابة
-        # تأكد أن المستخدم اختار إجابة (option_ids تحتوي على رقم الخيار)
+        # [تعديل هام]: تحويل البيانات القادمة من Redis إلى Integer
+        correct_opt = int(quiz_info["correct_option_id"])
+        
+        # التأكد من اختيار إجابة
         if not poll_answer.option_ids:
             return
             
-        selected_opt = poll_answer.option_ids[0]
+        # [تعديل هام]: تحويل إجابة الطالب إلى Integer
+        selected_opt = int(poll_answer.option_ids[0])
 
-        # 4. معالجة النتيجة وتحديث الـ State
+        # طباعة للتصحيح (ستظهر في السجلات لتتأكد من الحل)
+        log_info(logger, f"🔍 DEBUG: الطالب اختار {selected_opt} | الصحيح هو {correct_opt}")
+
+        # المقارنة الآن ستكون بين رقمين (Integer)
         if selected_opt == correct_opt:
-            # جلب النتيجة الحالية من الـ State (المخزنة أيضاً في Redis)
             current_data = await state.get_data()
             current_score = current_data.get('score', 0)
             
             # تحديث النتيجة
-            await state.update_data(score=current_score + 1)
-            log_info(logger, f"✅ إجابة صحيحة للمستخدم {user_id}. النتيجة الجديدة: {current_score + 1}")
+            new_score = current_score + 1
+            await state.update_data(score=new_score)
+            
+            log_info(logger, f"✅ إجابة صحيحة! النتيجة الآن: {new_score}")
         else:
-            log_info(logger, f"❌ إجابة خاطئة للمستخدم {user_id}.")
+            log_info(logger, f"❌ إجابة خاطئة")
 
     except Exception as e:
-        log_error(logger, f"❌ خطأ فادح في معالجة الإجابة (handle_poll_answer): {e}", exception=e)
-        
+        log_error(logger, f"❌ خطأ في معالجة الإجابة: {e}", exception=e)
+
 @router.callback_query(QuizState.answering_quiz, F.data == "get_hint")
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
