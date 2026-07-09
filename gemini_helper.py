@@ -117,7 +117,7 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
                         temperature=0.7
                     ),
                 ),
-                timeout=600.0
+                timeout=45.0
             )
             
             if response.parsed and hasattr(response.parsed, 'questions'):
