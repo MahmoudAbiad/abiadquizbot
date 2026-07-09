@@ -1,7 +1,7 @@
 """
 AI integration for quiz generation.
 Hybrid API Flow: Routes PDFs to Gemini and Photos to Groq.
-Optimized with Gemini File API and fast Fallback routing to Groq.
+Optimized with Gemini File API and safe 5-image cap for Groq Fallback.
 """
 
 import os
@@ -152,7 +152,6 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
 
     # محاولة إرسال الملف إلى جيميني
     if API_KEYS:
-        # 💡 تحسين سرعة: محاولتان كحد أقصى لجيميني لمنع تجميد البوت لـ 3 دقائق عند وجود ضغط
         max_attempts = min(len(API_KEYS), 2)
         for attempt in range(max_attempts):
             available = _get_available_key_indices()
@@ -167,17 +166,11 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
             try:
                 client = genai.Client(api_key=API_KEYS[idx])
                 
-                # 💡 تحسين خارق للسرعة: إذا كان الملف ممسوح ضوئياً، نرفعه عبر الـ File API الرسمي بدلاً من البايتات
-                if is_scanned:
+                if is_scanned or not contents:
                     log_info(logger, f"رفع الملف عبر Gemini File API المستقر والمخصص للملفات...")
                     gemini_file = await asyncio.to_thread(client.files.upload, file=file_path)
                     contents = [gemini_file, prompt]
-                elif not contents:
-                    # ملف صغير الحجم وغير ممسوح ضوئياً نرفعه أيضاً عبر الـ File API لضمان الثبات
-                    gemini_file = await asyncio.to_thread(client.files.upload, file=file_path)
-                    contents = [gemini_file, prompt]
                 
-                # 💡 تقليص المهملة الزمنية لـ 20 ثانية لسرعة الانتقال لغروك عند تعليق السيرفر
                 response = await asyncio.wait_for(
                     client.aio.models.generate_content(
                         model=GEMINI_MODEL,
@@ -191,7 +184,6 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
                     timeout=20.0
                 )
                 
-                # حذف الملف من سيرفرات جوجل فوراً بعد القراءة لإخلاء المساحة
                 if gemini_file:
                     asyncio.create_task(asyncio.to_thread(client.files.delete, name=gemini_file.name))
                 
@@ -202,7 +194,6 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
                     return questions
                 
             except Exception as e:
-                # تنظيف من خوادم جوجل في حال حدوث استثناء
                 if gemini_file:
                     try: asyncio.create_task(asyncio.to_thread(client.files.delete, name=gemini_file.name))
                     except: pass
@@ -225,15 +216,17 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
             groq_messages_content = [{"type": "text", "text": groq_instructions}]
             
             if is_scanned or len(total_text.strip()) < 100:
-                log_info(logger, "جاري تحويل أول 15 صفحة من الـ PDF الممسوح ضوئياً وضغطها لـ Groq Vision...")
                 doc = fitz.open(file_path)
-                max_pages = min(len(doc), 15)
-                matrix = fitz.Matrix(0.5, 0.5)
                 
+                # 💡 تعديل جوهري: تحديد الحد الأقصى لـ Groq بـ 5 صور فقط منعاً للخطأ 400
+                max_pages = min(len(doc), 5)
+                log_info(logger, f"جاري تحويل أول {max_pages} صفحات من الـ PDF الممسوح ضوئياً لـ Groq Vision...")
+                
+                matrix = fitz.Matrix(0.5, 0.5)
                 for i in range(max_pages):
                     page = doc[i]
                     pix = page.get_pixmap(matrix=matrix)
-                    img_bytes = pix.tobytes("jpg")  # 💡 تم إصلاح الخطأ وإلغاء الجودة غير المدعومة هنا
+                    img_bytes = pix.tobytes("jpg")  # تم تنظيف دالة تحويل البايتات لتكون متوافقة بالكامل
                     
                     base64_page = base64.b64encode(img_bytes).decode('utf-8')
                     groq_messages_content.append({
