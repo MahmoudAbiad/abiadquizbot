@@ -54,6 +54,13 @@ def _get_available_key_indices() -> List[int]:
             available.append(idx)
     return available
 
+async def _safe_delete_gemini_file(client: genai.Client, file_name: str):
+    """دالة مساعدة آمنة لحذف الملفات من سحابة جوجل في الخلفية دون التسبب بانهيار المهام"""
+    try:
+        await asyncio.to_thread(client.files.delete, name=file_name)
+    except Exception as e:
+        log_warning(logger, f"فشل الحذف التلقائي للملف {file_name} من سحابة Gemini (تم تجاهله آلياً): {e}")
+
 # ==================== Main Generation Function ====================
 
 async def generate_quiz_smart(
@@ -101,14 +108,11 @@ async def generate_quiz_smart(
     # ----------------------------------------------------
     # 📄 ثانياً: مسار جميع أنواع الملفات والوسائط والالبومات -> جيميني حصرياً
     # ----------------------------------------------------
-    # ----------------------------------------------------
-    # 📄 ثانياً: مسار جميع أنواع الملفات والوسائط والالبومات -> جيميني حصرياً
-    # ----------------------------------------------------
     if not file_paths: return None
     
     log_info(logger, f"توجيه الملفات والوسائط المرفوعة ({len(file_paths)} ملف) حصرياً إلى Gemini...")
     
-    # 🛠️ إصلاح: حساب هاش مجمع لكل الملفات لضمان دقة الكاش في حال الألبومات والصور المتعددة
+    # حساب هاش مجمع لكل الملفات لضمان دقة الكاش في حال الألبومات والصور المتعددة
     try:
         hashes = [await asyncio.to_thread(calculate_file_hash, path) for path in file_paths]
         file_hash = "-".join(hashes) if len(hashes) > 1 else hashes[0]
@@ -116,16 +120,13 @@ async def generate_quiz_smart(
         log_error(logger, f"خطأ أثناء حساب الهاش للملفات: {hash_err}")
         file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
 
-    # 🧠 أولاً: التحقق من الكاش في Supabase قبل استهلاك الـ API والرفع
+    # التحقق من الكاش في Supabase قبل استهلاك الـ API والرفع
     if not skip_cache:
         cached_quiz = await asyncio.to_thread(get_cached_quiz, file_hash)
         if cached_quiz:
             log_info(logger, "⚡ تم العثور على الكويز في الكاش (Supabase)! إرجاع النتيجة فوراً بدون استهلاك API.")
             return cached_quiz
 
-    # قراءة وتهيئة الملفات لرفعها عبر الـ Gemini File API
-    contents = [prompt]
-    uploaded_gemini_files = []
     local_sliced_paths = []
 
     try:
@@ -146,7 +147,7 @@ async def generate_quiz_smart(
         else:
             target_paths = file_paths
 
-        # تجهيز ورفع كل الملفات لـ جيميني
+        # تجهيز ورفع كل الملفات لـ جيميني عبر نظام التدوير الذكي للمفاتيح
         if API_KEYS:
             max_attempts = min(len(API_KEYS), 2)
             for attempt in range(max_attempts):
@@ -158,19 +159,24 @@ async def generate_quiz_smart(
                 idx = random.choice(available)
                 await asyncio.sleep(random.uniform(0.2, 0.5))
                 
+                # [إصلاح جوهري]: عزل النطاق وتهيئة مصفوفات مستقلة تماماً لكل محاولة مفتاح جديدة
+                attempt_uploaded_files = []
+                attempt_contents = [prompt]
+                
                 try:
                     client = genai.Client(api_key=API_KEYS[idx])
+                    log_info(logger, f"محاولة توليد الأسئلة باستخدام مفتاح جيميناي رقم {idx} (محاولة {attempt + 1})...")
                     
-                    # رفع كافة الملفات والوسائط دفعة واحدة إلى مساحة تخزين Gemini
+                    # رفع كافة الملفات والوسائط دفعة واحدة تحت صلاحية المفتاح الحالي حصرياً
                     for path in target_paths:
                         g_file = await asyncio.to_thread(client.files.upload, file=path)
-                        uploaded_gemini_files.append(g_file)
-                        contents.append(g_file)
+                        attempt_uploaded_files.append(g_file)
+                        attempt_contents.append(g_file)
                     
                     response = await asyncio.wait_for(
                         client.aio.models.generate_content(
                             model=GEMINI_MODEL,
-                            contents=contents,
+                            contents=attempt_contents,
                             config=types.GenerateContentConfig(
                                 response_mime_type="application/json", 
                                 response_schema=QuizResponse,
@@ -180,9 +186,9 @@ async def generate_quiz_smart(
                         timeout=40.0
                     )
                     
-                    # تنظيف سحابي فوري للملفات المرفوعة
-                    for gf in uploaded_gemini_files:
-                        asyncio.create_task(asyncio.to_thread(client.files.delete, name=gf.name))
+                    # تنظيف سحابي آمن فوري للملفات المرفوعة بنجاح
+                    for gf in attempt_uploaded_files:
+                        asyncio.create_task(_safe_delete_gemini_file(client, gf.name))
                     
                     # تنظيف محلي للملفات المقتطعة إن وُجدت
                     for sp in local_sliced_paths:
@@ -197,14 +203,13 @@ async def generate_quiz_smart(
                         return questions
                     
                 except Exception as e:
-                    # تنظيف جزئي عند حدوث خطأ بالمفتاح
-                    for gf in uploaded_gemini_files:
-                        try: asyncio.create_task(asyncio.to_thread(client.files.delete, name=gf.name))
-                        except: pass
-                    uploaded_gemini_files.clear()
+                    # تنظيف فوري لملفات المحاولة الفاشلة الحالية لمنع تسريبها أو خلط الصلاحيات مع المفتاح التالي
+                    for gf in attempt_uploaded_files:
+                        asyncio.create_task(_safe_delete_gemini_file(client, gf.name))
                     
                     error_msg = str(e).lower()
                     log_warning(logger, f"فشل مفتاح جيميني {idx} في محاولة التوليد: {e}")
+                    
                     if any(k in error_msg for k in QUOTA_ERROR_KEYWORDS):
                         blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(hours=KEY_BLOCK_QUOTA_EXHAUSTED)
                     else:
