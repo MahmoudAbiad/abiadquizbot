@@ -62,7 +62,7 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
         log_error(logger, "لم يتم العثور على مفاتيح API.")
         return None
 
-    # ✅ حل العثرة 1: تشغيل الدالات المتزامنة في Threads منفصلة لحماية الـ Event Loop من التجمد
+    # تشغيل الدالات المتزامنة في Threads منفصلة لحماية الـ Event Loop من التجمد
     file_hash = await asyncio.to_thread(calculate_file_hash, file_path)
     cached_data = await asyncio.to_thread(get_cached_quiz, file_hash)
     
@@ -104,7 +104,7 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
         try:
             client = genai.Client(api_key=API_KEYS[idx])
             
-            # ✅ إضافة مهلة زمنية للطلب لمنع التعليق اللانهائي في حال وجود مشاكل شبكية
+            # إضافة مهلة زمنية للطلب لمنع التعليق اللانهائي في حال وجود مشاكل شبكية
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
                     model=GEMINI_MODEL,
@@ -118,14 +118,23 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
                 timeout=45.0  # 45 ثانية كحد أقصى للرد
             )
             
-            result = json.loads(response.text)
-            questions = result.get("questions", [])
-            
-            if questions:
-                # ✅ تشغيل دالة حفظ الكاش في Thread منفصل أيضاً
-                await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, 0)
+            # الحل: الاعتماد على response.parsed الذي توفره المكتبة الحديثة
+            if response.parsed and hasattr(response.parsed, 'questions'):
                 
-            return questions
+                # 1. تحويل كائنات Pydantic إلى قواميس (Dicts) لتقبلها Supabase بأمان
+                questions = [q.model_dump() for q in response.parsed.questions]
+                
+                # 2. استخراج التوكينات الفعلية المستهلكة
+                total_tokens = 0
+                if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                    total_tokens = response.usage_metadata.total_token_count
+                    
+                # 3. حفظ الكويز في الكاش 
+                await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, total_tokens)
+                
+                return questions
+            
+            return []
             
         except Exception as e:
             error_msg = str(e).lower()

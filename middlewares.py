@@ -36,12 +36,12 @@ class ThrottlingMiddleware(BaseMiddleware):
             
             # إذا كان المستخدم في الكاش، فهذا يعني أنه أرسل طلباً قبل انتهاء المهلة
             if user_id in self.cache:
-                if isinstance(event, Message):
-                    await event.answer("⚠️ **مهلاً!** الرجاء الانتظار بضع ثوانٍ قبل إرسال طلب جديد لتجنب الضغط على البوت.")
-                else:
+                # نكتفي بإظهار تنبيه لضغطات الأزرار (CallbackQuery) لأنه يظهر كإشعار مؤقت ولا يغرق المحادثة
+                if isinstance(event, CallbackQuery):
                     await event.answer("⚠️ الرجاء الانتظار...", show_alert=True)
                 
-                logger.warning(f"Spam detected and blocked for user: {user_id}")
+                # بالنسبة للرسائل العادية (Message)، ننهي العملية بصمت (Silent Return) لحماية البوت من الحظر (429)
+                logger.warning(f"Spam detected and blocked silently for user: {user_id}")
                 return # ننهي العملية هنا ولا نمررها للبوت
             
             # إضافة المستخدم للكاش
