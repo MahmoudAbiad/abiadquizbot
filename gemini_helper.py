@@ -115,7 +115,7 @@ async def generate_quiz_smart(file_path: str, count: int) -> Optional[List[Dict[
                         temperature=0.7
                     ),
                 ),
-                timeout=45.0  # 45 ثانية كحد أقصى للرد
+                timeout=600.0
             )
             
             # الحل: الاعتماد على response.parsed الذي توفره المكتبة الحديثة
