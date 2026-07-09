@@ -220,26 +220,32 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
 
         questions = data.get("questions")
         title = data.get("source_title") or data.get("title") or "كويز بدون عنوان"
-        quiz_id = data.get("quiz_id")  # 🆕 1. جلب معرف الكويز الفريد المخزن في الـ State
+        quiz_id = data.get("quiz_id")
         
         if not questions:
             await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
             return
 
         user_favorites = await asyncio.to_thread(list_favorite_quizzes, call.from_user.id)
+        
+        is_already_saved = False
         if user_favorites:
-            # 🆕 2. تحديث شرط التحقق: يقارن بالـ ID أولاً، أو بالاسم بشرط ألا يكون الاسم التلقائي العام
-            is_already_saved = any(
-                (quiz_id and fav.get("quiz_id") == quiz_id) or 
-                (fav.get("title") == title and title != "كويز بدون عنوان")
-                for fav in user_favorites
-            )
-            if is_already_saved:
-                await state.update_data(is_saved_in_session=True)
-                await call.answer("💡 هذا الكويز موجود بالفعل في قائمتك المفضلة مسبقاً!", show_alert=True)
-                return
+            # 💡 الإصلاح الذكي هنا:
+            if quiz_id and str(quiz_id).strip():
+                # إذا كان الكويز قادماً من رابط مشاركة أو له معرف فريد، نتحقق بالمعرف فقط وهو الأدق
+                is_already_saved = any(fav.get("quiz_id") == quiz_id for fav in user_favorites)
+            else:
+                # إذا كان الكويز جديداً ومولداً للتو (quiz_id فارغ)، لا نتحقق بالاسم مطلقاً في قاعدة البيانات
+                # لأن المستخدم قد يولد كويزات مختلفة الأسئلة تماماً وتحمل نفس اسم المادة أو الملف
+                # نكتفي هنا بالاعتماد على الـ is_saved_in_session لمنع التكرار في نفس الوقت
+                is_already_saved = False
 
-        # 🆕 3. تمرير الـ quiz_id هنا كـ Keyword Argument ليتم حفظه في قاعدة البيانات
+        if is_already_saved:
+            await state.update_data(is_saved_in_session=True)
+            await call.answer("💡 هذا الكويز موجود بالفعل في قائمتك المفضلة مسبقاً!", show_alert=True)
+            return
+
+        # حفظ الكويز في قاعدة البيانات
         await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions, quiz_id=quiz_id)
         await state.update_data(is_saved_in_session=True)
         await call.answer("✅ تم الحفظ بنجاح! تجده في 'قائمتي المفضلة' قسم 'عام'.", show_alert=True)
@@ -247,7 +253,7 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         log_error(logger, f"Error saving quiz: {e}", exception=e)
         await call.answer("❌ حدث خطأ أثناء حفظ الكويز.", show_alert=True)
-        
+
 @router.callback_query(QuizState.answering_quiz, F.data == "next_question")
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
     try:
