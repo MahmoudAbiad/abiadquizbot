@@ -1,27 +1,23 @@
 """
-Files handling module - handles document and photo uploads,
-and background quiz generation using the Hybrid API flow.
+Files and Text handling module - handles documents, multiple photos (albums),
+and direct text inputs using Gemini for media and Groq for pure text.
 """
 
 import os
 import asyncio
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
-from pymupdf import message
 
 from config import bot, QuizState
 from constants import (
-    SUCCESS_FILE_UPLOADED, SUCCESS_PHOTO_UPLOADED, MSG_PROCESSING,
-    ERROR_INSUFFICIENT_POINTS
+    SUCCESS_MEDIA_RECEIVED, MSG_PROCESSING, ERROR_INSUFFICIENT_POINTS,
+    MAX_IMAGES_IN_ALBUM
 )
-# 🆕 تم إضافة استيراد الدالة لحساب الهاش من ملف الـ utils
 from gemini_helper import generate_quiz_smart
 from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
-# 🆕 تم إضافة استيراد دالة جلب الكاش من ملف الـ supabase_helper
 from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz
-from keyboards import get_main_menu_keyboard
 from validators import validate_file_size, validate_question_count
-from logger import get_logger, log_error, log_info, log_warning
+from logger import get_logger, log_error
 
 logger = get_logger(__name__)
 router = Router()
@@ -30,63 +26,95 @@ DOWNLOADS_DIR = "downloads"
 processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
 
-# ==================== File Handlers ====================
+# مخزن مؤقت لتجميع ألبومات الصور (Media Groups)
+album_cache: dict[str, list[types.Message]] = {}
+
+async def collect_album_photos(msg: types.Message) -> list[types.Message]:
+    """دالة مساعدة لتجميع الصور المرسلة كألبوم وتجنب التكرار"""
+    if not msg.media_group_id:
+        return [msg]
+    
+    mg_id = msg.media_group_id
+    if mg_id not in album_cache:
+        album_cache[mg_id] = []
+    
+    album_cache[mg_id].append(msg)
+    await asyncio.sleep(0.8)  # انتظار بسيط لجمع بقية الصور
+    
+    # إرجاع القائمة وتنظيف الكاش للمجموعة
+    photos = album_cache.get(mg_id, [])
+    if mg_id in album_cache:
+        del album_cache[mg_id]
+    return photos
+
+# ==================== Media Handlers (Photos & Documents) ====================
 
 @router.message(F.document | F.photo)
 async def handle_media(msg: types.Message, state: FSMContext):
     try:
-        # فحص الحالة الحالية لحماية الكويز القائم
         current_status = await state.get_state()
         if current_status == QuizState.answering_quiz:
-            await msg.answer("⚠️ **لديك اختبار قائم حالياً.** يرجى إكمال الاختبار أو الضغط على زر (⏹ إيقاف) أولاً قبل رفع ملفات أو صور جديدة.", parse_mode="Markdown")
+            await msg.answer("⚠️ **لديك اختبار قائم حالياً.** يرجى إكمال الاختبار أو الضغط على زر (⏹ إيقاف) أولاً.", parse_mode="Markdown")
             return
 
         ensure_directory_exists(DOWNLOADS_DIR)
         user_id = msg.from_user.id
-        
-        # 1. التحقق من الحجم قبل التنزيل (صمام أمان)
-        if msg.document:
+
+        # معالجة ألبوم الصور أو صورة مفردة
+        if msg.photo:
+            all_messages = await collect_album_photos(msg)
+            if not all_messages: return # تم تجميعه في مهمة أخرى
+            
+            if len(all_messages) > MAX_IMAGES_IN_ALBUM:
+                await msg.answer(f"❌ الحد الأقصى هو {MAX_IMAGES_IN_ALBUM} صور في المرة الواحدة.")
+                return
+
+            file_paths = []
+            for idx, p_msg in enumerate(all_messages):
+                photo = p_msg.photo[-1]
+                # فحص الحجم لكل صورة
+                is_valid, error = validate_file_size(photo.file_size, "photo")
+                if not is_valid:
+                    await msg.answer(f"❌ الصورة رقم {idx+1}: {error}")
+                    return
+                f_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{photo.file_id}.jpg")
+                await bot.download(photo, destination=f_path)
+                file_paths.append(f_path)
+            
+            file_title = f"كويز من ألبوم صور ({len(file_paths)} صور)"
+            # بالنسبة للألبوم سنستخدم الهاش الخاص بأول صورة كمعرّف مبدئي أو مدمج
+            file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
+
+        # معالجة المستندات بجميع أنواعها (بدون تقييد الامتداد)
+        else:
             is_valid, error = validate_file_size(msg.document.file_size, "document")
             if not is_valid:
                 await msg.answer(error)
                 return
             
-            # [تعديل] استخراج اسم الملف الأصلي وتنظيفه من الامتداد (مثل .pdf)
-            full_file_name = msg.document.file_name or "كويز من ملف"
+            full_file_name = msg.document.file_name or "مستند"
             file_title, _ = os.path.splitext(full_file_name)
             
-            file_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{msg.document.file_name}")
-            await bot.download(msg.document, destination=file_path)
-        else:
-            photo = msg.photo[-1]
-            is_valid, error = validate_file_size(photo.file_size, "photo")
-            if not is_valid:
-                await msg.answer(error)
-                return
-                
-            # [تعديل] تعيين اسم افتراضي مخصص ومناسب للصور
-            file_title = "كويز من صورة"
-            file_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{photo.file_id}.jpg")
-            await bot.download(photo, destination=file_path)
+            f_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{msg.document.file_name}")
+            await bot.download(msg.document, destination=f_path)
+            file_paths = [f_path]
+            file_hash = await asyncio.to_thread(calculate_file_hash, f_path)
 
-        # 🆕 [ميزة الكاش الذكي]: فحص الهاش والتحقق هل تمت معالجة هذا الملف مسبقاً أم لا
-        file_hash = await asyncio.to_thread(calculate_file_hash, file_path)
+        # [ميزة الكاش الذكي]
         cached_data = await asyncio.to_thread(get_cached_quiz, file_hash)
-
         if cached_data and cached_data.get("questions_data"):
             questions_data = cached_data["questions_data"]
             q_count = len(questions_data)
-            cache_cost = round(q_count * 0.1, 1)  # حساب تكلفة الـ 10% بدقة عشارية
+            cache_cost = round(q_count * 0.1, 1)
 
-            # تخزين البيانات مؤقتاً في جلسة المستخدم الحالية
             await state.update_data(
-                file_path=file_path, 
+                file_paths=file_paths,  # مصفوفة المسارات الجديدة
                 source_title=file_title,
                 cached_questions=questions_data,
-                cache_cost=cache_cost
+                cache_cost=cache_cost,
+                input_type="media"
             )
 
-            # بناء لوحة الاختيارات (أزرار إنلاين) للمستخدم
             kb = types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(text=f"🎰 كويز جاهز ({cache_cost} نقطة)", callback_data="cache_action_yes")],
                 [types.InlineKeyboardButton(text="🧠 توليد أسئلة جديدة (تكلفة كاملة)", callback_data="cache_action_no")]
@@ -94,22 +122,40 @@ async def handle_media(msg: types.Message, state: FSMContext):
 
             await state.set_state(QuizState.waiting_for_cache_decision)
             await msg.answer(
-                f"💡 **هذا الملف تمت معالجته مسبقاً في السيرفر!**\n\n"
-                f"📦 يحتوي على **{q_count}** سؤال جاهز تماماً.\n"
-                f"🏷️ **عرض التوفير:** يمكنك خوض هذا الاختبار فوراً بتكلفة **{cache_cost}** نقاط فقط بدلاً من {q_count} نقطة!",
-                reply_markup=kb,
-                parse_mode="Markdown"
+                f"💡 **هذا المحتوى تمت معالجته مسبقاً في السيرفر!**\n\n"
+                f"📦 يحتوي على **{q_count}** سؤال جاهز.\n"
+                f"🏷️ **عرض التوفير:** يمكنك خوض الاختبار بتكلفة **{cache_cost}** نقاط فقط!",
+                reply_markup=kb, parse_mode="Markdown"
             )
             return
 
-        # [تعديل] تخزين اسم الملف النظيف في الـ source_title بدلاً من الاسم الموحد القديم (السير الطبيعي)
-        await state.update_data(file_path=file_path, source_title=file_title)
+        await state.update_data(file_paths=file_paths, source_title=file_title, input_type="media")
         await state.set_state(QuizState.waiting_for_count)
-        await msg.answer("✅ تم رفع الملف بنجاح! كم سؤال تريد استخراجه من هذا المحتوى؟")
+        await msg.answer(SUCCESS_MEDIA_RECEIVED)
 
     except Exception as e:
         log_error(logger, f"Error in handle_media: {e}", exception=e)
-        await msg.answer("❌ حدث خطأ غير متوقع أثناء معالجة الملف.")
+        await msg.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
+
+
+# ==================== Text Handler (Groq Exclusive) ====================
+
+@router.message(F.text & ~F.text.startswith('/'))
+async def handle_pure_text(msg: types.Message, state: FSMContext):
+    current_status = await state.get_state()
+    if current_status in [QuizState.answering_quiz, QuizState.waiting_for_count, QuizState.waiting_for_cache_decision]:
+        return  # تجاهل النصوص العادية إذا كان في حالة معينة
+    
+    # استقبال النص وحفظه
+    text_content = msg.text.strip()
+    if len(text_content) < 30:
+        await msg.answer("⚠️ النص قصير جداً! يرجى إرسال نص تعليمي مفصل (30 حرف كحد أدنى) لتوليد الأسئلة منه.")
+        return
+
+    file_title = text_content[:20] + "..."
+    await state.update_data(pure_text=text_content, source_title=file_title, input_type="text")
+    await state.set_state(QuizState.waiting_for_count)
+    await msg.answer("✅ تم استقبال النص بنجاح! كم سؤال تريد استخراجه من هذا النص؟")
 
 
 # ==================== Cache Decision Handlers ====================
@@ -120,48 +166,36 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext):
         data = await state.get_data()
         questions = data.get("cached_questions")
         cost = data.get("cache_cost", 0)
-        source_title = data.get("source_title", "كويز من ملف")
-        file_path = data.get("file_path")
+        source_title = data.get("source_title")
+        file_paths = data.get("file_paths", [])
 
-        # التحقق من رصيد المستخدم الحالي
         user_info = await asyncio.to_thread(check_or_add_user, call.from_user.id, call.from_user.username or "Unknown", call.from_user.first_name or "Unknown", call.from_user.last_name or "Unknown")
         if user_info["points"] < cost:
-            await call.answer(f"❌ نقاطك غير كافية! تكلفة الاختبار {cost} ورصيدك {user_info['points']}", show_alert=True)
-            safe_file_cleanup(file_path)
+            await call.answer(f"❌ نقاطك غير كافية!", show_alert=True)
+            for path in file_paths: safe_file_cleanup(path)
             await state.clear()
             return
 
-        # الخصم المخفض بنسبة 10% من قاعدة البيانات وتحديث إحصائيات المستخدم بالأسئلة المستخرجة
         await asyncio.to_thread(update_user_stats, call.from_user.id, cost, len(questions))
 
         from handlers.execution import _start_loaded_quiz
-        # تشغيل الكويز المستخرج مباشرة من الكاش للمستخدم
         await _start_loaded_quiz(call.message, state, questions, source_title, origin="cached_file")
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
+        try: await call.message.delete()
+        except Exception: pass
 
     except Exception as e:
-        log_error(logger, f"Error processing cache acceptance: {e}", exception=e)
-        await call.answer("❌ حدث خطأ تقني أثناء تحميل الاختبار.", show_alert=True)
-    finally:
-        await call.answer()
+        log_error(logger, f"Error processing cache acceptance: {e}")
+    finally: await call.answer()
 
 
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext):
     try:
-        # الانتقال للمسار التقليدي وسؤال المستخدم عن عدد الأسئلة المطلوبة
         await state.set_state(QuizState.waiting_for_count)
-        await call.message.edit_text("🔄 رائع، سيتم تجاهل الكاش وتوليد أسئلة جديدة كلياً عبر الذكاء الاصطناعي.\n\n📝 **كم سؤال تريد استخراجه من هذا المحتوى؟**", parse_mode="Markdown")
-    except Exception as e:
-        log_error(logger, f"Error declining cache: {e}", exception=e)
-    finally:
-        await call.answer()
+        await call.message.edit_text("📝 **كم سؤال تريد استخراجه من هذا المحتوى؟**", parse_mode="Markdown")
+    except Exception as e: log_error(logger, f"Error declining cache: {e}")
+    finally: await call.answer()
 
-
-# ==================== Question Count Handler ====================
 
 # ==================== Question Count Handler ====================
 
@@ -174,125 +208,106 @@ async def process_count(msg: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
-    file_path = data.get('file_path')
+    input_type = data.get("input_type")
     
-    # التحقق من الرصيد
     user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown", msg.from_user.first_name or "Unknown", msg.from_user.last_name or "Unknown")
     if user_info["points"] < count:
-        await msg.answer(ERROR_INSUFFICIENT_POINTS.format(current=user_info["points"], required=count))
-        safe_file_cleanup(file_path)
+        await msg.answer(f"❌ رصيدك لا يكفي! تحتاج {count} نقاط.")
+        if input_type == "media":
+            for path in data.get("file_paths", []): safe_file_cleanup(path)
         await state.clear()
         return
 
-    # 🆕 [ميزتك الجديدة]: فحص عدد الصفحات قبل بدء معالجة الملف
-    if file_path.lower().endswith('.pdf'):
-        try:
-            import fitz
-            doc = fitz.open(file_path)
-            pages_total = len(doc)
-            doc.close()
-            
-            if pages_total > 15:
-                # حفظ عدد الأسئلة مؤقتاً في جلسة المستخدم للمتابعة لاحقاً
-                await state.update_data(pending_count=count)
+    # فحص حجم صفحات ملف الـ PDF إن وجد واقتطاعه
+    if input_type == "media":
+        file_paths = data.get("file_paths", [])
+        # إذا كان مستند PDF واحد، نفحص عدد صفحاته
+        if len(file_paths) == 1 and file_paths[0].lower().endswith('.pdf'):
+            try:
+                import fitz
+                doc = fitz.open(file_paths[0])
+                pages_total = len(doc)
+                doc.close()
                 
-                # بناء أزرار المتابعة أو التراجع
-                kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                    [types.InlineKeyboardButton(text="✅ المتابعة (أول 15 صفحة فقط)", callback_data="limit_action_continue")],
-                    [types.InlineKeyboardButton(text="❌ التراجع وإلغاء الطلب", callback_data="limit_action_cancel")]
-                ])
-                
-                # نقل المستخدم لحالة انتظار قرار الحجم
-                await state.set_state(QuizState.waiting_for_cache_decision) # يمكن استخدام نفس الحالة المؤقتة أو إضافة واحدة جديدة في config
-                await msg.answer(
-                    f"⚠️ **تنبيه بخصوص حجم الملف:**\n\n"
-                    f"الملف المرفوع يحتوي على **{pages_total}** صفحة. نظراً للضغط الحالي على سيرفرات الذكاء الاصطناعي، نحن غير قادرين على معالجة سوى 15 صفحة فقط من الملف.\n\n"
-                    f"سيقوم النظام بقراءة **أول 15 صفحة فقط** وتوليد الأسئلة منها. هل ترغب في المتابعة أم التراجع؟",
-                    reply_markup=kb
-                )
-                return
-        except Exception as e:
-            log_error(logger, f"خطأ أثناء فحص عدد الصفحات: {e}")
+                if pages_total > 15:
+                    await state.update_data(pending_count=count)
+                    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+                        [types.InlineKeyboardButton(text="✅ المتابعة (أول 15 صفحة فقط)", callback_data="limit_action_continue")],
+                        [types.InlineKeyboardButton(text="❌ التراجع وإلغاء الطلب", callback_data="limit_action_cancel")]
+                    ])
+                    await state.set_state(QuizState.waiting_for_limit_decision)
+                    await msg.answer(f"⚠️ المستند يحتوي على **{pages_total}** صفحة. سيقوم النظام بمعالجة **أول 15 صفحة فقط**. هل ترغب بالمتابعة؟", reply_markup=kb)
+                    return
+            except Exception as e: log_error(logger, f"Error checking pages: {e}")
 
-    # إذا كان الملف أقل من 15 صفحة، يستمر السير الطبيعي فوراً
-    await trigger_quiz_generation(msg, file_path, count, state)
+    await trigger_quiz_generation(msg, msg.from_user.id, count, state)
 
 
-# 🆕 دالة مساعدة لبدء التوليد الفعلي منعاً لتكرار الكود
-async def trigger_quiz_generation(msg: types.Message, file_path: str, count: int, state: FSMContext):
+async def trigger_quiz_generation(msg_obj: types.Message, user_id: int, count: int, state: FSMContext):
     async with processing_users_lock:
-        if msg.from_user.id in processing_users:
-            await msg.answer("⏳ جاري المعالجة، انتظر قليلاً...")
+        if user_id in processing_users:
+            await msg_obj.answer("⏳ جاري المعالجة، انتظر قليلاً...")
             return
-        processing_users.add(msg.from_user.id)
+        processing_users.add(user_id)
 
-    processing_msg = await msg.answer(MSG_PROCESSING)
-    asyncio.create_task(_run_quiz_flow(msg, file_path, count, state, processing_msg))
+    processing_msg = await msg_obj.answer(MSG_PROCESSING)
+    asyncio.create_task(_run_quiz_flow(msg_obj, user_id, count, state, processing_msg))
 
 
-# 🆕 مستقبلات الأزرار الجديدة للتعامل مع قرار الـ 15 صفحة
 @router.callback_query(F.data == "limit_action_continue")
 async def handle_limit_continue(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
-        file_path = data.get('file_path')
         count = data.get('pending_count')
-        
-        await call.message.edit_text("🔄 جاري التوجيه ومعالجة أول 15 صفحة من المستند...")
-        await trigger_quiz_generation(call.message, file_path, count, state)
-    except Exception as e:
-        log_error(logger, f"Error in limit continue callback: {e}")
-    finally:
-        await call.answer()
+        await call.message.edit_text("🔄 جاري توجيه ومعالجة أول 15 صفحة من المستند...")
+        await trigger_quiz_generation(call.message, call.from_user.id, count, state)
+    except Exception as e: log_error(logger, f"Error in limit continue: {e}")
+    finally: await call.answer()
 
 
 @router.callback_query(F.data == "limit_action_cancel")
 async def handle_limit_cancel(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
-        file_path = data.get('file_path')
-        
-        safe_file_cleanup(file_path)
+        for path in data.get('file_paths', []): safe_file_cleanup(path)
         await state.clear()
-        
-        await call.message.edit_text("❌ تم إلغاء العملية بنجاح بناءً على طلبك. يمكنك رفع ملف آخر في أي وقت.")
-    except Exception as e:
-        log_error(logger, f"Error in limit cancel callback: {e}")
-    finally:
-        await call.answer()
+        await call.message.edit_text("❌ تم إلغاء العملية بنجاح.")
+    except Exception as e: log_error(logger, f"Error in limit cancel: {e}")
+    finally: await call.answer()
 
 
-async def _run_quiz_flow(msg, file_path, count, state, processing_msg):
-    """
-    سير العمل الموحد: توليد الأسئلة ثم البدء.
-    """
+async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, processing_msg):
+    file_paths = []
     try:
-        # [تعديل] جلب اسم الملف الديناميكي الذي حفظناه في الخطوة السابقة من الـ State
         data = await state.get_data()
-        source_title = data.get('source_title', "كويز من ملف")
+        input_type = data.get("input_type")
+        source_title = data.get('source_title', "كويز")
 
-        # استدعاء الدالة الذكية (Gemini) مباشرة مع تمرير العلم skip_cache=True لتوليد كويز جديد كلياً
-        quiz_data = await generate_quiz_smart(file_path=file_path, count=count, skip_cache=True)
+        # الاستدعاء الموحد الذكي (تمرير الملفات أو النص المباشر)
+        quiz_data = await generate_quiz_smart(
+            file_paths=data.get("file_paths") if input_type == "media" else None,
+            pure_text=data.get("pure_text") if input_type == "text" else None,
+            count=count,
+            skip_cache=True
+        )
         
         if not quiz_data:
-            await processing_msg.edit_text("هناك ضغط على السيرفر، يرجى المحاولة بعد قليل")
+            await processing_msg.edit_text("⚠️ فشل توليد الأسئلة، يرجى المحاولة لاحقاً.")
             return
 
-        # تحديث الإحصائيات وبدء الكويز
-        await asyncio.to_thread(update_user_stats, msg.from_user.id, len(quiz_data), len(quiz_data))
+        await asyncio.to_thread(update_user_stats, user_id, len(quiz_data), len(quiz_data))
         
         from handlers.execution import _start_loaded_quiz
-        # [تعديل] تمرير متغير source_title الديناميكي هنا بدلاً من الكلمة الثابتة
-        await _start_loaded_quiz(msg, state, quiz_data, source_title, origin="file")
+        await _start_loaded_quiz(msg, state, quiz_data, source_title, origin="file" if input_type == "media" else "text")
         await processing_msg.delete()
 
     except Exception as e:
         log_error(logger, f"Error in quiz flow: {e}", exception=e)
         await processing_msg.edit_text("⚠️ حدث خطأ تقني.")
     finally:
-        safe_file_cleanup(file_path)
+        if input_type == "media":
+            for path in data.get("file_paths", []): safe_file_cleanup(path)
         async with processing_users_lock:
-            processing_users.discard(msg.from_user.id)
-            await state.update_data(quiz_processing=False)
+            processing_users.discard(user_id)
 
 files_router = router
