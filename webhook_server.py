@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI):
             await bot.set_webhook(
                 url=full_webhook_url,
                 drop_pending_updates=True,
+                # ✅ تم التحديث: إضافة poll_answer و poll لكي يرسل تلغرام أحداث الإجابات وحساب النقاط
                 allowed_updates=["message", "callback_query", "poll_answer", "poll"],
                 secret_token=TELEGRAM_WEBHOOK_SECRET,
             )
