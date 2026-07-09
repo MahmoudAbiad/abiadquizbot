@@ -34,7 +34,6 @@ processing_users: set[int] = set()
 async def handle_media(msg: types.Message, state: FSMContext):
     try:
         # فحص الحالة الحالية لحماية الكويز القائم
-      # ✅ الفحص الصحيح: نتحقق هل المستخدم "في منتصف حل الأسئلة فعلياً" أم لا
         current_status = await state.get_state()
         if current_status == QuizState.answering_quiz:
             await msg.answer("⚠️ **لديك اختبار قائم حالياً.** يرجى إكمال الاختبار أو الضغط على زر (⏹ إيقاف) أولاً قبل رفع ملفات أو صور جديدة.", parse_mode="Markdown")
@@ -50,6 +49,10 @@ async def handle_media(msg: types.Message, state: FSMContext):
                 await msg.answer(error)
                 return
             
+            # 🆕 [تعديل] استخراج اسم الملف الأصلي وتنظيفه من الامتداد (مثل .pdf)
+            full_file_name = msg.document.file_name or "كويز من ملف"
+            file_title, _ = os.path.splitext(full_file_name)
+            
             file_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{msg.document.file_name}")
             await bot.download(msg.document, destination=file_path)
         else:
@@ -59,18 +62,20 @@ async def handle_media(msg: types.Message, state: FSMContext):
                 await msg.answer(error)
                 return
                 
+            # 🆕 [تعديل] تعيين اسم افتراضي مخصص ومناسب للصور
+            file_title = "كويز من صورة"
             file_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{photo.file_id}.jpg")
-            # استخدام Download المباشر والأسرع
             await bot.download(photo, destination=file_path)
 
-        # تخزين البيانات والطلب من المستخدم تحديد عدد الأسئلة
-        await state.update_data(file_path=file_path, source_title=f"ملف_{user_id}")
+        # 🆕 [تعديل] تخزين اسم الملف النظيف في الـ source_title بدلاً من الاسم الموحد القديم
+        await state.update_data(file_path=file_path, source_title=file_title)
         await state.set_state(QuizState.waiting_for_count)
         await msg.answer("✅ تم رفع الملف بنجاح! كم سؤال تريد استخراجه من هذا المحتوى؟")
 
     except Exception as e:
         log_error(logger, f"Error in handle_media: {e}", exception=e)
         await msg.answer("❌ حدث خطأ غير متوقع أثناء معالجة الملف.")
+
 # ==================== Question Count Handler ====================
 
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
@@ -102,11 +107,16 @@ async def process_count(msg: types.Message, state: FSMContext):
     processing_msg = await msg.answer(MSG_PROCESSING)
     asyncio.create_task(_run_quiz_flow(msg, file_path, count, state, processing_msg))
 
+
 async def _run_quiz_flow(msg, file_path, count, state, processing_msg):
     """
     سير العمل الموحد: توليد الأسئلة ثم البدء.
     """
     try:
+        # 🆕 [تعديل] جلب اسم الملف الديناميكي الذي حفظناه في الخطوة السابقة من الـ State
+        data = await state.get_data()
+        source_title = data.get('source_title', "كويز من ملف")
+
         # استدعاء الدالة الذكية (Gemini) مباشرة
         quiz_data = await generate_quiz_smart(file_path=file_path, count=count)
         
@@ -118,7 +128,8 @@ async def _run_quiz_flow(msg, file_path, count, state, processing_msg):
         await asyncio.to_thread(update_user_stats, msg.from_user.id, len(quiz_data), len(quiz_data))
         
         from handlers.execution import _start_loaded_quiz
-        await _start_loaded_quiz(msg, state, quiz_data, "كويز من ملف", origin="file")
+        # 🆕 [تعديل] تمرير متغير source_title الديناميكي هنا بدلاً من الكلمة الثابتة
+        await _start_loaded_quiz(msg, state, quiz_data, source_title, origin="file")
         await processing_msg.delete()
 
     except Exception as e:
