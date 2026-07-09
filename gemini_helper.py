@@ -72,16 +72,6 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
 
     prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
     
-    # صياغة تعليمات المخرجات لـ Groq
-    groq_instructions = (
-        f"{prompt}\n\n"
-        "⚠️ تنبيه صارم: يجب أن تكون المخرجات عبارة عن كائن JSON صالح تماماً، يحتوي على حقل رئيسي باسم 'questions' وهو عبارة عن مصفوفة، وكل عنصر داخل المصفوفة يحتوي حصراً على الحقول التالية باللغة العربية:\n"
-        "- question\n"
-        "- options (مصفوفة من 4 خيارات)\n"
-        "- correct_option_id (رقم من 0 إلى 3)\n"
-        "- hint\n"
-        "- explanation"
-    )
 
     # ====================================================
     # 📸 أولاً: مسار معالجة الصور عبر Groq 
@@ -104,7 +94,7 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": groq_instructions},
+                                {"type": "text", "text":prompt },
                                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                             ]
                         }
