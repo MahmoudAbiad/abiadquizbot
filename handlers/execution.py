@@ -120,6 +120,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             correct_option_id=int(q['correct_option_id']),
             explanation=clean_explanation,
             reply_markup=control_kb
+            is_anonymous=False
         )
 
         # 2. الآن نستخرج الـ poll_id الحقيقي من رسالة الـ Poll التي أرسلناها للتو
