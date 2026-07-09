@@ -5,9 +5,9 @@ and direct text inputs using Gemini for media and Groq for pure text.
 
 import os
 import asyncio
-from aiogram import Router, types, F
+from aiogram import Router, types, F, Bot
 from aiogram.fsm.context import FSMContext
-from aiogram.filters import StateFilter  # تم استيراد الفلتر لضبط الحالات بشكل صحيح
+from aiogram.filters import StateFilter
 
 from config import bot, QuizState
 from constants import (
@@ -54,6 +54,8 @@ async def collect_album_photos(msg: types.Message) -> list[types.Message]:
 async def handle_media(msg: types.Message, state: FSMContext):
     try:
         current_status = await state.get_state()
+        
+        # ⚠️ هنا يتم الفحص الذكي: المنع يشتغل فقط لو المستخدم داخل الاختبار فعلياً
         if current_status == QuizState.answering_quiz:
             await msg.answer("⚠️ **لديك اختبار قائم حالياً.** يرجى إكمال الاختبار أو الضغط على زر (⏹ إيقاف) أولاً.", parse_mode="Markdown")
             return
@@ -73,7 +75,6 @@ async def handle_media(msg: types.Message, state: FSMContext):
             file_paths = []
             for idx, p_msg in enumerate(all_messages):
                 photo = p_msg.photo[-1]
-                # فحص الحجم لكل صورة
                 is_valid, error = validate_file_size(photo.file_size, "photo")
                 if not is_valid:
                     await msg.answer(f"❌ الصورة رقم {idx+1}: {error}")
@@ -83,10 +84,9 @@ async def handle_media(msg: types.Message, state: FSMContext):
                 file_paths.append(f_path)
             
             file_title = f"كويز من ألبوم صور ({len(file_paths)} صور)"
-            # بالنسبة للألبوم سنستخدم الهاش الخاص بأول صورة كمعرّف مبدئي أو مدمج
             file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
 
-        # معالجة المستندات بجميع أنواعها (بدون تقييد الامتداد)
+        # معالجة المستندات بجميع أنواعها
         else:
             is_valid, error = validate_file_size(msg.document.file_size, "document")
             if not is_valid:
@@ -109,7 +109,7 @@ async def handle_media(msg: types.Message, state: FSMContext):
             cache_cost = round(q_count * 0.1, 1)
 
             await state.update_data(
-                file_paths=file_paths,  # مصفوفة المسارات الجديدة
+                file_paths=file_paths,
                 source_title=file_title,
                 cached_questions=questions_data,
                 cache_cost=cache_cost,
@@ -141,10 +141,8 @@ async def handle_media(msg: types.Message, state: FSMContext):
 
 # ==================== Text Handler (Groq Exclusive) ====================
 
-# تم ربطه بـ StateFilter(None) لضمان عدم اعتراض الأرقام أو الردود أثناء الحالات الأخرى
 @router.message(StateFilter(None), F.text, ~F.text.startswith('/'))
 async def handle_pure_text(msg: types.Message, state: FSMContext):
-    # استقبال النص وحفظه
     text_content = msg.text.strip()
     if len(text_content) < 30:
         await msg.answer("⚠️ النص قصير جداً! يرجى إرسال نص تعليمي مفصل (30 حرف كحد أدنى) لتوليد الأسئلة منه.")
@@ -197,7 +195,6 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext):
 
 # ==================== Question Count Handler ====================
 
-# المعالج الأساسي عند استقبال رقم صحيح في حالة انتظار العدد
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
 async def process_count(msg: types.Message, state: FSMContext):
     count = int(msg.text)
@@ -217,10 +214,8 @@ async def process_count(msg: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # فحص حجم صفحات ملف الـ PDF إن وجد واقتطاعه
     if input_type == "media":
         file_paths = data.get("file_paths", [])
-        # إذا كان مستند PDF واحد، نفحص عدد صفحاته
         if len(file_paths) == 1 and file_paths[0].lower().endswith('.pdf'):
             try:
                 import fitz
@@ -242,7 +237,6 @@ async def process_count(msg: types.Message, state: FSMContext):
     await trigger_quiz_generation(msg, msg.from_user.id, count, state)
 
 
-# معالج الأخطاء: يعمل إذا أرسل المستخدم نصاً عادياً بدلاً من الرقم أثناء حالة انتظار العدد
 @router.message(QuizState.waiting_for_count)
 async def process_count_invalid(msg: types.Message):
     await msg.answer("⚠️ **الرجاء إرسال رقم صحيح فقط** (مثال: 5 أو 10) وتجنب كتابة الكلمات لتحديد عدد الأسئلة!")
@@ -253,7 +247,7 @@ async def process_count_invalid(msg: types.Message):
 async def trigger_quiz_generation(msg_obj: types.Message, user_id: int, count: int, state: FSMContext):
     async with processing_users_lock:
         if user_id in processing_users:
-            await msg_obj.answer("⏳ جاري المعالجة، انتظر قليلاً...")
+            await msg_obj.answer("⏳ جاري المعالجة, انتظر قليلاً...")
             return
         processing_users.add(user_id)
 
@@ -290,7 +284,6 @@ async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, proce
         input_type = data.get("input_type")
         source_title = data.get('source_title', "كويز")
 
-        # الاستدعاء الموحد الذكي (تمرير الملفات أو النص المباشر)
         quiz_data = await generate_quiz_smart(
             file_paths=data.get("file_paths") if input_type == "media" else None,
             pure_text=data.get("pure_text") if input_type == "text" else None,

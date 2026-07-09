@@ -86,10 +86,10 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         q = questions[idx]
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
         
-        # 🔐 حل مشكلة معرف البوت: جلب معرف الطالب الحقيقي دائماً من مفتاح الـ FSM المتصل بالعملية
+        # 🔐 جلب معرف الطالب الحقيقي دائماً من مفتاح الـ FSM المتصل بالعملية
         user_id = state.key.user_id
 
-        # ⚙️ [حصن الحماية] معالجة واقتطاع النصوص للامتثال لقيود تليجرام الصارمة لضمان الاستقرار الإرسالي
+        # ⚙️ معالجة واقتطاع النصوص للامتثال لقيود تليجرام الصارمة لضمان الاستقرار الإرسالي
         raw_question = f"📝 السؤال {idx + 1} من {len(questions)}:\n{q['question']}"
         clean_question = raw_question if len(raw_question) <= 300 else raw_question[:297] + "..."
         
@@ -132,7 +132,6 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
 
     except Exception as e:
         log_error(logger, f"Error in send_question: {e}", exception=e)
-        # كسر الصمت المطبق: إرسال واجهة تفاعلية بديلة للمستخدم ليتجاوز المشكلة إن حدثت
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
         try:
             await bot.send_message(
@@ -348,8 +347,13 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
         
         await call.message.edit_text(f"✅ **تم الحفظ بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم: `عام`", parse_mode="Markdown")
         
-        prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
-        await state.set_state(prev_state)
+        # 🛠 [إصلاح ذكي]: التحقق لمنع تعليق حالة المستخدم بعد الحفظ النهائي
+        if data.get("quiz_completed"):
+            await state.set_state(None)
+        else:
+            prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
+            await state.set_state(prev_state)
+            
     except Exception as e:
         log_error(logger, f"Error saving to general: {e}", exception=e)
         await call.answer("❌ حدث خطأ أثناء حفظ الكويز.", show_alert=True)
@@ -396,8 +400,13 @@ async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMC
         
         await call.message.edit_text(f"✅ **تم حفظ الاختبار بنجاح ضمن القسم المختار!**\n\n📦 الاسم: `{title}`", parse_mode="Markdown")
         
-        prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
-        await state.set_state(prev_state)
+        # 🛠 [إصلاح ذكي]: التحقق لمنع تعليق حالة المستخدم بعد الحفظ النهائي
+        if data.get("quiz_completed"):
+            await state.set_state(None)
+        else:
+            prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
+            await state.set_state(prev_state)
+            
     except Exception as e:
         log_error(logger, f"Error saving to existing section: {e}", exception=e)
     finally:
@@ -439,8 +448,13 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
         
         await msg.answer(f"✅ **تم إنشاء القسم وحفظ الاختبار بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم الجديد: `{section_title}`", parse_mode="Markdown")
         
-        prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
-        await state.set_state(prev_state)
+        # 🛠 [إصلاح ذكي]: التحقق لمنع تعليق حالة المستخدم بعد الحفظ النهائي
+        if data.get("quiz_completed"):
+            await state.set_state(None)
+        else:
+            prev_state = data.get("prev_quiz_state") or QuizState.answering_quiz
+            await state.set_state(prev_state)
+            
     except Exception as e:
         log_error(logger, f"Error in creating section and saving: {e}", exception=e)
 
