@@ -19,6 +19,8 @@ from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_has
 from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz
 from validators import validate_file_size, validate_question_count
 from logger import get_logger, log_error
+import uuid # 👈 أضف هذه المكتبة
+from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz, save_shared_quiz # 👈 أضف save_shared_quiz هنا
 
 logger = get_logger(__name__)
 router = Router()
@@ -180,8 +182,13 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext):
 
         await asyncio.to_thread(update_user_stats, call.from_user.id, cost, len(questions))
 
+        # 🆕 إنشاء ID للكويز وحفظه كنسخة مشتركة لربطه بلوحة الشرف
+        quiz_id = uuid.uuid4().hex[:12]
+        await asyncio.to_thread(save_shared_quiz, quiz_id, call.from_user.id, source_title, questions)
+
         from handlers.execution import _start_loaded_quiz
-        await _start_loaded_quiz(call.message, state, questions, source_title, origin="cached_file")
+        # 🆕 تمرير الـ quiz_id للدالة
+        await _start_loaded_quiz(call.message, state, questions, source_title, origin="cached_file", quiz_id=quiz_id)
         try: await call.message.delete()
         except Exception: pass
 
@@ -301,10 +308,15 @@ async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, proce
             await processing_msg.edit_text("⚠️ فشل توليد الأسئلة، يرجى المحاولة لاحقاً.")
             return
 
+        # 🆕 إنشاء ID فريد للكويز الجديد وحفظه لتمكين لوحة الشرف والمشاركة
+        quiz_id = uuid.uuid4().hex[:12]
+        await asyncio.to_thread(save_shared_quiz, quiz_id, user_id, source_title, quiz_data)
+
         await asyncio.to_thread(update_user_stats, user_id, len(quiz_data), len(quiz_data))
         
         from handlers.execution import _start_loaded_quiz
-        await _start_loaded_quiz(msg, state, quiz_data, source_title, origin="file" if input_type == "media" else "text")
+        # 🆕 تمرير الـ quiz_id للدالة
+        await _start_loaded_quiz(msg, state, quiz_data, source_title, origin="file" if input_type == "media" else "text", quiz_id=quiz_id)
         await processing_msg.delete()
 
     except Exception as e:

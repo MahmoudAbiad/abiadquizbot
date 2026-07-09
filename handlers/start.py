@@ -39,9 +39,15 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
                 shared = await asyncio.to_thread(get_shared_quiz, share_id)
             else:
                 share_id = command.args.replace("quiz_", "", 1)
-                # البحث في جدول favorite_quizzes باستخدام الـ UUID الفريد
-                from supabase_helper import get_favorite_quiz_by_global_id
+                # 🆕 استدعاء الدالتين
+                from supabase_helper import get_favorite_quiz_by_global_id, get_shared_quiz
+                
+                # 1. البحث في جدول المفضلة أولاً
                 shared = await asyncio.to_thread(get_favorite_quiz_by_global_id, share_id)
+                
+                # 2. 🆕 إذا لم يجده في المفضلة، يبحث عنه في الكويزات المشتركة المخفية
+                if not shared:
+                    shared = await asyncio.to_thread(get_shared_quiz, share_id)
                 
             if shared:
                 # حماية: تسجيل أو التحقق من المستخدم في الداتابيز أولاً لمنع أخطاء الـ Database لاحقاً
