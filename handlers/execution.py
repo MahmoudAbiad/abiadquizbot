@@ -1,7 +1,6 @@
 """
 Quiz execution module - handles answering questions, hints, and results.
 """
-# تأكد من هذا السطر في أعلى الملف
 import asyncio
 
 from supabase_helper import list_favorite_quizzes, update_user_stats, save_favorite_quiz
@@ -22,7 +21,6 @@ from aiogram.fsm.storage.base import StorageKey
 # قاموس عام للربط بين معرف السؤال (poll_id) وبيانات الكويز والمحادثة
 poll_to_quiz_map = {}
 
-
 # 💡 تعريف الراوتر الأساسي للملف
 router = Router()
 
@@ -35,12 +33,11 @@ async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQu
     else:
         await call_or_message.answer(text, reply_markup=menu)
 
-# 💡 تم التحديث: إضافة quiz_id لكي يتم حفظه في الـ State عند تشغيل أي كويز
 async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: str = "") -> None:
     await state.update_data(
         questions=quiz_data, current_index=0, score=0,
         total_count=len(quiz_data), source_title=source_title,
-        quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id  # حفظ المعرف هنا
+        quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id
     )
     await state.set_state(QuizState.answering_quiz)
     if isinstance(msg_or_call, types.CallbackQuery):
@@ -57,7 +54,6 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         idx = data['current_index']
         
         # 1. التحقق من انتهاء الاختبار
-        # 1. التحقق من انتهاء الاختبار
         if idx >= len(questions):
             score = data['score']
             total = data['total_count']
@@ -71,25 +67,20 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
                 f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
             )
             
-            # 🔥 إضافة parse_mode ليتم تنسيق النجوم كخط عريض
-            await bot.send_message(
-                chat_id, 
-                result_text, 
-                reply_markup=get_quiz_result_keyboard(),
-                parse_mode="Markdown" 
-            )
-            
+            # تفعيل الـ Markdown لظهور الخط العريض بشكل صحيح
+            await bot.send_message(chat_id, result_text, reply_markup=get_quiz_result_keyboard(), parse_mode="Markdown")
             log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
+            await state.update_data(quiz_completed=True)
             
-            # 🔥 السطر الأهم: تفريغ حالة المستخدم بالكامل ليتمكن من رفع صور وملفات جديدة
-            await state.clear()
+            # ✅ الحل الهندسي: تصفير الحالة فقط (set_state(None)) دون حذف البيانات (clear) ليتمكن من معالجة صور جديدة وتظل الأزرار تعمل!
+            await state.set_state(None)
             return
         
         # 2. جلب بيانات السؤال الحالي
         q = questions[idx]
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
 
-        # 3. إنشاء أزرار التحكم السفلية متجاورة (إيقاف | مشاركة | حفظ)
+        # 3. إنشاء أزرار التحكم السفلية
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
             [
@@ -100,7 +91,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
 
-        # 4. إرسال السؤال كـ Poll رسمي وحفظ كائن الرسالة لالتقاط الـ ID
+        # 4. إرسال السؤال كـ Poll رسمي
         poll_msg = await bot.send_poll(
             chat_id=chat_id,
             question=f"📝 السؤال {idx + 1} من {len(questions)}:\n{q['question']}",
@@ -111,7 +102,6 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             reply_markup=control_kb
         )
 
-        # حفظ بيانات هذا السؤال لربطه بالإجابة لاحقاً بدقة تامة
         poll_to_quiz_map[poll_msg.poll.id] = {
             "chat_id": chat_id,
             "user_id": msg_or_call.from_user.id,
@@ -132,10 +122,10 @@ async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext)
     finally:
         await call.answer()
 
-@router.callback_query(QuizState.answering_quiz, F.data == "quiz_stop")
+@router.callback_query(F.data == "quiz_stop")
 async def stop_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
-        await state.clear()
+        await state.clear() # هنا نمسح بالكامل لأن المستخدم اختار الإيقاف الفعلي بنفسه
         try:
             await call.message.delete()
         except Exception:
@@ -156,6 +146,9 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         if not questions:
             await call.answer("❌ لا يوجد كويز محفوظ لإعادة تشغيله", show_alert=True)
             return
+        
+        # ✅ تحديث: إعادتهم لحالة الاختبار قبل البدء لتأمين تسلسل الأسئلة
+        await state.set_state(QuizState.answering_quiz)
         await state.update_data(current_index=0, score=0, quiz_completed=False)
         try:
             await call.message.delete()
@@ -171,7 +164,6 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "quiz_home")
 async def quiz_home(call: types.CallbackQuery, state: FSMContext):
     try:
-        # تصفير الحالة تماماً ليعود الطالب لوضع الاستعداد الطبيعي
         await state.clear() 
         await _send_main_menu(call, call.from_user.id)
     finally:
@@ -181,7 +173,6 @@ async def quiz_home(call: types.CallbackQuery, state: FSMContext):
 async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
     try:
         poll_id = poll_answer.poll_id
-        
         if poll_id not in poll_to_quiz_map:
             return
 
@@ -219,12 +210,11 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
         await call.answer("❌ خطأ في جلب التلميح", show_alert=True)
 
-@router.callback_query(QuizState.answering_quiz, F.data == "save_quiz")
+# ✅ تحديث: إزالة الفلتر المقيّد للحالة واستقبال الحدثين (save_quiz أثناء الحل و quiz_favorite عند النهاية)
+@router.callback_query(F.data.in_({"save_quiz", "quiz_favorite"}))
 async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
-        
-        # 1. الفحص السريع من الـ Session الحالي منعاً للضغط المتكرر اللحظي
         if data.get("is_saved_in_session"):
             await call.answer("✅ هذا الكويز محفوظ بالفعل في قائمتك المفضلة!", show_alert=True)
             return
@@ -236,24 +226,19 @@ async def handle_save_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
             return
 
-        # 2. الفحص العميق من قاعدة البيانات (Supabase) للتحقق من العنوان منعاً للتكرار نهائياً
         user_favorites = await asyncio.to_thread(list_favorite_quizzes, call.from_user.id)
-        
         if user_favorites:
-            # نتحقق إذا كان أي كويز محفوظ يطابق العنوان الحالي
             is_already_saved = any(
                 (fav.get("title") == title or fav.get("source_title") == title) 
                 for fav in user_favorites
             )
             if is_already_saved:
-                await state.update_data(is_saved_in_session=True) # تحديث الجلسة لتوفير الاستعلامات مستقبلاً
+                await state.update_data(is_saved_in_session=True)
                 await call.answer("💡 هذا الكويز موجود بالفعل في قائمتك المفضلة مسبقاً!", show_alert=True)
                 return
 
-        # 3. إذا كان جديداً تماماً، يتم الحفظ بشكل طبيعي
         await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions)
         await state.update_data(is_saved_in_session=True)
-        
         await call.answer("✅ تم الحفظ بنجاح! تجده في 'قائمتي المفضلة' قسم 'عام'.", show_alert=True)
         
     except Exception as e:
@@ -279,8 +264,8 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
 async def handle_ignored_click(call: types.CallbackQuery):
     await call.answer("✅ تم تسجيل إجابتك")
 
-# 🔥 تم التحديث: الهاندلر الآن يولد رابط يخص الكويز الحالي تحديداً بناءً على الـ quiz_id الخاص به
-@router.callback_query(QuizState.answering_quiz, F.data == "quiz_share")
+# ✅ تحديث: إزالة الفلتر المقيّد للحالة ليعمل زر المشاركة من شاشة النهاية بامتياز
+@router.callback_query(F.data == "quiz_share")
 async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext):
     try:
         bot_info = await bot.get_me()
@@ -289,7 +274,6 @@ async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext)
         quiz_id = data.get("quiz_id", "")
         title = data.get("source_title", "اختبار مميز")
         
-        # إذا كان هناك معرف للكويز نقوم بإنشاء رابط مخصص له، وإلا نضع رابط عام للبوت كاحتياط
         if quiz_id:
             start_param = f"quiz_{quiz_id}"
             share_text = f"🎯 جرب حل كويز «{title}» وتحدى نفسك معي في الدراسة!"
@@ -298,7 +282,6 @@ async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext)
             share_text = "🔥 جرب حل هذا الكويز الرهيب وتحدى نفسك معي في الدراسة!"
             
         share_url = f"https://t.me/share/url?url=https://t.me/{bot_info.username}?start={start_param}&text={share_text}"
-        
         share_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="🚀 شارك هذا الكويز الآن", url=share_url)]
         ])
