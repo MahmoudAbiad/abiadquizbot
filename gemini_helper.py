@@ -220,7 +220,7 @@ async def generate_quiz_smart(file_path: str, count: int, skip_cache: bool = Fal
                 for i in range(max_pages):
                     page = doc[i]
                     pix = page.get_pixmap(matrix=matrix)  # تحويل الصفحة لصورة بالدقة الجديدة
-                    img_bytes = pix.tobytes("jpeg", quality=50)  # ضغط جودة الـ JPEG إلى 50% لتوفير المساحة الخارقة
+                    img_bytes = pix.tobytes("jpg")  # ضغط جودة الـ JPEG إلى 50% لتوفير المساحة الخارقة
                     
                     base64_page = base64.b64encode(img_bytes).decode('utf-8')
                     groq_messages_content.append({
