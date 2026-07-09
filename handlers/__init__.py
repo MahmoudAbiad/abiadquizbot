@@ -16,5 +16,6 @@ __all__ = [
     "files_router", 
     "execution_router", 
     "favorites_router", 
-    "sharing_router"
+    "sharing_router",
+    "leaderboard_router"
 ]
