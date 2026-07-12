@@ -11,6 +11,7 @@ import random
 import asyncio
 import fitz  # PyMuPDF
 import base64
+import uuid  # استيراد مكتبة توليد المعرفات الفريدة لحماية الملفات المؤقتة
 from typing import Optional, List, Dict, Any
 from google import genai
 from google.genai import types
@@ -21,7 +22,7 @@ from dotenv import load_dotenv
 from constants import (
     GEMINI_MODEL, MAX_TEXT_LENGTH_FOR_AI, KEY_BLOCK_QUOTA_EXHAUSTED,
     KEY_BLOCK_TEMPORARY_ERROR, SYSTEM_PROMPT_GENERATE_QUESTIONS,
-    QUOTA_ERROR_KEYWORDS
+    QUOTA_ERROR_KEYWORDS,MAX_PDF_PAGES
 )
 from logger import get_logger, log_error, log_warning, log_info
 from utils import calculate_file_hash
@@ -133,9 +134,11 @@ async def generate_quiz_smart(
         # إذا كان ملف واحد PDF وهو أكبر من 15 صفحة نقوم باقتطاعه لحماية السيرفر
         if len(file_paths) == 1 and file_paths[0].lower().endswith('.pdf'):
             doc = fitz.open(file_paths[0])
-            if len(doc) > 15:
+            if len(doc) > MAX_PDF_PAGES:
                 new_doc = fitz.open()
-                new_doc.insert_pdf(doc, from_page=0, to_page=14)
+                unique_id = uuid.uuid4().hex
+                sliced_path = file_paths[0].replace(".pdf", f"_{unique_id}_sliced.pdf")
+                new_doc.insert_pdf(doc, from_page=0, to_page=MAX_PDF_PAGES - 1)
                 sliced_path = file_paths[0].replace(".pdf", "_sliced.pdf")
                 new_doc.save(sliced_path)
                 new_doc.close()

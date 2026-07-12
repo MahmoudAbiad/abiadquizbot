@@ -12,7 +12,7 @@ from aiogram.filters import StateFilter
 from config import bot, QuizState
 from constants import (
     SUCCESS_MEDIA_RECEIVED, MSG_PROCESSING, ERROR_INSUFFICIENT_POINTS,
-    MAX_IMAGES_IN_ALBUM
+    MAX_IMAGES_IN_ALBUM,MAX_PDF_PAGES
 )
 from gemini_helper import generate_quiz_smart
 from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
@@ -236,16 +236,28 @@ async def process_count(msg: types.Message, state: FSMContext):
                 pages_total = len(doc)
                 doc.close()
                 
-                if pages_total > 15:
+                # فحص الشرط ديناميكياً بناءً على الثوابت (30 صفحة حالياً)
+                if pages_total > MAX_PDF_PAGES:
                     await state.update_data(pending_count=count)
+                    
+                    # صياغة النص على زر التنبيه المدمج ديناميكياً
                     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                        [types.InlineKeyboardButton(text="✅ المتابعة (أول 15 صفحة فقط)", callback_data="limit_action_continue")],
+                        [types.InlineKeyboardButton(text=f"✅ المتابعة (أول {MAX_PDF_PAGES} صفحة فقط)", callback_data="limit_action_continue")],
                         [types.InlineKeyboardButton(text="❌ التراجع وإلغاء الطلب", callback_data="limit_action_cancel")]
                     ])
                     await state.set_state(QuizState.waiting_for_limit_decision)
-                    await msg.answer(f"⚠️ المستند يحتوي على **{pages_total}** صفحة. سيقوم النظام بمعالجة **أول 15 صفحة فقط**. هل ترغب بالمتابعة؟", reply_markup=kb)
+                    
+                    # صياغة نص الرسالة التحذيرية ديناميكياً للطلب
+                    await msg.answer(
+                        f"⚠️ المستند يحتوي على **{pages_total}** صفحة.\n"
+                        f"سيقوم النظام بمعالجة **أول {MAX_PDF_PAGES} صفحة فقط** بناءً على حدود النظام.\n\n"
+                        f"هل ترغب بالمتابعة؟", 
+                        reply_markup=kb, 
+                        parse_mode="Markdown"
+                    )
                     return
-            except Exception as e: log_error(logger, f"Error checking pages: {e}")
+            except Exception as e: 
+                log_error(logger, f"Error checking pages: {e}")
 
     await trigger_quiz_generation(msg, msg.from_user.id, count, state)
 
@@ -273,7 +285,7 @@ async def handle_limit_continue(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         count = data.get('pending_count')
-        await call.message.edit_text("🔄 جاري توجيه ومعالجة أول 15 صفحة من المستند...")
+        await call.message.edit_text(f"🔄 جاري توجيه ومعالجة أول {MAX_PDF_PAGES} صفحة من المستند...")
         await trigger_quiz_generation(call.message, call.from_user.id, count, state)
     except Exception as e: log_error(logger, f"Error in limit continue: {e}")
     finally: await call.answer()
