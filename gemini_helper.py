@@ -19,10 +19,12 @@ from groq import AsyncGroq
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+# استيراد الثوابت الجديدة والديناميكية بالكامل وإلغاء الثوابت القديمة الصلبة
 from constants import (
-    GEMINI_MODEL, MAX_TEXT_LENGTH_FOR_AI, KEY_BLOCK_QUOTA_EXHAUSTED,
+    AI_REQUEST_TIMEOUT, GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL, MAX_PDF_PAGES,
+    MAX_TEXT_LENGTH_FOR_AI, KEY_BLOCK_QUOTA_EXHAUSTED,
     KEY_BLOCK_TEMPORARY_ERROR, SYSTEM_PROMPT_GENERATE_QUESTIONS,
-    QUOTA_ERROR_KEYWORDS,MAX_PDF_PAGES
+    QUOTA_ERROR_KEYWORDS
 )
 from logger import get_logger, log_error, log_warning, log_info
 from utils import calculate_file_hash
@@ -131,15 +133,15 @@ async def generate_quiz_smart(
     local_sliced_paths = []
 
     try:
-        # إذا كان ملف واحد PDF وهو أكبر من 15 صفحة نقوم باقتطاعه لحماية السيرفر
+        # إذا كان ملف واحد PDF وهو أكبر من الحد الأقصى نقوم باقتطاعه ديناميكياً لحماية السيرفر
         if len(file_paths) == 1 and file_paths[0].lower().endswith('.pdf'):
             doc = fitz.open(file_paths[0])
             if len(doc) > MAX_PDF_PAGES:
                 new_doc = fitz.open()
                 unique_id = uuid.uuid4().hex
+                # تحديد اسم فريد للملف المقتطع باستخدام UUID لمنع تداخل ملفات الطلاب المتزامنة
                 sliced_path = file_paths[0].replace(".pdf", f"_{unique_id}_sliced.pdf")
                 new_doc.insert_pdf(doc, from_page=0, to_page=MAX_PDF_PAGES - 1)
-                sliced_path = file_paths[0].replace(".pdf", "_sliced.pdf")
                 new_doc.save(sliced_path)
                 new_doc.close()
                 local_sliced_paths.append(sliced_path)
@@ -150,9 +152,13 @@ async def generate_quiz_smart(
         else:
             target_paths = file_paths
 
-        # تجهيز ورفع كل الملفات لـ جيميني عبر نظام التدوير الذكي للمفاتيح
+        # تجهيز ورفع كل الملفات لـ جيميني عبر نظام التدوير الذكي للمفاتيح والتبديل الديناميكي للموديل
         if API_KEYS:
-            max_attempts = min(len(API_KEYS), 2)
+            # جعل المحاولات الأقصى تتسع لـ 3 محاولات لإعطاء فرصة كافية للموديل الاحتياطي ليعمل
+            max_attempts = min(len(API_KEYS), 3)
+            # تهيئة الموديل الحالي ليبدأ بالموديل الأساسي ديناميكياً
+            current_model = GEMINI_PRIMARY_MODEL
+            
             for attempt in range(max_attempts):
                 available = _get_available_key_indices()
                 if not available:
@@ -162,13 +168,12 @@ async def generate_quiz_smart(
                 idx = random.choice(available)
                 await asyncio.sleep(random.uniform(0.2, 0.5))
                 
-                # [إصلاح جوهري]: عزل النطاق وتهيئة مصفوفات مستقلة تماماً لكل محاولة مفتاح جديدة
                 attempt_uploaded_files = []
                 attempt_contents = [prompt]
                 
                 try:
                     client = genai.Client(api_key=API_KEYS[idx])
-                    log_info(logger, f"محاولة توليد الأسئلة باستخدام مفتاح جيميناي رقم {idx} (محاولة {attempt + 1})...")
+                    log_info(logger, f"محاولة توليد الأسئلة باستخدام الموديل ({current_model}) عبر مفتاح جيميناي رقم {idx} (محاولة {attempt + 1})...")
                     
                     # رفع كافة الملفات والوسائط دفعة واحدة تحت صلاحية المفتاح الحالي حصرياً
                     for path in target_paths:
@@ -178,7 +183,7 @@ async def generate_quiz_smart(
                     
                     response = await asyncio.wait_for(
                         client.aio.models.generate_content(
-                            model=GEMINI_MODEL,
+                            model=current_model, # تمرير الموديل الحالي المتغير
                             contents=attempt_contents,
                             config=types.GenerateContentConfig(
                                 response_mime_type="application/json", 
@@ -186,7 +191,7 @@ async def generate_quiz_smart(
                                 temperature=0.7
                             ),
                         ),
-                        timeout=40.0
+                        timeout=AI_REQUEST_TIMEOUT
                     )
                     
                     # تنظيف سحابي آمن فوري للملفات المرفوعة بنجاح
@@ -211,9 +216,15 @@ async def generate_quiz_smart(
                         asyncio.create_task(_safe_delete_gemini_file(client, gf.name))
                     
                     error_msg = str(e).lower()
-                    log_warning(logger, f"فشل مفتاح جيميني {idx} في محاولة التوليد: {e}")
+                    log_warning(logger, f"فشل مفتاح جيميني {idx} أثناء استخدام الموديل {current_model}: {e}")
                     
-                    if any(k in error_msg for k in QUOTA_ERROR_KEYWORDS):
+                    # 🎯 كشف خطأ الضغط والسيرفر 503 للتحويل التلقائي للموديل الاحتياطي
+                    if "503" in error_msg or "service_unavailable" in error_msg:
+                        log_warning(logger, f"⚠️ تم رصد خطأ ضغط (503). تحويل الموديل فوراً إلى الاحتياطي: {GEMINI_FALLBACK_MODEL}")
+                        current_model = GEMINI_FALLBACK_MODEL  # تحويل الموديل الحالي للاحتياطي الخفيف للمحاولة التالية
+                        blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(minutes=1)  # تهدئة المفتاح الحالي لدقيقة
+                        
+                    elif any(k in error_msg for k in QUOTA_ERROR_KEYWORDS):
                         blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(hours=KEY_BLOCK_QUOTA_EXHAUSTED)
                     else:
                         blocked_keys[idx] = datetime.datetime.now() + datetime.timedelta(minutes=KEY_BLOCK_TEMPORARY_ERROR)

@@ -10,15 +10,16 @@ MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_PDF_PAGES = 30
 # أضف أو عدل هذه السطور في ملف constants.py
 MAX_IMAGES_IN_ALBUM = 10  # أقصى عدد صور يمكن دمجها في كويز واحد
-MAX_TEXT_INPUT_SIZE = 50000  # أقصى طول للنص المباشر المرسل
+MAX_TEXT_INPUT_SIZE = 8,000  # أقصى طول للنص المباشر المرسل
 
 # تعديل رسائل الخطأ والنجاح
 SUCCESS_MEDIA_RECEIVED = "✅ تم استقبال الوسائط بنجاح!\nكم سؤالاً تريد توليده من هذا المحتوى؟ (أرسل رقماً فقط)"
 ERROR_ALBUM_TOO_LARGE = f"❌ يمكنك إرسال {MAX_IMAGES_IN_ALBUM} صور كحد أقصى في المرة الواحدة."
 # ==================== AI Model Configuration ====================
-GEMINI_MODEL = "gemini-3.1-flash-lite"  # نموذج الذكاء الاصطناعي المستخدم لتوليد الأسئلة
+GEMINI_PRIMARY_MODEL = "gemini-3.5-flash"  
+GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite"
 MAX_TEXT_LENGTH_FOR_AI = 100000  
-AI_REQUEST_TIMEOUT = 60  # Seconds
+AI_REQUEST_TIMEOUT = 120  # Seconds
 
 # ==================== Points & Token System ====================
 WELCOME_POINTS = 50           # 50 نقطة ترحيبية = 50,000 توكن مجاني

@@ -12,7 +12,7 @@ from aiogram.filters import StateFilter
 from config import bot, QuizState
 from constants import (
     SUCCESS_MEDIA_RECEIVED, MSG_PROCESSING, ERROR_INSUFFICIENT_POINTS,
-    MAX_IMAGES_IN_ALBUM,MAX_PDF_PAGES
+    MAX_IMAGES_IN_ALBUM,MAX_PDF_PAGES,MAX_TEXT_INPUT_SIZE
 )
 from gemini_helper import generate_quiz_smart
 from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
@@ -149,13 +149,29 @@ async def handle_media(msg: types.Message, state: FSMContext):
 
 # ==================== Text Handler (Groq Exclusive) ====================
 
+# handlers/files.py
+
 @router.message(StateFilter(None), F.text, ~F.text.startswith('/'))
 async def handle_pure_text(msg: types.Message, state: FSMContext):
     text_content = msg.text.strip()
+    
+    # 1. الحماية من النصوص القصيرة جداً (الحد الأدنى الحالي)
     if len(text_content) < 30:
         await msg.answer("⚠️ النص قصير جداً! يرجى إرسال نص تعليمي مفصل (30 حرف كحد أدنى) لتوليد الأسئلة منه.")
         return
 
+    # 2. 🛡️ الإضافة الجديدة: جدار الحماية للحد الأقصى (مأخوذ ديناميكياً من ملف الثوابت)
+    if len(text_content) > MAX_TEXT_INPUT_SIZE:
+        await msg.answer(
+            f"❌ **عذراً، النص المرسل طويل جداً!**\n"
+            f"الحد الأقصى المسموح به لإدخال النصوص المباشرة هو **{MAX_TEXT_INPUT_SIZE}** حرف.\n"
+            f"نصك الحالي يحتوي على **{len(text_content)}** حرف.\n\n"
+            f"💡 *نصيحة:* يمكنك تقسيم النص وإرساله على أجزاء، أو حفظه داخل ملف PDF وإرساله للبوت كملف.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # في حال تخطي الفحوصات بنجاح، يتم المتابعة
     file_title = text_content[:20] + "..."
     await state.update_data(pure_text=text_content, source_title=file_title, input_type="text")
     await state.set_state(QuizState.waiting_for_count)
