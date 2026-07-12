@@ -77,22 +77,26 @@ def _add_new_user(user_id: int, username: str, first_name: str, last_name: str, 
 
 def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dict[str, Any]:
     try:
-        current_points = user_data['points']
-        last_renewal = user_data.get('last_renewal')
+        # استدعاء الدالة الذرية من قاعدة البيانات مباشرة لمنع حالة السباق
+        rpc_response = supabase.rpc("check_and_apply_daily_renewal_atomic", {
+            "target_user_id": user_id,
+            "today_date": today,
+            "renewal_amount": DAILY_RENEWAL_POINTS
+        }).execute()
         
-        if last_renewal != today:
-            current_points += DAILY_RENEWAL_POINTS
-            supabase.table("users").update({
-                "points": current_points,
-                "last_renewal": today
-            }).eq("user_id", user_id).execute()
-            return {"points": current_points, "status": "renewed", "referrer": None}
+        if rpc_response.data:
+            result = rpc_response.data[0] if isinstance(rpc_response.data, list) else rpc_response.data
+            return {
+                "points": result["current_points"], 
+                "status": result["renewal_status"], 
+                "referrer": None
+            }
         
-        return {"points": current_points, "status": "normal", "referrer": None}
+        return {"points": user_data.get('points', 0), "status": "normal", "referrer": None}
     except Exception as e:
-        log_error(logger, f"Error checking daily renewal: {e}", exception=e)
+        log_error(logger, f"Error checking daily renewal via RPC: {e}", exception=e)
         return {"points": user_data.get('points', 0), "status": "error", "referrer": None}
-
+    
 def update_user_stats(
     user_id: int,
     points_to_deduct: int,
@@ -105,22 +109,18 @@ def update_user_stats(
         if questions_generated is None:
             questions_generated = points_to_deduct
         
-        user = supabase.table("users").select("points, total_questions").eq("user_id", user_id).execute()
-        if user.data:
-            current_points = user.data[0]['points']
-            current_total = user.data[0]['total_questions']
-            
-            new_points = max(0, current_points - points_to_deduct)
-            new_total = current_total + questions_generated
-            
-            supabase.table("users").update({
-                "points": new_points,
-                "total_questions": new_total
-            }).eq("user_id", user_id).execute()
-            return new_points
+        # تنفيذ عملية الخصم الذرية بطلب واحد آمن بنسبة 100%
+        rpc_response = supabase.rpc("deduct_user_points_atomic", {
+            "target_user_id": user_id,
+            "points_to_deduct": points_to_deduct,
+            "questions_generated": questions_generated
+        }).execute()
+        
+        if rpc_response.data is not None:
+            return int(rpc_response.data)
         return None
     except Exception as e:
-        log_error(logger, f"Error updating user stats: {e}", exception=e)
+        log_error(logger, f"Error updating user stats via RPC: {e}", exception=e)
         return None
 
 # ==================== Shared Quiz Operations ====================
