@@ -12,7 +12,7 @@ from config import bot
 from keyboards import get_main_menu_keyboard
 from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id
 from logger import get_logger, log_warning, log_info
-from constants import ADMIN_CONTACT, MAX_PDF_PAGES
+from constants import ADMIN_CONTACT, MAX_PDF_PAGES,DAILY_RENEWAL_POINTS
 
 logger = get_logger(__name__)
 router = Router()
@@ -103,7 +103,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         elif status == "renewed":
             welcome_text = (
                 "☀️ <b>يا أهلاً، يومك سعيد!</b>\n\n"
-                f"دائماً معك في رحلتك الدراسية.. تم تجديد رصيدك اليومي وإضافة <b>15 نقطة مجانية جديدة</b> لحسابك. 🔄\n"
+                f"دائماً معك في رحلتك الدراسية.. تم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄\n"
             )
         else:
             welcome_text = "👋 <b>يا مرحباً بك مجدداً!</b>\n جاهز لاختبار جديد اليوم؟ ✍️\n"

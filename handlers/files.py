@@ -12,7 +12,7 @@ from aiogram.filters import StateFilter
 from config import bot, QuizState
 from constants import (
     SUCCESS_MEDIA_RECEIVED, MSG_PROCESSING, ERROR_INSUFFICIENT_POINTS,
-    MAX_IMAGES_IN_ALBUM,MAX_PDF_PAGES,MAX_TEXT_INPUT_SIZE
+    MAX_IMAGES_IN_ALBUM,MAX_PDF_PAGES,MAX_TEXT_INPUT_SIZE,DAILY_RENEWAL_POINTS
 )
 from gemini_helper import generate_quiz_smart
 from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
@@ -190,6 +190,8 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext):
         file_paths = data.get("file_paths", [])
 
         user_info = await asyncio.to_thread(check_or_add_user, call.from_user.id, call.from_user.username or "Unknown", call.from_user.first_name or "Unknown", call.from_user.last_name or "Unknown")
+        if user_info.get("status") == "renewed":
+            await call.message.answer(f"☀️ <b>يا أهلاً، يومك سعيد!</b>\nتم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄", parse_mode="HTML")
         if user_info["points"] < cost:
             await call.answer(f"❌ نقاطك غير كافية!", show_alert=True)
             for path in file_paths: safe_file_cleanup(path)
@@ -236,6 +238,8 @@ async def process_count(msg: types.Message, state: FSMContext):
     input_type = data.get("input_type")
     
     user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown", msg.from_user.first_name or "Unknown", msg.from_user.last_name or "Unknown")
+    if user_info.get("status") == "renewed":
+        await msg.answer(f"☀️ <b>يا أهلاً، يومك سعيد!</b>\nتم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄", parse_mode="HTML")
     if user_info["points"] < count:
         await msg.answer(f"❌ رصيدك لا يكفي! تحتاج {count} نقاط.")
         if input_type == "media":
