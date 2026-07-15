@@ -19,7 +19,7 @@ ERROR_ALBUM_TOO_LARGE = f"❌ يمكنك إرسال {MAX_IMAGES_IN_ALBUM} صور
 GEMINI_PRIMARY_MODEL = "gemini-3.5-flash"  
 GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite"
 MAX_TEXT_LENGTH_FOR_AI = 100000  
-AI_REQUEST_TIMEOUT = 120  # Seconds
+AI_REQUEST_TIMEOUT = 620  # Seconds
 
 # ==================== Points & Token System ====================
 WELCOME_POINTS = 50           # 50 نقطة ترحيبية = 50,000 توكن مجاني
