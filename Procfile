@@ -1,1 +1,1 @@
-web: python main.py
+web: python "my quiz bot/main.py"
