@@ -10,7 +10,8 @@ MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_PDF_PAGES = 30
 # أضف أو عدل هذه السطور في ملف constants.py
 MAX_IMAGES_IN_ALBUM = 10  # أقصى عدد صور يمكن دمجها في كويز واحد
-MAX_TEXT_LENGTH_FOR_AI = 8000  # أقصى طول للنص المباشر المرسل
+MAX_TEXT_INPUT_SIZE = 8000  # أقصى طول للنص المباشر المرسل
+MAX_TEXT_LENGTH_FOR_AI = 8000
 
 # تعديل رسائل الخطأ والنجاح
 SUCCESS_MEDIA_RECEIVED = "✅ تم استقبال الوسائط بنجاح!\nكم سؤالاً تريد توليده من هذا المحتوى؟ (أرسل رقماً فقط)"
