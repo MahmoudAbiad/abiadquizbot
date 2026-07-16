@@ -251,6 +251,9 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         if not poll_answer.option_ids:
             return
             
+        if poll_answer.user.id != quiz_info["user_id"]:
+            return
+        
         # [تعديل هام]: تحويل إجابة الطالب إلى Integer
         selected_opt = int(poll_answer.option_ids[0])
 
