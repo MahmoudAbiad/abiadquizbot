@@ -33,7 +33,7 @@ processing_users: set[int] = set()
 album_cache: dict[str, list[types.Message]] = {}
 
 # 🚀 الموضع المضاف 1: دالة فحص وتطهير الملفات المهجورة التي مر عليها أكثر من ساعة
-def clean_old_files_inline(directory: str, max_age_seconds: int = 3600):
+def clean_old_files_inline(directory: str, max_age_seconds: int = 900):
     import time
     try:
         if not os.path.exists(directory):
