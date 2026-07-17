@@ -17,7 +17,7 @@ from constants import (
 )
 from gemini_helper import generate_quiz_smart
 from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
-# ✅ تم دمج السطرين المتكررين للاستيراد من supabase_helper في سطر واحد نظيف هنا
+# ✅ تم دمج أسطر الاستيراد المتكررة هنا في سطر واحد نظيف يمنع التداخل
 from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz, save_shared_quiz
 from validators import validate_file_size, validate_question_count
 from logger import get_logger, log_error
@@ -31,6 +31,23 @@ processing_users: set[int] = set()
 
 # مخزن مؤقت لتجميع ألبومات الصور (Media Groups)
 album_cache: dict[str, list[types.Message]] = {}
+
+# 🚀 الموضع المضاف 1: دالة فحص وتطهير الملفات المهجورة التي مر عليها أكثر من ساعة
+def clean_old_files_inline(directory: str, max_age_seconds: int = 3600):
+    import time
+    try:
+        if not os.path.exists(directory):
+            return
+        now = time.time()
+        for filename in os.listdir(directory):
+            file_path = os.path.join(directory, filename)
+            if os.path.isfile(file_path):
+                # إذا كان وقت تعديل الملف أقدم من ساعة، يتم حذفه فوراً
+                if os.path.getmtime(file_path) < now - max_age_seconds:
+                    os.remove(file_path)
+                    logger.info(f"🗑️ تم حذف ملف مهجور تلقائياً لتوفير المساحة: {filename}")
+    except Exception as e:
+        logger.error(f"خطأ أثناء تنظيف الملفات المهجورة: {e}")
 
 async def collect_album_photos(msg: types.Message) -> list[types.Message]:
     """دالة مساعدة لتجميع الصور المرسلة كألبوم وتجنب التكرار"""
@@ -63,6 +80,7 @@ def get_pdf_page_count_sync(file_path: str) -> int:
 @router.message(F.document | F.photo)
 async def handle_media(msg: types.Message, state: FSMContext):
     try:
+        clean_old_files_inline(DOWNLOADS_DIR)
         current_status = await state.get_state()
         
         # ⚠️ هنا يتم الفحص الذكي: المنع يشتغل فقط لو المستخدم داخل الاختبار فعلياً
@@ -180,7 +198,7 @@ async def handle_pure_text(msg: types.Message, state: FSMContext):
     file_title = text_content[:20] + "..."
     await state.update_data(pure_text=text_content, source_title=file_title, input_type="text")
     await state.set_state(QuizState.waiting_for_count)
-    await msg.answer("✅ تم استقبال النص بنجاح! كم سؤال تريد استخراجه من هذا النص؟")
+    await msg.answer("✅ تم استقبال النص بنجاح! كم سؤال تريد استخراجه من هذا النص？")
 
 
 # ==================== Cache Decision Handlers ====================

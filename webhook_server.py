@@ -23,6 +23,11 @@ async def lifespan(app: FastAPI):
     """
     # [حدث الـ Startup]: يتم تنفيذه عند إقلاع السيرفر
     try:
+        # 🚀 الموضع المضاف: تنظيف وجرف مجلد التحميلات بالكامل عند إقلاع السيرفر على Railway
+        import shutil
+        if os.path.exists("downloads"):
+            shutil.rmtree("downloads")
+        os.makedirs("downloads", exist_ok=True)
         webhook_url = os.getenv("WEBHOOK_URL")
         if webhook_url:
             full_webhook_url = f"{webhook_url.rstrip('/')}{WEBHOOK_PATH}"
