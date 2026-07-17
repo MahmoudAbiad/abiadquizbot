@@ -32,6 +32,33 @@ processing_users: set[int] = set()
 # مخزن مؤقت لتجميع ألبومات الصور (Media Groups)
 album_cache: dict[str, list[types.Message]] = {}
 
+# 🚀 الموضع المضاف 1: دالة المؤقت الخلفي الذكي لإلغاء الانتظار وإشعار المستخدم بعد 15 دقيقة
+async def auto_cancel_upload_timeout(chat_id: int, user_id: int, state: FSMContext, timeout: int = 900):
+    await asyncio.sleep(timeout)
+    current_state = await state.get_state()
+    
+    # التحقق: إذا مرت الـ 15 دقيقة ولا يزال المستخدم عالقاً في نفس الحالة ولم يرسل رقم الأسئلة
+    if current_state == QuizState.waiting_for_count:
+        data = await state.get_data()
+        file_paths = data.get("file_paths", [])
+        
+        # 1. تنظيف الملفات فوراً من الهارد ديسك لتوفير مساحة السيرفر
+        for path in file_paths:
+            safe_file_cleanup(path)
+            
+        # 2. تصفير حالة المستخدم
+        await state.clear()
+        
+        # 3. إشعار الطالب بلطف عبر رسالة تلغرام
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ **انتهت مهلة الانتظار (15 دقيقة).**\nتم إلغاء طلبك الحالي تلقائياً وتنظيف الملفات لتوفير مساحة السيرفر. يمكنك إرسال ملف أو نص جديد في أي وقت تريد! 🔄",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+
 # 🚀 الموضع المضاف 1: دالة فحص وتطهير الملفات المهجورة التي مر عليها أكثر من ساعة
 def clean_old_files_inline(directory: str, max_age_seconds: int = 900):
     import time
@@ -167,6 +194,9 @@ async def handle_media(msg: types.Message, state: FSMContext):
         await state.set_state(QuizState.waiting_for_count)
         await msg.answer(SUCCESS_MEDIA_RECEIVED)
 
+        # 🚀 الموضع المضاف 2: إطلاق دالة الإلغاء التلقائي في الخلفية دون حظر السيرفر
+        asyncio.create_task(auto_cancel_upload_timeout(msg.chat.id, msg.from_user.id, state, timeout=900))
+
     except Exception as e:
         log_error(logger, f"Error in handle_media: {e}", exception=e)
         await msg.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
@@ -200,6 +230,8 @@ async def handle_pure_text(msg: types.Message, state: FSMContext):
     await state.set_state(QuizState.waiting_for_count)
     await msg.answer("✅ تم استقبال النص بنجاح! كم سؤال تريد استخراجه من هذا النص？")
 
+    # 🚀 الموضع المضاف 3: إطلاق دالة الإلغاء التلقائي في الخلفية للنصوص أيضاً
+    asyncio.create_task(auto_cancel_upload_timeout(msg.chat.id, msg.from_user.id, state, timeout=900))
 
 # ==================== Cache Decision Handlers ====================
 
@@ -243,6 +275,10 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext):
     try:
         await state.set_state(QuizState.waiting_for_count)
         await call.message.edit_text("📝 **كم سؤال تريد استخراجه من هذا المحتوى؟**", parse_mode="Markdown")
+        
+        # 🚀 الموضع المعدل: إطلاق دالة الإلغاء التلقائي هنا أيضاً في حال رفض الطالب استخدام الكاش ودخل حالة انتظار العدد
+        asyncio.create_task(auto_cancel_upload_timeout(call.message.chat.id, call.from_user.id, state, timeout=900))
+        
     except Exception as e: log_error(logger, f"Error declining cache: {e}")
     finally: await call.answer()
 
