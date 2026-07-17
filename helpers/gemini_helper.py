@@ -48,6 +48,25 @@ class QuizQuestion(BaseModel):
 class QuizResponse(BaseModel):
     questions: List[QuizQuestion]
 
+# دالة مساعدة متزامنة نضعها في ملف helpers/gemini_helper.py
+def slice_pdf_if_needed_sync(file_path: str, max_pages: int, unique_id: str) -> tuple[str, bool]:
+    """
+    تقطيع ملف الـ PDF متزامناً داخل خيط منفصل لحماية السيرفر
+    تعيد: (مسار الملف النهائي، هل تم قصه أم لا)
+    """
+    import fitz
+    doc = fitz.open(file_path)
+    if len(doc) > max_pages:
+        new_doc = fitz.open()
+        sliced_path = file_path.replace(".pdf", f"_{unique_id}_sliced.pdf")
+        new_doc.insert_pdf(doc, from_page=0, to_page=max_pages - 1)
+        new_doc.save(sliced_path)
+        new_doc.close()
+        doc.close()
+        return sliced_path, True
+    doc.close()
+    return file_path, False
+
 def _get_available_key_indices() -> List[int]:
     now = datetime.datetime.now()
     available = []
@@ -133,24 +152,27 @@ async def generate_quiz_smart(
     local_sliced_paths = []
 
     try:
-        # إذا كان ملف واحد PDF وهو أكبر من الحد الأقصى نقوم باقتطاعه ديناميكياً لحماية السيرفر
+        # ======= 🚀 بداية الموضع المعدل بدقة =======
+        # إذا كان ملف واحد PDF نقوم بتمريره مباشرة للخيط الخلفي ليفحص ويقتطع دون حظر السيرفر
         if len(file_paths) == 1 and file_paths[0].lower().endswith('.pdf'):
-            doc = fitz.open(file_paths[0])
-            if len(doc) > MAX_PDF_PAGES:
-                new_doc = fitz.open()
+            try:
                 unique_id = uuid.uuid4().hex
-                # تحديد اسم فريد للملف المقتطع باستخدام UUID لمنع تداخل ملفات الطلاب المتزامنة
-                sliced_path = file_paths[0].replace(".pdf", f"_{unique_id}_sliced.pdf")
-                new_doc.insert_pdf(doc, from_page=0, to_page=MAX_PDF_PAGES - 1)
-                new_doc.save(sliced_path)
-                new_doc.close()
-                local_sliced_paths.append(sliced_path)
-                target_paths = [sliced_path]
-            else:
+                # الاستدعاء المباشر للخيط الخلفي، الدالة تتكفل بالفحص والقص بأمان وثبات
+                final_path, is_sliced = await asyncio.to_thread(
+                    slice_pdf_if_needed_sync, file_paths[0], MAX_PDF_PAGES, unique_id
+                )
+        
+                if is_sliced:
+                    local_sliced_paths.append(final_path)
+                    target_paths = [final_path]
+                else:
+                    target_paths = file_paths
+            except Exception as pdf_err:
+                log_error(logger, f"خطأ في معالجة خيط الـ PDF الخلفي: {pdf_err}")
                 target_paths = file_paths
-            doc.close()
         else:
             target_paths = file_paths
+        # ======= 🚀 نهاية الموضع المعدل بدقة =======
 
         # تجهيز ورفع كل الملفات لـ جيميني عبر نظام التدوير الذكي للمفاتيح والتبديل الديناميكي للموديل
         if API_KEYS:

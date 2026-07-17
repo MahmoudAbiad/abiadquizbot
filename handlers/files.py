@@ -5,6 +5,7 @@ and direct text inputs using Gemini for media and Groq for pure text.
 
 import os
 import asyncio
+import uuid 
 from aiogram import Router, types, F, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
@@ -12,15 +13,14 @@ from aiogram.filters import StateFilter
 from config import bot, QuizState
 from constants import (
     SUCCESS_MEDIA_RECEIVED, MSG_PROCESSING, ERROR_INSUFFICIENT_POINTS,
-    MAX_IMAGES_IN_ALBUM,MAX_PDF_PAGES,MAX_TEXT_INPUT_SIZE,DAILY_RENEWAL_POINTS
+    MAX_IMAGES_IN_ALBUM, MAX_PDF_PAGES, MAX_TEXT_INPUT_SIZE, DAILY_RENEWAL_POINTS
 )
 from gemini_helper import generate_quiz_smart
 from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_hash
-from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz
+# ✅ تم دمج السطرين المتكررين للاستيراد من supabase_helper في سطر واحد نظيف هنا
+from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz, save_shared_quiz
 from validators import validate_file_size, validate_question_count
 from logger import get_logger, log_error
-import uuid # 👈 أضف هذه المكتبة
-from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz, save_shared_quiz # 👈 أضف save_shared_quiz هنا
 
 logger = get_logger(__name__)
 router = Router()
@@ -49,6 +49,14 @@ async def collect_album_photos(msg: types.Message) -> list[types.Message]:
     if mg_id in album_cache:
         del album_cache[mg_id]
     return photos
+
+# ✅ دالتك المساعدة الممتازة لقراءة عدد الصفحات في خيط منفصل
+def get_pdf_page_count_sync(file_path: str) -> int:
+    import fitz
+    doc = fitz.open(file_path)
+    pages_total = len(doc)
+    doc.close()
+    return pages_total
 
 # ==================== Media Handlers (Photos & Documents) ====================
 
@@ -89,7 +97,6 @@ async def handle_media(msg: types.Message, state: FSMContext):
             file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
 
         # معالجة المستندات بجميع أنواعها
-# ==================== معالجة المستندات بجميع أنواعها ====================
         else:
             is_valid, error = validate_file_size(msg.document.file_size, "document")
             if not is_valid:
@@ -149,8 +156,6 @@ async def handle_media(msg: types.Message, state: FSMContext):
 
 # ==================== Text Handler (Groq Exclusive) ====================
 
-# handlers/files.py
-
 @router.message(StateFilter(None), F.text, ~F.text.startswith('/'))
 async def handle_pure_text(msg: types.Message, state: FSMContext):
     text_content = msg.text.strip()
@@ -160,7 +165,7 @@ async def handle_pure_text(msg: types.Message, state: FSMContext):
         await msg.answer("⚠️ النص قصير جداً! يرجى إرسال نص تعليمي مفصل (30 حرف كحد أدنى) لتوليد الأسئلة منه.")
         return
 
-    # 2. 🛡️ الإضافة الجديدة: جدار الحماية للحد الأقصى (مأخوذ ديناميكياً من ملف الثوابت)
+    # 2. 🛡️ جدار الحماية للحد الأقصى (مأخوذ ديناميكياً من ملف الثوابت)
     if len(text_content) > MAX_TEXT_INPUT_SIZE:
         await msg.answer(
             f"❌ **عذراً، النص المرسل طويل جداً!**\n"
@@ -251,10 +256,8 @@ async def process_count(msg: types.Message, state: FSMContext):
         file_paths = data.get("file_paths", [])
         if len(file_paths) == 1 and file_paths[0].lower().endswith('.pdf'):
             try:
-                import fitz
-                doc = fitz.open(file_paths[0])
-                pages_total = len(doc)
-                doc.close()
+                # 🚀 تشغيل عملية فتح الـ PDF في خيط خلفي لمنع تجميد السيرفر لباقي الطلاب
+                pages_total = await asyncio.to_thread(get_pdf_page_count_sync, file_paths[0])
                 
                 # فحص الشرط ديناميكياً بناءً على الثوابت (30 صفحة حالياً)
                 if pages_total > MAX_PDF_PAGES:
@@ -323,7 +326,6 @@ async def handle_limit_cancel(call: types.CallbackQuery, state: FSMContext):
 
 
 async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, processing_msg):
-    file_paths = []
     try:
         data = await state.get_data()
         input_type = data.get("input_type")
