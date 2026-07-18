@@ -53,7 +53,7 @@ async def auto_cancel_upload_timeout(chat_id: int, user_id: int, state: FSMConte
         try:
             await bot.send_message(
                 chat_id=chat_id,
-                text="⚠️ **انتهت مهلة الانتظار (15 دقيقة).**\nتم إلغاء طلبك الحالي تلقائياً وتنظيف الملفات لتوفير مساحة السيرفر. يمكنك إرسال ملف أو نص جديد في أي وقت تريد! 🔄",
+                text="⚠️ **انتهت مهلة الانتظار (15 دقيقة).**\nتم إلغاءطلبك الحالي تلقائياً وتنظيف الملفات لتوفير مساحة السيرفر. يمكنك إرسال ملف أو نص جديد في أي وقت تريد! 🔄",
                 parse_mode="Markdown"
             )
         except Exception:
@@ -161,8 +161,9 @@ async def handle_media(msg: types.Message, state: FSMContext):
             file_paths = [f_path]
             file_hash = await asyncio.to_thread(calculate_file_hash, f_path)
 
-        # [ميزة الكاش الذكي] - ✅ تم التعديل بـ await مباشر
+        # [ميزة الكاش الذكي] - المحاذاة أصبحت صحيحة 100% خارج البلوكات للصور والمستندات معاً
         cached_data = await get_cached_quiz(file_hash)
+        
         if cached_data and cached_data.get("questions_data"):
             questions_data = cached_data["questions_data"]
             q_count = len(questions_data)
