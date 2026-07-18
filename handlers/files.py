@@ -21,7 +21,25 @@ from utils import safe_file_cleanup, ensure_directory_exists, calculate_file_has
 from supabase_helper import check_or_add_user, update_user_stats, get_cached_quiz, save_shared_quiz
 from validators import validate_file_size, validate_question_count
 from logger import get_logger, log_error
+from PIL import Image
 
+def calculate_image_hash(image_path: str) -> str:
+    """
+    توليد بصمة مرئية ثابتة للصورة بناءً على مظهرها لمنع تأثر الكاش بضغط تليغرام.
+    """
+    try:
+        with Image.open(image_path) as img:
+            # تحويل الصورة للون الرمادي وتصغيرها لـ 8x8 لتقليل الحساسية للفروقات الرقمية الصغيرة
+            img = img.convert('L').resize((8, 8))
+            pixels = list(img.getdata())
+            avg = sum(pixels) / len(pixels)
+            # بناء سلسلة البتات بمقارنة كل بكسل بمتوسط الإضاءة
+            bits = "".join(['1' if p >= avg else '0' for p in pixels])
+            # تحويل الـ 64 بت إلى نص سداسي عشر ثابت
+            return f"img_{int(bits, 2):016x}"
+    except Exception:
+        return ""
+    
 logger = get_logger(__name__)
 router = Router()
 
@@ -139,7 +157,8 @@ async def handle_media(msg: types.Message, state: FSMContext):
                 file_paths.append(f_path)
             
             file_title = f"كويز من ألبوم صور ({len(file_paths)} صور)"
-            file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
+            # استخدام البصمة المرئية المعتمدة على مظهر الصورة وليس بايتات الملف الحساسة للضغط
+            file_hash = await asyncio.to_thread(calculate_image_hash, file_paths[0])
 
         # معالجة المستندات بجميع أنواعها
         else:
