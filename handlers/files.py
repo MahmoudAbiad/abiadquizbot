@@ -6,11 +6,12 @@ and direct text inputs using Gemini for media and Groq for pure text.
 import os
 import asyncio
 import uuid 
+import json  # 💡 مضاف لمعالجة تسلسل بيانات الألبوم المشتركة
 from aiogram import Router, types, F, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 
-from config import bot, QuizState
+from config import bot, QuizState, redis_client  # 💡 تم استدعاء عميل Redis المشترك هنا
 from constants import (
     SUCCESS_MEDIA_RECEIVED, MSG_PROCESSING, ERROR_INSUFFICIENT_POINTS,
     MAX_IMAGES_IN_ALBUM, MAX_PDF_PAGES, MAX_TEXT_INPUT_SIZE, DAILY_RENEWAL_POINTS
@@ -47,15 +48,12 @@ DOWNLOADS_DIR = "downloads"
 processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
 
-# مخزن مؤقت لتجميع ألبومات الصور (Media Groups)
-album_cache: dict[str, list[types.Message]] = {}
-
 # 🚀 الموضع المضاف 1: دالة المؤقت الخلفي الذكي لإلغاء الانتظار وإشعار المستخدم بعد 15 دقيقة
 async def auto_cancel_upload_timeout(chat_id: int, user_id: int, state: FSMContext, timeout: int = 900):
     await asyncio.sleep(timeout)
     current_state = await state.get_state()
     
-    # التحقق: إذا مرت الـ 15 دقيقة ولا يزال المستخدم عالقاً في نفس الحالة ولم يرسل رقم الأسئلة
+    # التحقق: إذا مرت الـ 15 دقيقة ولا يزال المستخدم علاً في نفس الحالة ولم يرسل رقم الأسئلة
     if current_state == QuizState.waiting_for_count:
         data = await state.get_data()
         file_paths = data.get("file_paths", [])
@@ -94,21 +92,44 @@ def clean_old_files_inline(directory: str, max_age_seconds: int = 900):
     except Exception as e:
         logger.error(f"خطأ أثناء تنظيف الملفات المهجورة: {e}")
 
-async def collect_album_photos(msg: types.Message) -> list[types.Message]:
-    """دالة مساعدة لتجميع الصور المرسلة كألبوم وتجنب التكرار المتوازي"""
+# 🎯 تم استبدال الكاش المحلي المكسور بدالة تجمع الألبومات عابر للـ Workers بواسطة Redis
+async def collect_album_photos_redis(msg: types.Message) -> list[dict]:
+    """تجميع صور الألبوم بشكل آمن وموزع عبر Redis لضمان التوافق مع تعدد الـ Workers والخيوط"""
     if not msg.media_group_id:
-        return [msg]
+        photo = msg.photo[-1]
+        return [{"file_id": photo.file_id, "file_unique_id": photo.file_unique_id, "file_size": photo.file_size}]
     
     mg_id = msg.media_group_id
-    if mg_id not in album_cache:
-        album_cache[mg_id] = []
-        album_cache[mg_id].append(msg)
-        # 🎯 الرسالة الأولى المكتشفة فقط هي التي تنام وتعمل كمجمع للألبوم
-        await asyncio.sleep(1.0)
-        return album_cache.pop(mg_id, [])
+    photo = msg.photo[-1]
+    photo_data = {
+        "file_id": photo.file_id, 
+        "file_unique_id": photo.file_unique_id, 
+        "file_size": photo.file_size
+    }
+    
+    list_key = f"album_list:{mg_id}"
+    lock_key = f"album_lock:{mg_id}"
+    
+    # دفع بيانات الصورة الحالية إلى قائمة الألبوم المركزية في Redis
+    await redis_client.rpush(list_key, json.dumps(photo_data))
+    
+    # محاولة حجز قفل التنسيق (الخيط أو الـ Worker المستلم لأول صورة يفوز بحق التنسيق)
+    is_coordinator = await redis_client.set(lock_key, "locked", nx=True, ex=10)
+    
+    if is_coordinator:
+        # المنسق ينام لمدة ثانية كاملة ليعطي فرصة لباقي الـ Workers لدفع بقية الصور في القائمة
+        await asyncio.sleep(1.2)
+        
+        # سحب مصفوفة الصور كاملة من قاعدة بيانات Redis
+        raw_items = await redis_client.lrange(list_key, 0, -1)
+        
+        # تنظيف فوري لمفاتيح الألبوم من Redis لمنع تراكم كاش الرام
+        await redis_client.delete(list_key)
+        await redis_client.delete(lock_key)
+        
+        return [json.loads(item) for item in raw_items]
     else:
-        # 🎯 الرسائل المتوازية اللاحقة تضيف بايتاتها للكاش وتخرج فوراً بقائمة فارغة لمنع تكرار الإرسال
-        album_cache[mg_id].append(msg)
+        # بقية الـ Workers الفرعية تخرج بصمت تام لمنع تكرار إرسال الرسائل للمستخدم
         return []
 
 # ✅ دالتك المساعدة الممتازة لقراءة عدد الصفحات في خيط منفصل
@@ -137,26 +158,30 @@ async def handle_media(msg: types.Message, state: FSMContext):
 
         # معالجة ألبوم الصور أو صورة مفردة
         if msg.photo:
-            all_messages = await collect_album_photos(msg)
-            if not all_messages: 
-                return # تم تجميعه وإنهاء المهمة الفرعية بنجاح في الرسالة الأساسية للألبوم
+            all_photos = await collect_album_photos_redis(msg)
+            if not all_photos: 
+                return # الخروج بصمت للمهام الفرعية، خيط التنسيق الأساسي سيتولى الباقي
             
-            if len(all_messages) > MAX_IMAGES_IN_ALBUM:
+            # 🔥 ترتيب الصور شبكياً بناءً على معرّفها الفريد لضمان ثبات توليد الهاش المجمع للألبوم دائماً
+            all_photos.sort(key=lambda p: p["file_unique_id"])
+            
+            if len(all_photos) > MAX_IMAGES_IN_ALBUM:
                 await msg.answer(f"❌ الحد الأقصى هو {MAX_IMAGES_IN_ALBUM} صور في المرة الواحدة.")
                 return
 
             file_paths = []
-            for idx, p_msg in enumerate(all_messages):
-                photo = p_msg.photo[-1]
-                is_valid, error = validate_file_size(photo.file_size, "photo")
+            for idx, p_data in enumerate(all_photos):
+                f_id = p_data["file_id"]
+                is_valid, error = validate_file_size(p_data["file_size"], "photo")
                 if not is_valid:
                     await msg.answer(f"❌ الصورة رقم {idx+1}: {error}")
+                    for path in file_paths: safe_file_cleanup(path)
                     return
-                f_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{photo.file_id}.jpg")
-                await bot.download(photo, destination=f_path)
+                f_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{f_id}.jpg")
+                await bot.download(file=f_id, destination=f_path)
                 file_paths.append(f_path)
             
-            # 🎯 التعديل: التمييز الذكي بين الصورة المفردة والألبوم وحساب الهاش المجمع لمنع التضارب
+            # التمييز الذكي بين الصورة المفردة والألبوم وحساب الهاش المجمع لمنع التضارب
             if len(file_paths) > 1:
                 file_title = f"كويز من ألبوم صور ({len(file_paths)} صور)"
                 img_hashes = [await asyncio.to_thread(calculate_image_hash, path) for path in file_paths]
@@ -193,12 +218,14 @@ async def handle_media(msg: types.Message, state: FSMContext):
             q_count = len(questions_data)
             cache_cost = round(q_count * 0.1, 1)
 
+            # 🔥 حفظ حقل file_hash هنا أيضاً لحمايته من الفقدان الشبكي داخل الـ State
             await state.update_data(
                 file_paths=file_paths,
                 source_title=file_title,
                 cached_questions=questions_data,
                 cache_cost=cache_cost,
-                input_type="media"
+                input_type="media",
+                file_hash=file_hash
             )
 
             kb = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -215,7 +242,7 @@ async def handle_media(msg: types.Message, state: FSMContext):
             )
             return
 
-        # ⚡ حفظ حقل file_hash الموحد (سواء ألبوم أو مفرد) داخل الـ State لربطه بمرحلة التوليد الفعلي
+        # ⚡ حفظ حقل file_hash الموحد للألبوم داخل الـ State لربطه بمرحلة التوليد الفعلي
         await state.update_data(file_paths=file_paths, source_title=file_title, input_type="media", file_hash=file_hash)
         await state.set_state(QuizState.waiting_for_count)
         await msg.answer(SUCCESS_MEDIA_RECEIVED)
@@ -414,9 +441,8 @@ async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, proce
         data = await state.get_data()
         input_type = data.get("input_type")
         source_title = data.get('source_title', "كويز")
-        file_hash = data.get("file_hash") # ⚡ استرجاع البصمة الموحدة من الـ State
+        file_hash = data.get("file_hash") 
 
-        # ⚡ تمرير البصمة الجاهزة (سواء مرئية مدمجة للألبوم أو منفردة) لمنع التضارب
         quiz_data = await generate_quiz_smart(
             file_paths=data.get("file_paths") if input_type == "media" else None,
             pure_text=data.get("pure_text") if input_type == "text" else None,
@@ -429,16 +455,11 @@ async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, proce
             await processing_msg.edit_text("⚠️ فشل توليد الأسئلة، يرجى المحاولة لاحقاً.")
             return
 
-        # 🆕 إنشاء ID فريد للكويز الجديد وحفظه لتمكين لوحة الشرف والمشاركة
         quiz_id = uuid.uuid4().hex[:12]
-        # 🛠️ الموضع المعدل 5: استدعاء مباشر غير متزامن
         await save_shared_quiz(quiz_id, user_id, source_title, quiz_data)
-
-        # 🛠️ الموضع المعدل 6: استدعاء مباشر غير متزامن
         await update_user_stats(user_id, len(quiz_data), len(quiz_data))
         
         from handlers.execution import _start_loaded_quiz
-        # 🆕 تمرير الـ quiz_id للدالة
         await _start_loaded_quiz(msg, state, quiz_data, source_title, origin="file" if input_type == "media" else "text", quiz_id=quiz_id)
         await processing_msg.delete()
 
