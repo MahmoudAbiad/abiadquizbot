@@ -62,7 +62,6 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         idx = data['current_index']
         
         # 1. التحقق من انتهاء الاختبار
-# 1. التحقق من انتهاء الاختبار
         if idx >= len(questions):
             score = data['score']
             total = data['total_count']
@@ -78,7 +77,8 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             
             if quiz_id and quiz_id.strip():
                 from supabase_helper import get_or_update_high_score
-                score_data = await asyncio.to_thread(get_or_update_high_score, user_id, quiz_id, score, total)
+                # استدعاء مباشر غير متزامن بدون خيوط خلفية
+                score_data = await get_or_update_high_score(user_id, quiz_id, score, total)
                 is_public = score_data["is_public"]
                 
                 if score_data["previous_score"] is not None:
@@ -137,7 +137,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
 
-# 1. إرسال السؤال كـ Poll رسمي بالبيانات النظيفة
+        # 1. إرسال السؤال كـ Poll رسمي بالبيانات النظيفة
         poll_msg = await bot.send_poll(
             chat_id=chat_id,
             question=clean_question,
@@ -304,7 +304,8 @@ async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ لا يوجد كويز لحفظه!", show_alert=True)
             return
 
-        user_favorites = await asyncio.to_thread(list_favorite_quizzes, call.from_user.id)
+        # استدعاء مباشر أصلي بدون خيوط
+        user_favorites = await list_favorite_quizzes(call.from_user.id)
         is_already_saved = False
         if user_favorites and quiz_id and str(quiz_id).strip():
             is_already_saved = any(fav.get("quiz_id") == quiz_id for fav in user_favorites)
@@ -322,7 +323,7 @@ async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
             [types.InlineKeyboardButton(text="✏️ حفظ باسم مخصص", callback_data="save_name_custom")]
         ])
 
-        await call.message.answer("📝 **خطوة 1 من 2: تسمية الاختبار**\n\nكيف تود تسمية هذا الكويز في المفضلة؟", reply_markup=kb, parse_mode="Markdown")
+        await call.message.answer("📝 **خطوة 1 من 2: تسمية الاختبار**\n\nكيف تود تسمية هذا الكويز في المفضلة？", reply_markup=kb, parse_mode="Markdown")
 
     except Exception as e:
         log_error(logger, f"Error starting save wizard: {e}", exception=e)
@@ -388,7 +389,8 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
         questions = data.get("questions")
         quiz_id = data.get("quiz_id")
         
-        await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions, None, None, quiz_id)
+        # استدعاء مباشر غير متزامن
+        await save_favorite_quiz(call.from_user.id, title, questions, None, None, quiz_id)
         await state.update_data(is_saved_in_session=True)
         
         await call.message.edit_text(f"✅ **تم الحفظ بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم: `عام`", parse_mode="Markdown")
@@ -410,7 +412,8 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
 async def handle_save_choose_section(call: types.CallbackQuery, state: FSMContext):
     try:
         user_id = call.from_user.id
-        sections = await asyncio.to_thread(list_favorite_sections, user_id)
+        # استدعاء مباشر غير متزامن
+        sections = await list_favorite_sections(user_id)
         
         inline_keyboard = []
         if sections:
@@ -440,13 +443,13 @@ async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMC
         questions = data.get("questions")
         quiz_id = data.get("quiz_id")
         
-        await asyncio.to_thread(save_favorite_quiz, call.from_user.id, title, questions, section_id, None, quiz_id)
+        # استدعاء مباشر غير متزامن
+        await save_favorite_quiz(call.from_user.id, title, questions, section_id, None, quiz_id)
         await state.update_data(is_saved_in_session=True)
         
         await call.message.edit_text(f"✅ **تم حفظ الاختبار بنجاح ضمن القسم المختار!**\n\n📦 الاسم: `{title}`", parse_mode="Markdown")
         
         # 🛠 [إصلاح ذكي]: التحقق لمنع تعليق حالة المستخدم بعد الحفظ النهائي
-# الكود المصحح الجديد ✨:
         if data.get("quiz_completed"):
             await state.set_state(None)
         else:
@@ -483,18 +486,18 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
         questions = data.get("questions")
         quiz_id = data.get("quiz_id")
         
-        new_section_id = await asyncio.to_thread(create_favorite_section, user_id, section_title)
+        # استدعاءات مباشرة غير متزامنة
+        new_section_id = await create_favorite_section(user_id, section_title)
         if not new_section_id:
             await msg.answer("⚠️ تعذر إنشاء القسم، تم تحويل مسار الحفظ تلقائياً إلى 'عام'.")
             new_section_id = None
             
-        await asyncio.to_thread(save_favorite_quiz, user_id, title, questions, new_section_id, None, quiz_id)
+        await save_favorite_quiz(user_id, title, questions, new_section_id, None, quiz_id)
         await state.update_data(is_saved_in_session=True)
         
         await msg.answer(f"✅ **تم إنشاء القسم وحفظ الاختبار بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم الجديد: `{section_title}`", parse_mode="Markdown")
         
         # 🛠 [إصلاح ذكي]: التحقق لمنع تعليق حالة المستخدم بعد الحفظ النهائي
-# الكود المصحح الجديد ✨:
         if data.get("quiz_completed"):
             await state.set_state(None)
         else:

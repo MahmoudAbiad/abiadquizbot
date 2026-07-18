@@ -3,6 +3,7 @@ Supabase database operations for user management and statistics.
 Handles user registration, points management, database queries, and quiz token caching.
 """
 
+import asyncio
 import os
 import datetime
 import uuid
@@ -24,12 +25,29 @@ load_dotenv(dotenv_path)
 
 logger = get_logger(__name__)
 
+# ==================== إعداد واقلاع عميل قاعدة البيانات بشكل آمن ====================
 try:
-    supabase = create_async_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+    client_or_coro = create_async_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+    
+    # التحقق مما إذا كان الكائن المسترجع عبارة عن كوروتين يحتاج لمعالجة
+    if asyncio.iscoroutine(client_or_coro):
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # إذا كانت حلقة الأحداث تعمل بالفعل
+                supabase = loop.run_until_complete(client_or_coro)
+            else:
+                supabase = asyncio.run(client_or_coro)
+        except RuntimeError:
+            supabase = asyncio.run(client_or_coro)
+    else:
+        supabase = client_or_coro
+
     log_info(logger, "Supabase Async client initialized successfully")
 except Exception as e:
     log_error(logger, f"Failed to initialize Supabase Async: {e}", exception=e)
     raise
+# ==================================================================================
 
 # ==================== User Management ====================
 async def check_or_add_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int] = None) -> Dict[str, Any]:

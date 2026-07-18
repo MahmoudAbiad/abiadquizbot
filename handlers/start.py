@@ -165,6 +165,5 @@ async def show_recharge_info(call: types.CallbackQuery):
 async def set_bot_commands(bot):
     commands = [
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
-        types.BotCommand(command="recharge", description="شحن النقاط")
     ]
     await bot.set_my_commands(commands)
