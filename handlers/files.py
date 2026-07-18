@@ -162,7 +162,7 @@ async def handle_media(msg: types.Message, state: FSMContext):
             file_hash = await asyncio.to_thread(calculate_file_hash, f_path)
 
         # [ميزة الكاش الذكي]
-        cached_data = await asyncio.to_thread(get_cached_quiz, file_hash)
+            cached_data = await get_cached_quiz(file_hash)
         if cached_data and cached_data.get("questions_data"):
             questions_data = cached_data["questions_data"]
             q_count = len(questions_data)
