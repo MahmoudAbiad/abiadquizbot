@@ -27,7 +27,9 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
 
         share_id = data.get("share_id") or create_shared_quiz_id()
         title = _build_source_title(data)
-        saved = await asyncio.to_thread(save_shared_quiz, share_id, call.from_user.id, title, questions)
+        
+        # ✅ تم التعديل: استدعاء مباشر غير متزامن بدون خيوط
+        saved = await save_shared_quiz(share_id, call.from_user.id, title, questions)
         if not saved:
             await call.answer("❌ تعذر حفظ رابط المشاركة حالياً", show_alert=True)
             return
@@ -55,7 +57,9 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
 async def open_shared_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         share_id = call.data.replace("share_load_", "", 1)
-        shared = await asyncio.to_thread(get_shared_quiz, share_id)
+        
+        # ✅ تم التعديل: استدعاء مباشر غير متزامن بدون خيوط
+        shared = await get_shared_quiz(share_id)
         if not shared:
             await call.answer("❌ انتهى رابط المشاركة أو غير موجود", show_alert=True)
             return

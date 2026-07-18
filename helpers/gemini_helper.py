@@ -142,9 +142,9 @@ async def generate_quiz_smart(
         log_error(logger, f"خطأ أثناء حساب الهاش للملفات: {hash_err}")
         file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
 
-    # التحقق من الكاش في Supabase قبل استهلاك الـ API والرفع
+    # التحقق من الكاش في Supabase قبل استهلاك الـ API والرفع - ✅ تم التعديل بـ await مباشر
     if not skip_cache:
-        cached_quiz = await asyncio.to_thread(get_cached_quiz, file_hash)
+        cached_quiz = await get_cached_quiz(file_hash)
         if cached_quiz:
             log_info(logger, "⚡ تم العثور على الكويز في الكاش (Supabase)! إرجاع النتيجة فوراً بدون استهلاك API.")
             return cached_quiz
@@ -228,8 +228,8 @@ async def generate_quiz_smart(
                         questions = [q.model_dump() for q in response.parsed.questions]
                         total_tokens = response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') and response.usage_metadata else 0
                         
-                        # حفظ النتيجة في الكاش للاستخدام المستقبلي
-                        await asyncio.to_thread(save_quiz_to_cache, file_hash, questions, total_tokens)
+                        # حفظ النتيجة في الكاش للاستخدام المستقبلي - ✅ تم التعديل بـ await مباشر
+                        await save_quiz_to_cache(file_hash, questions, total_tokens)
                         return questions
                     
                 except Exception as e:

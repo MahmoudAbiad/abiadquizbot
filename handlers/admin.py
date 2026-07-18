@@ -44,9 +44,9 @@ async def safe_edit_text(message: types.Message, text: str, reply_markup=None):
     except TelegramBadRequest:
         pass
 
-# 🚀 إصلاح تسريب الاتصالات: نستخدم الآن عميل supabase المشترك والمستورد في الأعلى بدلاً من إنشائه من الصفر في كل استدعاء
-def fetch_users_sync():
-    res = supabase.table("users").select("*").order("joined_at", desc=True).execute()
+# 🚀 تم التعديل: تحويل جلب المستخدمين إلى دالة Async أصيلة ومباشرة
+async def fetch_users_async():
+    res = await supabase.table("users").select("*").order("joined_at", desc=True).execute()
     return res.data
 
 # دالة مساعدة لإرسال إشعار لبق للمستخدم عند شحن نقاطه
@@ -100,7 +100,7 @@ def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# ==================== الموجهات المركزية (Renderers) ====================
+# ==================== Central Renderers ====================
 
 async def render_admin_dashboard(event, state: FSMContext = None):
     if state:
@@ -115,7 +115,8 @@ async def render_admin_dashboard(event, state: FSMContext = None):
         await event.answer()
 
 async def render_users_page(event, page: int = 1):
-    users = await asyncio.to_thread(fetch_users_sync)
+    # ✅ تم التعديل: استدعاء مباشر غير متزامن
+    users = await fetch_users_async()
     if not users:
         text = "📭 لا يوجد أي طلاب مسجلين حالياً."
         if isinstance(event, types.Message):
@@ -172,32 +173,26 @@ async def render_users_page(event, page: int = 1):
 
 @router.message(Command("admin"))
 async def admin_cmd_dashboard(msg: types.Message, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     await render_admin_dashboard(msg, state)
 
 @router.message(Command("searchuser"))
 async def admin_cmd_search(msg: types.Message, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     await state.set_state(AdminState.waiting_for_search_query)
     await msg.answer("🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
 
 @router.message(Command("dbstats"))
 async def admin_cmd_stats(msg: types.Message):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
-    stats = await asyncio.to_thread(admin_get_global_stats)
+    # ✅ تم التعديل: استدعاء مباشر غير متزامن
+    stats = await admin_get_global_stats()
     text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة: <code>{stats['total_questions']}</code>\n"
     await msg.answer(text, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
 
 @router.message(Command("fetchall"))
 async def admin_cmd_fetchall(msg: types.Message):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     await render_users_page(msg, page=1)
 
 @router.message(Command("charge"))
 async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
-    
-    # 1. إذا كتبت الأمر وبجانبه الآيدي مباشرة (مثال: /charge 51234567)
     if command.args:
         target_id = command.args.strip()
         if target_id.isdigit():
@@ -208,8 +203,6 @@ async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, st
             )
             return
 
-    # 2. إذا تم ضغط الأمر من القائمة الجانبية مباشرة دون كتابة معاملات (من القائمة)
-    # نقوم بتحويله لحالة انتظار البحث تلقائياً ليسهل عليك العمل
     await state.set_state(AdminState.waiting_for_search_query)
     await msg.answer(
         "💡 <b>طريقة الشحن السريع للمطور:</b>\n"
@@ -224,34 +217,30 @@ async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, st
 
 @router.callback_query(F.data == "admin_main_menu")
 async def admin_callback_main_menu(call: types.CallbackQuery, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     await render_admin_dashboard(call, state)
 
 @router.callback_query(F.data.startswith("admin_users_page_"))
 async def admin_callback_users_page(call: types.CallbackQuery):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     page = int(call.data.split("_")[3])
     await render_users_page(call, page=page)
 
 @router.callback_query(F.data == "admin_cancel")
 async def admin_cancel_action(call: types.CallbackQuery, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     await state.clear()
     await safe_edit_text(call.message, "❌ تم إغلاق لوحة الإدارة.")
     await call.answer()
 
 @router.callback_query(F.data == "admin_search_prompt")
 async def callback_search_prompt(call: types.CallbackQuery, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     await state.set_state(AdminState.waiting_for_search_query)
     await safe_edit_text(call.message, "🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):", reply_markup=get_cancel_keyboard())
     await call.answer()
 
 @router.message(AdminState.waiting_for_search_query)
 async def process_search_user(msg: types.Message, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     query = msg.text.strip()
-    users_data = await asyncio.to_thread(admin_search_user, query)
+    # ✅ تم التعديل: استدعاء مباشر غير متزامن
+    users_data = await admin_search_user(query)
     
     if users_data:
         u = users_data[0] 
@@ -273,30 +262,26 @@ async def process_search_user(msg: types.Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_charge_menu_"))
 async def show_charge_menu(call: types.CallbackQuery):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     target_id = call.data.split("_")[3]
     await safe_edit_text(call.message, f"💰 <b>شحن رصيد للمستخدم</b> <code>{target_id}</code>\n\nاختر كمية شحن سريعة أو إدخال يدوي:", reply_markup=get_admin_charge_options_keyboard(target_id))
     await call.answer()
 
 @router.callback_query(F.data.startswith("admin_charge_quick_"))
 async def process_quick_charge(call: types.CallbackQuery):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     parts = call.data.split("_")
     amount = int(parts[3])
     target_id = int(parts[4])
     
-    new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
+    # ✅ تم التعديل: استدعاء مباشر غير متزامن
+    new_balance = await admin_add_points(target_id, amount)
     if new_balance is not None:
         await safe_edit_text(call.message, f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard())
-        
-        # إرسال إشعار للمستخدم هنا
         await send_points_notification(target_id, amount, new_balance)
     else:
         await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
 
 @router.callback_query(F.data.startswith("admin_charge_manual_"))
 async def prompt_manual_charge(call: types.CallbackQuery, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     target_id = call.data.split("_")[3]
     await state.update_data(target_id=target_id)
     await state.set_state(AdminState.waiting_for_charge_amount)
@@ -305,7 +290,6 @@ async def prompt_manual_charge(call: types.CallbackQuery, state: FSMContext):
 
 @router.message(AdminState.waiting_for_charge_amount)
 async def process_manual_charge(msg: types.Message, state: FSMContext):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     if not msg.text.isdigit():
         return await msg.answer("❌ يرجى إرسال أرقام صحيحة فقط.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
     
@@ -313,11 +297,10 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     target_id = int(data.get('target_id'))
     
-    new_balance = await asyncio.to_thread(admin_add_points, target_id, amount)
+    # ✅ تم التعديل: استدعاء مباشر غير متزامن
+    new_balance = await admin_add_points(target_id, amount)
     if new_balance is not None:
         await msg.answer(f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
-        
-        # إرسال إشعار للمخدم/المستخدم هنا
         await send_points_notification(target_id, amount, new_balance)
     else:
         await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
@@ -325,32 +308,30 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_stats")
 async def show_db_stats(call: types.CallbackQuery):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
-    stats = await asyncio.to_thread(admin_get_global_stats)
+    # ✅ تم التعديل: استدعاء مباشر غير متزامن
+    stats = await admin_get_global_stats()
     text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب المسجلين: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة المُولدة: <code>{stats['total_questions']}</code>\n"
     await safe_edit_text(call.message, text, reply_markup=get_admin_dashboard_keyboard())
     await call.answer()
 
 # ==================== تصدير البيانات إلى ملف CSV ====================
 
-# 🚀 دالة المساعدة الجديدة لحماية جهاز المطور والمسؤول من ثغرة Formula Injection
 def sanitize_csv_value(val) -> str:
     """
     تأمين النصوص المدخلة لمنع ثغرة الـ CSV Injection في برامج الجداول الحسابية مثل Excel
     """
     val_str = str(val) if val is not None else ""
-    # إذا بدأت القيمة بإحدى علامات المعادلة، نضيف علامة اقتباس مفردة لكسر مفعولها الأوتوماتيكي
     if val_str.startswith(('=', '+', '-', '@')):
         return f"'{val_str}"
     return val_str
 
 @router.callback_query(F.data == "admin_export_users")
 async def export_all_users(call: types.CallbackQuery):
-    # ❌ تمت إزالة فحص الآدمن اليدوي للاعتماد الكلي على IsAdminFilter المركزي
     await safe_edit_text(call.message, "⏳ جاري استخراج البيانات وبناء ملف الـ CSV، يرجى الانتظار...")
     
     try:
-        users = await asyncio.to_thread(fetch_users_sync)
+        # ✅ تم التعديل: استدعاء مباشر غير متزامن
+        users = await fetch_users_async()
         if not users:
             return await safe_edit_text(call.message, "📭 لا يوجد طلاب لتصديرهم.", reply_markup=get_admin_dashboard_keyboard())
         
@@ -358,7 +339,6 @@ async def export_all_users(call: types.CallbackQuery):
         writer = csv.writer(output)
         writer.writerow(["User ID", "Username", "First Name", "Last Name", "Points", "Total Questions", "Joined At"])
         
-        # 🚀 تنظيف البيانات وتطهيرها باستخدام دالة sanitize_csv_value قبل كتابتها بالملف
         for u in users:
             writer.writerow([
                 sanitize_csv_value(u.get('user_id', '')),

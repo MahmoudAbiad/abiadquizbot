@@ -19,8 +19,8 @@ async def handle_publish_score(call: types.CallbackQuery):
         quiz_id = call.data.replace("publish_score_", "")
         user_id = call.from_user.id
         
-        # تحديث حالة النتيجة في قاعدة البيانات
-        success = await asyncio.to_thread(publish_score_to_leaderboard, user_id, quiz_id)
+        # تحديث حالة النتيجة في قاعدة البيانات - ✅ تم التعديل: استدعاء مباشر غير متزامن
+        success = await publish_score_to_leaderboard(user_id, quiz_id)
         
         if success:
             await call.answer("✅ تم نشر نتيجتك بنجاح في لوحة الشرف!", show_alert=True)
@@ -43,8 +43,8 @@ async def handle_show_leaderboard(call: types.CallbackQuery):
     try:
         quiz_id = call.data.replace("leaderboard_", "")
         
-        # جلب البيانات من الداتا بيز
-        top_scores = await asyncio.to_thread(get_top_5_leaderboard, quiz_id)
+        # جلب البيانات من الداتا بيز - ✅ تم التعديل: استدعاء مباشر غير متزامن
+        top_scores = await get_top_5_leaderboard(quiz_id)
         
         if not top_scores:
             await call.answer("🏆 لا توجد نتائج علنية مسجلة لهذا الكويز حتى الآن. كن أول من ينشر نتيجته!", show_alert=True)

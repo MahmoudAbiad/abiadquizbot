@@ -76,7 +76,8 @@ async def _save_pending_favorite(target: Union[types.Message, types.CallbackQuer
         else: await target.answer("❌ لا يمكن حفظ هذا الكويز حالياً")
         return False
 
-    favorite_id = await asyncio.to_thread(save_favorite_quiz, target.from_user.id, favorite_name, questions, section_id, source_title)
+    # تفعيل الاستدعاء المباشر للدالة غير المتزامنة
+    favorite_id = await save_favorite_quiz(target.from_user.id, favorite_name, questions, section_id, source_title)
     if not favorite_id:
         if isinstance(target, types.CallbackQuery): await target.answer("❌ تعذر حفظ الكويز في المفضلة", show_alert=True)
         else: await target.answer("❌ تعذر حفظ الكويز في المفضلة")
@@ -94,7 +95,8 @@ async def _send_favorites_menu(target: Union[types.Message, types.CallbackQuery]
     sort_mode = data.get("favorites_sort_mode", "latest")
     search_query = data.get("favorites_search_query", "")
     
-    favorites = await asyncio.to_thread(list_favorite_quizzes, target.from_user.id, search_query or None, sort_mode)
+    # تفعيل الاستدعاء المباشر للدالة غير المتزامنة
+    favorites = await list_favorite_quizzes(target.from_user.id, search_query or None, sort_mode)
     
     # فلترة مخصصة إذا تم الضغط على قسم معين
     if section_filter:
@@ -114,8 +116,9 @@ async def _send_favorites_menu(target: Union[types.Message, types.CallbackQuery]
 
 async def _send_sections_menu(target: Union[types.Message, types.CallbackQuery], state: FSMContext) -> None:
     """🆕 تم التحديث: استخدام الدالة الجديدة وتحديث الرسالة"""
-    sections = await asyncio.to_thread(list_favorite_sections, target.from_user.id)
-    favorites = await asyncio.to_thread(list_favorite_quizzes, target.from_user.id, None, "latest")
+    # تفعيل الاستدعاء المباشر للدوال غير المتزامنة
+    sections = await list_favorite_sections(target.from_user.id)
+    favorites = await list_favorite_quizzes(target.from_user.id, None, "latest")
     quiz_counts: dict[str, int] = {}
     for item in favorites:
         sid = item.get("section_id")
@@ -158,8 +161,9 @@ async def process_favorite_name(msg: types.Message, state: FSMContext):
             await msg.answer(MSG_FAVORITE_NAME_INVALID.format(max_len=MAX_FAVORITE_TITLE_LENGTH))
             return
         await state.update_data(pending_favorite_name=name)
-        sections = await asyncio.to_thread(list_favorite_sections, msg.from_user.id)
-        allow_new = can_create_more_favorite_sections(msg.from_user.id)
+        # تفعيل الاستدعاء المباشر للدوال غير المتزامنة
+        sections = await list_favorite_sections(msg.from_user.id)
+        allow_new = await can_create_more_favorite_sections(msg.from_user.id)
         await msg.answer(MSG_FAVORITE_SECTION_PROMPT, reply_markup=get_favorite_section_keyboard(sections, allow_new=allow_new, allow_default=True))
     except Exception as e:
         log_error(logger, f"Error in process_favorite_name: {e}", exception=e)
@@ -172,11 +176,12 @@ async def process_favorite_section_name(msg: types.Message, state: FSMContext):
         if not s_name:
             await msg.answer("❌ اسم القسم لا يمكن أن يكون فارغًا")
             return
-        if not can_create_more_favorite_sections(msg.from_user.id):
+        if not await can_create_more_favorite_sections(msg.from_user.id):
             await msg.answer(f"❌ وصلت للحد الأقصى وهو {MAX_FAVORITE_SECTIONS} قسمًا")
             await state.set_state(QuizState.answering_quiz)
             return
-        sid = await asyncio.to_thread(create_favorite_section, msg.from_user.id, s_name)
+        # تفعيل الاستدعاء المباشر للدالة غير المتزامنة
+        sid = await create_favorite_section(msg.from_user.id, s_name)
         if not sid:
             await msg.answer("❌ تعذر إنشاء القسم")
             return
@@ -191,7 +196,7 @@ async def favorite_section_existing(call: types.CallbackQuery, state: FSMContext
     try:
         sid = call.data.replace("fav_section_", "", 1)
         if sid == "new":
-            if not can_create_more_favorite_sections(call.from_user.id):
+            if not await can_create_more_favorite_sections(call.from_user.id):
                 await call.answer(f"❌ وصلت للحد الأقصى وهو {MAX_FAVORITE_SECTIONS} قسمًا", show_alert=True)
                 return
             await state.set_state(QuizState.saving_favorite_section_name)
@@ -285,7 +290,8 @@ async def favorites_back(call: types.CallbackQuery):
 async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
     try:
         fid = call.data.replace("fav_details_", "", 1)
-        favorite = await asyncio.to_thread(get_favorite_quiz, call.from_user.id, fid)
+        # تفعيل الاستدعاء المباشر للدالة غير المتزامنة
+        favorite = await get_favorite_quiz(call.from_user.id, fid)
         
         if not favorite:
             await call.answer("❌ الكويز غير موجود أو تم حذفه", show_alert=True)
@@ -316,7 +322,8 @@ async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
 async def open_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         fid = call.data.replace("fav_open_", "", 1)
-        favorite = await asyncio.to_thread(get_favorite_quiz, call.from_user.id, fid)
+        # تفعيل الاستدعاء المباشر للدالة غير المتزامنة
+        favorite = await get_favorite_quiz(call.from_user.id, fid)
         if not favorite:
             await call.answer("❌ لم يتم العثور على هذا الكويز", show_alert=True)
             return
@@ -328,7 +335,8 @@ async def open_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
 async def delete_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         fid = call.data.replace("fav_del_", "", 1)
-        if await asyncio.to_thread(remove_favorite_quiz, call.from_user.id, fid):
+        # تفعيل الاستدعاء المباشر للدالة غير المتزامنة
+        if await remove_favorite_quiz(call.from_user.id, fid):
             await call.answer("🗑 تم حذف الكويز من المفضلة.", show_alert=True)
             await _send_favorites_menu(call, state)
         else: await call.answer("❌ تعذر حذف الكويز", show_alert=True)
