@@ -95,22 +95,21 @@ def clean_old_files_inline(directory: str, max_age_seconds: int = 900):
         logger.error(f"خطأ أثناء تنظيف الملفات المهجورة: {e}")
 
 async def collect_album_photos(msg: types.Message) -> list[types.Message]:
-    """دالة مساعدة لتجميع الصور المرسلة كألبوم وتجنب التكرار"""
+    """دالة مساعدة لتجميع الصور المرسلة كألبوم وتجنب التكرار المتوازي"""
     if not msg.media_group_id:
         return [msg]
     
     mg_id = msg.media_group_id
     if mg_id not in album_cache:
         album_cache[mg_id] = []
-    
-    album_cache[mg_id].append(msg)
-    await asyncio.sleep(0.8)  # انتظار بسيط لجمع بقية الصور
-    
-    # إرجاع القائمة وتنظيف الكاش للمجموعة
-    photos = album_cache.get(mg_id, [])
-    if mg_id in album_cache:
-        del album_cache[mg_id]
-    return photos
+        album_cache[mg_id].append(msg)
+        # 🎯 الرسالة الأولى المكتشفة فقط هي التي تنام وتعمل كمجمع للألبوم
+        await asyncio.sleep(1.0)
+        return album_cache.pop(mg_id, [])
+    else:
+        # 🎯 الرسائل المتوازية اللاحقة تضيف بايتاتها للكاش وتخرج فوراً بقائمة فارغة لمنع تكرار الإرسال
+        album_cache[mg_id].append(msg)
+        return []
 
 # ✅ دالتك المساعدة الممتازة لقراءة عدد الصفحات في خيط منفصل
 def get_pdf_page_count_sync(file_path: str) -> int:
@@ -139,7 +138,8 @@ async def handle_media(msg: types.Message, state: FSMContext):
         # معالجة ألبوم الصور أو صورة مفردة
         if msg.photo:
             all_messages = await collect_album_photos(msg)
-            if not all_messages: return # تم تجميعه في مهمة أخرى
+            if not all_messages: 
+                return # تم تجميعه وإنهاء المهمة الفرعية بنجاح في الرسالة الأساسية للألبوم
             
             if len(all_messages) > MAX_IMAGES_IN_ALBUM:
                 await msg.answer(f"❌ الحد الأقصى هو {MAX_IMAGES_IN_ALBUM} صور في المرة الواحدة.")
@@ -156,9 +156,14 @@ async def handle_media(msg: types.Message, state: FSMContext):
                 await bot.download(photo, destination=f_path)
                 file_paths.append(f_path)
             
-            file_title = f"كويز من ألبوم صور ({len(file_paths)} صور)"
-            # استخدام البصمة المرئية المعتمدة على مظهر الصورة وليس بايتات الملف الحساسة للضغط
-            file_hash = await asyncio.to_thread(calculate_image_hash, file_paths[0])
+            # 🎯 التعديل: التمييز الذكي بين الصورة المفردة والألبوم وحساب الهاش المجمع لمنع التضارب
+            if len(file_paths) > 1:
+                file_title = f"كويز من ألبوم صور ({len(file_paths)} صور)"
+                img_hashes = [await asyncio.to_thread(calculate_image_hash, path) for path in file_paths]
+                file_hash = "-".join(img_hashes)
+            else:
+                file_title = "كويز من صورة"
+                file_hash = await asyncio.to_thread(calculate_image_hash, file_paths[0])
 
         # معالجة المستندات بجميع أنواعها
         else:
@@ -210,7 +215,7 @@ async def handle_media(msg: types.Message, state: FSMContext):
             )
             return
 
-        # ⚡ تم التعديل هنا: حفظ حقل file_hash داخل الـ State لربطه بمرحلة التوليد الفعلي
+        # ⚡ حفظ حقل file_hash الموحد (سواء ألبوم أو مفرد) داخل الـ State لربطه بمرحلة التوليد الفعلي
         await state.update_data(file_paths=file_paths, source_title=file_title, input_type="media", file_hash=file_hash)
         await state.set_state(QuizState.waiting_for_count)
         await msg.answer(SUCCESS_MEDIA_RECEIVED)
@@ -409,9 +414,9 @@ async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, proce
         data = await state.get_data()
         input_type = data.get("input_type")
         source_title = data.get('source_title', "كويز")
-        file_hash = data.get("file_hash") # ⚡ تم التعديل هنا: استرجاع البصمة الموحدة من الـ State
+        file_hash = data.get("file_hash") # ⚡ استرجاع البصمة الموحدة من الـ State
 
-        # ⚡ تم التعديل هنا: تمرير البصمة الجاهزة (سواء مرئية للصور أو MD5 للمستند) لمنع التضارب
+        # ⚡ تمرير البصمة الجاهزة (سواء مرئية مدمجة للألبوم أو منفردة) لمنع التضارب
         quiz_data = await generate_quiz_smart(
             file_paths=data.get("file_paths") if input_type == "media" else None,
             pure_text=data.get("pure_text") if input_type == "text" else None,
