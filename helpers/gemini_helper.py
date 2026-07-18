@@ -89,7 +89,8 @@ async def generate_quiz_smart(
     file_paths: Optional[List[str]] = None, 
     pure_text: Optional[str] = None, 
     count: int = 0, 
-    skip_cache: bool = False
+    skip_cache: bool = False,
+    file_hash: Optional[str] = None  # ⚡ تم التعديل هنا: استقبال الهاش الجاهز من ملف files
 ) -> Optional[List[Dict[str, Any]]]:
     
     prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
@@ -134,13 +135,14 @@ async def generate_quiz_smart(
     
     log_info(logger, f"توجيه الملفات والوسائط المرفوعة ({len(file_paths)} ملف) حصرياً إلى Gemini...")
     
-    # حساب هاش مجمع لكل الملفات لضمان دقة الكاش في حال الألبومات والصور المتعددة
-    try:
-        hashes = [await asyncio.to_thread(calculate_file_hash, path) for path in file_paths]
-        file_hash = "-".join(hashes) if len(hashes) > 1 else hashes[0]
-    except Exception as hash_err:
-        log_error(logger, f"خطأ أثناء حساب الهاش للملفات: {hash_err}")
-        file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
+    # ⚡ تم التعديل هنا: حساب الهاش المجمع فقط إذا لم يتم تمريره جاهزاً من معالج الميديا
+    if not file_hash:
+        try:
+            hashes = [await asyncio.to_thread(calculate_file_hash, path) for path in file_paths]
+            file_hash = "-".join(hashes) if len(hashes) > 1 else hashes[0]
+        except Exception as hash_err:
+            log_error(logger, f"خطأ أثناء حساب الهاش للملفات: {hash_err}")
+            file_hash = await asyncio.to_thread(calculate_file_hash, file_paths[0])
 
     # التحقق من الكاش في Supabase قبل استهلاك الـ API والرفع - ✅ تم التعديل بـ await مباشر
     if not skip_cache:

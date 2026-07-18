@@ -210,7 +210,8 @@ async def handle_media(msg: types.Message, state: FSMContext):
             )
             return
 
-        await state.update_data(file_paths=file_paths, source_title=file_title, input_type="media")
+        # ⚡ تم التعديل هنا: حفظ حقل file_hash داخل الـ State لربطه بمرحلة التوليد الفعلي
+        await state.update_data(file_paths=file_paths, source_title=file_title, input_type="media", file_hash=file_hash)
         await state.set_state(QuizState.waiting_for_count)
         await msg.answer(SUCCESS_MEDIA_RECEIVED)
 
@@ -408,12 +409,15 @@ async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, proce
         data = await state.get_data()
         input_type = data.get("input_type")
         source_title = data.get('source_title', "كويز")
+        file_hash = data.get("file_hash") # ⚡ تم التعديل هنا: استرجاع البصمة الموحدة من الـ State
 
+        # ⚡ تم التعديل هنا: تمرير البصمة الجاهزة (سواء مرئية للصور أو MD5 للمستند) لمنع التضارب
         quiz_data = await generate_quiz_smart(
             file_paths=data.get("file_paths") if input_type == "media" else None,
             pure_text=data.get("pure_text") if input_type == "text" else None,
             count=count,
-            skip_cache=True
+            skip_cache=True,
+            file_hash=file_hash
         )
         
         if not quiz_data:
