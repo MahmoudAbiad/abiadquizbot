@@ -161,8 +161,8 @@ async def handle_media(msg: types.Message, state: FSMContext):
             file_paths = [f_path]
             file_hash = await asyncio.to_thread(calculate_file_hash, f_path)
 
-        # [ميزة الكاش الذكي]
-            cached_data = await get_cached_quiz(file_hash)
+        # [ميزة الكاش الذكي] - ✅ تم التعديل بـ await مباشر
+        cached_data = await get_cached_quiz(file_hash)
         if cached_data and cached_data.get("questions_data"):
             questions_data = cached_data["questions_data"]
             q_count = len(questions_data)
@@ -244,7 +244,8 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext):
         source_title = data.get("source_title")
         file_paths = data.get("file_paths", [])
 
-        user_info = await asyncio.to_thread(check_or_add_user, call.from_user.id, call.from_user.username or "Unknown", call.from_user.first_name or "Unknown", call.from_user.last_name or "Unknown")
+        # 🛠️ الموضع المعدل 1: استدعاء مباشر غير متزامن
+        user_info = await check_or_add_user(call.from_user.id, call.from_user.username or "Unknown", call.from_user.first_name or "Unknown", call.from_user.last_name or "Unknown")
         if user_info.get("status") == "renewed":
             await call.message.answer(f"☀️ <b>يا أهلاً، يومك سعيد!</b>\nتم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄", parse_mode="HTML")
         if user_info["points"] < cost:
@@ -253,11 +254,13 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext):
             await state.clear()
             return
 
-        await asyncio.to_thread(update_user_stats, call.from_user.id, cost, len(questions))
+        # 🛠️ الموضع المعدل 2: استدعاء مباشر غير متزامن
+        await update_user_stats(call.from_user.id, cost, len(questions))
 
         # 🆕 إنشاء ID للكويز وحفظه كنسخة مشتركة لربطه بلوحة الشرف
         quiz_id = uuid.uuid4().hex[:12]
-        await asyncio.to_thread(save_shared_quiz, quiz_id, call.from_user.id, source_title, questions)
+        # 🛠️ الموضع المعدل 3: استدعاء مباشر غير متزامن
+        await save_shared_quiz(quiz_id, call.from_user.id, source_title, questions)
 
         from handlers.execution import _start_loaded_quiz
         # 🆕 تمرير الـ quiz_id للدالة
@@ -296,7 +299,8 @@ async def process_count(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     input_type = data.get("input_type")
     
-    user_info = await asyncio.to_thread(check_or_add_user, msg.from_user.id, msg.from_user.username or "Unknown", msg.from_user.first_name or "Unknown", msg.from_user.last_name or "Unknown")
+    # 🛠️ الموضع المعدل 4: استدعاء مباشر غير متزامن
+    user_info = await check_or_add_user(msg.from_user.id, msg.from_user.username or "Unknown", msg.from_user.first_name or "Unknown", msg.from_user.last_name or "Unknown")
     if user_info.get("status") == "renewed":
         await msg.answer(f"☀️ <b>يا أهلاً، يومك سعيد!</b>\nتم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄", parse_mode="HTML")
     if user_info["points"] < count:
@@ -310,7 +314,7 @@ async def process_count(msg: types.Message, state: FSMContext):
         file_paths = data.get("file_paths", [])
         if len(file_paths) == 1 and file_paths[0].lower().endswith('.pdf'):
             try:
-                # 🚀 تشغيل عملية فتح الـ PDF في خيط خلفي لمنع تجميد السيرفر لباقي الطلاب
+                # 🚀 تشغيل عملية فتح الـ PDF في خيط خلفي لمنع تجميد السيرفر لباقي الطلاب (هذه تظل خيط لأنها بروسيسور)
                 pages_total = await asyncio.to_thread(get_pdf_page_count_sync, file_paths[0])
                 
                 # فحص الشرط ديناميكياً بناءً على الثوابت (30 صفحة حالياً)
@@ -398,9 +402,11 @@ async def _run_quiz_flow(msg, user_id: int, count: int, state: FSMContext, proce
 
         # 🆕 إنشاء ID فريد للكويز الجديد وحفظه لتمكين لوحة الشرف والمشاركة
         quiz_id = uuid.uuid4().hex[:12]
-        await asyncio.to_thread(save_shared_quiz, quiz_id, user_id, source_title, quiz_data)
+        # 🛠️ الموضع المعدل 5: استدعاء مباشر غير متزامن
+        await save_shared_quiz(quiz_id, user_id, source_title, quiz_data)
 
-        await asyncio.to_thread(update_user_stats, user_id, len(quiz_data), len(quiz_data))
+        # 🛠️ الموضع المعدل 6: استدعاء مباشر غير متزامن
+        await update_user_stats(user_id, len(quiz_data), len(quiz_data))
         
         from handlers.execution import _start_loaded_quiz
         # 🆕 تمرير الـ quiz_id للدالة
