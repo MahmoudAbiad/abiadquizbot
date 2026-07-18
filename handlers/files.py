@@ -11,7 +11,7 @@ from aiogram import Router, types, F, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 
-from config import bot, QuizState, redis_client  # 💡 تم استدعاء عميل Redis المشترك هنا
+from config import bot, QuizState, redis_client  # 💡 تم استدعاء عميل Redis المشترك
 from constants import (
     SUCCESS_MEDIA_RECEIVED, MSG_PROCESSING, ERROR_INSUFFICIENT_POINTS,
     MAX_IMAGES_IN_ALBUM, MAX_PDF_PAGES, MAX_TEXT_INPUT_SIZE, DAILY_RENEWAL_POINTS
@@ -53,7 +53,7 @@ async def auto_cancel_upload_timeout(chat_id: int, user_id: int, state: FSMConte
     await asyncio.sleep(timeout)
     current_state = await state.get_state()
     
-    # التحقق: إذا مرت الـ 15 دقيقة ولا يزال المستخدم علاً في نفس الحالة ولم يرسل رقم الأسئلة
+    # التحقق: إذا مرت الـ 15 دقيقة ولا يزال المستخدم عالقاً في نفس الحالة ولم يرسل رقم الأسئلة
     if current_state == QuizState.waiting_for_count:
         data = await state.get_data()
         file_paths = data.get("file_paths", [])
@@ -92,7 +92,7 @@ def clean_old_files_inline(directory: str, max_age_seconds: int = 900):
     except Exception as e:
         logger.error(f"خطأ أثناء تنظيف الملفات المهجورة: {e}")
 
-# 🎯 تم استبدال الكاش المحلي المكسور بدالة تجمع الألبومات عابر للـ Workers بواسطة Redis
+# 🎯 تم التحديث: تجميع ألبومات الصور بنظام العداد التنازلي الذكي عبر Redis عابر للـ Workers والخيوط
 async def collect_album_photos_redis(msg: types.Message) -> list[dict]:
     """تجميع صور الألبوم بشكل آمن وموزع عبر Redis لضمان التوافق مع تعدد الـ Workers والخيوط"""
     if not msg.media_group_id:
@@ -108,31 +108,45 @@ async def collect_album_photos_redis(msg: types.Message) -> list[dict]:
     }
     
     list_key = f"album_list:{mg_id}"
-    lock_key = f"album_lock:{mg_id}"
+    count_key = f"album_count:{mg_id}"
     
-    # دفع بيانات الصورة الحالية إلى قائمة الألبوم المركزية في Redis
+    # 1. دفع بيانات الصورة الحالية إلى قائمة الألبوم المركزية في Redis
     await redis_client.rpush(list_key, json.dumps(photo_data))
+    await redis_client.expire(list_key, 60)
     
-    # محاولة حجز قفل التنسيق (الخيط أو الـ Worker المستلم لأول صورة يفوز بحق التنسيق)
-    is_coordinator = await redis_client.set(lock_key, "locked", nx=True, ex=10)
+    # 2. زيادة العداد الذري لمعرفة الترتيب الحالي للرسالة المستلمة في الخيط الحالي
+    current_index = await redis_client.incr(count_key)
+    await redis_client.expire(count_key, 60)
     
-    if is_coordinator:
-        # المنسق ينام لمدة ثانية كاملة ليعطي فرصة لباقي الـ Workers لدفع بقية الصور في القائمة
-        await asyncio.sleep(1.2)
-        
-        # سحب مصفوفة الصور كاملة من قاعدة بيانات Redis
+    # 3. النوم لثانية ونصف لضمان وصول وتجميع كافة الرسائل المتوازية للألبوم بالكامل داخل القائمة
+    await asyncio.sleep(1.4)
+    
+    # 4. جلب القيمة النهائية للعداد لمعرفة القيمة الأحدث التي استقرت في السيرفر
+    final_count_raw = await redis_client.get(count_key)
+    final_count = int(final_count_raw) if final_count_raw else current_index
+    
+    # 5. الرسالة الأخيرة المكتشفة شبكياً فقط (صاحبة الرقم الأكبر) هي من تتولى المعالجة للألبوم كاملاً
+    if current_index == final_count:
         raw_items = await redis_client.lrange(list_key, 0, -1)
         
-        # تنظيف فوري لمفاتيح الألبوم من Redis لمنع تراكم كاش الرام
+        # تنظيف فوري لمفاتيح الألبوم الحالية من Redis لمنع التراكم في الرام
         await redis_client.delete(list_key)
-        await redis_client.delete(lock_key)
+        await redis_client.delete(count_key)
         
-        return [json.loads(item) for item in raw_items]
+        # تصفية المعرفات الفريدة لضمان عدم تكرار قراءة الصور تحت أي ظرف شبكي طارئ
+        seen = set()
+        unique_photos = []
+        for item in raw_items:
+            p = json.loads(item)
+            if p["file_unique_id"] not in seen:
+                seen.add(p["file_unique_id"])
+                unique_photos.append(p)
+        return unique_photos
     else:
-        # بقية الـ Workers الفرعية تخرج بصمت تام لمنع تكرار إرسال الرسائل للمستخدم
+        # الرسائل والـ Workers الفرعية السابقة تخرج بصمت تام لحماية البوت من التكرار والازدواجية
         return []
 
-# ✅ دالتك المساعدة الممتازة لقراءة عدد الصفحات في خيط منفصل
+# ✅ لقراءة عدد الصفحات في خيط منفصل
 def get_pdf_page_count_sync(file_path: str) -> int:
     import fitz
     doc = fitz.open(file_path)
@@ -201,7 +215,7 @@ async def handle_media(msg: types.Message, state: FSMContext):
             full_file_name = msg.document.file_name or "document.pdf"
             file_title, ext = os.path.splitext(full_file_name)
             
-            # 2. التعديل الجوهري ✨: استخدام file_id والامتداد الأصلي لتفادي مشاكل اللغة العربية والمسافات
+            # 2. استخدام file_id والامتداد الأصلي لتفادي مشاكل اللغة العربية والمسافات
             safe_file_name = f"{user_id}_{msg.document.file_id}{ext}"
             f_path = os.path.join(DOWNLOADS_DIR, safe_file_name)
             
@@ -247,7 +261,7 @@ async def handle_media(msg: types.Message, state: FSMContext):
         await state.set_state(QuizState.waiting_for_count)
         await msg.answer(SUCCESS_MEDIA_RECEIVED)
 
-        # 🚀 الموضع المضاف 2: إطلاق دالة الإلغاء التلقائي في الخلفية دون حظر السيرفر
+        # 🚀 إطلاق دالة الإلغاء التلقائي في الخلفية دون حظر السيرفر
         asyncio.create_task(auto_cancel_upload_timeout(msg.chat.id, msg.from_user.id, state, timeout=900))
 
     except Exception as e:
@@ -261,12 +275,10 @@ async def handle_media(msg: types.Message, state: FSMContext):
 async def handle_pure_text(msg: types.Message, state: FSMContext):
     text_content = msg.text.strip()
     
-    # 1. الحماية من النصوص القصيرة جداً (الحد الأدنى الحالي)
     if len(text_content) < 30:
         await msg.answer("⚠️ النص قصير جداً! يرجى إرسال نص تعليمي مفصل (30 حرف كحد أدنى) لتوليد الأسئلة منه.")
         return
 
-    # 2. 🛡️ جدار الحماية للحد الأقصى (مأخوذ ديناميكياً من ملف الثوابت)
     if len(text_content) > MAX_TEXT_INPUT_SIZE:
         await msg.answer(
             f"❌ **عذراً، النص المرسل طويل جداً!**\n"
@@ -277,13 +289,11 @@ async def handle_pure_text(msg: types.Message, state: FSMContext):
         )
         return
 
-    # في حال تخطي الفحوصات بنجاح، يتم المتابعة
     file_title = text_content[:20] + "..."
     await state.update_data(pure_text=text_content, source_title=file_title, input_type="text")
     await state.set_state(QuizState.waiting_for_count)
     await msg.answer("✅ تم استقبال النص بنجاح! كم سؤال تريد استخراجه من هذا النص？")
 
-    # 🚀 الموضع المضاف 3: إطلاق دالة الإلغاء التلقائي في الخلفية للنصوص أيضاً
     asyncio.create_task(auto_cancel_upload_timeout(msg.chat.id, msg.from_user.id, state, timeout=900))
 
 # ==================== Cache Decision Handlers ====================
@@ -297,26 +307,21 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext):
         source_title = data.get("source_title")
         file_paths = data.get("file_paths", [])
 
-        # 🛠️ الموضع المعدل 1: استدعاء مباشر غير متزامن
         user_info = await check_or_add_user(call.from_user.id, call.from_user.username or "Unknown", call.from_user.first_name or "Unknown", call.from_user.last_name or "Unknown")
         if user_info.get("status") == "renewed":
-            await call.message.answer(f"☀️ <b>يا أهلاً، يومك سعيد!</b>\nتم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄", parse_mode="HTML")
+            await call.message.answer(f"☀️ <b>يا أهلاً، يومك سعيد!</b>\nتم تججديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄", parse_mode="HTML")
         if user_info["points"] < cost:
             await call.answer(f"❌ نقاطك غير كافية!", show_alert=True)
             for path in file_paths: safe_file_cleanup(path)
             await state.clear()
             return
 
-        # 🛠️ الموضع المعدل 2: استدعاء مباشر غير متزامن
         await update_user_stats(call.from_user.id, cost, len(questions))
 
-        # 🆕 إنشاء ID للكويز وحفظه كنسخة مشتركة لربطه بلوحة الشرف
         quiz_id = uuid.uuid4().hex[:12]
-        # 🛠️ الموضع المعدل 3: استدعاء مباشر غير متزامن
         await save_shared_quiz(quiz_id, call.from_user.id, source_title, questions)
 
         from handlers.execution import _start_loaded_quiz
-        # 🆕 تمرير الـ quiz_id للدالة
         await _start_loaded_quiz(call.message, state, questions, source_title, origin="cached_file", quiz_id=quiz_id)
         try: await call.message.delete()
         except Exception: pass
@@ -331,10 +336,7 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext):
     try:
         await state.set_state(QuizState.waiting_for_count)
         await call.message.edit_text("📝 **كم سؤال تريد استخراجه من هذا المحتوى؟**", parse_mode="Markdown")
-        
-        # 🚀 الموضع المعدل: إطلاق دالة الإلغاء التلقائي هنا أيضاً في حال رفض الطالب استخدام الكاش ودخل حالة انتظار العدد
         asyncio.create_task(auto_cancel_upload_timeout(call.message.chat.id, call.from_user.id, state, timeout=900))
-        
     except Exception as e: log_error(logger, f"Error declining cache: {e}")
     finally: await call.answer()
 
@@ -352,7 +354,6 @@ async def process_count(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     input_type = data.get("input_type")
     
-    # 🛠️ الموضع المعدل 4: استدعاء مباشر غير متزامن
     user_info = await check_or_add_user(msg.from_user.id, msg.from_user.username or "Unknown", msg.from_user.first_name or "Unknown", msg.from_user.last_name or "Unknown")
     if user_info.get("status") == "renewed":
         await msg.answer(f"☀️ <b>يا أهلاً، يومك سعيد!</b>\nتم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄", parse_mode="HTML")
@@ -367,21 +368,17 @@ async def process_count(msg: types.Message, state: FSMContext):
         file_paths = data.get("file_paths", [])
         if len(file_paths) == 1 and file_paths[0].lower().endswith('.pdf'):
             try:
-                # 🚀 تشغيل عملية فتح الـ PDF في خيط خلفي لمنع تجميد السيرفر لباقي الطلاب (هذه تظل خيط لأنها بروسيسور)
                 pages_total = await asyncio.to_thread(get_pdf_page_count_sync, file_paths[0])
                 
-                # فحص الشرط ديناميكياً بناءً على الثوابت (30 صفحة حالياً)
                 if pages_total > MAX_PDF_PAGES:
                     await state.update_data(pending_count=count)
                     
-                    # صياغة النص على زر التنبيه المدمج ديناميكياً
                     kb = types.InlineKeyboardMarkup(inline_keyboard=[
                         [types.InlineKeyboardButton(text=f"✅ المتابعة (أول {MAX_PDF_PAGES} صفحة فقط)", callback_data="limit_action_continue")],
                         [types.InlineKeyboardButton(text="❌ التراجع وإلغاء الطلب", callback_data="limit_action_cancel")]
                     ])
                     await state.set_state(QuizState.waiting_for_limit_decision)
                     
-                    # صياغة نص الرسالة التحذيرية ديناميكياً للطلب
                     await msg.answer(
                         f"⚠️ المستند يحتوي على **{pages_total}** صفحة.\n"
                         f"سيقوم النظام بمعالجة **أول {MAX_PDF_PAGES} صفحة فقط** بناءً على حدود النظام.\n\n"
