@@ -12,7 +12,7 @@ from config import bot
 from keyboards import get_main_menu_keyboard
 from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id
 from logger import get_logger, log_warning, log_info
-from constants import ADMIN_CONTACT, MAX_PDF_PAGES,DAILY_RENEWAL_POINTS
+from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS
 
 logger = get_logger(__name__)
 router = Router()
@@ -31,26 +31,25 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         bot_info = await bot.get_me()
         
         # 1. 🔥 تم التحديث: التحقق من وجود رابط مشاركة كويز (يدعم كلا البادئتين لضمان التوافق)
-       # 1. 🔥 تم التحديث: التحقق من الرابط والبحث في الجدول المناسب حسب الهيكل
+        # 1. 🔥 تم التحديث: التحقق من الرابط والبحث في الجدول المناسب حسب الهيكل
         if command.args and (command.args.startswith("share_") or command.args.startswith("quiz_")):
             if command.args.startswith("share_"):
                 share_id = command.args.replace("share_", "", 1)
-                # البحث في جدول shared_quizzes
-                shared = await asyncio.to_thread(get_shared_quiz, share_id)
+                # البحث في جدول shared_quizzes مباشرة بشكل غير متزامن
+                shared = await get_shared_quiz(share_id)
             else:
                 share_id = command.args.replace("quiz_", "", 1)
                 
                 # 1. البحث في جدول المفضلة أولاً
-                shared = await asyncio.to_thread(get_favorite_quiz_by_global_id, share_id)
+                shared = await get_favorite_quiz_by_global_id(share_id)
                 
                 # 2. 🆕 إذا لم يجده في المفضلة، يبحث عنه في الكويزات المشتركة المخفية
                 if not shared:
-                    shared = await asyncio.to_thread(get_shared_quiz, share_id)
+                    shared = await get_shared_quiz(share_id)
                 
             if shared:
-                # حماية: تسجيل أو التحقق من المستخدم في الداتابيز أولاً لمنع أخطاء الـ Database لاحقاً
-                await asyncio.to_thread(
-                    check_or_add_user,
+                # حماية: تسجيل أو التحقق من المستخدم في الداتابيز أولاً بشكل مباشر
+                await check_or_add_user(
                     msg.from_user.id,
                     msg.from_user.username or "Unknown",
                     msg.from_user.first_name,
@@ -75,9 +74,8 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             referrer_id = int(command.args)
             log_info(logger, f"User {msg.from_user.id} joined via referral from {referrer_id}")
         
-        # Check or create user in database
-        user_info = await asyncio.to_thread(
-            check_or_add_user,
+        # Check or create user in database بشكل مباشر دون استهلاك خيوط
+        user_info = await check_or_add_user(
             msg.from_user.id,
             msg.from_user.username or "Unknown",
             msg.from_user.first_name,
@@ -144,7 +142,7 @@ async def show_recharge_info(call: types.CallbackQuery):
             "🔋 <b>شحن النقاط وزيادة الرصيد</b>\n\n"
             "هل استهلكت نقاطك المجانية وتحتاج للمزيد؟ لا تقلق! "
             "يمكنك شحن رصيدك بكميات مخصصة لتوليد اختبارات بلا حدود والتحضير للامتحانات بكل راحة. 📚\n\n"
-            "لطلب الشحن، كل ما عليك هو التواصل مباشرة مع الدعم والإدارة عبر الرابط التالي:\n"
+            "لطلب الشحن, كل ما عليك هو التواصل مباشرة مع الدعم والإدارة عبر الرابط التالي:\n"
             f"👉 <b>{ADMIN_CONTACT}</b>\n\n"
             "📝 <b>طريقة الشحن:</b>\n"
             "1️⃣ تواصل معنا وحدد عدد النقاط التي تحتاجها.\n"
@@ -167,5 +165,6 @@ async def show_recharge_info(call: types.CallbackQuery):
 async def set_bot_commands(bot):
     commands = [
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
+        types.BotCommand(command="recharge", description="شحن النقاط")
     ]
     await bot.set_my_commands(commands)
