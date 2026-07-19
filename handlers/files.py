@@ -102,7 +102,8 @@ async def collect_album_photos_redis(message: types.Message) -> List[Dict[str, A
     await asyncio.sleep(1.2)
     raw_photos = await redis_client.lrange(list_key, 0, -1)
     await redis_client.delete(list_key)
-    await redis_client.delete(lock_key)
+    
+    # ترك الصلاحية تنتهي تلقائياً (ex=15) لحظر الطلبات المتأخرة لنفس الألبوم القادمة من الميدل وير بصمت
 
     seen: set = set()
     unique_photos: List[Dict[str, Any]] = []
@@ -197,6 +198,16 @@ async def _download_photos(message: types.Message, photos: List[Dict[str, Any]])
 async def handle_media(message: types.Message, state: FSMContext) -> None:
     file_paths: List[str] = []
     try:
+        # فرز وتجميع الألبوم في بداية الدالة لتوجيه وإبقاء الطلب للمنسق الفائز فقط، وإسقاط بقية الحركات بصمت
+        is_photo = bool(message.photo)
+        if is_photo:
+            photos = await collect_album_photos_redis(message)
+            if not photos:
+                return  # العمال غير المنسقين ينتهون هنا فوراً بصمت لمنع تكرار الرسائل
+            if len(photos) > MAX_ALBUM_IMAGES:
+                await message.answer(ERROR_ALBUM_TOO_LARGE)
+                return
+
         current_state = await state.get_state()
         if current_state == QuizState.answering_quiz:
             await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه قبل رفع محتوى جديد.")
@@ -211,13 +222,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 
         ensure_directory_exists(DOWNLOADS_DIR)
 
-        if message.photo:
-            photos = await collect_album_photos_redis(message)
-            if not photos:
-                return
-            if len(photos) > MAX_ALBUM_IMAGES:
-                await message.answer(ERROR_ALBUM_TOO_LARGE)
-                return
+        if is_photo:
             file_paths = await _download_photos(message, photos)
             if not file_paths:
                 return

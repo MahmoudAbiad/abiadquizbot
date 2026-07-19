@@ -29,6 +29,10 @@ class ThrottlingMiddleware(BaseMiddleware):
     ) -> Any:
         # التحقق مما إذا كان الحدث رسالة أو ضغطة زر
         if isinstance(event, (Message, CallbackQuery)):
+            # 🚀 استثناء ألبومات الصور: إذا كانت الرسالة جزءاً من ألبوم، نمررها مباشرة لتجميعها عبر Redis
+            if isinstance(event, Message) and event.media_group_id:
+                return await handler(event, data)
+
             user_id = event.from_user.id
 
             if user_id == ADMIN_ID or user_id in self.exempt_user_ids:
