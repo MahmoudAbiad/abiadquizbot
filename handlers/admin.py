@@ -17,6 +17,11 @@ from logger import get_logger
 logger = get_logger(__name__)
 router = Router()
 
+
+def user_total_points(user: dict) -> float:
+    """Calculate a display balance from the segregated database columns."""
+    return float(user.get("free_points") or 0) + float(user.get("paid_points") or 0)
+
 # ==================== فلتر الحماية المركزي للإدارة ====================
 class IsAdminFilter(BaseFilter):
     """
@@ -144,7 +149,9 @@ async def render_users_page(event, page: int = 1):
             f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
             f"┣ 📝 الاسم: <b>{u.get('first_name', 'Unknown')} {u.get('last_name', 'Unknown')}</b>\n"
-            f"┣ 💰 النقاط: <code>{u['points']}</code>\n"
+            f"┣ 🎁 المجاني: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
+            f"┣ 💳 المدفوع: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
+            f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
             f"┗ 📊 الأسئلة: <code>{u.get('total_questions', 0)}</code>\n"
             f"──────────────────\n"
         )
@@ -250,7 +257,9 @@ async def process_search_user(msg: types.Message, state: FSMContext):
             f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
             f"┣ 📝 الاسم: <b>{u['first_name']} {u.get('last_name', '')}</b>\n"
-            f"┣ 💰 النقاط الحالية: <code>{u['points']}</code>\n"
+            f"┣ 🎁 النقاط المجانية: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
+            f"┣ 💳 النقاط المدفوعة: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
+            f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
             f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
         )
         await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
@@ -337,7 +346,7 @@ async def export_all_users(call: types.CallbackQuery):
         
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Points", "Total Questions", "Joined At"])
+        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Joined At"])
         
         for u in users:
             writer.writerow([
@@ -345,7 +354,9 @@ async def export_all_users(call: types.CallbackQuery):
                 sanitize_csv_value(u.get('username', 'Unknown')),
                 sanitize_csv_value(u.get('first_name', 'Unknown')),
                 sanitize_csv_value(u.get('last_name', 'Unknown')),
-                sanitize_csv_value(u.get('points', 0)),
+                sanitize_csv_value(u.get('free_points', 0)),
+                sanitize_csv_value(u.get('paid_points', 0)),
+                sanitize_csv_value(user_total_points(u)),
                 sanitize_csv_value(u.get('total_questions', 0)),
                 sanitize_csv_value(u.get('joined_at', ''))
             ])

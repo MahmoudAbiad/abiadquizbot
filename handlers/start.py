@@ -84,6 +84,8 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         )
         
         points = user_info["points"]
+        free_points = user_info.get("free_points", 0)
+        paid_points = user_info.get("paid_points", 0)
         status = user_info["status"]
         
         # Build welcome message based on user status
@@ -112,7 +114,8 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             f"1️⃣ أرسل ملف الـ PDF الخاص بمحاضرتك (بحد أقصى {MAX_PDF_PAGES} صفحة) أو حتى صورة واضحة لها.\n"
             f"2️⃣ حدد عدد الأسئلة التي تفضلها.\n"
             f"3️⃣ ابدأ حل الكويز التفاعلي واختبر معلوماتك! 🔥\n\n"
-            f"📊 <b>رصيدك الحالي:</b> <code>{points}</code> نقطة\n\n"
+            f"📊 <b>رصيدك الحالي:</b> <code>{points:.2f}</code> نقطة\n"
+            f"🎁 مجاني: <code>{free_points:.2f}</code> | 💳 مدفوع: <code>{paid_points:.2f}</code>\n\n"
             f"🎯 <b>نصيحة ذكية:</b> شارك البوت مع زملائك عبر رابط الدعوة الخاص بك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁"
         )
         

@@ -10,9 +10,9 @@ logger = get_logger(__name__)
 
 def calculate_file_hash(file_path: str) -> str:
     """
-    توليد بصمة فريدة للملف باستخدام MD5 للتحقق مما إذا كان قد تم رفعه مسبقاً.
+    Return a SHA-256 digest of file bytes only. File names are deliberately ignored.
     """
-    hasher = hashlib.md5()
+    hasher = hashlib.sha256()
     try:
         with open(file_path, 'rb') as f:
             for chunk in iter(lambda: f.read(4096), b""):

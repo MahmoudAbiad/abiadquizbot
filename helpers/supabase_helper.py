@@ -14,7 +14,6 @@ from logger import get_logger, log_error, log_warning, log_info
 # :الاستيراد الآمن والمتطابق
 from constants import (
     WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS,
-    POINTS_PER_QUESTION,
     DEFAULT_FAVORITE_SECTION_TITLE,
     MAX_FAVORITE_SECTIONS,
 )
@@ -24,6 +23,13 @@ dotenv_path = find_dotenv()
 load_dotenv(dotenv_path)
 
 logger = get_logger(__name__)
+
+
+def _balance_payload(free_points: Any = 0, paid_points: Any = 0, **extra: Any) -> Dict[str, Any]:
+    """Expose split balances while retaining ``points`` for older callers."""
+    free = float(free_points or 0)
+    paid = float(paid_points or 0)
+    return {"free_points": free, "paid_points": paid, "points": free + paid, **extra}
 
 # ==================== إعداد واقلاع عميل قاعدة البيانات بشكل آمن ====================
 try:
@@ -54,7 +60,7 @@ async def check_or_add_user(user_id: int, username: str, first_name: str, last_n
     try:
         is_valid, error = validate_user_id(user_id)
         if not is_valid:
-            return {"points": 0, "status": "error", "referrer": None}
+            return _balance_payload(status="error", referrer=None)
         
         today = datetime.date.today().isoformat()
         response = await supabase.table("users").select("*").eq("user_id", user_id).execute()
@@ -65,33 +71,34 @@ async def check_or_add_user(user_id: int, username: str, first_name: str, last_n
         return await _check_daily_renewal(user_id, response.data[0], today)
     except Exception as e:
         log_error(logger, f"Error in check_or_add_user: {e}", exception=e)
-        return {"points": 0, "status": "error", "referrer": None}
+        return _balance_payload(status="error", referrer=None)
 
 async def _add_new_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int], today: str) -> Dict[str, Any]:
     try:
         actual_referrer = None
         if referrer_id and str(referrer_id) != str(user_id):
-            ref_check = await supabase.table("users").select("points").eq("user_id", referrer_id).execute()
+            ref_check = await supabase.table("users").select("paid_points").eq("user_id", referrer_id).execute()
             if ref_check.data:
                 actual_referrer = referrer_id
-                new_ref_points = ref_check.data[0]['points'] + REFERRAL_BONUS_POINTS
-                await supabase.table("users").update({"points": new_ref_points}).eq("user_id", referrer_id).execute()
+                new_ref_points = float(ref_check.data[0].get('paid_points') or 0) + REFERRAL_BONUS_POINTS
+                await supabase.table("users").update({"paid_points": new_ref_points}).eq("user_id", referrer_id).execute()
                 
         await supabase.table("users").insert({
             "user_id": user_id,
             "username": username,
             "first_name": first_name,
             "last_name": last_name or "Unknown",
-            "points": WELCOME_POINTS,
+            "free_points": float(WELCOME_POINTS),
+            "paid_points": 0.0,
             "total_questions": 0,
             "referred_by": actual_referrer,
             "last_renewal": today
         }).execute()
         
-        return {"points": WELCOME_POINTS, "status": "new", "referrer": actual_referrer}
+        return _balance_payload(WELCOME_POINTS, 0, status="new", referrer=actual_referrer)
     except Exception as e:
         log_error(logger, f"Error adding new user: {e}", exception=e)
-        return {"points": 0, "status": "error", "referrer": None}
+        return _balance_payload(status="error", referrer=None)
 
 async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dict[str, Any]:
     try:
@@ -105,21 +112,21 @@ async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dic
         if rpc_response.data:
             result = rpc_response.data[0] if isinstance(rpc_response.data, list) else rpc_response.data
             return {
-                "points": result["current_points"], 
+                **_balance_payload(result.get("free_points"), result.get("paid_points")),
                 "status": result["renewal_status"], 
                 "referrer": None
             }
         
-        return {"points": user_data.get('points', 0), "status": "normal", "referrer": None}
+        return _balance_payload(user_data.get('free_points'), user_data.get('paid_points'), status="normal", referrer=None)
     except Exception as e:
         log_error(logger, f"Error checking daily renewal via RPC: {e}", exception=e)
-        return {"points": user_data.get('points', 0), "status": "error", "referrer": None}
+        return _balance_payload(user_data.get('free_points'), user_data.get('paid_points'), status="error", referrer=None)
     
 async def update_user_stats(
     user_id: int,
-    points_to_deduct: int,
+    points_to_deduct: float,
     questions_generated: Optional[int] = None,
-) -> Optional[int]:
+) -> Optional[float]:
     try:
         is_valid, error = validate_user_id(user_id)
         if not is_valid: return None
@@ -135,7 +142,7 @@ async def update_user_stats(
         }).execute()
         
         if rpc_response.data is not None:
-            return int(rpc_response.data)
+            return float(rpc_response.data)
         return None
     except Exception as e:
         log_error(logger, f"Error updating user stats via RPC: {e}", exception=e)
@@ -361,11 +368,12 @@ async def save_quiz_to_cache(file_hash: str, quiz_data: List[Dict[str, Any]], to
 # ==================== Admin Operations ====================
 async def admin_add_points(target_id: int, amount: int) -> Optional[int]:
     try:
-        user = await supabase.table("users").select("points").eq("user_id", target_id).execute()
+        user = await supabase.table("users").select("free_points, paid_points").eq("user_id", target_id).execute()
         if user.data:
-            new_points = user.data[0]['points'] + amount
-            await supabase.table("users").update({"points": new_points}).eq("user_id", target_id).execute()
-            return new_points
+            paid_points = float(user.data[0].get('paid_points') or 0) + amount
+            free_points = float(user.data[0].get('free_points') or 0)
+            await supabase.table("users").update({"paid_points": paid_points}).eq("user_id", target_id).execute()
+            return free_points + paid_points
         return None
     except Exception as e:
         logger.error(f"Error in admin_add_points: {e}")
