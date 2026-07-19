@@ -22,6 +22,7 @@ from constants import (
     MAX_STANDARD_PAGES,
     MAX_STANDARD_QUESTIONS,
     MAX_SUPER_PAGES,
+    MAX_TEXT_INPUT_SIZE,
     MSG_PROCESSING,
     MSG_SUPER_PROCESSING_ALERT,
     SUCCESS_MEDIA_RECEIVED,
@@ -233,6 +234,9 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     text = message.text.strip()
     if len(text) < 30:
         await message.answer("⚠️ النص قصير جداً؛ أرسل 30 حرفاً على الأقل.")
+        return
+    if len(text) > MAX_TEXT_INPUT_SIZE:
+        await message.answer(f"❌ الحد الأقصى للنص المباشر هو {MAX_TEXT_INPUT_SIZE} حرفاً.")
         return
     await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
     await state.set_state(QuizState.waiting_for_count)

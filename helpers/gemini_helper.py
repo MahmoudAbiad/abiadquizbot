@@ -223,7 +223,7 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
         client = AsyncGroq(api_key=GROQ_API_KEY)
         response = await asyncio.wait_for(
             client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model="Grok 4.5",
                 messages=[{"role": "user", "content": f"{prompt}\n\n{pure_text}"}],
                 response_format={"type": "json_object"},
                 temperature=0.7,
