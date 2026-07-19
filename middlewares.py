@@ -21,7 +21,7 @@ class ThrottlingMiddleware(BaseMiddleware):
         self.cache = TTLCache(maxsize=10000, ttl=limit)
         self.exempt_user_ids = exempt_user_ids or set()
 
-async def __call__(
+    async def __call__(
         self,
         handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
         event: Any,
@@ -29,7 +29,7 @@ async def __call__(
     ) -> Any:
         # التحقق مما إذا كان الحدث رسالة أو ضغطة زر
         if isinstance(event, (Message, CallbackQuery)):
-            # 🚀 الحل هنا: إذا كانت الرسالة جزءاً من ألبوم، مررها فوراً وتخطى فحص السبام لكي يجمعها الـ Redis
+            # 🚀 استثناء ألبومات الصور: إذا كانت الرسالة جزءاً من ألبوم، نمررها مباشرة لتجميعها عبر Redis
             if isinstance(event, Message) and event.media_group_id:
                 return await handler(event, data)
 
@@ -40,11 +40,13 @@ async def __call__(
             
             # إذا كان المستخدم في الكاش، فهذا يعني أنه أرسل طلباً قبل انتهاء المهلة
             if user_id in self.cache:
+                # نكتفي بإظهار تنبيه لضغطات الأزرار (CallbackQuery) لأنه يظهر كإشعار مؤقت ولا يغرق المحادثة
                 if isinstance(event, CallbackQuery):
                     await event.answer("⚠️ الرجاء الانتظار...", show_alert=True)
                 
+                # بالنسبة للرسائل العادية (Message)، ننهي العملية بصمت (Silent Return) لحماية البوت من الحظر (429)
                 logger.warning(f"Spam detected and blocked silently for user: {user_id}")
-                return
+                return # ننهي العملية هنا ولا نمررها للبوت
             
             # إضافة المستخدم للكاش
             self.cache[user_id] = True
