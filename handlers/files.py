@@ -256,6 +256,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                     # ننهي العملية فوراً لكي يعود 200 OK لتليجرام ويرسل الصورة التالية بسرعة
                     return 
                 
+                await message.answer("📥 جارٍ معالجة الألبوم...")
                 # المنسق يبدأ مهمة الانتظار في الخلفية ويُنهي الـ Handler فوراً أيضاً!
                 asyncio.create_task(process_album_background(message, state))
                 return

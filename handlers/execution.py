@@ -2,6 +2,7 @@ import asyncio
 from typing import Union
 import json
 
+from PIL.TiffImagePlugin import idx
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
@@ -106,16 +107,38 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         user_id = state.key.user_id
 
         raw_question = f"📝 السؤال {idx + 1} من {len(questions)}:\n{q['question']}"
-        clean_question = raw_question if len(raw_question) <= 300 else raw_question[:297] + "..."
         
+        needs_text_fallback = False
         clean_options = []
+        
+        # فحص طول الخيارات
         for opt in q['options']:
             opt_str = str(opt).strip()
+            if len(opt_str) > 100:
+                needs_text_fallback = True
             clean_options.append(opt_str if len(opt_str) <= 100 else opt_str[:97] + "...")
             
-        raw_explanation = q.get("explanation") or "إجابة صحيحة!"
-        clean_explanation = raw_explanation if len(raw_explanation) <= 200 else raw_explanation[:197] + "..."
+        # فحص طول السؤال
+        if len(raw_question) > 300:
+            needs_text_fallback = True
 
+        # آلية التكيف مع النصوص الطويلة جداً
+        if needs_text_fallback:
+            full_text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n{q['question']}\n\n"
+            poll_options = []
+            for i, opt in enumerate(q['options'], 1):
+                full_text += f"**{i}.** {str(opt).strip()}\n"
+                poll_options.append(f"الخيار رقم {i}")
+            
+            # إرسال الرسالة النصية المفصلة أولاً
+            await bot.send_message(chat_id=chat_id, text=full_text, parse_mode="Markdown")
+            
+            # تقصير الـ Poll ليكون مجرد أزرار للتصويت
+            clean_question = "اختر الإجابة الصحيحة بناءً على التفاصيل أعلاه 👆:"
+            clean_options = poll_options
+        else:
+            clean_question = raw_question
+            
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
             [
@@ -222,7 +245,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         questions = data.get("questions", [])
-        if not Redial_questions:
+        if not questions:
             await call.answer("❌ لا يوجد كويز محفوظ لإعادة تشغيله", show_alert=True)
             return
         

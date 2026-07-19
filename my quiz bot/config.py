@@ -56,7 +56,7 @@ try:
     
     # إعداد التخزين الدائم (RedisStorage)
   # 🚀 التعديل: جعل حالة المستخدم وبياناته المؤقتة تنتهي وتُحذف تلقائياً من Redis بعد 15 دقيقة من خمول المستخدم
-    storage = RedisStorage(redis=redis_client, state_ttl=3600, data_ttl=3600)
+    storage = RedisStorage(redis=redis_client, state_ttl=86400, data_ttl=86400) # 15 دقيقة = 900 ثانية، 1 يوم = 86400 ثانية
     
     bot = Bot(token=_get_bot_token())
     dp = Dispatcher(storage=storage) # ربط الـ Dispatcher بـ Redis
