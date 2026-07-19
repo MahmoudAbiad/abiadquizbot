@@ -1,14 +1,9 @@
-"""
-Start command and recharge info handler.
-Manages initial user onboarding and account information display.
-"""
-
 import asyncio
 from typing import Optional
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
-from config import bot
+from config import bot, QuizState
 from keyboards import get_main_menu_keyboard
 from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id
 from logger import get_logger, log_warning, log_info
@@ -17,56 +12,64 @@ from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS
 logger = get_logger(__name__)
 router = Router()
 
+async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, args_payload: str):
+    """الماكينة المسؤولة عن تحميل وتشغيل الكويز القادم من الروابط العميقة بأمان"""
+    if args_payload.startswith("share_"):
+        share_id = args_payload.replace("share_", "", 1)
+        shared = await get_shared_quiz(share_id)
+    else:
+        share_id = args_payload.replace("quiz_", "", 1)
+        shared = await get_favorite_quiz_by_global_id(share_id)
+        if not shared:
+            shared = await get_shared_quiz(share_id)
+            
+    if shared:
+        await check_or_add_user(
+            target_msg.from_user.id,
+            target_msg.from_user.username or "Unknown",
+            target_msg.from_user.first_name,
+            target_msg.from_user.last_name or "Unknown",
+            None
+        )
+        from handlers.execution import _start_loaded_quiz
+        await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{shared.get('title') or 'كويز مشترك'}</b>...", parse_mode="HTML")
+        await _start_loaded_quiz(
+            target_msg, state, shared["quiz_data"], 
+            shared.get('title') or 'كويز مشترك', 
+            origin="shared", 
+            quiz_id=share_id
+        )
+    else:
+        await target_msg.answer("❌ عذراً، هذا الرابط منتهي الصلاحية أو لم يعد موجوداً في قاعدة البيانات.")
+
 @router.message(Command("start"))
 async def start(msg: types.Message, command: CommandObject, state: FSMContext):
-    """
-    Start command handler - greets user and displays welcome info.
-    Handles referral system if user was invited by another user.
-    
-    Args:
-        msg: Message object
-        command: Command object with optional referrer ID
-    """
     try:
         bot_info = await bot.get_me()
         
-        # 1. 🔥 تم التحديث: التحقق من وجود رابط مشاركة كويز (يدعم كلا البادئتين لضمان التوافق)
-        # 1. 🔥 تم التحديث: التحقق من الرابط والبحث في الجدول المناسب حسب الهيكل
+        # حماية التدفق: التحقق من وجود كويز معلق قادم من رابط عميق
         if command.args and (command.args.startswith("share_") or command.args.startswith("quiz_")):
-            if command.args.startswith("share_"):
-                share_id = command.args.replace("share_", "", 1)
-                # البحث في جدول shared_quizzes مباشرة بشكل غير متزامن
-                shared = await get_shared_quiz(share_id)
-            else:
-                share_id = command.args.replace("quiz_", "", 1)
-                
-                # 1. البحث في جدول المفضلة أولاً
-                shared = await get_favorite_quiz_by_global_id(share_id)
-                
-                # 2. 🆕 إذا لم يجده في المفضلة، يبحث عنه في الكويزات المشتركة المخفية
-                if not shared:
-                    shared = await get_shared_quiz(share_id)
-                
-            if shared:
-                # حماية: تسجيل أو التحقق من المستخدم في الداتابيز أولاً بشكل مباشر
-                await check_or_add_user(
-                    msg.from_user.id,
-                    msg.from_user.username or "Unknown",
-                    msg.from_user.first_name,
-                    msg.from_user.last_name or "Unknown",
-                    None
-                )
-                
-                from handlers.execution import _start_loaded_quiz
-                await msg.answer(f"🔗 تم فتح كويز مشترك: {shared.get('title') or 'كويز مشترك'}")
-                await _start_loaded_quiz(
-                    msg, state, shared["quiz_data"], 
-                    shared.get('title') or 'كويز مشترك', 
-                    origin="shared", 
-                    quiz_id=share_id
+            current_state = await state.get_state()
+            
+            # إذا كان المستخدم يحل اختباراً حالياً، نمنع دهس البيانات ونطلب تأكيده بوضوح
+            if current_state == QuizState.answering_quiz:
+                await state.update_data(interrupted_deep_link=command.args)
+                overwrite_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="⚠️ نعم، ألغِ الحالي وافتح الجديد", callback_data="deep_link_overwrite_confirm")],
+                    [types.InlineKeyboardButton(text="🔄 لا، أريد إكمال اختباري الحالي", callback_data="deep_link_overwrite_cancel")]
+                ])
+                await msg.answer(
+                    "⚠️ <b>تنبيه حرج!</b>\n\n"
+                    "أنت تقوم بحل اختبار نشط حالياً. الضغط على الرابط سيؤدي إلى خسارة تقدمك الحالي وإلغاء الكويز.\n"
+                    "هل أنت متأكد من رغبتك في إنهاء الاختبار الحالي وفتح الرابط الجديد؟",
+                    reply_markup=overwrite_kb,
+                    parse_mode="HTML"
                 )
                 return
-          
+            
+            # إذا كانت حالته نظيفة، يتم تشغيل الكويز مباشرة
+            await launch_deep_linked_quiz(msg, state, command.args)
+            return
 
         # Extract referrer ID from command arguments
         referrer_id: Optional[int] = None
@@ -88,9 +91,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         paid_points = user_info.get("paid_points", 0)
         status = user_info["status"]
         
-        # Build welcome message based on user status
         welcome_text = ""
-        
         if status == "new":
             welcome_text = (
                 "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
@@ -99,7 +100,6 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             )
             if user_info["referrer"]:
                 welcome_text += "✨ وجميلك ما ننساه! تم منح زميلك الذي دعاك مكافأة إضافية أيضاً. 🤝\n"
-                
         elif status == "renewed":
             welcome_text = (
                 "☀️ <b>يا أهلاً، يومك سعيد!</b>\n\n"
@@ -108,7 +108,6 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         else:
             welcome_text = "👋 <b>يا مرحباً بك مجدداً!</b>\n جاهز لاختبار جديد اليوم؟ ✍️\n"
         
-        # Add main instructions
         welcome_text += (
             f"\n💡 <b>طريقة الاستخدام في ثوانٍ:</b>\n"
             f"1️⃣ أرسل ملف الـ PDF الخاص بمحاضرتك (بحد أقصى {MAX_PDF_PAGES} صفحة) أو حتى صورة واضحة لها.\n"
@@ -124,7 +123,6 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
         )
-        
         log_info(logger, f"User {msg.from_user.id} started bot. Status: {status}, Points: {points}")
         
     except Exception as e:
@@ -135,17 +133,43 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             parse_mode="HTML"
         )
 
+# ==================== معالجات تأكيد/إلغاء دهس الكويزات النشطة ====================
+
+@router.callback_query(F.data == "deep_link_overwrite_confirm")
+async def handle_deep_link_overwrite_confirm(call: types.CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        payload = data.get("interrupted_deep_link")
+        await state.clear()
+        if payload:
+            await call.message.delete()
+            await launch_deep_linked_quiz(call.message, state, payload)
+        else:
+            await call.answer("❌ عذراً، انتهت صلاحية هذا الطلب.", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error in deep_link_overwrite_confirm: {e}")
+    finally:
+        await call.answer()
+
+@router.callback_query(F.data == "deep_link_overwrite_cancel")
+async def handle_deep_link_overwrite_cancel(call: types.CallbackQuery, state: FSMContext):
+    try:
+        await state.update_data(interrupted_deep_link=None)
+        await call.message.delete()
+        await call.message.answer("🔄 تم الحفاظ على اختبارك الحالي بنجاح. يمكنك متابعة الإجابة دون أي قلق!")
+    except Exception as e:
+        logger.error(f"Error in deep_link_overwrite_cancel: {e}")
+    finally:
+        await call.answer()
+
 @router.callback_query(F.data == "recharge_info")
 async def show_recharge_info(call: types.CallbackQuery):
-    """
-    Show recharge information and contact details.
-    """
     try:
         recharge_text = (
             "🔋 <b>شحن النقاط وزيادة الرصيد</b>\n\n"
-            "هل استهلكت نقاطك المجانية وتحتاج للمزيد؟ لا تقلق! "
+            "هل استهلكت نقاطك المجانية وتحتاج للمزيد? لا تقلق! "
             "يمكنك شحن رصيدك بكميات مخصصة لتوليد اختبارات بلا حدود والتحضير للامتحانات بكل راحة. 📚\n\n"
-            "لطلب الشحن, كل ما عليك هو التواصل مباشرة مع الدعم والإدارة عبر الرابط التالي:\n"
+            "لطلب الشحن، كل ما عليك هو التواصل مباشرة مع الدعم والإدارة عبر الرابط التالي:\n"
             f"👉 <b>{ADMIN_CONTACT}</b>\n\n"
             "📝 <b>طريقة الشحن:</b>\n"
             "1️⃣ تواصل معنا وحدد عدد النقاط التي تحتاجها.\n"
@@ -154,14 +178,8 @@ async def show_recharge_info(call: types.CallbackQuery):
         )
         await call.message.answer(recharge_text, parse_mode="HTML")
         log_info(logger, f"User {call.from_user.id} requested recharge info")
-        
     except Exception as e:
         logger.error(f"Error in show_recharge_info: {e}")
-        await call.message.answer(
-            "⚠️ <b>عذراً، لم نتمكن من تحميل معلومات الشحن حالياً.</b>\n"
-            "يرجى المحاولة مرة أخرى.",
-            parse_mode="HTML"
-        )
     finally:
         await call.answer()
 

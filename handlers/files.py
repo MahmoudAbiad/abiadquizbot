@@ -1,5 +1,3 @@
-"""Media ingestion, pricing transparency, and generation orchestration."""
-
 import asyncio
 import hashlib
 import json
@@ -56,7 +54,7 @@ PENDING_REQUEST_STATES = (QuizState.waiting_for_count, QuizState.waiting_for_cac
 
 
 def _combined_hash(paths: List[str]) -> str:
-    """Hash ordered file payloads without using their names or Telegram IDs."""
+    """بناء بصمة SHA-256 موحدة للملفات بناءً على محتواها الرقمي فقط لتفادي تكرار التنزيل."""
     digest = hashlib.sha256()
     for path in paths:
         digest.update(calculate_file_hash(path).encode("ascii"))
@@ -64,18 +62,14 @@ def _combined_hash(paths: List[str]) -> str:
 
 
 def _cancel_keyboard() -> types.InlineKeyboardMarkup:
-    """Inline keyboard offering a clean way to back out of a pending request."""
+    """إنشاء كيبورد إلغاء الطلب الموحد لتوفير تجربة تنقل مرنة."""
     return types.InlineKeyboardMarkup(
         inline_keyboard=[[types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
     )
 
 
 async def _discard_pending_upload(state: FSMContext) -> int:
-    """Delete any files tied to the currently pending (not-yet-actioned) request.
-
-    Returns the number of files removed from disk. Safe to call even when
-    there is nothing pending (e.g. a pure-text request has no files).
-    """
+    """تنظيف المجلدات وحذف كافة الملفات المؤصلة بالطلب المعلق لضمان عدم تراكم البيانات."""
     data = await state.get_data()
     file_paths = data.get("file_paths", []) or []
     removed = 0
@@ -86,7 +80,7 @@ async def _discard_pending_upload(state: FSMContext) -> int:
 
 
 async def collect_album_photos_redis(message: types.Message) -> List[Dict[str, Any]]:
-    """Coalesce Telegram media-group messages across workers using Redis."""
+    """تجميع ألبومات الصور الموزعة على خوادم متعددة باستخدام Redis بآلية آمنة."""
     photo = message.photo[-1]
     current = {
         "file_id": photo.file_id,
@@ -100,8 +94,6 @@ async def collect_album_photos_redis(message: types.Message) -> List[Dict[str, A
     list_key = f"album_list:{group_id}"
     lock_key = f"album_lock:{group_id}"
     await redis_client.rpush(list_key, json.dumps(current))
-    # ضبط TTL على قائمة الألبوم نفسها (وليس فقط القفل) لمنع تراكم بيانات يتيمة
-    # في Redis في حال انهارت العملية قبل اكتمال التجميع.
     await redis_client.expire(list_key, 30)
     coordinator = await redis_client.set(lock_key, "1", nx=True, ex=15)
     if not coordinator:
@@ -112,7 +104,6 @@ async def collect_album_photos_redis(message: types.Message) -> List[Dict[str, A
     await redis_client.delete(list_key)
     await redis_client.delete(lock_key)
 
-    # تصفية أي تكرار محتمل لنفس الصورة (بحسب معرّفها الفريد) قبل المتابعة.
     seen: set = set()
     unique_photos: List[Dict[str, Any]] = []
     for raw_photo in raw_photos:
@@ -138,11 +129,11 @@ def _execution_mode(items: int, questions: int, cached: bool = False) -> str:
 
 def _transparency_text(items: int, questions: int, mode: str, cost: float) -> str:
     return (
-        "📋 <b>تفاصيل التنفيذ</b>\n"
+        "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n\n"
         f"• العناصر/الصفحات: <code>{items}</code>\n"
         f"• الأسئلة المطلوبة: <code>{questions}</code>\n"
-        f"• وضع التنفيذ: <code>{mode}</code>\n"
-        f"• النقاط المطلوب خصمها: <code>{cost:.2f}</code>"
+        f"• وضع المعالجة: <code>{mode}</code>\n"
+        f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>"
     )
 
 
@@ -161,14 +152,14 @@ async def _insufficient_balance(
     deficit = max(0.0, required - balance)
     contact = ADMIN_CONTACT.lstrip("@")
     keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[[types.InlineKeyboardButton(text="💳 شحن الرصيد", url=f"https://t.me/{contact}")]]
+        inline_keyboard=[[types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]]
     )
     await message.answer(
-        "❌ <b>رصيدك لا يكفي لإتمام الطلب.</b>\n"
-        f"المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
-        f"المدفوع: <code>{float(user_info.get('paid_points') or 0):.2f}</code>\n"
-        f"الإجمالي: <code>{balance:.2f}</code> / المطلوب: <code>{required:.2f}</code>\n"
-        f"العجز: <code>{deficit:.2f}</code>",
+        "❌ <b>رصيدك الحالي لا يكفي لإتمام هذه العملية.</b>\n\n"
+        f"🎁 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
+        f"💳 المدفوع: <code>{float(user_info.get('paid_points') or 0):.2f}</code>\n"
+        f"💰 الإجمالي الحالي: <code>{balance:.2f}</code> / المطلوب: <code>{required:.2f}</code>\n"
+        f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>",
         reply_markup=keyboard,
         parse_mode="HTML",
     )
@@ -211,9 +202,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
             await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه قبل رفع محتوى جديد.")
             return
 
-        # إذا كان هناك طلب سابق معلّق (ملف/صورة بانتظار عدد الأسئلة، أو بانتظار
-        # قرار الكاش) نقوم بإلغائه وحذف ملفاته تلقائياً قبل قبول المحتوى الجديد،
-        # حتى لا تتراكم ملفات يتيمة في مجلد downloads.
+        # إلغاء تلقائي نظيف لأي طلب سابق معلق لمنع تراكم الملفات اليتيمة
         if current_state in PENDING_REQUEST_STATES:
             removed = await _discard_pending_upload(state)
             await state.clear()
@@ -276,7 +265,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
             ])
             await message.answer(
-                "💡 تم العثور على هذا المحتوى في الكاش.\n\n"
+                "💡 <b>ملاحظة ذكية: تم العثور على هذا الملف في الكاش مسبقاً!</b>\n\n"
                 + _transparency_text(items, len(questions), "Cached", cost),
                 parse_mode="HTML",
                 reply_markup=keyboard,
@@ -297,19 +286,19 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     text = message.text.strip()
     if len(text) < 30:
-        await message.answer("⚠️ النص قصير جداً؛ أرسل 30 حرفاً على الأقل.")
+        await message.answer("⚠️ النص قصير جداً؛ اعمد إلى إرسال 30 حرفاً على الأقل لضمان صياغة أسئلة دقيقة.")
         return
     if len(text) > MAX_TEXT_INPUT_SIZE:
         await message.answer(f"❌ الحد الأقصى للنص المباشر هو {MAX_TEXT_INPUT_SIZE} حرفاً.")
         return
     await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
     await state.set_state(QuizState.waiting_for_count)
-    await message.answer("✅ تم استقبال النص. كم سؤالاً تريد توليده؟", reply_markup=_cancel_keyboard())
+    await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
 
 
 @router.callback_query(F.data == "cancel_upload_request")
 async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
-    """إلغاء نظيف لطلب معلّق (ملف/صورة/نص) وحذف أي ملفات مرتبطة به من القرص."""
+    """إلغاء نظيف وآمن لطلب معلّق وحذف ملفاته لضمان سلامة تجربة التصفح الكلية."""
     try:
         current_state = await state.get_state()
         if current_state not in PENDING_REQUEST_STATES:
@@ -332,7 +321,7 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
 
 @router.message(StateFilter(*PENDING_REQUEST_STATES), Command("cancel"))
 async def handle_cancel_command(message: types.Message, state: FSMContext) -> None:
-    """أمر /cancel كبديل نصي لزر الإلغاء (لمن لا يستخدم الأزرار)."""
+    """أمر /cancel لتوفير بديل نصي موازي للتحكم بدون أزرار."""
     await _discard_pending_upload(state)
     await state.clear()
     await message.answer(MSG_REQUEST_CANCELLED)
@@ -364,7 +353,7 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext) -> None
             safe_file_cleanup(path)
     except Exception as exc:
         log_error(logger, f"Cached quiz start failed: {exc}", exception=exc)
-        await call.message.answer("❌ تعذر بدء الكويز المخزّن.")
+        await call.message.answer("❌ تعذر بدء الاختبار المخزّن.")
     finally:
         await call.answer()
 
@@ -372,7 +361,7 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext) -> None
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
     await state.set_state(QuizState.waiting_for_count)
-    await call.message.edit_text("📝 كم سؤالاً تريد استخراجه من هذا المحتوى؟", reply_markup=_cancel_keyboard())
+    await call.message.edit_text("📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
     await call.answer()
 
 
@@ -381,7 +370,7 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
     count = int(message.text)
     valid, error = validate_question_count(count)
     if not valid:
-        await message.answer(f"❌ {error}")
+        await message.answer(f"❌ {error}", reply_markup=_cancel_keyboard())
         return
     data = await state.get_data()
     items = int(data.get("items_count") or 1)
@@ -407,13 +396,17 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
 
 @router.message(QuizState.waiting_for_count)
 async def process_count_invalid(message: types.Message) -> None:
-    await message.answer("⚠️ الرجاء إرسال رقم صحيح لعدد الأسئلة، أو اضغط زر الإلغاء أعلاه للتراجع عن الطلب.")
+    await message.answer(
+        "⚠️ <b>الرجاء إرسال رقم صحيح لعدد الأسئلة!</b>\n\nأو اعمد إلى استخدام زر التراجع أدناه لإلغاء العملية الحالية بشكل نظيف وعادل.",
+        reply_markup=_cancel_keyboard(),
+        parse_mode="HTML"
+    )
 
 
 async def trigger_quiz_generation(message: types.Message, user_id: int, count: int, state: FSMContext) -> None:
     async with processing_users_lock:
         if user_id in processing_users:
-            await message.answer("⏳ الطلب قيد المعالجة بالفعل.")
+            await message.answer("⏳ طلبك قيد المعالجة حالياً بالخلفية.")
             return
         processing_users.add(user_id)
     status_message = await message.answer(MSG_PROCESSING)
@@ -435,8 +428,10 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
         )
         if not quiz_data:
             await _refund_after_failure(user_id, data)
+            await state.set_state(None)  # حل حاسم لفخ تعليق الحالة (FSM State Trap)
             await status_message.edit_text(
-                "⚠️ فشل توليد الأسئلة. لم يتمكن النظام من إكمال الطلب، وقد تم استرجاع النقاط المخصومة إلى رصيدك."
+                "⚠️ <b>فشل توليد الأسئلة الأكاديمية!</b>\n\nلم يتمكن محرك الذكاء الاصطناعي من قراءة تفاصيل الملف، رصيدك آمن بالكامل ولم يتم خصم أي نقاط منه.",
+                parse_mode="HTML"
             )
             return
         quiz_id = uuid.uuid4().hex[:12]
@@ -447,8 +442,10 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
     except Exception as exc:
         log_error(logger, f"Quiz flow failed: {exc}", exception=exc)
         await _refund_after_failure(user_id, data)
+        await state.set_state(None)  # حل حاسم لفخ تعليق الحالة (FSM State Trap)
         await status_message.edit_text(
-            "⚠️ حدث خطأ تقني أثناء إعداد الاختبار، وقد تم استرجاع النقاط المخصومة إلى رصيدك."
+            "⚠️ <b>المعذرة، واجهنا خطأ تقنياً مفاجئاً أثناء بناء الكويز.</b>\n\nتم إعادة شحن رصيدك تلقائياً دون خصم أي نقاط، يرجى تكرار المحاولة.",
+            parse_mode="HTML"
         )
     finally:
         for path in data.get("file_paths", []):
@@ -458,7 +455,7 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
 
 
 async def _refund_after_failure(user_id: int, data: Dict[str, Any]) -> None:
-    """Best-effort refund of the points deducted for a request that ultimately failed."""
+    """إعادة الرصيد المخصوم تلقائياً للمستخدم فور فشل العملية لضمان عدالة النظام الشاملة."""
     cost = float(data.get("debited_cost") or 0)
     if cost > 0:
         await refund_user_points(user_id, cost)
