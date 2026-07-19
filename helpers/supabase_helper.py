@@ -148,6 +148,33 @@ async def update_user_stats(
         log_error(logger, f"Error updating user stats via RPC: {e}", exception=e)
         return None
 
+async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
+    """Credit points back to a user's paid balance.
+
+    Used when points were already deducted for a quiz request that the user
+    later cancelled/failed to complete (e.g. AI generation error). This is a
+    best-effort read-modify-write (consistent with other balance updates in
+    this module) rather than an atomic RPC, since no dedicated refund
+    procedure exists on the database side.
+    """
+    try:
+        if points_to_refund <= 0:
+            return True
+        is_valid, error = validate_user_id(user_id)
+        if not is_valid:
+            return False
+        response = await supabase.table("users").select("paid_points").eq("user_id", user_id).execute()
+        if not response.data:
+            return False
+        current_paid = float(response.data[0].get("paid_points") or 0)
+        new_paid = current_paid + float(points_to_refund)
+        await supabase.table("users").update({"paid_points": new_paid}).eq("user_id", user_id).execute()
+        log_info(logger, f"Refunded {points_to_refund} points to user {user_id}")
+        return True
+    except Exception as e:
+        log_error(logger, f"Error refunding points for user {user_id}: {e}", exception=e)
+        return False
+
 # ==================== Shared Quiz Operations ====================
 def create_shared_quiz_id() -> str:
     """Create a short share identifier safe for Telegram callback/deep links."""

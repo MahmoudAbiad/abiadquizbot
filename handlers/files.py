@@ -8,12 +8,13 @@ import uuid
 from typing import Any, Dict, List
 
 from aiogram import F, Router, types
-from aiogram.filters import StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 
 from config import QuizState, bot, redis_client
 from constants import (
     ADMIN_CONTACT,
+    BTN_CANCEL_REQUEST,
     DAILY_RENEWAL_POINTS,
     ERROR_ALBUM_TOO_LARGE,
     MAX_ALBUM_IMAGES,
@@ -23,14 +24,23 @@ from constants import (
     MAX_STANDARD_QUESTIONS,
     MAX_SUPER_PAGES,
     MAX_TEXT_INPUT_SIZE,
+    MSG_NOTHING_TO_CANCEL,
+    MSG_PREVIOUS_REQUEST_REPLACED,
     MSG_PROCESSING,
+    MSG_REQUEST_CANCELLED,
     MSG_SUPER_PROCESSING_ALERT,
     SUCCESS_MEDIA_RECEIVED,
 )
 from gemini_helper import generate_quiz_smart, get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from logger import get_logger, log_error
-from supabase_helper import check_or_add_user, get_cached_quiz, save_shared_quiz, update_user_stats
+from supabase_helper import (
+    check_or_add_user,
+    get_cached_quiz,
+    refund_user_points,
+    save_shared_quiz,
+    update_user_stats,
+)
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup
 from validators import validate_file_size, validate_question_count
 
@@ -39,6 +49,10 @@ router = Router()
 DOWNLOADS_DIR = "downloads"
 processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
+
+# الحالات التي يوجد فيها "طلب معلّق" (ملف/صورة/نص بانتظار قرار المستخدم)
+# يمكن إلغاؤه أو استبداله بشكل نظيف.
+PENDING_REQUEST_STATES = (QuizState.waiting_for_count, QuizState.waiting_for_cache_decision)
 
 
 def _combined_hash(paths: List[str]) -> str:
@@ -49,11 +63,34 @@ def _combined_hash(paths: List[str]) -> str:
     return digest.hexdigest()
 
 
+def _cancel_keyboard() -> types.InlineKeyboardMarkup:
+    """Inline keyboard offering a clean way to back out of a pending request."""
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[[types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
+    )
+
+
+async def _discard_pending_upload(state: FSMContext) -> int:
+    """Delete any files tied to the currently pending (not-yet-actioned) request.
+
+    Returns the number of files removed from disk. Safe to call even when
+    there is nothing pending (e.g. a pure-text request has no files).
+    """
+    data = await state.get_data()
+    file_paths = data.get("file_paths", []) or []
+    removed = 0
+    for path in file_paths:
+        if safe_file_cleanup(path):
+            removed += 1
+    return removed
+
+
 async def collect_album_photos_redis(message: types.Message) -> List[Dict[str, Any]]:
     """Coalesce Telegram media-group messages across workers using Redis."""
     photo = message.photo[-1]
     current = {
         "file_id": photo.file_id,
+        "file_unique_id": photo.file_unique_id,
         "file_size": photo.file_size,
     }
     if not message.media_group_id:
@@ -63,6 +100,9 @@ async def collect_album_photos_redis(message: types.Message) -> List[Dict[str, A
     list_key = f"album_list:{group_id}"
     lock_key = f"album_lock:{group_id}"
     await redis_client.rpush(list_key, json.dumps(current))
+    # ضبط TTL على قائمة الألبوم نفسها (وليس فقط القفل) لمنع تراكم بيانات يتيمة
+    # في Redis في حال انهارت العملية قبل اكتمال التجميع.
+    await redis_client.expire(list_key, 30)
     coordinator = await redis_client.set(lock_key, "1", nx=True, ex=15)
     if not coordinator:
         return []
@@ -71,7 +111,19 @@ async def collect_album_photos_redis(message: types.Message) -> List[Dict[str, A
     raw_photos = await redis_client.lrange(list_key, 0, -1)
     await redis_client.delete(list_key)
     await redis_client.delete(lock_key)
-    return [json.loads(raw_photo) for raw_photo in raw_photos]
+
+    # تصفية أي تكرار محتمل لنفس الصورة (بحسب معرّفها الفريد) قبل المتابعة.
+    seen: set = set()
+    unique_photos: List[Dict[str, Any]] = []
+    for raw_photo in raw_photos:
+        item = json.loads(raw_photo)
+        unique_id = item.get("file_unique_id")
+        if unique_id and unique_id in seen:
+            continue
+        if unique_id:
+            seen.add(unique_id)
+        unique_photos.append(item)
+    return unique_photos
 
 
 def _execution_mode(items: int, questions: int, cached: bool = False) -> str:
@@ -154,9 +206,20 @@ async def _download_photos(message: types.Message, photos: List[Dict[str, Any]])
 async def handle_media(message: types.Message, state: FSMContext) -> None:
     file_paths: List[str] = []
     try:
-        if await state.get_state() == QuizState.answering_quiz:
+        current_state = await state.get_state()
+        if current_state == QuizState.answering_quiz:
             await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه قبل رفع محتوى جديد.")
             return
+
+        # إذا كان هناك طلب سابق معلّق (ملف/صورة بانتظار عدد الأسئلة، أو بانتظار
+        # قرار الكاش) نقوم بإلغائه وحذف ملفاته تلقائياً قبل قبول المحتوى الجديد،
+        # حتى لا تتراكم ملفات يتيمة في مجلد downloads.
+        if current_state in PENDING_REQUEST_STATES:
+            removed = await _discard_pending_upload(state)
+            await state.clear()
+            if removed:
+                await message.answer(MSG_PREVIOUS_REQUEST_REPLACED)
+
         ensure_directory_exists(DOWNLOADS_DIR)
 
         if message.photo:
@@ -210,6 +273,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
             keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(text=f"⚡ استخدام الكويز الجاهز ({cost:.2f} نقطة)", callback_data="cache_action_yes")],
                 [types.InlineKeyboardButton(text="🧠 توليد أسئلة جديدة", callback_data="cache_action_no")],
+                [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
             ])
             await message.answer(
                 "💡 تم العثور على هذا المحتوى في الكاش.\n\n"
@@ -221,7 +285,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 
         await state.update_data(**common_state)
         await state.set_state(QuizState.waiting_for_count)
-        await message.answer(SUCCESS_MEDIA_RECEIVED)
+        await message.answer(SUCCESS_MEDIA_RECEIVED, reply_markup=_cancel_keyboard())
     except Exception as exc:
         for path in file_paths:
             safe_file_cleanup(path)
@@ -240,7 +304,38 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         return
     await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
     await state.set_state(QuizState.waiting_for_count)
-    await message.answer("✅ تم استقبال النص. كم سؤالاً تريد توليده؟")
+    await message.answer("✅ تم استقبال النص. كم سؤالاً تريد توليده؟", reply_markup=_cancel_keyboard())
+
+
+@router.callback_query(F.data == "cancel_upload_request")
+async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
+    """إلغاء نظيف لطلب معلّق (ملف/صورة/نص) وحذف أي ملفات مرتبطة به من القرص."""
+    try:
+        current_state = await state.get_state()
+        if current_state not in PENDING_REQUEST_STATES:
+            await call.answer(MSG_NOTHING_TO_CANCEL, show_alert=True)
+            return
+
+        await _discard_pending_upload(state)
+        await state.clear()
+
+        try:
+            await call.message.edit_text(MSG_REQUEST_CANCELLED)
+        except Exception:
+            await call.message.answer(MSG_REQUEST_CANCELLED)
+    except Exception as exc:
+        log_error(logger, f"Cancel request failed: {exc}", exception=exc)
+        await call.answer("❌ تعذر إلغاء الطلب، حاول مجدداً.", show_alert=True)
+    finally:
+        await call.answer()
+
+
+@router.message(StateFilter(*PENDING_REQUEST_STATES), Command("cancel"))
+async def handle_cancel_command(message: types.Message, state: FSMContext) -> None:
+    """أمر /cancel كبديل نصي لزر الإلغاء (لمن لا يستخدم الأزرار)."""
+    await _discard_pending_upload(state)
+    await state.clear()
+    await message.answer(MSG_REQUEST_CANCELLED)
 
 
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_yes")
@@ -277,7 +372,7 @@ async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext) -> None
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
     await state.set_state(QuizState.waiting_for_count)
-    await call.message.edit_text("📝 كم سؤالاً تريد استخراجه من هذا المحتوى؟")
+    await call.message.edit_text("📝 كم سؤالاً تريد استخراجه من هذا المحتوى؟", reply_markup=_cancel_keyboard())
     await call.answer()
 
 
@@ -312,7 +407,7 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
 
 @router.message(QuizState.waiting_for_count)
 async def process_count_invalid(message: types.Message) -> None:
-    await message.answer("⚠️ الرجاء إرسال رقم صحيح لعدد الأسئلة.")
+    await message.answer("⚠️ الرجاء إرسال رقم صحيح لعدد الأسئلة، أو اضغط زر الإلغاء أعلاه للتراجع عن الطلب.")
 
 
 async def trigger_quiz_generation(message: types.Message, user_id: int, count: int, state: FSMContext) -> None:
@@ -339,7 +434,10 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
             status_message=status_message,
         )
         if not quiz_data:
-            await status_message.edit_text("⚠️ فشل توليد الأسئلة. لم يتمكن النظام من إكمال الطلب.")
+            await _refund_after_failure(user_id, data)
+            await status_message.edit_text(
+                "⚠️ فشل توليد الأسئلة. لم يتمكن النظام من إكمال الطلب، وقد تم استرجاع النقاط المخصومة إلى رصيدك."
+            )
             return
         quiz_id = uuid.uuid4().hex[:12]
         await save_shared_quiz(quiz_id, user_id, data.get("source_title", "كويز"), quiz_data)
@@ -348,12 +446,22 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
         await status_message.delete()
     except Exception as exc:
         log_error(logger, f"Quiz flow failed: {exc}", exception=exc)
-        await status_message.edit_text("⚠️ حدث خطأ تقني أثناء إعداد الاختبار.")
+        await _refund_after_failure(user_id, data)
+        await status_message.edit_text(
+            "⚠️ حدث خطأ تقني أثناء إعداد الاختبار، وقد تم استرجاع النقاط المخصومة إلى رصيدك."
+        )
     finally:
         for path in data.get("file_paths", []):
             safe_file_cleanup(path)
         async with processing_users_lock:
             processing_users.discard(user_id)
+
+
+async def _refund_after_failure(user_id: int, data: Dict[str, Any]) -> None:
+    """Best-effort refund of the points deducted for a request that ultimately failed."""
+    cost = float(data.get("debited_cost") or 0)
+    if cost > 0:
+        await refund_user_points(user_id, cost)
 
 
 files_router = router

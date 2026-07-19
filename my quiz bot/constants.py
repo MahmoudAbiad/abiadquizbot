@@ -21,6 +21,12 @@ MAX_TEXT_LENGTH_FOR_AI = 8000
 # تعديل رسائل الخطأ والنجاح
 SUCCESS_MEDIA_RECEIVED = "✅ تم استقبال الوسائط بنجاح!\nكم سؤالاً تريد توليده من هذا المحتوى؟ (أرسل رقماً فقط)"
 ERROR_ALBUM_TOO_LARGE = f"❌ يمكنك إرسال {MAX_ALBUM_IMAGES} صور كحد أقصى في المرة الواحدة."
+
+# ==================== Cancel / Undo Flow ====================
+BTN_CANCEL_REQUEST = "❌ إلغاء الطلب"
+MSG_REQUEST_CANCELLED = "✅ تم إلغاء طلبك وحذف الملفات المرسلة بنجاح.\nيمكنك إرسال ملف أو صورة أو نص جديد في أي وقت تريد. 🔄"
+MSG_NOTHING_TO_CANCEL = "ℹ️ لا يوجد طلب قائم حالياً لإلغائه."
+MSG_PREVIOUS_REQUEST_REPLACED = "ℹ️ تم إلغاء طلبك السابق تلقائياً واستبداله بهذا المحتوى الجديد."
 # ==================== AI Model Configuration ====================
 GEMINI_PRIMARY_MODEL = "gemini-3.5-flash"  
 GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite"

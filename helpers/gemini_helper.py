@@ -217,7 +217,7 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
 
 async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
     if not GROQ_API_KEY:
-        log_error(logger, "GROQ_API_KEY is not configured")
+        log_warning(logger, "GROQ_API_KEY is not configured; skipping straight to Gemini for text generation")
         return None
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
@@ -233,8 +233,43 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
         parsed = QuizResponse(**json.loads(response.choices[0].message.content))
         return [question.model_dump() for question in parsed.questions]
     except Exception as exc:
-        log_error(logger, f"Text generation failed: {exc}")
+        # لا نُفشل الطلب هنا؛ فقط نسجل السبب الحقيقي ونترك المتصل يجرّب البديل (Gemini).
+        log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
         return None
+
+
+async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
+    """Fallback path: generate a quiz from plain text using Gemini directly (no file upload needed).
+
+    This reuses the same reliable provider already used for files/images, so pure-text
+    generation keeps working even if Groq's model lineup changes or GROQ_API_KEY is missing.
+    """
+    if not API_KEYS:
+        log_error(logger, "GEMINI_API_KEYS is not configured; cannot fall back for text generation")
+        return None
+    candidates = _available_key_indices() or list(range(len(API_KEYS)))
+    for key_index in random.sample(candidates, len(candidates)):
+        client = genai.Client(api_key=API_KEYS[key_index])
+        try:
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=GEMINI_PRIMARY_MODEL,
+                    contents=[f"{prompt}\n\n{pure_text}"],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=QuizResponse,
+                        temperature=0.7,
+                    ),
+                ),
+                timeout=AI_REQUEST_TIMEOUT,
+            )
+            if not response.parsed or not hasattr(response.parsed, "questions"):
+                raise ValueError("Gemini returned no structured questions")
+            return [question.model_dump() for question in response.parsed.questions]
+        except Exception as exc:
+            _mark_key_failure(key_index, exc)
+            log_warning(logger, f"Gemini text-fallback key {key_index} failed: {exc}")
+    return None
 
 
 async def generate_quiz_smart(
@@ -251,7 +286,10 @@ async def generate_quiz_smart(
     try:
         prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
         if pure_text:
-            return await _generate_text_quiz(pure_text, prompt)
+            questions = await _generate_text_quiz(pure_text, prompt)
+            if not questions:
+                questions = await _generate_text_quiz_with_gemini(pure_text, prompt)
+            return questions
         if not file_paths:
             return None
 
