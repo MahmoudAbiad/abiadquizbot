@@ -49,27 +49,20 @@ processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
 
 # الحالات التي يوجد فيها "طلب معلّق" (ملف/صورة/نص بانتظار قرار المستخدم)
-# يمكن إلغاؤه أو استبداله بشكل نظيف.
 PENDING_REQUEST_STATES = (QuizState.waiting_for_count, QuizState.waiting_for_cache_decision)
 
-
 def _combined_hash(paths: List[str]) -> str:
-    """بناء بصمة SHA-256 موحدة للملفات بناءً على محتواها الرقمي فقط لتفادي تكرار التنزيل."""
     digest = hashlib.sha256()
     for path in paths:
         digest.update(calculate_file_hash(path).encode("ascii"))
     return digest.hexdigest()
 
-
 def _cancel_keyboard() -> types.InlineKeyboardMarkup:
-    """إنشاء كيبورد إلغاء الطلب الموحد لتوفير تجربة تنقل مرنة."""
     return types.InlineKeyboardMarkup(
         inline_keyboard=[[types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
     )
 
-
 async def _discard_pending_upload(state: FSMContext) -> int:
-    """تنظيف المجلدات وحذف كافة الملفات المؤصلة بالطلب المعلق لضمان عدم تراكم البيانات."""
     data = await state.get_data()
     file_paths = data.get("file_paths", []) or []
     removed = 0
@@ -78,55 +71,13 @@ async def _discard_pending_upload(state: FSMContext) -> int:
             removed += 1
     return removed
 
-
-async def collect_album_photos_redis(message: types.Message) -> List[Dict[str, Any]]:
-    """تجميع ألبومات الصور الموزعة على خوادم متعددة باستخدام Redis بآلية آمنة."""
-    photo = message.photo[-1]
-    current = {
-        "file_id": photo.file_id,
-        "file_unique_id": photo.file_unique_id,
-        "file_size": photo.file_size,
-    }
-    if not message.media_group_id:
-        return [current]
-
-    group_id = message.media_group_id
-    list_key = f"album_list:{group_id}"
-    lock_key = f"album_lock:{group_id}"
-    await redis_client.rpush(list_key, json.dumps(current))
-    await redis_client.expire(list_key, 30)
-    coordinator = await redis_client.set(lock_key, "1", nx=True, ex=15)
-    if not coordinator:
-        return []
-
-    await asyncio.sleep(1.2)
-    raw_photos = await redis_client.lrange(list_key, 0, -1)
-    await redis_client.delete(list_key)
-    
-    # ترك الصلاحية تنتهي تلقائياً (ex=15) لحظر الطلبات المتأخرة لنفس الألبوم القادمة من الميدل وير بصمت
-
-    seen: set = set()
-    unique_photos: List[Dict[str, Any]] = []
-    for raw_photo in raw_photos:
-        item = json.loads(raw_photo)
-        unique_id = item.get("file_unique_id")
-        if unique_id and unique_id in seen:
-            continue
-        if unique_id:
-            seen.add(unique_id)
-        unique_photos.append(item)
-    return unique_photos
-
+# ==================== Core Processing Helpers ====================
 
 def _execution_mode(items: int, questions: int, cached: bool = False) -> str:
-    if cached:
-        return "Cached"
-    if items > MAX_LIMIT_PAGES or questions > MAX_LIMIT_QUESTIONS:
-        return "Super-Processing"
-    if items > MAX_STANDARD_PAGES or questions > MAX_STANDARD_QUESTIONS:
-        return "Over-Limit"
+    if cached: return "Cached"
+    if items > MAX_LIMIT_PAGES or questions > MAX_LIMIT_QUESTIONS: return "Super-Processing"
+    if items > MAX_STANDARD_PAGES or questions > MAX_STANDARD_QUESTIONS: return "Over-Limit"
     return "Standard"
-
 
 def _transparency_text(items: int, questions: int, mode: str, cost: float) -> str:
     return (
@@ -137,44 +88,27 @@ def _transparency_text(items: int, questions: int, mode: str, cost: float) -> st
         f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>"
     )
 
-
 async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> None:
     if user_info.get("status") == "renewed":
-        await message.answer(
-            f"☀️ تم تجديد رصيدك اليومي إلى <b>{DAILY_RENEWAL_POINTS} نقطة مجانية</b>.",
-            parse_mode="HTML",
-        )
+        await message.answer(f"☀️ تم تجديد رصيدك اليومي إلى <b>{DAILY_RENEWAL_POINTS} نقطة مجانية</b>.", parse_mode="HTML")
 
-
-async def _insufficient_balance(
-    message: types.Message, user_info: Dict[str, Any], required: float
-) -> None:
+async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float) -> None:
     balance = float(user_info.get("points") or 0)
     deficit = max(0.0, required - balance)
     contact = ADMIN_CONTACT.lstrip("@")
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[[types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]]
-    )
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]])
     await message.answer(
         "❌ <b>رصيدك الحالي لا يكفي لإتمام هذه العملية.</b>\n\n"
         f"🎁 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
         f"💳 المدفوع: <code>{float(user_info.get('paid_points') or 0):.2f}</code>\n"
         f"💰 الإجمالي الحالي: <code>{balance:.2f}</code> / المطلوب: <code>{required:.2f}</code>\n"
         f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>",
-        reply_markup=keyboard,
-        parse_mode="HTML",
+        reply_markup=keyboard, parse_mode="HTML"
     )
-
 
 async def _current_user(message: types.Message, user: Any = None) -> Dict[str, Any]:
     user = user or message.from_user
-    return await check_or_add_user(
-        user.id,
-        user.username or "Unknown",
-        user.first_name or "Unknown",
-        user.last_name or "Unknown",
-    )
-
+    return await check_or_add_user(user.id, user.username or "Unknown", user.first_name or "Unknown", user.last_name or "Unknown")
 
 async def _download_photos(message: types.Message, photos: List[Dict[str, Any]]) -> List[str]:
     paths: List[str] = []
@@ -189,67 +123,62 @@ async def _download_photos(message: types.Message, photos: List[Dict[str, Any]])
             paths.append(path)
         return paths
     except Exception:
-        for path in paths:
-            safe_file_cleanup(path)
+        for path in paths: safe_file_cleanup(path)
         raise
 
+# ==================== Background Album Processor ====================
 
-@router.message(F.document | F.photo)
-async def handle_media(message: types.Message, state: FSMContext) -> None:
-    file_paths: List[str] = []
+async def process_album_background(message: types.Message, state: FSMContext):
+    """
+    مهمة خلفية (Background Task) للانتظار بصمت وتجميع الألبوم
+    دون تجميد استجابة السيرفر لتليجرام.
+    """
     try:
-        # فرز وتجميع الألبوم في بداية الدالة لتوجيه وإبقاء الطلب للمنسق الفائز فقط، وإسقاط بقية الحركات بصمت
-        is_photo = bool(message.photo)
-        if is_photo:
-            photos = await collect_album_photos_redis(message)
-            if not photos:
-                return  # العمال غير المنسقين ينتهون هنا فوراً بصمت لمنع تكرار الرسائل
-            if len(photos) > MAX_ALBUM_IMAGES:
-                await message.answer(ERROR_ALBUM_TOO_LARGE)
-                return
-
-        current_state = await state.get_state()
-        if current_state == QuizState.answering_quiz:
-            await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه قبل رفع محتوى جديد.")
+        # الانتظار ريثما يرسل تليجرام باقي الصور وتتخزن في Redis
+        await asyncio.sleep(1.5)
+        
+        group_id = message.media_group_id
+        list_key = f"album_list:{group_id}"
+        
+        raw_photos = await redis_client.lrange(list_key, 0, -1)
+        await redis_client.delete(list_key)
+        # نترك قفل album_lock لينتهي من تلقاء نفسه (ex=15) لصد أي طلبات شاردة
+        
+        seen = set()
+        photos = []
+        for raw_photo in raw_photos:
+            item = json.loads(raw_photo)
+            uid = item.get("file_unique_id")
+            if uid and uid not in seen:
+                seen.add(uid)
+                photos.append(item)
+                
+        if not photos: return
+        
+        if len(photos) > MAX_ALBUM_IMAGES:
+            await message.answer(ERROR_ALBUM_TOO_LARGE)
             return
+            
+        file_paths = await _download_photos(message, photos)
+        if not file_paths: return
+        
+        is_album = len(file_paths) > 1
+        title = f"كويز من ألبوم صور ({len(file_paths)} صور)" if is_album else "كويز من صورة"
+        items = len(file_paths)
+        file_hash = await asyncio.to_thread(_combined_hash, file_paths)
+        
+        # استكمال المعالجة بعد التجميع والتنزيل
+        await _finalize_media_processing(message, state, file_paths, title, items, is_album, file_hash)
+        
+    except Exception as exc:
+        log_error(logger, f"Album background processing failed: {exc}", exception=exc)
+        await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
-        # إلغاء تلقائي نظيف لأي طلب سابق معلق لمنع تراكم الملفات اليتيمة
-        if current_state in PENDING_REQUEST_STATES:
-            removed = await _discard_pending_upload(state)
-            await state.clear()
-            if removed:
-                await message.answer(MSG_PREVIOUS_REQUEST_REPLACED)
+# ==================== Common Finalization ====================
 
-        ensure_directory_exists(DOWNLOADS_DIR)
-
-        if is_photo:
-            file_paths = await _download_photos(message, photos)
-            if not file_paths:
-                return
-            is_album = len(file_paths) > 1
-            title = f"كويز من ألبوم صور ({len(file_paths)} صور)" if is_album else "كويز من صورة"
-            items = len(file_paths)
-            file_hash = await asyncio.to_thread(_combined_hash, file_paths)
-        else:
-            valid, error = validate_file_size(message.document.file_size, "document")
-            if not valid:
-                await message.answer(error)
-                return
-            original_name = message.document.file_name or "document"
-            title, extension = os.path.splitext(original_name)
-            destination = os.path.join(DOWNLOADS_DIR, f"{message.from_user.id}_{uuid.uuid4().hex}{extension}")
-            await bot.download(message.document, destination=destination)
-            file_paths = [destination]
-            is_album = False
-            items = 1
-            if destination.lower().endswith(".pdf"):
-                items = await asyncio.to_thread(get_pdf_page_count_sync, destination)
-                if items > MAX_SUPER_PAGES:
-                    await message.answer(f"❌ الحد الأقصى لمعالجة ملفات PDF هو {MAX_SUPER_PAGES} صفحة.")
-                    safe_file_cleanup(destination)
-                    return
-            file_hash = await asyncio.to_thread(calculate_file_hash, destination)
-
+async def _finalize_media_processing(message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int, is_album: bool, file_hash: str):
+    """المرحلة النهائية الموحدة لمعالجة الملفات والصور (للتحقق من الكاش)"""
+    try:
         cached = await get_cached_quiz(file_hash)
         common_state = {
             "file_paths": file_paths,
@@ -281,8 +210,89 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
         await state.set_state(QuizState.waiting_for_count)
         await message.answer(SUCCESS_MEDIA_RECEIVED, reply_markup=_cancel_keyboard())
     except Exception as exc:
-        for path in file_paths:
-            safe_file_cleanup(path)
+        for path in file_paths: safe_file_cleanup(path)
+        log_error(logger, f"Finalize media failed: {exc}", exception=exc)
+        await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
+
+# ==================== Main Handlers ====================
+
+@router.message(F.document | F.photo)
+async def handle_media(message: types.Message, state: FSMContext) -> None:
+    try:
+        current_state = await state.get_state()
+        if current_state == QuizState.answering_quiz:
+            await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه قبل رفع محتوى جديد.")
+            return
+
+        if current_state in PENDING_REQUEST_STATES:
+            removed = await _discard_pending_upload(state)
+            await state.clear()
+            if removed:
+                await message.answer(MSG_PREVIOUS_REQUEST_REPLACED)
+
+        ensure_directory_exists(DOWNLOADS_DIR)
+
+        if message.photo:
+            photo = message.photo[-1]
+            current = {
+                "file_id": photo.file_id,
+                "file_unique_id": photo.file_unique_id,
+                "file_size": photo.file_size,
+            }
+            
+            # 🚀 السحر هنا: معالجة الألبومات بدون تجميد الـ Webhook
+            if message.media_group_id:
+                group_id = message.media_group_id
+                list_key = f"album_list:{group_id}"
+                lock_key = f"album_lock:{group_id}"
+                
+                # إضافة الصورة الحالية لـ Redis فوراً
+                await redis_client.rpush(list_key, json.dumps(current))
+                await redis_client.expire(list_key, 30)
+                
+                # الفائز بالقفل هو المنسق
+                is_coordinator = await redis_client.set(lock_key, "1", nx=True, ex=15)
+                if not is_coordinator:
+                    # ننهي العملية فوراً لكي يعود 200 OK لتليجرام ويرسل الصورة التالية بسرعة
+                    return 
+                
+                # المنسق يبدأ مهمة الانتظار في الخلفية ويُنهي الـ Handler فوراً أيضاً!
+                asyncio.create_task(process_album_background(message, state))
+                return
+            else:
+                # صورة مفردة عادية
+                photos = [current]
+                file_paths = await _download_photos(message, photos)
+                if not file_paths: return
+                is_album = False
+                title = "كويز من صورة"
+                items = 1
+                file_hash = await asyncio.to_thread(_combined_hash, file_paths)
+                await _finalize_media_processing(message, state, file_paths, title, items, is_album, file_hash)
+
+        else:
+            # ملفات ومستندات (PDF وغيرها)
+            valid, error = validate_file_size(message.document.file_size, "document")
+            if not valid:
+                await message.answer(error)
+                return
+            original_name = message.document.file_name or "document"
+            title, extension = os.path.splitext(original_name)
+            destination = os.path.join(DOWNLOADS_DIR, f"{message.from_user.id}_{uuid.uuid4().hex}{extension}")
+            await bot.download(message.document, destination=destination)
+            file_paths = [destination]
+            is_album = False
+            items = 1
+            if destination.lower().endswith(".pdf"):
+                items = await asyncio.to_thread(get_pdf_page_count_sync, destination)
+                if items > MAX_SUPER_PAGES:
+                    await message.answer(f"❌ الحد الأقصى لمعالجة ملفات PDF هو {MAX_SUPER_PAGES} صفحة.")
+                    safe_file_cleanup(destination)
+                    return
+            file_hash = await asyncio.to_thread(calculate_file_hash, destination)
+            await _finalize_media_processing(message, state, file_paths, title, items, is_album, file_hash)
+
+    except Exception as exc:
         log_error(logger, f"Media handling failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
 
@@ -303,16 +313,13 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "cancel_upload_request")
 async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
-    """إلغاء نظيف وآمن لطلب معلّق وحذف ملفاته لضمان سلامة تجربة التصفح الكلية."""
     try:
         current_state = await state.get_state()
         if current_state not in PENDING_REQUEST_STATES:
             await call.answer(MSG_NOTHING_TO_CANCEL, show_alert=True)
             return
-
         await _discard_pending_upload(state)
         await state.clear()
-
         try:
             await call.message.edit_text(MSG_REQUEST_CANCELLED)
         except Exception:
@@ -326,7 +333,6 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
 
 @router.message(StateFilter(*PENDING_REQUEST_STATES), Command("cancel"))
 async def handle_cancel_command(message: types.Message, state: FSMContext) -> None:
-    """أمر /cancel لتوفير بديل نصي موازي للتحكم بدون أزرار."""
     await _discard_pending_upload(state)
     await state.clear()
     await message.answer(MSG_REQUEST_CANCELLED)
@@ -433,7 +439,7 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
         )
         if not quiz_data:
             await _refund_after_failure(user_id, data)
-            await state.set_state(None)  # حل حاسم لفخ تعليق الحالة (FSM State Trap)
+            await state.set_state(None)  
             await status_message.edit_text(
                 "⚠️ <b>فشل توليد الأسئلة الأكاديمية!</b>\n\nلم يتمكن محرك الذكاء الاصطناعي من قراءة تفاصيل الملف، رصيدك آمن بالكامل ولم يتم خصم أي نقاط منه.",
                 parse_mode="HTML"
@@ -447,7 +453,7 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
     except Exception as exc:
         log_error(logger, f"Quiz flow failed: {exc}", exception=exc)
         await _refund_after_failure(user_id, data)
-        await state.set_state(None)  # حل حاسم لفخ تعليق الحالة (FSM State Trap)
+        await state.set_state(None) 
         await status_message.edit_text(
             "⚠️ <b>المعذرة، واجهنا خطأ تقنياً مفاجئاً أثناء بناء الكويز.</b>\n\nتم إعادة شحن رصيدك تلقائياً دون خصم أي نقاط، يرجى تكرار المحاولة.",
             parse_mode="HTML"
@@ -460,10 +466,8 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
 
 
 async def _refund_after_failure(user_id: int, data: Dict[str, Any]) -> None:
-    """إعادة الرصيد المخصوم تلقائياً للمستخدم فور فشل العملية لضمان عدالة النظام الشاملة."""
     cost = float(data.get("debited_cost") or 0)
     if cost > 0:
         await refund_user_points(user_id, cost)
-
 
 files_router = router
