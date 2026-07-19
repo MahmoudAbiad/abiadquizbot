@@ -2,7 +2,6 @@ import asyncio
 from typing import Union
 import json
 
-from PIL.TiffImagePlugin import idx
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
@@ -138,6 +137,10 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             clean_options = poll_options
         else:
             clean_question = raw_question
+
+        # تجهيز الشرح وتفادي تجاوز الحد المسموح (200 حرف)
+        raw_explanation = q.get("explanation") or "إجابة صحيحة!"
+        clean_explanation = raw_explanation if len(raw_explanation) <= 200 else raw_explanation[:197] + "..."
             
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
