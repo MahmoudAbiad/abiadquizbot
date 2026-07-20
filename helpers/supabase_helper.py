@@ -1,6 +1,6 @@
 """
 Supabase database operations for user management and statistics.
-Handles user registration, points management, database queries, and quiz token caching.
+Handles user registration, points management, database queries, centralized quiz caching, and community ratings.
 """
 
 import asyncio
@@ -11,11 +11,9 @@ from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv, find_dotenv
 from supabase import create_async_client
 from logger import get_logger, log_error, log_warning, log_info
-# :الاستيراد الآمن والمتطابق
 from constants import (
     WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS,
-    DEFAULT_FAVORITE_SECTION_TITLE,
-    MAX_FAVORITE_SECTIONS,
+    DEFAULT_FAVORITE_SECTION_TITLE, MAX_FAVORITE_SECTIONS,
 )
 from validators import validate_user_id, validate_points_amount
 
@@ -35,12 +33,10 @@ def _balance_payload(free_points: Any = 0, paid_points: Any = 0, **extra: Any) -
 try:
     client_or_coro = create_async_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
     
-    # التحقق مما إذا كان الكائن المسترجع عبارة عن كوروتين يحتاج لمعالجة
     if asyncio.iscoroutine(client_or_coro):
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # إذا كانت حلقة الأحداث تعمل بالفعل
                 supabase = loop.run_until_complete(client_or_coro)
             else:
                 supabase = asyncio.run(client_or_coro)
@@ -49,7 +45,7 @@ try:
     else:
         supabase = client_or_coro
 
-    log_info(logger, "Supabase Async client initialized successfully")
+    log_info(logger, "Supabase Async client initialized successfully with centralized schema mapping")
 except Exception as e:
     log_error(logger, f"Failed to initialize Supabase Async: {e}", exception=e)
     raise
@@ -102,7 +98,6 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
 
 async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dict[str, Any]:
     try:
-        # استدعاء الدالة الذرية من قاعدة البيانات مباشرة لمنع حالة السباق
         rpc_response = await supabase.rpc("check_and_apply_daily_renewal_atomic", {
             "target_user_id": user_id,
             "today_date": today,
@@ -122,19 +117,14 @@ async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dic
         log_error(logger, f"Error checking daily renewal via RPC: {e}", exception=e)
         return _balance_payload(user_data.get('free_points'), user_data.get('paid_points'), status="error", referrer=None)
     
-async def update_user_stats(
-    user_id: int,
-    points_to_deduct: float,
-    questions_generated: Optional[int] = None,
-) -> Optional[float]:
+async def update_user_stats(user_id: int, points_to_deduct: float, questions_generated: Optional[int] = None) -> Optional[float]:
     try:
         is_valid, error = validate_user_id(user_id)
         if not is_valid: return None
 
         if questions_generated is None:
-            questions_generated = points_to_deduct
+            questions_generated = int(points_to_deduct)
         
-        # تنفيذ عملية الخصم الذرية بطلب واحد آمن بنسبة 100%
         rpc_response = await supabase.rpc("deduct_user_points_atomic", {
             "target_user_id": user_id,
             "points_to_deduct": points_to_deduct,
@@ -149,14 +139,6 @@ async def update_user_stats(
         return None
 
 async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
-    """Credit points back to a user's paid balance.
-
-    Used when points were already deducted for a quiz request that the user
-    later cancelled/failed to complete (e.g. AI generation error). This is a
-    best-effort read-modify-write (consistent with other balance updates in
-    this module) rather than an atomic RPC, since no dedicated refund
-    procedure exists on the database side.
-    """
     try:
         if points_to_refund <= 0:
             return True
@@ -175,159 +157,206 @@ async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
         log_error(logger, f"Error refunding points for user {user_id}: {e}", exception=e)
         return False
 
-# ==================== Shared Quiz Operations ====================
+# ==================== Central Quiz & Cache Operations ====================
+
+async def get_file_quizzes(file_hash: str) -> list:
+    """جلب كل الكويزات التابعة للملف مرتبة تلقائياً حسب التقييم الأعلى لزملائك الطلاب"""
+    try:
+        res = await supabase.table("quizzes").select("id, likes, dislikes, score, quiz_data").eq("file_hash", file_hash).order("score", desc=True).execute()
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error getting file quizzes from central table: {e}")
+        return []
+
+async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title: str, quiz_data: list, total_tokens: int) -> Optional[str]:
+    """حفظ كويز جديد مولد كلياً بالجدول المركزي وعزل التكرار لخدمة الدفعة الدراسية"""
+    try:
+        res = await supabase.table("quizzes").insert({
+            "creator_id": creator_id,
+            "file_hash": file_hash,
+            "source_title": source_title,
+            "quiz_data": quiz_data,
+            "total_tokens": total_tokens
+        }).execute()
+        if res.data:
+            return res.data[0]['id']
+        return None
+    except Exception as e:
+        log_error(logger, f"Error saving central quiz data: {e}")
+        return None
+
+async def get_cached_quiz(file_hash: str) -> Optional[Dict[str, Any]]:
+    """توجيه ذكي وفولباك (Backward Compatibility) لمحاذاة كود ملف البوت القديم مع الجدول المركزي الجديد"""
+    try:
+        res = await supabase.table("quizzes").select("quiz_data, total_tokens").eq("file_hash", file_hash).order("score", desc=True).limit(1).execute()
+        if res.data:
+            log_info(logger, f"Cache HIT (Central Table redirection) for hash: {file_hash}")
+            row = res.data[0]
+            return {
+                "questions_data": row["quiz_data"],
+                "total_tokens": row["total_tokens"]
+            }
+        return None
+    except Exception as e:
+        log_error(logger, f"Error reading fallback cache content: {e}")
+        return None
+
+async def save_quiz_to_cache(file_hash: str, quiz_data: List[Dict[str, Any]], total_tokens: int) -> bool:
+    """دالة فولباك للتخزين السريع في المسار المركزي الافتراضي"""
+    try:
+        # استخدام معرف الإدارة كمنشئ افتراضي في حال عدم تمريره من السيرفر القديم
+        admin_id = int(os.getenv("ADMIN_ID", "0"))
+        res = await save_file_quiz_multiple(file_hash, admin_id, "كويز مخزن تلقائياً", quiz_data, total_tokens)
+        return res is not None
+    except Exception as e:
+        log_error(logger, f"Error routing fallback cache saving: {e}")
+        return False
+
+# ==================== Shared Quiz Operations (Deep Linking) ====================
 def create_shared_quiz_id() -> str:
-    """Create a short share identifier safe for Telegram callback/deep links."""
     return uuid.uuid4().hex[:12]
 
 async def save_shared_quiz(share_id: str, owner_id: int, title: str, quiz_data: List[Dict[str, Any]]) -> bool:
+    """تفعيل ميزة المشاركة بدمج كود الرابط مباشرة بالخلية المركزية لمنع تكرار الـ JSONB وهدر المساحة"""
     try:
-        await supabase.table("shared_quizzes").upsert({
-            "share_id": share_id,
-            "owner_id": owner_id,
-            "title": title,
-            "quiz_data": quiz_data,
-            "created_at": datetime.datetime.utcnow().isoformat()
-        }).execute()
-        log_info(logger, f"Saved shared quiz: {share_id}")
+        # البحث إن كان هذا الكويز موجود بالفعل لنقوم فقط بحقن رمز المشاركة داخله دون إنشاء صف جديد مكرر
+        check_res = await supabase.table("quizzes").select("id").eq("creator_id", owner_id).eq("source_title", title).order("created_at", desc=True).limit(1).execute()
+        
+        if check_res.data:
+            target_id = check_res.data[0]["id"]
+            await supabase.table("quizzes").update({"share_code": share_id}).eq("id", target_id).execute()
+            log_info(logger, f"Injected share code {share_id} into existing central quiz {target_id}")
+        else:
+            # إذا كان كويز نصي مباشر أو لم يعثر عليه، ننشئ له سجلاً مركزياً مخصصاً برمز مشاركة فريد
+            await supabase.table("quizzes").insert({
+                "creator_id": owner_id,
+                "source_title": title,
+                "quiz_data": quiz_data,
+                "share_code": share_id
+            }).execute()
+            log_info(logger, f"Created new central row with share code: {share_id}")
         return True
     except Exception as e:
-        log_error(logger, f"Error saving shared quiz: {e}", exception=e)
+        log_error(logger, f"Error linking shared quiz code: {e}")
         return False
 
 async def get_shared_quiz(share_id: str) -> Optional[Dict[str, Any]]:
     try:
-        res = await supabase.table("shared_quizzes").select("*").eq("share_id", share_id).execute()
+        res = await supabase.table("quizzes").select("*").eq("share_code", share_id).execute()
         if res.data:
             return res.data[0]
         return None
     except Exception as e:
-        log_error(logger, f"Error loading shared quiz: {e}", exception=e)
+        log_error(logger, f"Error loading shared quiz from code: {e}")
         return None
 
 # ==================== Favorite Quiz Operations ====================
 async def count_favorite_sections(user_id: int) -> int:
     try:
-        res = await supabase.table("favorite_quiz_sections").select("section_id", count="exact").eq("user_id", user_id).execute()
+        res = await supabase.table("favorite_quiz_sections").select("id", count="exact").eq("user_id", user_id).execute()
         return int(res.count or 0)
     except Exception as e:
-        log_error(logger, f"Error counting favorite sections: {e}", exception=e)
+        log_error(logger, f"Error counting favorite sections: {e}")
         return 0
 
 async def list_favorite_sections(user_id: int) -> List[Dict[str, Any]]:
     try:
-        res = await supabase.table("favorite_quiz_sections").select("section_id, title, created_at").eq("user_id", user_id).order("created_at", desc=False).execute()
-        return res.data or []
+        res = await supabase.table("favorite_quiz_sections").select("id, title, created_at").eq("user_id", user_id).order("created_at", desc=False).execute()
+        # إعادة تعيين المسميات لتطابق السير القديم في البوت (id -> section_id)
+        return [{"section_id": r["id"], "title": r["title"], "created_at": r["created_at"]} for r in (res.data or [])]
     except Exception as e:
-        log_error(logger, f"Error listing favorite sections: {e}", exception=e)
+        log_error(logger, f"Error listing favorite sections: {e}")
         return []
 
 async def create_favorite_section(user_id: int, title: str) -> Optional[str]:
     try:
-        section_id = uuid.uuid4().hex[:12]
-        await supabase.table("favorite_quiz_sections").insert({
-            "section_id": section_id,
+        res = await supabase.table("favorite_quiz_sections").insert({
             "user_id": user_id,
-            "title": title,
-            "created_at": datetime.datetime.utcnow().isoformat(),
+            "title": title
         }).execute()
-        log_info(logger, f"Created favorite section: {section_id} for user {user_id}")
-        return section_id
+        if res.data:
+            return res.data[0]["id"]
+        return None
     except Exception as e:
-        log_error(logger, f"Error creating favorite section: {e}", exception=e)
+        log_error(logger, f"Error creating favorite section: {e}")
         return None
 
-async def save_favorite_quiz(
-    user_id: int,
-    title: str,
-    quiz_data: List[Dict[str, Any]],
-    section_id: Optional[str] = None,
-    source_title: Optional[str] = None,
-    quiz_id: Optional[str] = None,  # 🆕 أضفنا هذا المعامل لاستقبال معرف الكويز الفريد
-) -> Optional[str]:
+async def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str, Any]], section_id: Optional[str] = None, source_title: Optional[str] = None, quiz_id: Optional[str] = None) -> Optional[str]:
     try:
-        favorite_id = uuid.uuid4().hex[:12]
-        payload = {
-            "favorite_id": favorite_id,
-            "user_id": user_id,
-            "title": title,
-            "source_title": source_title or title,
-            "quiz_data": quiz_data,
-            "created_at": datetime.datetime.utcnow().isoformat()
-        }
-        if section_id is not None:
-            payload["section_id"] = section_id
+        target_quiz_uuid = None
+        
+        # التحقق إذا كان الآيدي الممرر عبارة عن UUID صحيح وجاهز للربط في السكيما المركزية
+        if quiz_id:
+            try:
+                uuid.UUID(str(quiz_id))
+                target_quiz_uuid = str(quiz_id)
+            except ValueError:
+                pass
+                
+        # إذا لم يتوفر UUID (مثل الكويزات القديمة أو النصية)، نضمن حقنها بالجدول المركزي أولاً لتوليد معرف فريد لها
+        if not target_quiz_uuid:
+            q_res = await supabase.table("quizzes").insert({
+                "creator_id": user_id,
+                "source_title": source_title or title,
+                "quiz_data": quiz_data
+            }).execute()
+            if q_res.data:
+                target_quiz_uuid = q_res.data[0]["id"]
+                
+        if not target_quiz_uuid:
+            return None
             
-        if quiz_id is not None:  # 🆕 تخزين المعرف في قاعدة البيانات إن وجد
-            payload["quiz_id"] = quiz_id
-
-        try:
-            await supabase.table("favorite_quizzes").insert(payload).execute()
-        except Exception as insert_error:
-            error_text = getattr(insert_error, 'message', str(insert_error))
-            if section_id is not None and "section_id" in error_text and "favorite_quizzes" in error_text:
-                payload.pop("section_id", None)
-                await supabase.table("favorite_quizzes").insert(payload).execute()
-                log_warning(logger, "Saved favorite quiz without section_id because the deployed schema does not expose that column yet.")
-            else:
-                raise
-
-        log_info(logger, f"Saved favorite quiz: {favorite_id} for user {user_id}")
-        return favorite_id
+        fav_id = str(uuid.uuid4())
+        await supabase.table("favorite_quizzes").insert({
+            "favorite_id": fav_id,
+            "user_id": user_id,
+            "quiz_id": target_quiz_uuid,
+            "section_id": section_id if section_id else None,
+            "custom_title": title
+        }).execute()
+        return fav_id
     except Exception as e:
-        log_error(logger, f"Error saving favorite quiz: {e}", exception=e)
+        log_error(logger, f"Error saving favorite junction entity: {e}")
         return None
 
-async def list_favorite_quizzes(
-    user_id: int,
-    search_query: Optional[str] = None,
-    sort_by: str = "latest",
-) -> List[Dict[str, Any]]:
+async def list_favorite_quizzes(user_id: int, search_query: Optional[str] = None, sort_by: str = "latest") -> List[Dict[str, Any]]:
     try:
-        sections_res = await supabase.table("favorite_quiz_sections").select("section_id, title").eq("user_id", user_id).execute()
-        section_map = {
-            item["section_id"]: item["title"]
-            for item in (sections_res.data or [])
-            if item.get("section_id")
-        }
-
-        try:
-            # 🆕 قمنا بإضافة quiz_id هنا لجلبها من قاعدة البيانات
-            res = await supabase.table("favorite_quizzes").select("favorite_id, quiz_id, title, source_title, section_id, created_at").eq("user_id", user_id).execute()
-        except Exception as select_error:
-            error_text = getattr(select_error, 'message', str(select_error))
-            if "section_id" in error_text and "favorite_quizzes" in error_text:
-                # 🆕 قمنا بإضافة quiz_id هنا أيضاً في حالة الفولباك (Fallback)
-                res = await supabase.table("favorite_quizzes").select("favorite_id, quiz_id, title, source_title, created_at").eq("user_id", user_id).execute()
-            else:
-                raise
-
+        res = await supabase.table("favorite_quizzes").select("favorite_id, section_id, custom_title, created_at, quizzes(id, source_title, quiz_data)").eq("user_id", user_id).execute()
+        
+        sections_res = await supabase.table("favorite_quiz_sections").select("id, title").eq("user_id", user_id).execute()
+        section_map = {s["id"]: s["title"] for s in (sections_res.data or [])}
+        
         items = []
         for row in (res.data or []):
-            item = dict(row)
-            item["favorite_id"] = item.get("favorite_id") or item.get("created_at")
-            section_title = section_map.get(item.get("section_id")) or DEFAULT_FAVORITE_SECTION_TITLE
-            item["section_title"] = section_title
+            quiz_info = row.get("quizzes") or {}
+            item = {
+                "favorite_id": row["favorite_id"],
+                "quiz_id": quiz_info.get("id"),
+                "title": row["custom_title"] or quiz_info.get("source_title") or "كويز",
+                "source_title": quiz_info.get("source_title") or "محتوى مستخرج",
+                "section_id": row["section_id"],
+                "section_title": section_map.get(row["section_id"]) or DEFAULT_FAVORITE_SECTION_TITLE,
+                "created_at": row["created_at"],
+                "quiz_data": quiz_info.get("quiz_data", [])
+            }
             items.append(item)
-
+            
         if search_query:
             query = search_query.strip().lower()
             items = [
-                item for item in items
-                if query in (item.get("title") or "").lower()
-                or query in (item.get("source_title") or "").lower()
-                or query in (item.get("section_title") or "").lower()
+                i for i in items
+                if query in i["title"].lower() or query in i["source_title"].lower() or query in i["section_title"].lower()
             ]
 
         if sort_by == "section":
-            items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
-            items.sort(key=lambda item: (item.get("section_title") or "").lower())
+            items.sort(key=lambda x: x["created_at"] or "", reverse=True)
+            items.sort(key=lambda x: x["section_title"].lower())
         else:
-            items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+            items.sort(key=lambda x: x["created_at"] or "", reverse=True)
 
         return items
     except Exception as e:
-        log_error(logger, f"Error listing favorite quizzes: {e}", exception=e)
+        log_error(logger, f"Error listing favorite central junction row: {e}")
         return []
 
 async def can_create_more_favorite_sections(user_id: int) -> bool:
@@ -335,62 +364,91 @@ async def can_create_more_favorite_sections(user_id: int) -> bool:
 
 async def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str, Any]]:
     try:
-        # Fixed: Query via favorite_id column instead of created_at timestamp
-        res = await supabase.table("favorite_quizzes").select("*").eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
+        res = await supabase.table("favorite_quizzes").select("favorite_id, custom_title, section_id, quizzes(*)").eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
         if res.data:
-            return res.data[0]
+            row = res.data[0]
+            quiz_info = row.get("quizzes") or {}
+            return {
+                "favorite_id": row["favorite_id"],
+                "title": row["custom_title"] or quiz_info.get("source_title"),
+                "quiz_data": quiz_info.get("quiz_data"),
+                "section_id": row["section_id"]
+            }
         return None
     except Exception as e:
-        log_error(logger, f"Error loading favorite quiz: {e}", exception=e)
+        log_error(logger, f"Error loading specific favorite quiz join row: {e}")
         return None
 
-# 🆕 تم التحديث: جلب الكويز المفضّل باستخدام الـ UUID الفريد عالمياً (لملف start.py)
 async def get_favorite_quiz_by_global_id(favorite_id: str) -> Optional[Dict[str, Any]]:
     try:
-        res = await supabase.table("favorite_quizzes").select("*").eq("favorite_id", favorite_id).execute()
+        res = await supabase.table("favorite_quizzes").select("favorite_id, custom_title, quizzes(*)").eq("favorite_id", favorite_id).execute()
         if res.data:
-            return res.data[0]
+            row = res.data[0]
+            quiz_info = row.get("quizzes") or {}
+            return {
+                "favorite_id": row["favorite_id"],
+                "title": row["custom_title"] or quiz_info.get("source_title"),
+                "quiz_data": quiz_info.get("quiz_data")
+            }
         return None
     except Exception as e:
-        log_error(logger, f"Error loading global favorite quiz: {e}", exception=e)
+        log_error(logger, f"Error loading global id matching favorite element: {e}")
         return None
 
 async def remove_favorite_quiz(user_id: int, favorite_id: str) -> bool:
     try:
-        # Fixed: Query via favorite_id column instead of created_at timestamp
         await supabase.table("favorite_quizzes").delete().eq("user_id", user_id).eq("favorite_id", favorite_id).execute()
-        log_info(logger, f"Removed favorite quiz: {favorite_id} for user {user_id}")
         return True
     except Exception as e:
-        log_error(logger, f"Error removing favorite quiz: {e}", exception=e)
+        log_error(logger, f"Error removing target favorite quiz connection: {e}")
         return False
 
-# ==================== Token Cache Operations ====================
-async def get_cached_quiz(file_hash: str) -> Optional[Dict[str, Any]]:
-    """البحث عن المستند في الكاش وجلب بيانات الأسئلة والتوكينات الأصلية معاً"""
-    try:
-        res = await supabase.table("files_cache").select("questions_data, total_tokens").eq("file_hash", file_hash).execute()
-        if res.data:
-            log_info(logger, f"Cache HIT for hash: {file_hash}")
-            return res.data[0]
-        return None
-    except Exception as e:
-        log_error(logger, f"Error reading from cache: {e}", exception=e)
-        return None
+# ==================== Rating, Feedbacks & Quality Control Operations ====================
 
-async def save_quiz_to_cache(file_hash: str, quiz_data: List[Dict[str, Any]], total_tokens: int) -> bool:
-    """حفظ الكويز المولد حديثاً مع تسجيل عدد التوكينات الفعلية المستهلكة"""
+async def submit_quiz_vote(quiz_id: str, user_id: int, vote_type: str) -> bool:
+    """إرسال وحقن تصويت الطلاب (لايك/ديسلايك) عبر الـ RPC لضمان منع التكرار وحساب السكور لحظياً"""
     try:
-        await supabase.table("files_cache").insert({
-            "file_hash": file_hash,
-            "questions_data": quiz_data,
-            "total_tokens": total_tokens
+        res = await supabase.rpc("vote_on_quiz", {
+            "p_quiz_id": quiz_id,
+            "p_user_id": user_id,
+            "p_vote": vote_type
         }).execute()
-        log_info(logger, f"Saved to cache with hash: {file_hash} | Tokens: {total_tokens}")
+        return bool(res.data)
+    except Exception as e:
+        log_error(logger, f"Error executing quiz atomic vote function: {e}")
+        return False
+
+async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
+    """حفظ ملاحظات وإفادات الطلاب الأكاديمية لمراجعتها لاحقاً من قبل الإدارة"""
+    try:
+        await supabase.table("quiz_feedbacks").insert({
+            "quiz_id": quiz_id,
+            "user_id": user_id,
+            "comment": comment
+        }).execute()
         return True
     except Exception as e:
-        log_error(logger, f"Error saving to cache: {e}", exception=e)
+        log_error(logger, f"Error saving student feedback on quiz: {e}")
         return False
+
+async def admin_get_recent_feedbacks() -> list:
+    """جلب قائمة بأحدث الملاحظات لتقديمها للوحة الإدارة السرية"""
+    try:
+        res = await supabase.table("quiz_feedbacks").select("quiz_id, comment, created_at, user_id").order("created_at", desc=True).limit(15).execute()
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error pulling admin statistics feedbacks report: {e}")
+        return []
+
+async def auto_cleanup_bad_quizzes():
+    """تنظيف تلقائي شامل للكويزات المرفوضة من الطلاب (ديسلايكات عالية) والتي تجاوزت 48 ساعة"""
+    try:
+        threshold = (datetime.datetime.utcnow() - datetime.timedelta(days=2)).isoformat()
+        # السياسة: حذف أي كويز قديم مجموعه سلبي (Score < 0) تلقائياً بفعل مجتمع الطلاب النشط
+        await supabase.table("quizzes").delete().lt("created_at", threshold).lt("score", 0).execute()
+        log_info(logger, "Automated database garbage cleanup loop executed successfully.")
+    except Exception as e:
+        log_error(logger, f"Error running the background auto cleanup query: {e}")
 
 # ==================== Admin Operations ====================
 async def admin_add_points(target_id: int, amount: int) -> Optional[int]:
@@ -400,7 +458,7 @@ async def admin_add_points(target_id: int, amount: int) -> Optional[int]:
             paid_points = float(user.data[0].get('paid_points') or 0) + amount
             free_points = float(user.data[0].get('free_points') or 0)
             await supabase.table("users").update({"paid_points": paid_points}).eq("user_id", target_id).execute()
-            return free_points + paid_points
+            return int(free_points + paid_points)
         return None
     except Exception as e:
         logger.error(f"Error in admin_add_points: {e}")
@@ -430,12 +488,7 @@ async def admin_search_user(query: str) -> Optional[list]:
 
 # ==================== Quiz Scores & Leaderboard Operations ====================
 async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: int, total_questions: int) -> Dict[str, Any]:
-    """
-    جلب النتيجة السابقة للطالب (إن وجدت) وتحديثها إذا كانت النتيجة الحالية أعلى.
-    تعيد قاموساً يحتوي على النتيجة السابقة وأعلى نتيجة حالية.
-    """
     try:
-        # البحث عن النتيجة السابقة
         res = await supabase.table("quiz_scores").select("*").eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
         
         previous_score = None
@@ -447,17 +500,15 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
             previous_score = existing["highest_score"]
             is_public = existing["is_public"]
             
-            # التحديث فقط إذا كانت النتيجة الجديدة أعلى
             if current_score > previous_score:
                 await supabase.table("quiz_scores").update({
                     "highest_score": current_score,
                     "total_questions": total_questions,
                     "updated_at": datetime.datetime.utcnow().isoformat()
-                }).eq("score_id", existing["score_id"]).execute()
+                }).eq("id", existing["id"]).execute()
             else:
-                new_highest = previous_score # الاحتفاظ بالنتيجة القديمة لأنها أعلى
+                new_highest = previous_score
         else:
-            # إدخال سجل جديد إذا كانت هذه أول مرة يحل فيها الكويز
             await supabase.table("quiz_scores").insert({
                 "quiz_id": quiz_id,
                 "user_id": user_id,
@@ -476,7 +527,6 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
         return {"previous_score": None, "highest_score": current_score, "is_public": False}
 
 async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
-    """تغيير حالة النتيجة لتصبح عامة وتظهر في لوحة الشرف"""
     try:
         await supabase.table("quiz_scores").update({"is_public": True}).eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
         return True
@@ -485,9 +535,7 @@ async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
         return False
 
 async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
-    """جلب أعلى 5 نتائج علنية لهذا الكويز مع أسماء الطلاب"""
     try:
-        # استخدام Join في Supabase لجلب بيانات المستخدم مع النتيجة
         res = await supabase.table("quiz_scores") \
             .select("highest_score, total_questions, users(first_name, last_name)") \
             .eq("quiz_id", quiz_id) \

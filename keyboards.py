@@ -56,6 +56,38 @@ def get_cancel_upload_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+# ==================== لوحات إدارة المخازن المتعددة والتقييمات ====================
+
+def get_multiple_quizzes_keyboard(quizzes: list, cost: float, show_generate_btn: bool = True) -> types.InlineKeyboardMarkup:
+    """توليد أزرار ذكية لعرض كافة الكويزات المتوفرة للملف الواحد مع إحصائيات تقييم مجتمع الطلاب"""
+    kb = []
+    for idx, q in enumerate(quizzes, 1):
+        likes = q.get('likes', 0)
+        dislikes = q.get('dislikes', 0)
+        btn_text = f"📝 كويز {idx} الجاهز | 👍 {likes} | 👎 {dislikes}"
+        kb.append([types.InlineKeyboardButton(text=btn_text, callback_data=f"use_multi_{q['id']}")])
+    
+    if show_generate_btn:
+        kb.append([types.InlineKeyboardButton(text="🆕 توليد كويز جديد كلياً (تكلفة كاملة)", callback_data="cache_action_no")])
+    else:
+        # إشعار شفاف في حال قفل التوليد للوصول للحد الأقصى للملف بناءً على حجمه
+        kb.append([types.InlineKeyboardButton(text="🔒 تم استنفاد الحد الأقصى لتنوع هذا الملف", callback_data="ignored")])
+        
+    kb.append([types.InlineKeyboardButton(text="❌ إلغاء الطلب والتراجع", callback_data="cancel_upload_request")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_rating_keyboard(file_quiz_id: str) -> types.InlineKeyboardMarkup:
+    """لوحة التقييم التفاعلية الفورية التي تظهر للطالب بمجرد إنهاء الكويز المركزي لفرز المحتوى"""
+    kb = [
+        [
+            types.InlineKeyboardButton(text="👍 راق لي الأسئلة", callback_data=f"rate_like_{file_quiz_id}"),
+            types.InlineKeyboardButton(text="👎 سيئ / يحتوي تكرار", callback_data=f"rate_dislike_{file_quiz_id}")
+        ],
+        [types.InlineKeyboardButton(text="✍️ إرسال ملاحظة أو شكوى أكاديمية", callback_data=f"rate_feedback_{file_quiz_id}")],
+        [types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="quiz_home")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 # ==================== لوحات إدارة المفضلة والأقسام ====================
 
 def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_size: int = 5, sort_mode: str = "latest", search_query: str = "") -> types.InlineKeyboardMarkup:
@@ -199,6 +231,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
             types.InlineKeyboardButton(text="📥 تصدير الطلاب", callback_data="admin_export_users")
         ],
+        [types.InlineKeyboardButton(text="💬 مراجعة الملاحظات والتقييمات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)

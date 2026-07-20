@@ -11,7 +11,8 @@ from constants import MSG_QUIZ_STOPPED
 from keyboards import (
     get_main_menu_keyboard, 
     get_quiz_result_keyboard,
-    get_quiz_exit_confirmation_keyboard
+    get_quiz_exit_confirmation_keyboard,
+    get_rating_keyboard # 🆕 تم استيراد لوحة التقييم الجديدة لفرز الكويزات
 )
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import (
@@ -20,14 +21,21 @@ from supabase_helper import (
     save_favorite_quiz,
     list_favorite_sections,
     create_favorite_section,
-    get_or_update_high_score
+    get_or_update_high_score,
+    submit_quiz_vote,     # 🆕 تم استيراد دالة التصويت الذرية
+    save_quiz_feedback    # 🆕 تم استيراد دالة حفظ الشكاوى والملاحظات
 )
 
 logger = get_logger(__name__)
 router = Router()
 
-# مصفوفة الحالات النشطة للاختبار لضمان عدم شلل أزرار الملاحة أثناء معالج الحفظ والتسمية
-ACTIVE_QUIZ_STATES = (QuizState.answering_quiz, QuizState.waiting_for_custom_name, QuizState.waiting_for_new_section_title)
+# مصفوفة الحالات النشطة للاختبار تم تحديثها لتشمل حالة كتابة الملاحظات لحماية التدفق
+ACTIVE_QUIZ_STATES = (
+    QuizState.answering_quiz, 
+    QuizState.waiting_for_custom_name, 
+    QuizState.waiting_for_new_section_title,
+    QuizState.waiting_for_quiz_feedback # 🆕 تم الإضافة هنا
+)
 
 async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
     bot_info = await bot.get_me()
@@ -60,7 +68,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         questions = data['questions']
         idx = data['current_index']
         
-        # 1. التحقق من انتهاء الاختبار وعرض النتيجة النهائية وعقد لوحة الشرف
+        # 1. التحقق من انتهاء الاختبار وعرض النتيجة النهائية وعقد لوحة الشرف أو التقييم الفوري
         if idx >= len(questions):
             score = data['score']
             total = data['total_count']
@@ -79,21 +87,27 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
                 if score_data["previous_score"] is not None:
                     prev_score = score_data["previous_score"]
                     highest = score_data["highest_score"]
-                    previous_score_text = f"\n🕒 نتيجتك السابقة: **{prev_score}**"
+                    previous_score_text = f"\n🕒 نتيجتك السابقة: <b>{prev_score}</b>"
                     if score > prev_score:
-                        previous_score_text += f"\n🎉 **رقم قياسي جديد لك!**"
-                    previous_score_text += f"\n🏆 أعلى نتيجة مسجلة لك: **{highest}** من **{total}**\n"
+                        previous_score_text += f"\n🎉 <b>رقم قياسي جديد لك!</b>"
+                    previous_score_text += f"\n🏆 أعلى نتيجة مسجلة لك: <b>{highest}</b> من <b>{total}</b>\n"
 
             result_text = (
-                f"🏁 **اكتمل الاختبار بنجاح!**\n\n"
-                f"🎯 نتيجتك الحالية: **{score}** من **{total}**\n"
-                f"📊 النسبة المئوية: **{percentage:.1f}%**\n"
+                f"🏁 <b>اكتمل الاختبار بنجاح!</b>\n\n"
+                f"🎯 نتيجتك الحالية: <b>{score}</b> من <b>{total}</b>\n"
+                f"📊 النسبة المئوية: <b>{percentage:.1f}%</b>\n"
                 f"{previous_score_text}\n"
                 f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
             )
             
-            keyboard = get_quiz_result_keyboard(quiz_id=quiz_id, is_score_public=is_public)
-            await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="Markdown")
+            # 🆕 إضافة لوحة التقييم الفوري الفلتر الذاتي إذا كان المعرف قادم كـ UUID من الجدول المركزي
+            if quiz_id and "-" in str(quiz_id):
+                keyboard = get_rating_keyboard(quiz_id)
+                result_text += "\n\n⭐ <b>كيف تقيم هذا الكويز؟</b> تقييمك المباشر يساعد الدفعة على فرز الكويزات الممتازة وتصفية الرديئة تلقائياً!"
+            else:
+                keyboard = get_quiz_result_keyboard(quiz_id=quiz_id, is_score_public=is_public)
+                
+            await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
             
             log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
             await state.update_data(quiz_completed=True, is_switching_question=False)
@@ -171,7 +185,6 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         }
 
         await redis_client.set(f"poll:{poll_id}", json.dumps(quiz_data), ex=7200)
-        # فتح الحظر بمجرد إرسال واستقرار السؤال بنجاح على الشاشة لكسر ثغرة النقر المزدوج القافز
         await state.update_data(is_switching_question=False)
 
     except Exception as e:
@@ -201,7 +214,6 @@ async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext)
     finally:
         await call.answer()
 
-# إطلاق معالج التأكيد البصري قبل حرق وكسر جلسة الكويز
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "quiz_stop")
 async def request_stop_confirmation(call: types.CallbackQuery, state: FSMContext):
     try:
@@ -315,6 +327,72 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
         await call.answer("❌ خطأ في جلب التلميح", show_alert=True)
+
+# ==================== معالجات نظام التقييم والملاحظات الفورية ====================
+
+@router.callback_query(F.data.startswith("rate_like_"))
+async def rate_like_quiz(call: types.CallbackQuery):
+    try:
+        quiz_id = call.data.replace("rate_like_", "")
+        success = await submit_quiz_vote(quiz_id, call.from_user.id, "like")
+        if success:
+            await call.answer("👍 شكراً لك! تم تسجيل إعجابك وتحديث تقييم الاختبار بنجاح.", show_alert=True)
+        else:
+            await call.answer("⚠️ لقد قمت بالتصويت على هذا الاختبار مسبقاً!", show_alert=True)
+    except Exception as e:
+        log_error(logger, f"Error in rate_like_quiz: {e}")
+        await call.answer("❌ حدث خطأ أثناء معالجة الإعجاب.", show_alert=True)
+
+@router.callback_query(F.data.startswith("rate_dislike_"))
+async def rate_dislike_quiz(call: types.CallbackQuery):
+    try:
+        quiz_id = call.data.replace("rate_dislike_", "")
+        success = await submit_quiz_vote(quiz_id, call.from_user.id, "dislike")
+        if success:
+            await call.answer("👎 تم احتساب تقييمك السلبي. سيتولى النظام تصفية وحذف الاختبارات الرديئة تلقائياً.", show_alert=True)
+        else:
+            await call.answer("⚠️ لقد قمت بالتصويت على هذا الاختبار مسبقاً!", show_alert=True)
+    except Exception as e:
+        log_error(logger, f"Error in rate_dislike_quiz: {e}")
+        await call.answer("❌ حدث خطأ أثناء تسجيل التقييم السلبي.", show_alert=True)
+
+@router.callback_query(F.data.startswith("rate_feedback_"))
+async def prompt_feedback(call: types.CallbackQuery, state: FSMContext):
+    try:
+        quiz_id = call.data.replace("rate_feedback_", "")
+        await state.update_data(feedback_quiz_id=quiz_id)
+        await state.set_state(QuizState.waiting_for_quiz_feedback)
+        
+        from constants import MSG_FEEDBACK_PROMPT
+        await call.message.answer(MSG_FEEDBACK_PROMPT, parse_mode="HTML")
+    except Exception as e:
+        log_error(logger, f"Error in prompt_feedback: {e}")
+        await call.answer("❌ تعذر فتح واجهة الملاحظات والشكاوى.", show_alert=True)
+    finally:
+        await call.answer()
+
+@router.message(QuizState.waiting_for_quiz_feedback, F.text)
+async def process_quiz_feedback(msg: types.Message, state: FSMContext):
+    try:
+        comment = msg.text.strip()
+        if not comment:
+            await msg.answer("❌ الملاحظة فارغة، يرجى كتابة نص شكوى واضح ومفهوم:")
+            return
+        
+        data = await state.get_data()
+        quiz_id = data.get("feedback_quiz_id")
+        
+        if quiz_id:
+            from constants import MSG_FEEDBACK_SAVED
+            await save_quiz_feedback(quiz_id, msg.from_user.id, comment[:500])
+            await msg.answer(MSG_FEEDBACK_SAVED, parse_mode="HTML")
+        else:
+            await msg.answer("❌ حدث خطأ داخلي، لم يتم العثور على المعرف المركزي لهذا الاختبار.")
+            
+        await state.set_state(None)
+    except Exception as e:
+        log_error(logger, f"Error in process_quiz_feedback: {e}")
+        await msg.answer("❌ نعتذر منك، حدث خطأ أثناء إرسال وحفظ ملاحظتك للآدمن.")
 
 # ==================== معالج حفظ الكويز التفاعلي الذكي ====================
 
@@ -522,12 +600,10 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         
-        # كسر حماية قفز الأسئلة المتكررة (Anti-Double-Click System)
         if data.get("is_switching_question"):
             await call.answer()
             return
             
-        # قفل المفتاح مؤقتاً أثناء الإرسال والمسح
         await state.update_data(is_switching_question=True, current_index=data['current_index'] + 1)
         
         try: 

@@ -29,6 +29,7 @@ class QuizState(StatesGroup):
     waiting_for_limit_decision = State()
     waiting_for_custom_name = State()       # استقبال الاسم المخصص
     waiting_for_new_section_title = State() # استقبال اسم القسم الجديد
+    waiting_for_quiz_feedback = State()     # 🆕 استقبال ملاحظات وشكاوى الطلاب بنهاية الاختبار
 
 # ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:
@@ -55,8 +56,8 @@ try:
     redis_client = Redis.from_url(redis_url)
     
     # إعداد التخزين الدائم (RedisStorage)
-  # 🚀 التعديل: جعل حالة المستخدم وبياناته المؤقتة تنتهي وتُحذف تلقائياً من Redis بعد 15 دقيقة من خمول المستخدم
-    storage = RedisStorage(redis=redis_client, state_ttl=86400, data_ttl=86400) # 15 دقيقة = 900 ثانية، 1 يوم = 86400 ثانية
+    # جعل حالة المستخدم وبياناته المؤقتة تنتهي وتُحذف تلقائياً من Redis بعد 15 ساعة من خمول المستخدم
+    storage = RedisStorage(redis=redis_client, state_ttl=86400, data_ttl=86400)
     
     bot = Bot(token=_get_bot_token())
     dp = Dispatcher(storage=storage) # ربط الـ Dispatcher بـ Redis

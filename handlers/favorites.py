@@ -12,7 +12,8 @@ from constants import (
 )
 from supabase_helper import (
     save_favorite_quiz, list_favorite_quizzes, list_favorite_sections,
-    create_favorite_section, can_create_more_favorite_sections, get_favorite_quiz, remove_favorite_quiz
+    create_favorite_section, can_create_more_favorite_sections, get_favorite_quiz, 
+    remove_favorite_quiz, supabase # 🆕 تم استيراد كائن سوبابيس لعمل الاستعلام المباشر للـ UUID
 )
 from keyboards import (
     get_favorites_list_keyboard, get_sections_list_keyboard, 
@@ -324,7 +325,7 @@ async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
             f"📌 <b>العنوان:</b> {title}\n"
             f"📁 <b>القسم الأكاديمي:</b> {section_title}\n"
             f"🔢 <b>إجمالي الأسئلة:</b> {questions_count} أسئلة تفاعلية\n\n"
-            f"ماذا تريد أن تفعل بهذا الكويز حالياً؟"
+            f"ماذا تريد أن تفعل بهذا الكويز حالياً?"
         )
         
         # تمرير الـ section_id لزر الرجوع الذكي ليعود الطالب لنفس المجلد بدلاً من تشتيته
@@ -345,7 +346,19 @@ async def open_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
         if not favorite:
             await call.answer("❌ لم يتم العثور على ملفات هذا الاختبار", show_alert=True)
             return
-        await _start_loaded_quiz(call, state, favorite["quiz_data"], favorite.get("title") or "كويز محفوظ", origin="favorite")
+            
+        # 🆕 استخراج الـ UUID المركزي الحقيقي المرتبط بجدول المفضلة لضمان عمل القيود وجدول النتائج بسلاسة
+        actual_quiz_id = None
+        fav_res = await supabase.table("favorite_quizzes").select("quiz_id").eq("favorite_id", fid).execute()
+        if fav_res.data:
+            actual_quiz_id = fav_res.data[0]["quiz_id"]
+            
+        await _start_loaded_quiz(
+            call, state, favorite["quiz_data"], 
+            favorite.get("title") or "كويز محفوظ", 
+            origin="favorite",
+            quiz_id=str(actual_quiz_id) if actual_quiz_id else "" # تمرير المعرف الفريد للمركزية
+        )
     except Exception as e: 
         log_error(logger, f"Error in open_favorite_quiz: {e}")
         await call.answer("❌ تعذر تشغيل واختبار هذا الكويز حالياً", show_alert=True)

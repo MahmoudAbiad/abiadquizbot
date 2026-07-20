@@ -5,7 +5,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from config import bot, QuizState
 from keyboards import get_main_menu_keyboard
-from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id
+from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, supabase
 from logger import get_logger, log_warning, log_info
 from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS
 
@@ -14,16 +14,30 @@ router = Router()
 
 async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, args_payload: str):
     """الماكينة المسؤولة عن تحميل وتشغيل الكويز القادم من الروابط العميقة بأمان"""
+    actual_quiz_id = None
+    shared = None
+    
     if args_payload.startswith("share_"):
         share_id = args_payload.replace("share_", "", 1)
         shared = await get_shared_quiz(share_id)
+        if shared:
+            # استخراج الـ UUID المركزي الحقيقي للكويز المشترك
+            actual_quiz_id = shared.get("id")
     else:
         share_id = args_payload.replace("quiz_", "", 1)
         shared = await get_favorite_quiz_by_global_id(share_id)
         if not shared:
+            # فولباك في حال كان الرابط قديماً أو مشتركاً مباشرة
             shared = await get_shared_quiz(share_id)
+            if shared:
+                actual_quiz_id = shared.get("id")
+        else:
+            # جلب الـ UUID المركزي الحقيقي المرتبط بجدول المفضلة لضمان عدم انهيار جدول العلامات
+            fav_res = await supabase.table("favorite_quizzes").select("quiz_id").eq("favorite_id", share_id).execute()
+            if fav_res.data:
+                actual_quiz_id = fav_res.data[0]["quiz_id"]
             
-    if shared:
+    if shared and actual_quiz_id:
         await check_or_add_user(
             target_msg.from_user.id,
             target_msg.from_user.username or "Unknown",
@@ -32,12 +46,14 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
             None
         )
         from handlers.execution import _start_loaded_quiz
-        await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{shared.get('title') or 'كويز مشترك'}</b>...", parse_mode="HTML")
+        quiz_title = shared.get('title') or shared.get('source_title') or 'كويز مشترك'
+        
+        await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{quiz_title}</b>...", parse_mode="HTML")
         await _start_loaded_quiz(
             target_msg, state, shared["quiz_data"], 
-            shared.get('title') or 'كويز مشترك', 
+            quiz_title, 
             origin="shared", 
-            quiz_id=share_id
+            quiz_id=str(actual_quiz_id) # تمرير الـ UUID المركزي الحقيقي الصالح لجدول السكور والتقييمات
         )
     else:
         await target_msg.answer("❌ عذراً، هذا الرابط منتهي الصلاحية أو لم يعد موجوداً في قاعدة البيانات.")

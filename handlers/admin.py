@@ -11,7 +11,13 @@ from aiogram.exceptions import TelegramBadRequest
 
 # 🚀 تم تعديل الاستيراد لاستجلاب كائن supabase المشترك لمنع تسريب الاتصالات
 from config import bot, ADMIN_ID
-from supabase_helper import supabase, admin_add_points, admin_get_global_stats, admin_search_user
+from supabase_helper import (
+    supabase, 
+    admin_add_points, 
+    admin_get_global_stats, 
+    admin_search_user,
+    admin_get_recent_feedbacks  # 🆕 استيراد دالة جلب الملاحظات الجديدة
+)
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -77,6 +83,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1")],
         [types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
          types.InlineKeyboardButton(text="📥 تصدير CSV", callback_data="admin_export_users")],
+        [types.InlineKeyboardButton(text="💬 مراجعة الملاحظات والتقييمات", callback_data="admin_view_feedbacks")], # 🆕 الزر الجديد مضاف هنا
         [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -206,6 +213,7 @@ async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, st
             await msg.answer(
                 f"💰 <b>شحن رصيد للمستخدم</b> <code>{target_id}</code>\n\nاختر كمية شحن سريعة أو إدخال يدوي:", 
                 reply_markup=get_admin_charge_options_keyboard(int(target_id)), 
+                get_admin_dashboard_keyboard=None,
                 parse_mode="HTML"
             )
             return
@@ -266,6 +274,31 @@ async def process_search_user(msg: types.Message, state: FSMContext):
     else:
         await msg.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
     await state.clear()
+
+# 🆕 المعالج الجديد لمراجعة أحدث الملاحظات والشكاوى الواردة من الطلاب على الكويزات
+@router.callback_query(F.data == "admin_view_feedbacks")
+async def admin_callback_view_feedbacks(call: types.CallbackQuery):
+    try:
+        feedbacks = await admin_get_recent_feedbacks()
+        if not feedbacks:
+            await safe_edit_text(call.message, "📭 لا توجد أي ملاحظات أو شكاوى مسجلة من الطلاب حالياً.", reply_markup=get_admin_dashboard_keyboard())
+            return
+
+        report = "💬 <b>أحدث ملاحظات وشكاوى الطلاب على الكويزات:</b>\n\n"
+        for idx, fb in enumerate(feedbacks, start=1):
+            report += (
+                f"<b>{idx}. كويز ID:</b> <code>{fb['quiz_id']}</code>\n"
+                f"┣ 👤 الطالب الآيدي: <code>{fb['user_id']}</code>\n"
+                f"┗ 📝 الملاحظة: <i>{fb['comment']}</i>\n"
+                f"──────────────────\n"
+            )
+
+        await safe_edit_text(call.message, report, reply_markup=get_admin_dashboard_keyboard())
+    except Exception as e:
+        logger.error(f"Error in admin_view_feedbacks: {e}")
+        await call.answer("❌ حدث خطأ داخلي أثناء جلب الملاحظات.", show_alert=True)
+    finally:
+        await call.answer()
 
 # ==================== مسار شحن الرصيد ====================
 

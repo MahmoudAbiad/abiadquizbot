@@ -27,6 +27,7 @@ from constants import (
     MAX_LIMIT_PAGES,
     QUOTA_ERROR_KEYWORDS,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
+    MSG_PREVIOUS_QUESTIONS_INSTRUCTION, # 🆕 تم استيراد الثابت الجديد الخاص بمنع تكرار الأسئلة
 )
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import get_cached_quiz, save_quiz_to_cache
@@ -233,17 +234,12 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
         parsed = QuizResponse(**json.loads(response.choices[0].message.content))
         return [question.model_dump() for question in parsed.questions]
     except Exception as exc:
-        # لا نُفشل الطلب هنا؛ فقط نسجل السبب الحقيقي ونترك المتصل يجرّب البديل (Gemini).
         log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
         return None
 
 
 async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
-    """Fallback path: generate a quiz from plain text using Gemini directly (no file upload needed).
-
-    This reuses the same reliable provider already used for files/images, so pure-text
-    generation keeps working even if Groq's model lineup changes or GROQ_API_KEY is missing.
-    """
+    """Fallback path: generate a quiz from plain text using Gemini directly (no file upload needed)."""
     if not API_KEYS:
         log_error(logger, "GEMINI_API_KEYS is not configured; cannot fall back for text generation")
         return None
@@ -279,12 +275,20 @@ async def generate_quiz_smart(
     skip_cache: bool = False,
     file_hash: Optional[str] = None,
     status_message: Optional[Any] = None,
+    previous_questions: Optional[List[Dict[str, Any]]] = None, # 🆕 المعامل الجديد لاستقبال الأسئلة السابقة منعاً للتكرار
 ) -> Optional[List[Dict[str, Any]]]:
     """Generate a quiz, using SHA-256 cache lookup before any external API call."""
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
     try:
-        prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{count}", str(count))
+        # بناء القالب الأساسي وحقن الأسئلة السابقة بداخله لمنع التكرار عِلمياً
+        base_prompt_template = SYSTEM_PROMPT_GENERATE_QUESTIONS
+        if previous_questions:
+            old_q_texts = "\n".join([f"- {q['question']}" for q in previous_questions if 'question' in q])
+            base_prompt_template += MSG_PREVIOUS_QUESTIONS_INSTRUCTION.format(previous_questions=old_q_texts)
+
+        prompt = base_prompt_template.replace("{count}", str(count))
+        
         if pure_text:
             questions = await _generate_text_quiz(pure_text, prompt)
             if not questions:
@@ -306,7 +310,7 @@ async def generate_quiz_smart(
             and await asyncio.to_thread(get_pdf_page_count_sync, file_paths[0]) > MAX_LIMIT_PAGES
         )
         generated = (
-            await _generate_super_pdf(file_paths[0], count, SYSTEM_PROMPT_GENERATE_QUESTIONS)
+            await _generate_super_pdf(file_paths[0], count, base_prompt_template)
             if is_super_pdf
             else await _generate_regular(file_paths, prompt)
         )

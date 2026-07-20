@@ -4,6 +4,7 @@ Handles HTTP server setup safely with modern lifespan context and proper Pydanti
 """
 
 import os
+import asyncio  
 from fastapi import FastAPI, Request, HTTPException
 from contextlib import asynccontextmanager
 from aiogram.types import Update
@@ -12,8 +13,24 @@ from config import bot, dp
 from config import set_bot_commands 
 from logger import get_logger
 from constants import WEBHOOK_PATH, WEBHOOK_PORT, TELEGRAM_WEBHOOK_SECRET
+from supabase_helper import auto_cleanup_bad_quizzes  
 
 logger = get_logger(__name__)
+
+# ==================== Background Tasks ====================
+
+async def scheduled_cleanup_loop():
+    """
+    مهمة خلفية دورية مستمرة تعمل كل 24 ساعة لفحص بنك الأسئلة المركزي،
+    وحذف الاختبارات التي حصلت على ديسلايكات سلبية وتجاوزت مهلة الـ 48 ساعة.
+    """
+    while True:
+        try:
+            await auto_cleanup_bad_quizzes()
+        except Exception as e:
+            logger.error(f"Error inside the background scheduled cleanup task: {e}")
+        # النوم والانتظار لمدة 24 ساعة كاملة (86400 ثانية)
+        await asyncio.sleep(86400)
 
 # ==================== Lifespan Context (Modern Event Handling) ====================
 @asynccontextmanager
@@ -23,11 +40,12 @@ async def lifespan(app: FastAPI):
     """
     # [حدث الـ Startup]: يتم تنفيذه عند إقلاع السيرفر
     try:
-        # 🚀 الموضع المضاف: تنظيف وجرف مجلد التحميلات بالكامل عند إقلاع السيرفر على Railway
+        # تنظيف وجرف مجلد التحميلات بالكامل عند إقلاع السيرفر على Railway
         import shutil
         if os.path.exists("downloads"):
             shutil.rmtree("downloads")
         os.makedirs("downloads", exist_ok=True)
+        
         webhook_url = os.getenv("WEBHOOK_URL")
         if webhook_url:
             full_webhook_url = f"{webhook_url.rstrip('/')}{WEBHOOK_PATH}"
@@ -40,7 +58,7 @@ async def lifespan(app: FastAPI):
             await bot.set_webhook(
                 url=full_webhook_url,
                 drop_pending_updates=True,
-                # ✅ تم التحديث: إضافة poll_answer و poll لكي يرسل تلغرام أحداث الإجابات وحساب النقاط
+                # إضافة poll_answer و poll لكي يرسل تلغرام أحداث الإجابات وحساب النقاط
                 allowed_updates=["message", "callback_query", "poll_answer", "poll"],
                 secret_token=TELEGRAM_WEBHOOK_SECRET,
             )
@@ -49,9 +67,13 @@ async def lifespan(app: FastAPI):
             # تفعيل قائمة الأوامر
             await set_bot_commands(bot)
             
+        # إطلاق وتثبيت مهمة التنظيف التلقائي في الخلفية فور نجاح الإقلاع
+        asyncio.create_task(scheduled_cleanup_loop())
+        print("🔄 تم جدولة ميزة الفلترة التلقائية وحذف الاختبارات الرديئة بنجاح كل 24 ساعة.")
+            
     except Exception as e:
-        print(f"❌ فشل تفعيل الـ Webhook أثناء تشغيل السيرفر: {e}")
-        logger.error(f"Failed to set webhook on startup: {e}")
+        print(f"❌ فشل تفعيل الـ Webhook أو المهام الدورية أثناء تشغيل السيرفر: {e}")
+        logger.error(f"Failed to set webhook or tasks on startup: {e}")
 
     yield  # هنا يعمل السيرفر ويستقبل الطلبات...
 
@@ -85,7 +107,7 @@ async def webhook(request: Request):
 
         update_data = await request.json()
         
-        # [إصلاح الخطأ الحرج]: استخدام model_validate لتحليل البيانات المتداخلة بالكامل
+        # استخدام model_validate لتحليل البيانات المتداخلة بالكامل
         update = Update.model_validate(update_data)
         
         # تمرير التحديث للـ Dispatcher الخاص بـ aiogram

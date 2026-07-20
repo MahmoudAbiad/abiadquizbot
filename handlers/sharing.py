@@ -28,7 +28,7 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
         share_id = data.get("share_id") or create_shared_quiz_id()
         title = _build_source_title(data)
         
-        # ✅ تم التعديل: استدعاء مباشر غير متزامن بدون خيوط
+        # حفظ الرابط بالجدول المركزي لمنع تكرار الـ JSONB وهدر المساحة
         saved = await save_shared_quiz(share_id, call.from_user.id, title, questions)
         if not saved:
             await call.answer("❌ تعذر حفظ رابط المشاركة حالياً", show_alert=True)
@@ -37,7 +37,6 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
         await state.update_data(share_id=share_id)
         bot_info = await bot.get_me()
         
-        # 🔥 تعديل النص ليعود إلى التنسيق الحقيقي القديم والسليم الذي طلبته
         share_link = f"https://t.me/{bot_info.username}?start=share_{share_id}"
         old_style_text = (
             "تم إنشاء رابط مشاركة الكويز\n\n"
@@ -58,15 +57,21 @@ async def open_shared_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         share_id = call.data.replace("share_load_", "", 1)
         
-        # ✅ تم التعديل: استدعاء مباشر غير متزامن بدون خيوط
         shared = await get_shared_quiz(share_id)
         if not shared:
             await call.answer("❌ انتهى رابط المشاركة أو غير موجود", show_alert=True)
             return
-        await _start_loaded_quiz(call, state, shared["quiz_data"], shared.get("title") or "كويز مشترك", origin="shared")
+            
+        # تمرير الـ UUID المركزي الحقيقي (shared["id"]) لضمان عمل القيود وجدول النتائج بسلاسة
+        quiz_title = shared.get("source_title") or "كويز مشترك"
+        await _start_loaded_quiz(
+            call, state, shared["quiz_data"], 
+            quiz_title, 
+            origin="shared", 
+            quiz_id=str(shared["id"])
+        )
     except Exception as e:
         log_error(logger, f"Error in open_shared_quiz: {e}", exception=e)
         await call.answer("❌ تعذر فتح الكويز المشترك", show_alert=True)
     finally:
-        # 💡 سطر جوهري لمنع تعليق الرابط عند الضغط عليه
         await call.answer()

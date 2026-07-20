@@ -28,13 +28,17 @@ from constants import (
     MSG_REQUEST_CANCELLED,
     MSG_SUPER_PROCESSING_ALERT,
     SUCCESS_MEDIA_RECEIVED,
+    PAGES_PER_QUIZ_RATIO,       # 🆕 الخوارزمية: نسبة الصفحات لكل كويز
+    MAX_FILE_QUIZZES_LIMIT,     # 🆕 الحد الأقصى المطلق للكويزات للملخص الواحد
+    MIN_QUIZZES_PER_FILE,       # 🆕 الحد الأدنى المضمون للملفات الصغيرة
+    MSG_MAX_QUIZZES_REACHED,    # 🆕 رسالة الوصول للحد الأقصى
 )
 from gemini_helper import generate_quiz_smart, get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from logger import get_logger, log_error
 from supabase_helper import (
     check_or_add_user,
-    get_cached_quiz,
+    get_file_quizzes,           # 🆕 جلب الكويزات المتعددة من الجدول المركزي
     refund_user_points,
     save_shared_quiz,
     update_user_stats,
@@ -82,7 +86,7 @@ def _execution_mode(items: int, questions: int, cached: bool = False) -> str:
 def _transparency_text(items: int, questions: int, mode: str, cost: float) -> str:
     return (
         "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n\n"
-        f"• العناصر/الصفحات: <code>{items}</code>\n"
+        f"• Elements/Pages: <code>{items}</code>\n"
         f"• الأسئلة المطلوبة: <code>{questions}</code>\n"
         f"• وضع المعالجة: <code>{mode}</code>\n"
         f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>"
@@ -134,7 +138,6 @@ async def process_album_background(message: types.Message, state: FSMContext):
     دون تجميد استجابة السيرفر لتليجرام.
     """
     try:
-        # الانتظار ريثما يرسل تليجرام باقي الصور وتتخزن في Redis
         await asyncio.sleep(1.5)
         
         group_id = message.media_group_id
@@ -142,7 +145,6 @@ async def process_album_background(message: types.Message, state: FSMContext):
         
         raw_photos = await redis_client.lrange(list_key, 0, -1)
         await redis_client.delete(list_key)
-        # نترك قفل album_lock لينتهي من تلقاء نفسه (ex=15) لصد أي طلبات شاردة
         
         seen = set()
         photos = []
@@ -167,7 +169,6 @@ async def process_album_background(message: types.Message, state: FSMContext):
         items = len(file_paths)
         file_hash = await asyncio.to_thread(_combined_hash, file_paths)
         
-        # استكمال المعالجة بعد التجميع والتنزيل
         await _finalize_media_processing(message, state, file_paths, title, items, is_album, file_hash)
         
     except Exception as exc:
@@ -177,9 +178,11 @@ async def process_album_background(message: types.Message, state: FSMContext):
 # ==================== Common Finalization ====================
 
 async def _finalize_media_processing(message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int, is_album: bool, file_hash: str):
-    """المرحلة النهائية الموحدة لمعالجة الملفات والصور (للتحقق من الكاش)"""
+    """المرحلة النهائية الموحدة لمعالجة الملفات والصور (للتحقق من الكاش المتعدد والحدود)"""
     try:
-        cached = await get_cached_quiz(file_hash)
+        # 🆕 جلب قائمة كافة الكويزات المخزنة مسبقاً لهذا الهاش من الجدول المركزي المحسن
+        cached_quizzes = await get_file_quizzes(file_hash)
+        
         common_state = {
             "file_paths": file_paths,
             "source_title": title,
@@ -188,22 +191,31 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
             "items_count": items,
             "is_album": is_album,
         }
-        if cached and cached.get("questions_data"):
-            questions = cached["questions_data"]
-            cost = calculate_cached_points_cost(items, len(questions), is_album)
-            await state.update_data(**common_state, cached_questions=questions, cache_cost=cost)
+        
+        if cached_quizzes:
+            # 🆕 خوارزمية احتساب الحد الأقصى للكويزات المسموحة بناءً على حجم صفحات الملف
+            max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
+            show_generate_btn = len(cached_quizzes) < max_allowed
+            
+            # حساب تكلفة الكاش الافتراضية للكويز الأول المتوفر
+            questions_count = len(cached_quizzes[0]["quiz_data"])
+            cost = calculate_cached_points_cost(items, questions_count, is_album)
+            
+            await state.update_data(**common_state, available_quizzes=cached_quizzes, cache_cost=cost, max_allowed_quizzes=max_allowed)
             await state.set_state(QuizState.waiting_for_cache_decision)
-            keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text=f"⚡ استخدام الكويز الجاهز ({cost:.2f} نقطة)", callback_data="cache_action_yes")],
-                [types.InlineKeyboardButton(text="🧠 توليد أسئلة جديدة", callback_data="cache_action_no")],
-                [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
-            ])
-            await message.answer(
-                "💡 <b>ملاحظة ذكية: تم العثور على هذا الملف في الكاش مسبقاً!</b>\n\n"
-                + _transparency_text(items, len(questions), "Cached", cost),
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
+            
+            # استدعاء لوحة المفاتيح المحدثة لعرض الخيارات المتعددة للطلاب وقفل التوليد إن لزم
+            from keyboards import get_multiple_quizzes_keyboard
+            keyboard = get_multiple_quizzes_keyboard(cached_quizzes, cost, show_generate_btn=show_generate_btn)
+            
+            msg_text = f"💡 <b>ملاحظة ذكية: تم العثور على ({len(cached_quizzes)}) كويز جاهز مخزن لهذا الملف مسبقاً!</b>\n\n"
+            if not show_generate_btn:
+                msg_text += f"🛑 <b>تم استنفاد الحد الأقصى للتنوع المسموح به لحجم هذا الملف وهو ({max_allowed}) كويزات.</b>\n"
+                msg_text += "يرجى حل أحد الاختبارات الجاهزة المتوفرة في القائمة بالأسفل لتوفير رصيدك حماية للجودة:"
+            else:
+                msg_text += f"يمكنك اختيار كويز جاهز بخصم 90% (يكلف {cost:.2f} نقطة)، أو توليد كويز جديد تماماً بأفكار مختلفة (المتاح لحجم ملفك: {len(cached_quizzes)} من {max_allowed}):"
+                
+            await message.answer(msg_text, parse_mode="HTML", reply_markup=keyboard)
             return
 
         await state.update_data(**common_state)
@@ -240,28 +252,22 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 "file_size": photo.file_size,
             }
             
-            # 🚀 السحر هنا: معالجة الألبومات بدون تجميد الـ Webhook
             if message.media_group_id:
                 group_id = message.media_group_id
                 list_key = f"album_list:{group_id}"
                 lock_key = f"album_lock:{group_id}"
                 
-                # إضافة الصورة الحالية لـ Redis فوراً
                 await redis_client.rpush(list_key, json.dumps(current))
                 await redis_client.expire(list_key, 30)
                 
-                # الفائز بالقفل هو المنسق
                 is_coordinator = await redis_client.set(lock_key, "1", nx=True, ex=15)
                 if not is_coordinator:
-                    # ننهي العملية فوراً لكي يعود 200 OK لتليجرام ويرسل الصورة التالية بسرعة
                     return 
                 
-                await message.answer("📥 جارٍ معالجة الألبوم...")
-                # المنسق يبدأ مهمة الانتظار في الخلفية ويُنهي الـ Handler فوراً أيضاً!
+                await message.answer("📥 جارٍ تجميع الصور ومعالجة الألبوم سياقياً بالخلفية...")
                 asyncio.create_task(process_album_background(message, state))
                 return
             else:
-                # صورة مفردة عادية
                 photos = [current]
                 file_paths = await _download_photos(message, photos)
                 if not file_paths: return
@@ -272,7 +278,6 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 await _finalize_media_processing(message, state, file_paths, title, items, is_album, file_hash)
 
         else:
-            # ملفات ومستندات (PDF وغيرها)
             valid, error = validate_file_size(message.document.file_size, "document")
             if not valid:
                 await message.answer(error)
@@ -339,33 +344,40 @@ async def handle_cancel_command(message: types.Message, state: FSMContext) -> No
     await message.answer(MSG_REQUEST_CANCELLED)
 
 
-@router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_yes")
-async def handle_cache_yes(call: types.CallbackQuery, state: FSMContext) -> None:
+# 🆕 معالج تشغيل أحد الكويزات الجاهزة المتعددة المخزنة بالجدول المركزي
+@router.callback_query(QuizState.waiting_for_cache_decision, F.data.startswith("use_multi_"))
+async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMContext) -> None:
     try:
+        quiz_uuid = call.data.replace("use_multi_", "")
         data = await state.get_data()
         cost = float(data["cache_cost"])
+        
         user_info = await _current_user(call.message, call.from_user)
         await _renewal_notice(call.message, user_info)
-        await call.message.answer(
-            _transparency_text(data["items_count"], len(data["cached_questions"]), "Cached", cost),
-            parse_mode="HTML",
-        )
+        
+        available_quizzes = data.get("available_quizzes", [])
+        selected_quiz = next((q for q in available_quizzes if str(q["id"]) == quiz_uuid), None)
+        if not selected_quiz:
+            await call.answer("❌ عذراً، لم نتمكن من جلب الكويز المختار.", show_alert=True)
+            return
+            
         if float(user_info["points"]) < cost:
             await _insufficient_balance(call.message, user_info, cost)
             return
-        remaining = await update_user_stats(call.from_user.id, cost, len(data["cached_questions"]))
+            
+        remaining = await update_user_stats(call.from_user.id, cost, len(selected_quiz["quiz_data"]))
         if remaining is None:
             await _insufficient_balance(call.message, await _current_user(call.message, call.from_user), cost)
             return
-        quiz_id = uuid.uuid4().hex[:12]
-        await save_shared_quiz(quiz_id, call.from_user.id, data["source_title"], data["cached_questions"])
+            
         from handlers.execution import _start_loaded_quiz
-        await _start_loaded_quiz(call.message, state, data["cached_questions"], data["source_title"], origin="cached_file", quiz_id=quiz_id)
+        await _start_loaded_quiz(call.message, state, selected_quiz["quiz_data"], data["source_title"], origin="cached_file", quiz_id=quiz_uuid)
+        
         for path in data.get("file_paths", []):
             safe_file_cleanup(path)
     except Exception as exc:
-        log_error(logger, f"Cached quiz start failed: {exc}", exception=exc)
-        await call.message.answer("❌ تعذر بدء الاختبار المخزّن.")
+        log_error(logger, f"Multi-cached selection trigger failed: {exc}")
+        await call.message.answer("❌ تعذر بدء تشغيل الاختبار المخزّن.")
     finally:
         await call.answer()
 
@@ -387,6 +399,17 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
     items = int(data.get("items_count") or 1)
     is_album = bool(data.get("is_album"))
+    file_hash = data.get("file_hash")
+    
+    # 🆕 جدار حماية خلفي لمنع التلاعب البرمجي وتجاوز الحد الأقصى للملف الواحد
+    if file_hash:
+        current_quizzes = await get_file_quizzes(file_hash)
+        max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
+        if len(current_quizzes) >= max_allowed:
+            await message.answer(MSG_MAX_QUIZZES_REACHED, parse_mode="HTML")
+            await state.clear()
+            return
+
     cost = calculate_quiz_points_cost(items, count, is_album)
     mode = _execution_mode(items, count)
 
@@ -430,13 +453,26 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
     try:
         data = await state.get_data()
         is_media = data.get("input_type") == "media"
+        file_hash = data.get("file_hash")
+        
+        # 🆕 ميزة منع التكرار: سحب الأسئلة السابقة وتمريرها لحقنها في الـ Prompt لقمع التشابه
+        previous_questions = []
+        existing_uuids = set()
+        if is_media and file_hash:
+            old_quizzes = await get_file_quizzes(file_hash)
+            for qz in old_quizzes:
+                existing_uuids.add(str(qz["id"]))
+                if "quiz_data" in qz and isinstance(qz["quiz_data"], list):
+                    previous_questions.extend(qz["quiz_data"])
+                    
         quiz_data = await generate_quiz_smart(
             file_paths=data.get("file_paths") if is_media else None,
             pure_text=data.get("pure_text") if not is_media else None,
             count=count,
             skip_cache=True,
-            file_hash=data.get("file_hash"),
+            file_hash=file_hash,
             status_message=status_message,
+            previous_questions=previous_questions if previous_questions else None, # مرر القائمة هنا
         )
         if not quiz_data:
             await _refund_after_failure(user_id, data)
@@ -446,10 +482,19 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
                 parse_mode="HTML"
             )
             return
-        quiz_id = uuid.uuid4().hex[:12]
-        await save_shared_quiz(quiz_id, user_id, data.get("source_title", "كويز"), quiz_data)
+
+        # 🆕 استخراج المعرف الفريد (UUID) للكويز المولد حديثاً من السلسلة لتشغيل التقييمات بدقة
+        new_quiz_id = uuid.uuid4().hex[:12] # فولباك افتراضي
+        if is_media and file_hash:
+            await asyncio.sleep(0.5) # مهلة زمنية للتأكد من اكتمال المعاملة على خوادم سوبابيس
+            updated_quizzes = await get_file_quizzes(file_hash)
+            for uq in updated_quizzes:
+                if str(uq["id"]) not in existing_uuids:
+                    new_quiz_id = str(uq["id"]) # هذا هو الـ UUID الصحيح المولد من الداتا بيز
+                    break
+
         from handlers.execution import _start_loaded_quiz
-        await _start_loaded_quiz(message, state, quiz_data, data.get("source_title", "كويز"), origin="file" if is_media else "text", quiz_id=quiz_id)
+        await _start_loaded_quiz(message, state, quiz_data, data.get("source_title", "كويز"), origin="file" if is_media else "text", quiz_id=new_quiz_id)
         await status_message.delete()
     except Exception as exc:
         log_error(logger, f"Quiz flow failed: {exc}", exception=exc)
