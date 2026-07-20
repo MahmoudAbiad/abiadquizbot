@@ -223,8 +223,8 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
         
-        # تضمين كلمة json صراحة لتلبية شرط Groq API للنمط json_object
-        groq_content = f"{prompt}\n\nIMPORTANT: Provide the output strictly in JSON format.\n\n{pure_text}"
+        # تضمين كلمة json وتحديد الهيكل المطلوب بوضوح
+        groq_content = f"{prompt}\n\nIMPORTANT: Provide the output strictly in JSON format with a top-level key 'questions'.\n\n{pure_text}"
         
         response = await asyncio.wait_for(
             client.chat.completions.create(
@@ -235,8 +235,24 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
             ),
             timeout=45,
         )
-        parsed = QuizResponse(**json.loads(response.choices[0].message.content))
-        return [question.model_dump() for question in parsed.questions]
+        
+        content = response.choices[0].message.content
+        raw_data = json.loads(content)
+        
+        # معالجة مرنة لبنية البيانات المرجعة من Groq
+        if isinstance(raw_data, list):
+            return [QuizQuestion(**q).model_dump() for q in raw_data]
+        elif isinstance(raw_data, dict):
+            if "questions" in raw_data and isinstance(raw_data["questions"], list):
+                parsed = QuizResponse(**raw_data)
+                return [question.model_dump() for question in parsed.questions]
+            # حالة احتياطية إذا أرجع الموديل القائمة داخل مفتاح آخر
+            for val in raw_data.values():
+                if isinstance(val, list):
+                    return [QuizQuestion(**q).model_dump() for q in val]
+
+        log_error(logger, f"Unexpected JSON structure from Groq: {type(raw_data)}")
+        return None
     except Exception as exc:
         log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
         return None
