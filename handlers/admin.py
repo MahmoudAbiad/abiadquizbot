@@ -213,7 +213,6 @@ async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, st
             await msg.answer(
                 f"💰 <b>شحن رصيد للمستخدم</b> <code>{target_id}</code>\n\nاختر كمية شحن سريعة أو إدخال يدوي:", 
                 reply_markup=get_admin_charge_options_keyboard(int(target_id)), 
-                get_admin_dashboard_keyboard=None,
                 parse_mode="HTML"
             )
             return

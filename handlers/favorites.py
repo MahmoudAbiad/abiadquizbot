@@ -325,7 +325,7 @@ async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
             f"📌 <b>العنوان:</b> {title}\n"
             f"📁 <b>القسم الأكاديمي:</b> {section_title}\n"
             f"🔢 <b>إجمالي الأسئلة:</b> {questions_count} أسئلة تفاعلية\n\n"
-            f"ماذا تريد أن تفعل بهذا الكويز حالياً?"
+            f"ماذا تريد أن تفعل بهذا الكويز حالياً؟"
         )
         
         # تمرير الـ section_id لزر الرجوع الذكي ليعود الطالب لنفس المجلد بدلاً من تشتيته

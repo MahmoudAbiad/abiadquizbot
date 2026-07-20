@@ -86,7 +86,7 @@ def _execution_mode(items: int, questions: int, cached: bool = False) -> str:
 def _transparency_text(items: int, questions: int, mode: str, cost: float) -> str:
     return (
         "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n\n"
-        f"• Elements/Pages: <code>{items}</code>\n"
+        f"• العناصر/الصفحات: <code>{items}</code>\n"
         f"• الأسئلة المطلوبة: <code>{questions}</code>\n"
         f"• وضع المعالجة: <code>{mode}</code>\n"
         f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>"
