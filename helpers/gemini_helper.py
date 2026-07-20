@@ -223,29 +223,36 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
         
-        # تضمين المخطط (Schema) المطلوب بوضوح باللغة والأنواع المناسبة لـ Pydantic
-        json_schema_instruction = """
-IMPORTANT: Output MUST be valid JSON matching this structure strictly:
-{
+        # 1. إعداد تعليمات النظام وتأكيد هيكل الـ JSON في الـ System Role
+        system_instruction = f"""{prompt}
+
+IMPORTANT: You MUST respond ONLY with a valid JSON object matching this exact schema:
+{{
   "questions": [
-    {
-      "question": "string",
-      "options": ["string", "string", "string", "string"],
-      "correct_option_id": 0,  // Integer: 0, 1, 2, or 3
-      "hint": "string",
-      "explanation": "string"
-    }
+    {{
+      "question": "صيغة السؤال هنا",
+      "options": ["خيار 1", "خيار 2", "خيار 3", "خيار 4"],
+      "correct_option_id": 0,
+      "hint": "تلميح ذكي",
+      "explanation": "شرح مختصر للجواب"
+    }}
   ]
-}
-"""
-        groq_content = f"{prompt}\n\n{json_schema_instruction}\n\nالنص المرفق:\n{pure_text}"
+}}
+Do not include markdown code block formatting (like ```json), just raw JSON."""
+
+        # 2. فصل تعليمات النظام عن محتوى النص الأصلي
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": f"المحتوى التعليمي المطلوب استخراج الأسئلة منه:\n\n{pure_text}"}
+        ]
         
+        # 3. استخدام نموذج Groq الأقوى والأكثر استقراراً مع اللغة العربية (llama-3.3-70b-versatile)
         response = await asyncio.wait_for(
             client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": groq_content}],
+                messages=messages,
                 response_format={"type": "json_object"},
-                temperature=0.7,
+                temperature=0.4,  # تقليل الحرارة إلى 0.4 يمنع الهلوسة والقمامة النصية
             ),
             timeout=45,
         )
@@ -253,20 +260,14 @@ IMPORTANT: Output MUST be valid JSON matching this structure strictly:
         content = response.choices[0].message.content
         raw_data = json.loads(content)
         
-        if isinstance(raw_data, list):
-            return [QuizQuestion(**q).model_dump() for q in raw_data]
-        elif isinstance(raw_data, dict):
-            if "questions" in raw_data and isinstance(raw_data["questions"], list):
-                parsed = QuizResponse(**raw_data)
-                return [question.model_dump() for question in parsed.questions]
-            for val in raw_data.values():
-                if isinstance(val, list):
-                    return [QuizQuestion(**q).model_dump() for q in val]
+        if isinstance(raw_data, dict) and "questions" in raw_data:
+            parsed = QuizResponse(**raw_data)
+            return [question.model_dump() for question in parsed.questions]
 
         log_error(logger, f"Unexpected JSON structure from Groq: {type(raw_data)}")
         return None
     except Exception as exc:
-        log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
+        log_error(logger, f"Groq text generation failed, falling back to Gemini: {exc}")
         return None
 
 async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
