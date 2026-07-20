@@ -76,16 +76,16 @@ def get_multiple_quizzes_keyboard(quizzes: list, cost: float, show_generate_btn:
     kb.append([types.InlineKeyboardButton(text="❌ إلغاء الطلب والتراجع", callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_rating_keyboard(file_quiz_id: str) -> types.InlineKeyboardMarkup:
-    """لوحة التقييم التفاعلية الفورية التي تظهر للطالب بمجرد إنهاء الكويز المركزي لفرز المحتوى"""
-    kb = [
-        [
-            types.InlineKeyboardButton(text="👍 راق لي الأسئلة", callback_data=f"rate_like_{file_quiz_id}"),
-            types.InlineKeyboardButton(text="👎 سيئ / يحتوي تكرار", callback_data=f"rate_dislike_{file_quiz_id}")
-        ],
-        [types.InlineKeyboardButton(text="✍️ إرسال ملاحظة أو شكوى أكاديمية", callback_data=f"rate_feedback_{file_quiz_id}")],
-        [types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="quiz_home")]
-    ]
+def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None, is_score_public: bool = False) -> types.InlineKeyboardMarkup:
+    """لوحة نتيجة الاختبار الكاملة (إعادة/مشاركة/مفضلة/لوحة الشرف) + صف تقييم الكويز المركزي مضاف فوقها،
+    بدلاً من استبدال اللوحة الأصلية بالكامل وفقدان بقية الأزرار."""
+    base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id, is_score_public=is_score_public)
+    kb = list(base_kb.inline_keyboard)
+    kb.insert(0, [
+        types.InlineKeyboardButton(text="👍 راق لي الأسئلة", callback_data=f"rate_like_{file_quiz_id}"),
+        types.InlineKeyboardButton(text="👎 سيئ / يحتوي تكرار", callback_data=f"rate_dislike_{file_quiz_id}")
+    ])
+    kb.insert(1, [types.InlineKeyboardButton(text="✍️ إرسال ملاحظة أو شكوى أكاديمية", callback_data=f"rate_feedback_{file_quiz_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 # ==================== لوحات إدارة المفضلة والأقسام ====================

@@ -102,7 +102,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             
             # 🆕 إضافة لوحة التقييم الفوري الفلتر الذاتي إذا كان المعرف قادم كـ UUID من الجدول المركزي
             if quiz_id and "-" in str(quiz_id):
-                keyboard = get_rating_keyboard(quiz_id)
+                keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, is_score_public=is_public)
                 result_text += "\n\n⭐ <b>كيف تقيم هذا الكويز؟</b> تقييمك المباشر يساعد الدفعة على فرز الكويزات الممتازة وتصفية الرديئة تلقائياً!"
             else:
                 keyboard = get_quiz_result_keyboard(quiz_id=quiz_id, is_score_public=is_public)
