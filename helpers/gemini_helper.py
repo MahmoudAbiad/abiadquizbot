@@ -253,7 +253,7 @@ async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Option
                     contents=[f"{prompt}\n\n{pure_text}"],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=QuizResponse,
+                       #response_schema=QuizResponse,
                         temperature=0.7,
                     ),
                 ),
