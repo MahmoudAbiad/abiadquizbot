@@ -27,7 +27,7 @@ from constants import (
     MAX_LIMIT_PAGES,
     QUOTA_ERROR_KEYWORDS,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
-    MSG_PREVIOUS_QUESTIONS_INSTRUCTION, # 🆕 تم استيراد الثابت الجديد الخاص بمنع تكرار الأسئلة
+    MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
 )
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import get_cached_quiz, save_quiz_to_cache
@@ -222,10 +222,14 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
         return None
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
+        
+        # تضمين كلمة json صراحة لتلبية شرط Groq API للنمط json_object
+        groq_content = f"{prompt}\n\nIMPORTANT: Provide the output strictly in JSON format.\n\n{pure_text}"
+        
         response = await asyncio.wait_for(
             client.chat.completions.create(
                 model="openai/gpt-oss-120b",
-                messages=[{"role": "user", "content": f"{prompt}\n\n{pure_text}"}],
+                messages=[{"role": "user", "content": groq_content}],
                 response_format={"type": "json_object"},
                 temperature=0.7,
             ),
@@ -244,7 +248,8 @@ async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Option
         log_error(logger, "GEMINI_API_KEYS is not configured; cannot fall back for text generation")
         return None
     candidates = _available_key_indices() or list(range(len(API_KEYS)))
-    for key_index in random.sample(candidates, len(candidates)):
+    
+    for attempt_idx, key_index in enumerate(random.sample(candidates, len(candidates))):
         client = genai.Client(api_key=API_KEYS[key_index])
         try:
             response = await asyncio.wait_for(
@@ -265,6 +270,10 @@ async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Option
         except Exception as exc:
             _mark_key_failure(key_index, exc)
             log_warning(logger, f"Gemini text-fallback key {key_index} failed: {exc}")
+            
+            # مهلة انتظار قصيرة بين المحاولات عند مواجهة أخطاء خوادم Gemini (مثل 503)
+            await asyncio.sleep(1.5 * (attempt_idx + 1))
+            
     return None
 
 
@@ -275,13 +284,12 @@ async def generate_quiz_smart(
     skip_cache: bool = False,
     file_hash: Optional[str] = None,
     status_message: Optional[Any] = None,
-    previous_questions: Optional[List[Dict[str, Any]]] = None, # 🆕 المعامل الجديد لاستقبال الأسئلة السابقة منعاً للتكرار
+    previous_questions: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Generate a quiz, using SHA-256 cache lookup before any external API call."""
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
     try:
-        # بناء القالب الأساسي وحقن الأسئلة السابقة بداخله لمنع التكرار عِلمياً
         base_prompt_template = SYSTEM_PROMPT_GENERATE_QUESTIONS
         if previous_questions:
             old_q_texts = "\n".join([f"- {q['question']}" for q in previous_questions if 'question' in q])
