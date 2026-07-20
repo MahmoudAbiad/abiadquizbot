@@ -223,8 +223,22 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
         
-        # تضمين كلمة json وتحديد الهيكل المطلوب بوضوح
-        groq_content = f"{prompt}\n\nIMPORTANT: Provide the output strictly in JSON format with a top-level key 'questions'.\n\n{pure_text}"
+        # تضمين المخطط (Schema) المطلوب بوضوح باللغة والأنواع المناسبة لـ Pydantic
+        json_schema_instruction = """
+IMPORTANT: Output MUST be valid JSON matching this structure strictly:
+{
+  "questions": [
+    {
+      "question": "string",
+      "options": ["string", "string", "string", "string"],
+      "correct_option_id": 0,  // Integer: 0, 1, 2, or 3
+      "hint": "string",
+      "explanation": "string"
+    }
+  ]
+}
+"""
+        groq_content = f"{prompt}\n\n{json_schema_instruction}\n\nالنص المرفق:\n{pure_text}"
         
         response = await asyncio.wait_for(
             client.chat.completions.create(
@@ -239,14 +253,12 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
         content = response.choices[0].message.content
         raw_data = json.loads(content)
         
-        # معالجة مرنة لبنية البيانات المرجعة من Groq
         if isinstance(raw_data, list):
             return [QuizQuestion(**q).model_dump() for q in raw_data]
         elif isinstance(raw_data, dict):
             if "questions" in raw_data and isinstance(raw_data["questions"], list):
                 parsed = QuizResponse(**raw_data)
                 return [question.model_dump() for question in parsed.questions]
-            # حالة احتياطية إذا أرجع الموديل القائمة داخل مفتاح آخر
             for val in raw_data.values():
                 if isinstance(val, list):
                     return [QuizQuestion(**q).model_dump() for q in val]
@@ -256,7 +268,6 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
     except Exception as exc:
         log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
         return None
-
 
 async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
     """Fallback path: generate a quiz from plain text using Gemini directly (no file upload needed)."""

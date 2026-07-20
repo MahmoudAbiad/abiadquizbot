@@ -23,6 +23,17 @@ load_dotenv(dotenv_path)
 logger = get_logger(__name__)
 
 
+def _ensure_valid_uuid(val: str) -> str:
+    """Ensure standard 36-character UUID string for PostgreSQL UUID columns."""
+    if not val:
+        return str(uuid.uuid4())
+    try:
+        return str(uuid.UUID(str(val)))
+    except (ValueError, AttributeError):
+        # Convert short codes/hashes into a deterministic standard UUID
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, str(val)))
+
+
 def _balance_payload(free_points: Any = 0, paid_points: Any = 0, **extra: Any) -> Dict[str, Any]:
     """Expose split balances while retaining ``points`` for older callers."""
     free = float(free_points or 0)
@@ -291,7 +302,7 @@ async def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str,
                 uuid.UUID(str(quiz_id))
                 target_quiz_uuid = str(quiz_id)
             except ValueError:
-                pass
+                target_quiz_uuid = _ensure_valid_uuid(quiz_id)
                 
         # إذا لم يتوفر UUID (مثل الكويزات القديمة أو النصية)، نضمن حقنها بالجدول المركزي أولاً لتوليد معرف فريد لها
         if not target_quiz_uuid:
@@ -408,8 +419,9 @@ async def remove_favorite_quiz(user_id: int, favorite_id: str) -> bool:
 async def submit_quiz_vote(quiz_id: str, user_id: int, vote_type: str) -> bool:
     """إرسال وحقن تصويت الطلاب (لايك/ديسلايك) عبر الـ RPC لضمان منع التكرار وحساب السكور لحظياً"""
     try:
+        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
         res = await supabase.rpc("vote_on_quiz", {
-            "p_quiz_id": quiz_id,
+            "p_quiz_id": formatted_quiz_id,
             "p_user_id": user_id,
             "p_vote": vote_type
         }).execute()
@@ -421,8 +433,9 @@ async def submit_quiz_vote(quiz_id: str, user_id: int, vote_type: str) -> bool:
 async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
     """حفظ ملاحظات وإفادات الطلاب الأكاديمية لمراجعتها لاحقاً من قبل الإدارة"""
     try:
+        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
         await supabase.table("quiz_feedbacks").insert({
-            "quiz_id": quiz_id,
+            "quiz_id": formatted_quiz_id,
             "user_id": user_id,
             "comment": comment
         }).execute()
@@ -489,7 +502,8 @@ async def admin_search_user(query: str) -> Optional[list]:
 # ==================== Quiz Scores & Leaderboard Operations ====================
 async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: int, total_questions: int) -> Dict[str, Any]:
     try:
-        res = await supabase.table("quiz_scores").select("*").eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
+        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
+        res = await supabase.table("quiz_scores").select("*").eq("quiz_id", formatted_quiz_id).eq("user_id", user_id).execute()
         
         previous_score = None
         new_highest = current_score
@@ -510,7 +524,7 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
                 new_highest = previous_score
         else:
             await supabase.table("quiz_scores").insert({
-                "quiz_id": quiz_id,
+                "quiz_id": formatted_quiz_id,
                 "user_id": user_id,
                 "highest_score": current_score,
                 "total_questions": total_questions,
@@ -528,7 +542,8 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
 
 async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
     try:
-        await supabase.table("quiz_scores").update({"is_public": True}).eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
+        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
+        await supabase.table("quiz_scores").update({"is_public": True}).eq("quiz_id", formatted_quiz_id).eq("user_id", user_id).execute()
         return True
     except Exception as e:
         log_error(logger, f"Error publishing score: {e}", exception=e)
@@ -536,9 +551,10 @@ async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
 
 async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
     try:
+        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
         res = await supabase.table("quiz_scores") \
             .select("highest_score, total_questions, users(first_name, last_name)") \
-            .eq("quiz_id", quiz_id) \
+            .eq("quiz_id", formatted_quiz_id) \
             .eq("is_public", True) \
             .order("highest_score", desc=True) \
             .limit(5) \
