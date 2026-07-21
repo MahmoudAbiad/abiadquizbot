@@ -4,6 +4,7 @@ import asyncio
 import datetime
 import hashlib
 import json
+import mimetypes
 import os
 import random
 import uuid
@@ -44,6 +45,11 @@ blocked_keys: Dict[int, datetime.datetime] = {}
 OVERLOAD_ERROR_KEYWORDS = ["overloaded", "unavailable", "503", "internal error", "500"]
 OVERLOAD_RETRY_ATTEMPTS = 2  # عدد إعادات المحاولة الإضافية بنفس المفتاح قبل الانتقال لمفتاح آخر
 OVERLOAD_RETRY_BASE_DELAY = 3  # ثوانٍ، يُضاعف تصاعدياً بين كل محاولة
+
+# 🆕 حد آمن للبيانات المضمّنة (inline) دون رفعها عبر Files API. حد Gemini الفعلي للطلب المضمّن
+# هو 20MB إجمالاً (يشمل نص البرومبت)، فأخذنا هامش أمان تحته. تقريباً كل صور/ملفات تيليجرام
+# العادية (حتى MAX_PHOTO_SIZE=10MB و MAX_DOC_SIZE=20MB لكل ملف) تقع ضمن هذا الحد غالباً.
+INLINE_DATA_SIZE_THRESHOLD = 15 * 1024 * 1024  # 15MB
 
 LOADING_PHRASES = (
     "🔍 يقوم الذكاء الاصطناعي الآن بفحص ملفاتك المرفوعة...",
@@ -151,15 +157,49 @@ def _is_overload_error(error: Exception) -> bool:
     return any(keyword in message for keyword in OVERLOAD_ERROR_KEYWORDS)
 
 
+def _read_file_bytes_sync(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
 async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, model: str = GEMINI_PRIMARY_MODEL) -> tuple[List[Dict[str, Any]], int]:
     client = genai.Client(api_key=API_KEYS[key_index])
     uploaded = []
     try:
         contents: List[Any] = [prompt]
+
+        # 🆕 السبب الحقيقي للبطء الشديد على الصور والملفات على حد سواء: كان الكود يرفع كل ملف
+        # عبر Files API (client.files.upload) بغض النظر عن حجمه أو كونه يُستخدم لمرة واحدة فقط.
+        # توثيق جوجل الرسمي يوصي باستخدام Files API فقط للملفات الكبيرة أو التي تُستخدم بتكرار
+        # عبر عدة طلبات - وليس حالتنا إطلاقاً (كل كويز يُولَّد لمرة واحدة من ملف واحد). الرفع عبر
+        # Files API يضيف جولة شبكة كاملة (رفع) + انتظار معالجة الملف على خوادم جوجل حتى تصبح
+        # حالته ACTIVE، قبل حتى ما يبدأ طلب التوليد نفسه - وهذا الانتظار الإضافي هو ما كان يظهر
+        # كجزء من مهلة الـ 120 ثانية سابقاً، على كل من الصور والملفات بنفس الدرجة.
+        # الحل: تمرير بيانات الملف مباشرة (inline) ضمن نفس الطلب متى كان الحجم الإجمالي صغيراً
+        # بما يكفي، ما يلغي جولة الشبكة الإضافية بالكامل. نلجأ لـ Files API فقط كخيار احتياطي
+        # للملفات الكبيرة (نادر جداً ضمن حدود البوت الحالية).
+        total_size = 0
         for path in paths:
-            uploaded_file = await asyncio.to_thread(client.files.upload, file=path)
-            uploaded.append(uploaded_file)
-            contents.append(uploaded_file)
+            try:
+                total_size += os.path.getsize(path)
+            except OSError:
+                total_size = INLINE_DATA_SIZE_THRESHOLD + 1  # فشل قراءة الحجم -> الأمان أولاً، ارفع عبر Files API
+                break
+
+        mime_types = [mimetypes.guess_type(path)[0] for path in paths]
+        # لو تعذّر تحديد نوع أي ملف (حالة نادرة، مثلاً مستند تيليجرام بدون اسم ملف)، لا نخمّن
+        # نوعاً عاماً قد لا يفهمه Gemini بشكل صحيح؛ نرفع كل الملفات عبر Files API بدلاً من ذلك.
+        use_inline = total_size <= INLINE_DATA_SIZE_THRESHOLD and all(mime_types)
+
+        if use_inline:
+            for path, mime_type in zip(paths, mime_types):
+                file_bytes = await asyncio.to_thread(_read_file_bytes_sync, path)
+                contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
+        else:
+            for path in paths:
+                uploaded_file = await asyncio.to_thread(client.files.upload, file=path)
+                uploaded.append(uploaded_file)
+                contents.append(uploaded_file)
 
         last_exc: Optional[Exception] = None
         # 🆕 إعادة محاولة نفس المفتاح عند خطأ مؤقت (مثل "model overloaded")، لأن تبديل المفاتيح
@@ -173,7 +213,12 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
                         config=types.GenerateContentConfig(
                             response_mime_type="application/json",
                             response_schema=QuizResponse,
-                            temperature=0.7,
+                            # 🆕 gemini-3.5-flash موديل تفكير (thinking) يعمل افتراضياً بمستوى تفكير
+                            # متوسط/عالٍ إن لم يُحدَّد صراحة، وهذا كان يجعل استخراج الأسئلة من
+                            # الصور يستغرق دقائق بدل ثوانٍ. استخراج أسئلة من ملف هو مهمة استخلاص
+                            # مباشرة وليست تفكيراً معقداً، لذا thinking_level="low" يعطي نفس الجودة
+                            # تقريباً بسرعة أعلى بكثير (راجع توثيق Gemini 3.5 Flash).
+                            thinking_config=types.ThinkingConfig(thinking_level="low"),
                         ),
                     ),
                     timeout=AI_REQUEST_TIMEOUT,
@@ -295,7 +340,7 @@ async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Option
                             config=types.GenerateContentConfig(
                                 response_mime_type="application/json",
                                 response_schema=QuizResponse,
-                                temperature=0.7,
+                                thinking_config=types.ThinkingConfig(thinking_level="low"),
                             ),
                         ),
                         timeout=AI_REQUEST_TIMEOUT,
