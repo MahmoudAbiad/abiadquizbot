@@ -62,6 +62,12 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
     else:
         await target_msg.answer("❌ عذراً، هذا الرابط منتهي الصلاحية أو لم يعد موجوداً في قاعدة البيانات.")
 
+@router.message(Command("test_sentry"))
+async def test_sentry_handler(msg: types.Message):
+    # كود متطوع لإحداث خطأ متعمد
+    division_by_zero = 1 / 0
+
+
 @router.message(Command("start"))
 async def start(msg: types.Message, command: CommandObject, state: FSMContext):
     try:
