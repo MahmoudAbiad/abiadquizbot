@@ -1,7 +1,7 @@
 import os  # 🔥 تم نقل الاستيراد إلى بداية الملف تماماً لحل مشكلة الـ NameError
 
 # ==================== File,Photo, Text Size Limits ====================
-MAX_DOC_SIZE = 35 * 1024 * 1024  # 20MB
+MAX_DOC_SIZE = 20 * 1024 * 1024  # 20MB
 MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_STANDARD_PAGES = 15
 MAX_STANDARD_QUESTIONS = 30
