@@ -35,7 +35,7 @@ GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite"
 # 🆕 كانت 120 ثانية، وبما أننا أضفنا thinking_level="low" (راجع gemini_helper.py) يجب أن تكون
 # الاستجابة أسرع بكثير من قبل؛ خفّضناها لتفادي انتظار دقيقتين كاملتين على كل مفتاح قبل التبديل
 # لمفتاح آخر عند تعثّر أحدها فعلياً.
-AI_REQUEST_TIMEOUT = 60  # Seconds
+AI_REQUEST_TIMEOUT = 120  # Seconds
 
 # ==================== Points & Token System ====================
 WELCOME_POINTS = 50           # 50 نقطة ترحيبية = 50,000 توكن مجاني

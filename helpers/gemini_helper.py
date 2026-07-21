@@ -218,7 +218,7 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
                             # الصور يستغرق دقائق بدل ثوانٍ. استخراج أسئلة من ملف هو مهمة استخلاص
                             # مباشرة وليست تفكيراً معقداً، لذا thinking_level="low" يعطي نفس الجودة
                             # تقريباً بسرعة أعلى بكثير (راجع توثيق Gemini 3.5 Flash).
-                            thinking_config=types.ThinkingConfig(thinking_level="low"),
+                            # thinking_config=types.ThinkingConfig(thinking_level="low"),
                         ),
                     ),
                     timeout=AI_REQUEST_TIMEOUT,
