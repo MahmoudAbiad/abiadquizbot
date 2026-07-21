@@ -338,7 +338,7 @@ async def _render_feedback_list(page: int):
 async def admin_callback_view_feedbacks(call: types.CallbackQuery):
     try:
         text, keyboard = await _render_feedback_list(1)
-        await safe_edit_text(call.message, text, reply_markup=keyboard, parse_mode="HTML")
+        await safe_edit_text(call.message, text, reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Error in admin_view_feedbacks: {e}")
         await call.answer("❌ حدث خطأ داخلي أثناء جلب الملاحظات.", show_alert=True)
@@ -351,7 +351,7 @@ async def admin_callback_feedbacks_page(call: types.CallbackQuery):
     try:
         page = int(call.data.replace("afb_p_", "", 1))
         text, keyboard = await _render_feedback_list(page)
-        await safe_edit_text(call.message, text, reply_markup=keyboard, parse_mode="HTML")
+        await safe_edit_text(call.message, text, reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Error paginating feedbacks: {e}")
         await call.answer("❌ حدث خطأ أثناء التنقل بين الصفحات.", show_alert=True)
@@ -397,7 +397,7 @@ async def admin_callback_feedback_details(call: types.CallbackQuery):
             url=f"tg://user?id={student_id}"
         )])
 
-        await safe_edit_text(call.message, details, reply_markup=kb, parse_mode="HTML")
+        await safe_edit_text(call.message, details, reply_markup=kb)
     except Exception as e:
         logger.error(f"Error showing feedback details: {e}")
         await call.answer("❌ حدث خطأ أثناء جلب تفاصيل الملاحظة.", show_alert=True)
@@ -438,7 +438,7 @@ async def admin_callback_delete_quiz_confirm(call: types.CallbackQuery):
         await safe_edit_text(
             call.message,
             "⚠️ <b>تأكيد الحذف</b>\n\nسيتم حذف هذا الكويز نهائياً من قاعدة البيانات، بما في ذلك كل التصويتات والنقاط وعناصر المفضلة المرتبطة به لكل الطلاب. هذا الإجراء لا يمكن التراجع عنه.\n\nهل أنت متأكد؟",
-            reply_markup=kb, parse_mode="HTML"
+            reply_markup=kb
         )
     except Exception as e:
         logger.error(f"Error preparing delete confirmation: {e}")
@@ -456,7 +456,7 @@ async def admin_callback_delete_quiz_execute(call: types.CallbackQuery):
         if success:
             await call.answer("🗑️ تم حذف الكويز نهائياً.", show_alert=True)
             text, keyboard = await _render_feedback_list(1)
-            await safe_edit_text(call.message, text, reply_markup=keyboard, parse_mode="HTML")
+            await safe_edit_text(call.message, text, reply_markup=keyboard)
         else:
             await call.answer("❌ تعذر حذف الكويز، حاول مجدداً.", show_alert=True)
     except Exception as e:
