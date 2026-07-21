@@ -13,6 +13,18 @@ from handlers import start_router, admin_router, files_router, execution_router,
 from middlewares import ThrottlingMiddleware
 from aiogram import types
 import logging
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+# تهيئة Sentry
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[FastApiIntegration()],
+        
+    )
 
 # جعل المكتبات الخارجية تظهر التحذيرات والأخطاء فقط وتتجاهل الـ DEBUG والـ INFO
 logging.getLogger("httpcore").setLevel(logging.WARNING)
