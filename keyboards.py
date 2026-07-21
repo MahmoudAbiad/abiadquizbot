@@ -231,7 +231,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
             types.InlineKeyboardButton(text="📥 تصدير الطلاب", callback_data="admin_export_users")
         ],
-        [types.InlineKeyboardButton(text="💬 مراجعة الملاحظات والتقييمات", callback_data="admin_view_feedbacks")],
+        [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)

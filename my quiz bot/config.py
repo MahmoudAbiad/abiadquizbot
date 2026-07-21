@@ -77,7 +77,8 @@ async def set_bot_commands(bot_instance: Bot):
     try:
         # أوامر الطلاب الافتراضية
         student_commands = [
-            types.BotCommand(command="start", description="🔄 تشغيل البوت وعرض الرصيد")
+            types.BotCommand(command="start", description="🔄 تشغيل البوت وعرض الرصيد"),
+            types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
         ]
         await bot_instance.set_my_commands(student_commands, scope=types.BotCommandScopeDefault())
         

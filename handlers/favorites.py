@@ -1,5 +1,6 @@
 import asyncio
 from aiogram import Router, types, F
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from typing import Union, Optional
 
@@ -211,6 +212,15 @@ async def favorite_section_existing(call: types.CallbackQuery, state: FSMContext
         await call.answer()
 
 # ==================== معالجات التصفح والقوائم الذكية ====================
+
+@router.message(Command("favorites"))
+async def favorites_command(msg: types.Message, state: FSMContext):
+    """🆕 نقطة دخول مباشرة من قائمة الأوامر الجانبية (زر Menu بجانب صندوق الكتابة)"""
+    try:
+        await _send_favorites_menu(msg, state)
+    except Exception as e:
+        log_error(logger, f"Error in favorites_command: {e}")
+        await msg.answer("❌ تعذر عرض القائمة المفضلة")
 
 @router.callback_query(F.data == "favorites_menu")
 async def show_favorites_menu(call: types.CallbackQuery, state: FSMContext):

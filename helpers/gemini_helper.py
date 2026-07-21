@@ -27,7 +27,7 @@ from constants import (
     MAX_LIMIT_PAGES,
     QUOTA_ERROR_KEYWORDS,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
-    MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
+    MSG_PREVIOUS_QUESTIONS_INSTRUCTION, # 🆕 تم استيراد الثابت الجديد الخاص بمنع تكرار الأسئلة
 )
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import get_cached_quiz, save_quiz_to_cache
@@ -38,6 +38,12 @@ logger = get_logger(__name__)
 API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") if key.strip()]
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 blocked_keys: Dict[int, datetime.datetime] = {}
+
+# 🆕 أخطاء Gemini المؤقتة (السيرفر مزدحم/غير متاح مؤقتاً) يجب إعادة محاولتها بدل الاستسلام فوراً،
+# بعكس أخطاء الحصة (quota) التي يجب فيها تبديل المفتاح مباشرة دون إضاعة وقت بإعادة المحاولة.
+OVERLOAD_ERROR_KEYWORDS = ["overloaded", "unavailable", "503", "internal error", "500"]
+OVERLOAD_RETRY_ATTEMPTS = 2  # عدد إعادات المحاولة الإضافية بنفس المفتاح قبل الانتقال لمفتاح آخر
+OVERLOAD_RETRY_BASE_DELAY = 3  # ثوانٍ، يُضاعف تصاعدياً بين كل محاولة
 
 LOADING_PHRASES = (
     "🔍 يقوم الذكاء الاصطناعي الآن بفحص ملفاتك المرفوعة...",
@@ -140,7 +146,12 @@ def _mark_key_failure(key_index: int, error: Exception) -> None:
         blocked_keys[key_index] = datetime.datetime.now() + datetime.timedelta(minutes=KEY_BLOCK_TEMPORARY_ERROR)
 
 
-async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int) -> tuple[List[Dict[str, Any]], int]:
+def _is_overload_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return any(keyword in message for keyword in OVERLOAD_ERROR_KEYWORDS)
+
+
+async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, model: str = GEMINI_PRIMARY_MODEL) -> tuple[List[Dict[str, Any]], int]:
     client = genai.Client(api_key=API_KEYS[key_index])
     uploaded = []
     try:
@@ -150,23 +161,37 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int) 
             uploaded.append(uploaded_file)
             contents.append(uploaded_file)
 
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=GEMINI_PRIMARY_MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=QuizResponse,
-                    temperature=0.7,
-                ),
-            ),
-            timeout=AI_REQUEST_TIMEOUT,
-        )
-        if not response.parsed or not hasattr(response.parsed, "questions"):
-            raise ValueError("Gemini returned no structured questions")
-        questions = [question.model_dump() for question in response.parsed.questions]
-        token_count = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0
-        return questions, int(token_count)
+        last_exc: Optional[Exception] = None
+        # 🆕 إعادة محاولة نفس المفتاح عند خطأ مؤقت (مثل "model overloaded")، لأن تبديل المفاتيح
+        # لا يفيد هنا: الازدحام غالباً في السيرفر نفسه وليس في المفتاح المستخدم.
+        for attempt in range(OVERLOAD_RETRY_ATTEMPTS + 1):
+            try:
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=QuizResponse,
+                            temperature=0.7,
+                        ),
+                    ),
+                    timeout=AI_REQUEST_TIMEOUT,
+                )
+                if not response.parsed or not hasattr(response.parsed, "questions"):
+                    raise ValueError("Gemini returned no structured questions")
+                questions = [question.model_dump() for question in response.parsed.questions]
+                token_count = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0
+                return questions, int(token_count)
+            except Exception as exc:
+                last_exc = exc
+                if _is_overload_error(exc) and attempt < OVERLOAD_RETRY_ATTEMPTS:
+                    delay = OVERLOAD_RETRY_BASE_DELAY * (attempt + 1)
+                    log_warning(logger, f"Gemini key {key_index} (model={model}) overloaded, retrying in {delay}s (attempt {attempt + 1}/{OVERLOAD_RETRY_ATTEMPTS}): {exc}")
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+        raise last_exc  # pragma: no cover - defensive, loop always returns or raises above
     except Exception as exc:
         _mark_key_failure(key_index, exc)
         raise
@@ -180,11 +205,23 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[tuple
         log_error(logger, "GEMINI_API_KEYS is not configured")
         return None
     candidates = _available_key_indices() or list(range(len(API_KEYS)))
-    for key_index in random.sample(candidates, len(candidates)):
+    key_order = random.sample(candidates, len(candidates))
+
+    for key_index in key_order:
         try:
-            return await _generate_with_key(paths, prompt, key_index)
+            return await _generate_with_key(paths, prompt, key_index, model=GEMINI_PRIMARY_MODEL)
         except Exception as exc:
-            log_warning(logger, f"Gemini key {key_index} failed: {exc}")
+            log_warning(logger, f"Gemini key {key_index} failed on primary model ({GEMINI_PRIMARY_MODEL}): {exc}")
+
+    # 🆕 كانت GEMINI_FALLBACK_MODEL معرّفة ومستوردة لكن غير مستخدمة إطلاقاً؛ الآن نجرب فعلياً
+    # موديل بديل مختلف عبر كل المفاتيح إذا فشل الموديل الأساسي على جميعها (خصوصاً مفيد عند ازدحام
+    # الموديل الأساسي تحديداً بينما البديل متاح).
+    log_warning(logger, f"All keys failed on primary model ({GEMINI_PRIMARY_MODEL}); trying fallback model ({GEMINI_FALLBACK_MODEL})")
+    for key_index in key_order:
+        try:
+            return await _generate_with_key(paths, prompt, key_index, model=GEMINI_FALLBACK_MODEL)
+        except Exception as exc:
+            log_warning(logger, f"Gemini key {key_index} failed on fallback model ({GEMINI_FALLBACK_MODEL}): {exc}")
     return None
 
 
@@ -222,53 +259,21 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
         return None
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
-        
-        # 1. إعداد تعليمات النظام وتأكيد هيكل الـ JSON في الـ System Role
-        system_instruction = f"""{prompt}
-
-IMPORTANT: You MUST respond ONLY with a valid JSON object matching this exact schema:
-{{
-  "questions": [
-    {{
-      "question": "صيغة السؤال هنا",
-      "options": ["خيار 1", "خيار 2", "خيار 3", "خيار 4"],
-      "correct_option_id": 0,
-      "hint": "تلميح ذكي",
-      "explanation": "شرح مختصر للجواب"
-    }}
-  ]
-}}
-Do not include markdown code block formatting (like ```json), just raw JSON."""
-
-        # 2. فصل تعليمات النظام عن محتوى النص الأصلي
-        messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"المحتوى التعليمي المطلوب استخراج الأسئلة منه:\n\n{pure_text}"}
-        ]
-        
-        # 3. استخدام نموذج Groq الأقوى والأكثر استقراراً مع اللغة العربية (llama-3.3-70b-versatile)
         response = await asyncio.wait_for(
             client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=messages,
+                model="openai/gpt-oss-120b",
+                messages=[{"role": "user", "content": f"{prompt}\n\n{pure_text}"}],
                 response_format={"type": "json_object"},
-                temperature=0.4,  # تقليل الحرارة إلى 0.4 يمنع الهلوسة والقمامة النصية
+                temperature=0.7,
             ),
             timeout=45,
         )
-        
-        content = response.choices[0].message.content
-        raw_data = json.loads(content)
-        
-        if isinstance(raw_data, dict) and "questions" in raw_data:
-            parsed = QuizResponse(**raw_data)
-            return [question.model_dump() for question in parsed.questions]
-
-        log_error(logger, f"Unexpected JSON structure from Groq: {type(raw_data)}")
-        return None
+        parsed = QuizResponse(**json.loads(response.choices[0].message.content))
+        return [question.model_dump() for question in parsed.questions]
     except Exception as exc:
-        log_error(logger, f"Groq text generation failed, falling back to Gemini: {exc}")
+        log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
         return None
+
 
 async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
     """Fallback path: generate a quiz from plain text using Gemini directly (no file upload needed)."""
@@ -276,33 +281,42 @@ async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Option
         log_error(logger, "GEMINI_API_KEYS is not configured; cannot fall back for text generation")
         return None
     candidates = _available_key_indices() or list(range(len(API_KEYS)))
-    
-    for attempt_idx, key_index in enumerate(random.sample(candidates, len(candidates))):
-        client = genai.Client(api_key=API_KEYS[key_index])
-        try:
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=GEMINI_PRIMARY_MODEL,
-                    contents=[f"{prompt}\n\n{pure_text}"],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=QuizResponse,
-                        temperature=0.7,
-                    ),
-                ),
-                timeout=AI_REQUEST_TIMEOUT,
-            )
-            if not response.parsed or not hasattr(response.parsed, "questions"):
-                raise ValueError("Gemini returned no structured questions")
-            return [question.model_dump() for question in response.parsed.questions]
-        except Exception as exc:
-            _mark_key_failure(key_index, exc)
-            log_warning(logger, f"Gemini text-fallback key {key_index} failed: {exc}")
-            
-            # مهلة انتظار قصيرة بين المحاولات عند مواجهة أخطاء خوادم Gemini (مثل 503)
-            await asyncio.sleep(1.5 * (attempt_idx + 1))
-            
-    return None
+    key_order = random.sample(candidates, len(candidates))
+
+    async def _attempt(model: str) -> Optional[List[Dict[str, Any]]]:
+        for key_index in key_order:
+            client = genai.Client(api_key=API_KEYS[key_index])
+            for attempt in range(OVERLOAD_RETRY_ATTEMPTS + 1):
+                try:
+                    response = await asyncio.wait_for(
+                        client.aio.models.generate_content(
+                            model=model,
+                            contents=[f"{prompt}\n\n{pure_text}"],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=QuizResponse,
+                                temperature=0.7,
+                            ),
+                        ),
+                        timeout=AI_REQUEST_TIMEOUT,
+                    )
+                    if not response.parsed or not hasattr(response.parsed, "questions"):
+                        raise ValueError("Gemini returned no structured questions")
+                    return [question.model_dump() for question in response.parsed.questions]
+                except Exception as exc:
+                    if _is_overload_error(exc) and attempt < OVERLOAD_RETRY_ATTEMPTS:
+                        await asyncio.sleep(OVERLOAD_RETRY_BASE_DELAY * (attempt + 1))
+                        continue
+                    _mark_key_failure(key_index, exc)
+                    log_warning(logger, f"Gemini text key {key_index} (model={model}) failed: {exc}")
+                    break
+        return None
+
+    result = await _attempt(GEMINI_PRIMARY_MODEL)
+    if result:
+        return result
+    log_warning(logger, f"All keys failed text generation on primary model ({GEMINI_PRIMARY_MODEL}); trying fallback ({GEMINI_FALLBACK_MODEL})")
+    return await _attempt(GEMINI_FALLBACK_MODEL)
 
 
 async def generate_quiz_smart(
@@ -312,12 +326,13 @@ async def generate_quiz_smart(
     skip_cache: bool = False,
     file_hash: Optional[str] = None,
     status_message: Optional[Any] = None,
-    previous_questions: Optional[List[Dict[str, Any]]] = None,
+    previous_questions: Optional[List[Dict[str, Any]]] = None, # 🆕 المعامل الجديد لاستقبال الأسئلة السابقة منعاً للتكرار
 ) -> Optional[List[Dict[str, Any]]]:
     """Generate a quiz, using SHA-256 cache lookup before any external API call."""
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
     try:
+        # بناء القالب الأساسي وحقن الأسئلة السابقة بداخله لمنع التكرار عِلمياً
         base_prompt_template = SYSTEM_PROMPT_GENERATE_QUESTIONS
         if previous_questions:
             old_q_texts = "\n".join([f"- {q['question']}" for q in previous_questions if 'question' in q])

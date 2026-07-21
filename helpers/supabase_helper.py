@@ -23,17 +23,6 @@ load_dotenv(dotenv_path)
 logger = get_logger(__name__)
 
 
-def _ensure_valid_uuid(val: str) -> str:
-    """Ensure standard 36-character UUID string for PostgreSQL UUID columns."""
-    if not val:
-        return str(uuid.uuid4())
-    try:
-        return str(uuid.UUID(str(val)))
-    except (ValueError, AttributeError):
-        # Convert short codes/hashes into a deterministic standard UUID
-        return str(uuid.uuid5(uuid.NAMESPACE_DNS, str(val)))
-
-
 def _balance_payload(free_points: Any = 0, paid_points: Any = 0, **extra: Any) -> Dict[str, Any]:
     """Expose split balances while retaining ``points`` for older callers."""
     free = float(free_points or 0)
@@ -302,7 +291,7 @@ async def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str,
                 uuid.UUID(str(quiz_id))
                 target_quiz_uuid = str(quiz_id)
             except ValueError:
-                target_quiz_uuid = _ensure_valid_uuid(quiz_id)
+                pass
                 
         # إذا لم يتوفر UUID (مثل الكويزات القديمة أو النصية)، نضمن حقنها بالجدول المركزي أولاً لتوليد معرف فريد لها
         if not target_quiz_uuid:
@@ -416,12 +405,92 @@ async def remove_favorite_quiz(user_id: int, favorite_id: str) -> bool:
 
 # ==================== Rating, Feedbacks & Quality Control Operations ====================
 
+async def admin_get_feedbacks_page(limit: int = 5, offset: int = 0) -> tuple[List[Dict[str, Any]], int]:
+    """🆕 جلب صفحة من ملاحظات الطلاب مع معلومات الكويز (اسم الملف) والطالب (الاسم) المرتبطة بها،
+    مع العدد الإجمالي لدعم التصفح بصفحات."""
+    try:
+        count_res = await supabase.table("quiz_feedbacks").select("id", count="exact").execute()
+        total = count_res.count or 0
+
+        res = await supabase.table("quiz_feedbacks").select(
+            "id, comment, created_at, user_id, quiz_id, "
+            "quizzes(id, source_title, file_hash)"
+        ).order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+        rows = res.data or []
+        if not rows:
+            return [], total
+
+        user_ids = list({row["user_id"] for row in rows})
+        users_res = await supabase.table("users").select("user_id, first_name, last_name, username").in_("user_id", user_ids).execute()
+        users_map = {u["user_id"]: u for u in (users_res.data or [])}
+        for row in rows:
+            row["student"] = users_map.get(row["user_id"])
+        return rows, total
+    except Exception as e:
+        log_error(logger, f"Error fetching admin feedbacks page: {e}")
+        return [], 0
+
+
+async def admin_get_feedback_by_id(feedback_id: int) -> Optional[Dict[str, Any]]:
+    """🆕 جلب ملاحظة واحدة بكامل تفاصيلها (الكويز + الطالب) لعرض شاشة التفاصيل الإدارية."""
+    try:
+        res = await supabase.table("quiz_feedbacks").select(
+            "id, comment, created_at, user_id, quiz_id, "
+            "quizzes(id, source_title, file_hash)"
+        ).eq("id", feedback_id).limit(1).execute()
+        if not res.data:
+            return None
+        row = res.data[0]
+        user_res = await supabase.table("users").select("user_id, first_name, last_name, username").eq("user_id", row["user_id"]).limit(1).execute()
+        row["student"] = user_res.data[0] if user_res.data else None
+        return row
+    except Exception as e:
+        log_error(logger, f"Error fetching feedback {feedback_id}: {e}")
+        return None
+
+
+async def admin_get_quiz_board_position(file_hash: Optional[str], quiz_id: str) -> tuple[int, int]:
+    """🆕 يرجع (رقم هذا الكويز، العدد الكلي) ضمن نفس لوحة/ملف الكويزات المخزّنة كاش،
+    بنفس ترتيب الأفضلية (score) الذي يراه الطلاب فعلياً."""
+    try:
+        if not file_hash:
+            return (0, 0)
+        quizzes = await get_file_quizzes(file_hash)
+        ids = [str(q["id"]) for q in quizzes]
+        if str(quiz_id) in ids:
+            return (ids.index(str(quiz_id)) + 1, len(ids))
+        return (0, len(ids))
+    except Exception as e:
+        log_error(logger, f"Error computing quiz board position for {quiz_id}: {e}")
+        return (0, 0)
+
+
+async def admin_get_quiz_by_id(quiz_id: str) -> Optional[Dict[str, Any]]:
+    """🆕 جلب بيانات كويز واحد كاملة من الجدول المركزي (تُستخدم لتجربة الكويز من لوحة الإدارة)."""
+    try:
+        res = await supabase.table("quizzes").select("id, source_title, quiz_data, file_hash").eq("id", quiz_id).limit(1).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        log_error(logger, f"Error fetching quiz {quiz_id}: {e}")
+        return None
+
+
+async def admin_delete_quiz(quiz_id: str) -> bool:
+    """🆕 حذف كويز بالكامل من الجدول المركزي؛ التصويتات والنقاط وعناصر المفضلة والملاحظات المرتبطة
+    به تُحذف تلقائياً معه (ON DELETE CASCADE) على مستوى قاعدة البيانات."""
+    try:
+        await supabase.table("quizzes").delete().eq("id", quiz_id).execute()
+        return True
+    except Exception as e:
+        log_error(logger, f"Error deleting quiz {quiz_id}: {e}")
+        return False
+
+
 async def submit_quiz_vote(quiz_id: str, user_id: int, vote_type: str) -> bool:
     """إرسال وحقن تصويت الطلاب (لايك/ديسلايك) عبر الـ RPC لضمان منع التكرار وحساب السكور لحظياً"""
     try:
-        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
         res = await supabase.rpc("vote_on_quiz", {
-            "p_quiz_id": formatted_quiz_id,
+            "p_quiz_id": quiz_id,
             "p_user_id": user_id,
             "p_vote": vote_type
         }).execute()
@@ -433,9 +502,8 @@ async def submit_quiz_vote(quiz_id: str, user_id: int, vote_type: str) -> bool:
 async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
     """حفظ ملاحظات وإفادات الطلاب الأكاديمية لمراجعتها لاحقاً من قبل الإدارة"""
     try:
-        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
         await supabase.table("quiz_feedbacks").insert({
-            "quiz_id": formatted_quiz_id,
+            "quiz_id": quiz_id,
             "user_id": user_id,
             "comment": comment
         }).execute()
@@ -443,15 +511,6 @@ async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
     except Exception as e:
         log_error(logger, f"Error saving student feedback on quiz: {e}")
         return False
-
-async def admin_get_recent_feedbacks() -> list:
-    """جلب قائمة بأحدث الملاحظات لتقديمها للوحة الإدارة السرية"""
-    try:
-        res = await supabase.table("quiz_feedbacks").select("quiz_id, comment, created_at, user_id").order("created_at", desc=True).limit(15).execute()
-        return res.data or []
-    except Exception as e:
-        log_error(logger, f"Error pulling admin statistics feedbacks report: {e}")
-        return []
 
 async def auto_cleanup_bad_quizzes():
     """تنظيف تلقائي شامل للكويزات المرفوضة من الطلاب (ديسلايكات عالية) والتي تجاوزت 48 ساعة"""
@@ -502,8 +561,7 @@ async def admin_search_user(query: str) -> Optional[list]:
 # ==================== Quiz Scores & Leaderboard Operations ====================
 async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: int, total_questions: int) -> Dict[str, Any]:
     try:
-        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
-        res = await supabase.table("quiz_scores").select("*").eq("quiz_id", formatted_quiz_id).eq("user_id", user_id).execute()
+        res = await supabase.table("quiz_scores").select("*").eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
         
         previous_score = None
         new_highest = current_score
@@ -524,7 +582,7 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
                 new_highest = previous_score
         else:
             await supabase.table("quiz_scores").insert({
-                "quiz_id": formatted_quiz_id,
+                "quiz_id": quiz_id,
                 "user_id": user_id,
                 "highest_score": current_score,
                 "total_questions": total_questions,
@@ -542,8 +600,7 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
 
 async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
     try:
-        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
-        await supabase.table("quiz_scores").update({"is_public": True}).eq("quiz_id", formatted_quiz_id).eq("user_id", user_id).execute()
+        await supabase.table("quiz_scores").update({"is_public": True}).eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
         return True
     except Exception as e:
         log_error(logger, f"Error publishing score: {e}", exception=e)
@@ -551,10 +608,9 @@ async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
 
 async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
     try:
-        formatted_quiz_id = _ensure_valid_uuid(quiz_id)
         res = await supabase.table("quiz_scores") \
             .select("highest_score, total_questions, users(first_name, last_name)") \
-            .eq("quiz_id", formatted_quiz_id) \
+            .eq("quiz_id", quiz_id) \
             .eq("is_public", True) \
             .order("highest_score", desc=True) \
             .limit(5) \

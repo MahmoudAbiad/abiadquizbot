@@ -200,7 +200,10 @@ async def show_recharge_info(call: types.CallbackQuery):
         await call.answer()
 
 async def set_bot_commands(bot):
+    # ملاحظة: هذه نسخة مستقلة تُستخدم فقط في وضع Polling المحلي (main.py)؛
+    # النسخة الفعلية المستخدمة على Railway/الويبهوك هي config.py::set_bot_commands
     commands = [
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
+        types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
     ]
     await bot.set_my_commands(commands)

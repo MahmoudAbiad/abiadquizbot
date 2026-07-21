@@ -492,7 +492,10 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
         questions = data.get("questions")
         quiz_id = data.get("quiz_id")
         
-        await save_favorite_quiz(call.from_user.id, title, questions, None, None, quiz_id)
+        fav_id = await save_favorite_quiz(call.from_user.id, title, questions, None, None, quiz_id)
+        if not fav_id:
+            await call.answer("❌ تعذر حفظ الكويز في المفضلة، حاول مجدداً.", show_alert=True)
+            return
         await state.update_data(is_saved_in_session=True)
         await call.message.edit_text(f"✅ **تم الحفظ بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم: `عام`", parse_mode="Markdown")
         
@@ -540,7 +543,10 @@ async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMC
         questions = data.get("questions")
         quiz_id = data.get("quiz_id")
         
-        await save_favorite_quiz(call.from_user.id, title, questions, section_id, None, quiz_id)
+        fav_id = await save_favorite_quiz(call.from_user.id, title, questions, section_id, None, quiz_id)
+        if not fav_id:
+            await call.answer("❌ تعذر حفظ الكويز ضمن هذا القسم، حاول مجدداً.", show_alert=True)
+            return
         await state.update_data(is_saved_in_session=True)
         await call.message.edit_text(f"✅ **تم حفظ الاختبار بنجاح ضمن القسم المختار!**\n\n📦 الاسم: `{title}`", parse_mode="Markdown")
         
@@ -583,7 +589,10 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
             await msg.answer("⚠️ تعذر إنشاء القسم، تم تحويل مسار الحفظ تلقائياً إلى 'عام'.")
             new_section_id = None
             
-        await save_favorite_quiz(user_id, title, questions, new_section_id, None, quiz_id)
+        fav_id = await save_favorite_quiz(user_id, title, questions, new_section_id, None, quiz_id)
+        if not fav_id:
+            await msg.answer("❌ تعذر حفظ الاختبار، حاول مجدداً.")
+            return
         await state.update_data(is_saved_in_session=True)
         await msg.answer(f"✅ **تم إنشاء القسم وحفظ الاختبار بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم الجديد: `{section_title}`", parse_mode="Markdown")
         
