@@ -620,3 +620,204 @@ async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
     except Exception as e:
         log_error(logger, f"Error getting leaderboard: {e}", exception=e)
         return []
+
+# ==================== Usage Analytics & Tracking ====================
+# 🆕 نظام تتبع نمط استخدام الطلاب: سجل أحداث عام + تتبع تفصيلي لكل محاولة كويز.
+# مبدأ أساسي: التسجيل يجب ألا يكسر تدفق البوت أبداً، لذلك كل الدوال هنا "صامتة" عند الفشل.
+
+async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    """تسجيل حدث استخدام (Fire-and-forget). لا يرمي استثناء أبداً حتى لا يعطل تجربة الطالب."""
+    try:
+        await supabase.table("usage_events").insert({
+            "user_id": user_id,
+            "event_type": event_type,
+            "metadata": metadata or {}
+        }).execute()
+    except Exception as e:
+        log_error(logger, f"Error logging usage event '{event_type}' for user {user_id}: {e}")
+
+
+def start_quiz_attempt(user_id: int, quiz_id: Optional[str], source_type: str, total_questions: int) -> str:
+    """🚀 غير معطّلة إطلاقاً (Zero-latency): تُنشئ معرّف تتبع فوري بجانب البوت دون أي انتظار
+    لقاعدة البيانات، وتُطلق عملية الإدراج الفعلية بمهمة خلفية منفصلة. يُستخدم الناتج (client_ref)
+    لاحقاً لإغلاق المحاولة عند الإكمال أو التوقف المبكر."""
+    client_ref = uuid.uuid4().hex
+    asyncio.create_task(_insert_quiz_attempt(client_ref, user_id, quiz_id, source_type, total_questions))
+    return client_ref
+
+
+async def _insert_quiz_attempt(client_ref: str, user_id: int, quiz_id: Optional[str], source_type: str, total_questions: int) -> None:
+    """المهمة الخلفية الفعلية لإدراج سجل المحاولة؛ لا تُستدعى مباشرة من الهاندلرز."""
+    try:
+        clean_quiz_id = None
+        if quiz_id:
+            try:
+                uuid.UUID(str(quiz_id))
+                clean_quiz_id = str(quiz_id)
+            except ValueError:
+                clean_quiz_id = None
+
+        await supabase.table("quiz_attempts").insert({
+            "client_ref": client_ref,
+            "user_id": user_id,
+            "quiz_id": clean_quiz_id,
+            "source_type": source_type,
+            "total_questions": total_questions
+        }).execute()
+    except Exception as e:
+        log_error(logger, f"Error inserting quiz attempt tracking row: {e}")
+
+
+async def complete_quiz_attempt(attempt_ref: Optional[str], score: int) -> None:
+    """إغلاق محاولة الكويز عند اكتمالها وتسجيل النتيجة النهائية والمدة الزمنية المستغرقة.
+    تُستدعى دوماً عبر asyncio.create_task من الهاندلر فلا تؤخر إرسال نتيجة الكويز للطالب."""
+    if not attempt_ref:
+        return
+    try:
+        row = await supabase.table("quiz_attempts").select("started_at").eq("client_ref", attempt_ref).limit(1).execute()
+        duration = None
+        if row.data and row.data[0].get("started_at"):
+            started = datetime.datetime.fromisoformat(str(row.data[0]["started_at"]).replace("Z", "+00:00"))
+            duration = int((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds())
+
+        await supabase.table("quiz_attempts").update({
+            "score": score,
+            "is_completed": True,
+            "completed_at": datetime.datetime.utcnow().isoformat(),
+            "duration_seconds": duration
+        }).eq("client_ref", attempt_ref).execute()
+    except Exception as e:
+        log_error(logger, f"Error completing quiz attempt {attempt_ref}: {e}")
+
+
+async def mark_quiz_attempt_stopped(attempt_ref: Optional[str]) -> None:
+    """تسجيل خروج الطالب المبكر من الكويز دون إكماله، مفيد لتحديد نقاط التسرب.
+    تُستدعى دوماً عبر asyncio.create_task فلا تؤخر رجوع الطالب للقائمة الرئيسية."""
+    if not attempt_ref:
+        return
+    try:
+        await supabase.table("quiz_attempts").update({
+            "is_completed": False,
+            "completed_at": datetime.datetime.utcnow().isoformat()
+        }).eq("client_ref", attempt_ref).execute()
+    except Exception as e:
+        log_error(logger, f"Error marking quiz attempt {attempt_ref} as stopped: {e}")
+
+
+# ---- تجميع البيانات لعرضها في لوحة الإدارة ----
+
+async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
+    """ملخص شامل لسلوك الاستخدام خلال آخر N يوم: مستخدمون نشطون، توزيع الأحداث، معدل إكمال الكويزات، متوسط النتائج."""
+    empty = {
+        "days": days, "active_users": 0, "event_counts": {}, "total_attempts": 0,
+        "completed_attempts": 0, "completion_rate": 0.0, "avg_duration_seconds": 0,
+        "source_breakdown": {}, "avg_score_percentage": 0.0,
+    }
+    try:
+        since = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+
+        events_res = await supabase.table("usage_events").select("user_id, event_type").gte("created_at", since).execute()
+        events = events_res.data or []
+
+        active_users = len({e["user_id"] for e in events})
+        event_counts: Dict[str, int] = {}
+        for e in events:
+            event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
+
+        attempts_res = await supabase.table("quiz_attempts").select(
+            "is_completed, source_type, duration_seconds, score, total_questions"
+        ).gte("started_at", since).execute()
+        attempts = attempts_res.data or []
+
+        total_attempts = len(attempts)
+        completed_attempts = sum(1 for a in attempts if a.get("is_completed"))
+        completion_rate = (completed_attempts / total_attempts * 100) if total_attempts else 0.0
+
+        durations = [a["duration_seconds"] for a in attempts if a.get("duration_seconds")]
+        avg_duration = (sum(durations) / len(durations)) if durations else 0
+
+        source_breakdown: Dict[str, int] = {}
+        for a in attempts:
+            src = a.get("source_type") or "unknown"
+            source_breakdown[src] = source_breakdown.get(src, 0) + 1
+
+        scored = [a for a in attempts if a.get("total_questions")]
+        pct_list = [(a["score"] / a["total_questions"]) * 100 for a in scored if a["total_questions"] > 0]
+        avg_score_pct = (sum(pct_list) / len(pct_list)) if pct_list else 0.0
+
+        return {
+            "days": days,
+            "active_users": active_users,
+            "event_counts": event_counts,
+            "total_attempts": total_attempts,
+            "completed_attempts": completed_attempts,
+            "completion_rate": completion_rate,
+            "avg_duration_seconds": avg_duration,
+            "source_breakdown": source_breakdown,
+            "avg_score_percentage": avg_score_pct,
+        }
+    except Exception as e:
+        log_error(logger, f"Error building usage overview: {e}")
+        return empty
+
+
+async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
+    """عدد المستخدمين النشطين يومياً خلال آخر N يوم، لعرض رسم بياني نصي بسيط بلوحة الإدارة."""
+    try:
+        since = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+        res = await supabase.table("usage_events").select("user_id, created_at").gte("created_at", since).execute()
+        rows = res.data or []
+
+        by_day: Dict[str, set] = {}
+        for r in rows:
+            day = str(r["created_at"])[:10]
+            by_day.setdefault(day, set()).add(r["user_id"])
+
+        return sorted(
+            [{"day": d, "active_users": len(u)} for d, u in by_day.items()],
+            key=lambda x: x["day"]
+        )
+    except Exception as e:
+        log_error(logger, f"Error computing daily active users: {e}")
+        return []
+
+
+async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[str, Any]:
+    """سجل نشاط تفصيلي لطالب محدد: آخر الأحداث + إحصائيات محاولات الكويزات الخاصة به."""
+    empty = {"recent_events": [], "total_attempts": 0, "completed_attempts": 0, "avg_score_percentage": 0.0, "recent_attempts": []}
+    try:
+        events_res = await supabase.table("usage_events").select("event_type, metadata, created_at") \
+            .eq("user_id", user_id).order("created_at", desc=True).limit(event_limit).execute()
+
+        attempts_res = await supabase.table("quiz_attempts").select(
+            "source_type, score, total_questions, is_completed, duration_seconds, started_at"
+        ).eq("user_id", user_id).order("started_at", desc=True).execute()
+        attempts = attempts_res.data or []
+
+        total_attempts = len(attempts)
+        completed = sum(1 for a in attempts if a.get("is_completed"))
+        scored = [a for a in attempts if a.get("total_questions")]
+        pct_list = [(a["score"] / a["total_questions"]) * 100 for a in scored if a["total_questions"] > 0]
+        avg_pct = (sum(pct_list) / len(pct_list)) if pct_list else 0.0
+
+        return {
+            "recent_events": events_res.data or [],
+            "total_attempts": total_attempts,
+            "completed_attempts": completed,
+            "avg_score_percentage": avg_pct,
+            "recent_attempts": attempts[:10],
+        }
+    except Exception as e:
+        log_error(logger, f"Error fetching user activity for {user_id}: {e}")
+        return empty
+
+
+async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
+    """جلب سجل الأحداث الخام لتصديره كملف CSV من لوحة الإدارة."""
+    try:
+        res = await supabase.table("usage_events").select("user_id, event_type, metadata, created_at") \
+            .order("created_at", desc=True).limit(limit).execute()
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error exporting usage events: {e}")
+        return []

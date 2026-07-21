@@ -5,7 +5,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from config import bot, QuizState
 from keyboards import get_main_menu_keyboard
-from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, supabase
+from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, supabase, log_usage_event
 from logger import get_logger, log_warning, log_info
 from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS
 
@@ -47,7 +47,11 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
         )
         from handlers.execution import _start_loaded_quiz
         quiz_title = shared.get('title') or shared.get('source_title') or 'كويز مشترك'
-        
+
+        asyncio.create_task(log_usage_event(target_msg.from_user.id, "shared_link_opened", {
+            "payload_type": "share" if args_payload.startswith("share_") else "quiz",
+        }))
+
         await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{quiz_title}</b>...", parse_mode="HTML")
         await _start_loaded_quiz(
             target_msg, state, shared["quiz_data"], 
@@ -106,6 +110,12 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         free_points = user_info.get("free_points", 0)
         paid_points = user_info.get("paid_points", 0)
         status = user_info["status"]
+
+        # 🆕 تسجيل حدث بدء تشغيل البوت لتتبع نمط عودة/تجدد الطلاب
+        asyncio.create_task(log_usage_event(msg.from_user.id, "bot_start", {
+            "status": status,
+            "has_referrer": bool(referrer_id),
+        }))
         
         welcome_text = ""
         if status == "new":

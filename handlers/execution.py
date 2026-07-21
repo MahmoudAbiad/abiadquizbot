@@ -23,7 +23,11 @@ from supabase_helper import (
     create_favorite_section,
     get_or_update_high_score,
     submit_quiz_vote,     # 🆕 تم استيراد دالة التصويت الذرية
-    save_quiz_feedback    # 🆕 تم استيراد دالة حفظ الشكاوى والملاحظات
+    save_quiz_feedback,   # 🆕 تم استيراد دالة حفظ الشكاوى والملاحظات
+    log_usage_event,          # 🆕 تتبع أحداث الاستخدام العامة
+    start_quiz_attempt,       # 🆕 بدء تتبع محاولة كويز جديدة
+    complete_quiz_attempt,    # 🆕 إغلاق محاولة الكويز عند الإكمال
+    mark_quiz_attempt_stopped # 🆕 تسجيل الخروج المبكر من الكويز
 )
 
 logger = get_logger(__name__)
@@ -47,11 +51,20 @@ async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQu
         await call_or_message.answer(text, reply_markup=menu)
 
 async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: str = "") -> None:
+    user_id = msg_or_call.from_user.id
+    # 🆕 بدء تتبع محاولة الكويز بدون أي انتظار لقاعدة البيانات (Zero-latency)؛
+    # المعرف يُنشأ فوراً محلياً والإدراج الفعلي يعمل بمهمة خلفية منفصلة
+    attempt_id = start_quiz_attempt(user_id, quiz_id or None, origin, len(quiz_data))
+    asyncio.create_task(log_usage_event(user_id, "quiz_started", {
+        "origin": origin, "quiz_id": quiz_id, "questions": len(quiz_data),
+    }))
+
     await state.update_data(
         questions=quiz_data, current_index=0, score=0,
         total_count=len(quiz_data), source_title=source_title,
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
-        is_saved_in_session=False, is_switching_question=False
+        is_saved_in_session=False, is_switching_question=False,
+        attempt_id=attempt_id
     )
     await state.set_state(QuizState.answering_quiz)
     if isinstance(msg_or_call, types.CallbackQuery):
@@ -110,6 +123,14 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
             
             log_info(logger, f"Quiz completed for user {chat_id}: {score}/{total}")
+
+            # 🆕 إغلاق محاولة الكويز وتسجيل حدث الإكمال لأغراض التحليلات
+            attempt_id = data.get("attempt_id")
+            asyncio.create_task(complete_quiz_attempt(attempt_id, score))
+            asyncio.create_task(log_usage_event(user_id, "quiz_completed", {
+                "quiz_id": quiz_id, "score": score, "total": total, "percentage": round(percentage, 1),
+            }))
+
             await state.update_data(quiz_completed=True, is_switching_question=False)
             await state.set_state(None)
             return
@@ -232,6 +253,15 @@ async def request_stop_confirmation(call: types.CallbackQuery, state: FSMContext
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "quiz_stop_confirmed")
 async def stop_quiz_confirmed(call: types.CallbackQuery, state: FSMContext):
     try:
+        data = await state.get_data()
+        # 🆕 تسجيل خروج الطالب المبكر من الكويز (نقطة تسرب) قبل مسح حالته
+        asyncio.create_task(mark_quiz_attempt_stopped(data.get("attempt_id")))
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_stopped", {
+            "quiz_id": data.get("quiz_id"),
+            "at_question": data.get("current_index"),
+            "of_total": data.get("total_count"),
+        }))
+
         await state.clear() 
         try: 
             await call.message.delete()
@@ -336,6 +366,7 @@ async def rate_like_quiz(call: types.CallbackQuery):
         quiz_id = call.data.replace("rate_like_", "")
         success = await submit_quiz_vote(quiz_id, call.from_user.id, "like")
         if success:
+            asyncio.create_task(log_usage_event(call.from_user.id, "quiz_rated", {"quiz_id": quiz_id, "vote": "like"}))
             await call.answer("👍 شكراً لك! تم تسجيل إعجابك وتحديث تقييم الاختبار بنجاح.", show_alert=True)
         else:
             await call.answer("⚠️ لقد قمت بالتصويت على هذا الاختبار مسبقاً!", show_alert=True)
@@ -349,6 +380,7 @@ async def rate_dislike_quiz(call: types.CallbackQuery):
         quiz_id = call.data.replace("rate_dislike_", "")
         success = await submit_quiz_vote(quiz_id, call.from_user.id, "dislike")
         if success:
+            asyncio.create_task(log_usage_event(call.from_user.id, "quiz_rated", {"quiz_id": quiz_id, "vote": "dislike"}))
             await call.answer("👎 تم احتساب تقييمك السلبي. سيتولى النظام تصفية وحذف الاختبارات الرديئة تلقائياً.", show_alert=True)
         else:
             await call.answer("⚠️ لقد قمت بالتصويت على هذا الاختبار مسبقاً!", show_alert=True)
@@ -385,6 +417,7 @@ async def process_quiz_feedback(msg: types.Message, state: FSMContext):
         if quiz_id:
             from constants import MSG_FEEDBACK_SAVED
             await save_quiz_feedback(quiz_id, msg.from_user.id, comment[:500])
+            asyncio.create_task(log_usage_event(msg.from_user.id, "feedback_submitted", {"quiz_id": quiz_id}))
             await msg.answer(MSG_FEEDBACK_SAVED, parse_mode="HTML")
         else:
             await msg.answer("❌ حدث خطأ داخلي، لم يتم العثور على المعرف المركزي لهذا الاختبار.")
@@ -497,6 +530,7 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ تعذر حفظ الكويز في المفضلة، حاول مجدداً.", show_alert=True)
             return
         await state.update_data(is_saved_in_session=True)
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_saved_favorite", {"quiz_id": quiz_id, "section": "عام"}))
         await call.message.edit_text(f"✅ **تم الحفظ بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم: `عام`", parse_mode="Markdown")
         
         if data.get("quiz_completed"):
@@ -548,6 +582,7 @@ async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMC
             await call.answer("❌ تعذر حفظ الكويز ضمن هذا القسم، حاول مجدداً.", show_alert=True)
             return
         await state.update_data(is_saved_in_session=True)
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_saved_favorite", {"quiz_id": quiz_id, "section_id": section_id}))
         await call.message.edit_text(f"✅ **تم حفظ الاختبار بنجاح ضمن القسم المختار!**\n\n📦 الاسم: `{title}`", parse_mode="Markdown")
         
         if data.get("quiz_completed"):
@@ -594,6 +629,7 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
             await msg.answer("❌ تعذر حفظ الاختبار، حاول مجدداً.")
             return
         await state.update_data(is_saved_in_session=True)
+        asyncio.create_task(log_usage_event(user_id, "quiz_saved_favorite", {"quiz_id": quiz_id, "new_section": section_title}))
         await msg.answer(f"✅ **تم إنشاء القسم وحفظ الاختبار بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم الجديد: `{section_title}`", parse_mode="Markdown")
         
         if data.get("quiz_completed"):
@@ -651,6 +687,8 @@ async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext)
             [types.InlineKeyboardButton(text="🚀 شارك هذا الكويز الآن", url=share_url)]
         ])
         
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_shared", {"quiz_id": quiz_id}))
+
         await call.message.answer(
             f"🔗 يمكنك مشاركة كويز «{title}» مع أصدقائك عبر الضغط على الزر أدناه:",
             reply_markup=share_kb

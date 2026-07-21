@@ -3,7 +3,7 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 
 from config import bot
-from supabase_helper import create_shared_quiz_id, save_shared_quiz, get_shared_quiz
+from supabase_helper import create_shared_quiz_id, save_shared_quiz, get_shared_quiz, log_usage_event
 from logger import get_logger, log_error
 
 # استيراد الوظيفة المشتركة لتشغيل الكويز الجاهز
@@ -44,6 +44,7 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
             "يمكنك مشاركته"
         )
         
+        asyncio.create_task(log_usage_event(call.from_user.id, "share_link_created", {"share_id": share_id}))
         await call.message.answer(old_style_text, disable_web_page_preview=True)
         
     except Exception as e:
@@ -62,6 +63,8 @@ async def open_shared_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ انتهى رابط المشاركة أو غير موجود", show_alert=True)
             return
             
+        asyncio.create_task(log_usage_event(call.from_user.id, "shared_link_opened", {"share_id": share_id}))
+
         # تمرير الـ UUID المركزي الحقيقي (shared["id"]) لضمان عمل القيود وجدول النتائج بسلاسة
         quiz_title = shared.get("source_title") or "كويز مشترك"
         await _start_loaded_quiz(

@@ -42,6 +42,7 @@ from supabase_helper import (
     refund_user_points,
     save_shared_quiz,
     update_user_stats,
+    log_usage_event,            # 🆕 تتبع أحداث الاستخدام (رفع محتوى، توليد، استخدام كاش)
 )
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup
 from validators import validate_file_size, validate_question_count
@@ -180,6 +181,14 @@ async def process_album_background(message: types.Message, state: FSMContext):
 async def _finalize_media_processing(message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int, is_album: bool, file_hash: str):
     """المرحلة النهائية الموحدة لمعالجة الملفات والصور (للتحقق من الكاش المتعدد والحدود)"""
     try:
+        content_type = "album" if is_album else ("photo" if len(file_paths) == 1 and file_paths[0].lower().endswith((".jpg", ".jpeg", ".png")) else "document")
+        asyncio.create_task(log_usage_event(message.from_user.id, "content_uploaded", {
+            "content_type": content_type,
+            "items_count": items,
+            "is_album": is_album,
+            "file_hash": file_hash,
+        }))
+
         # 🆕 جلب قائمة كافة الكويزات المخزنة مسبقاً لهذا الهاش من الجدول المركزي المحسن
         cached_quizzes = await get_file_quizzes(file_hash)
         
@@ -314,6 +323,10 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         return
     await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
     await state.set_state(QuizState.waiting_for_count)
+    asyncio.create_task(log_usage_event(message.from_user.id, "content_uploaded", {
+        "content_type": "text",
+        "text_length": len(text),
+    }))
     await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
 
 
@@ -370,6 +383,10 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
             await _insufficient_balance(call.message, await _current_user(call.message, call.from_user), cost)
             return
             
+        asyncio.create_task(log_usage_event(call.from_user.id, "cached_quiz_used", {
+            "quiz_id": quiz_uuid, "cost": cost,
+        }))
+
         from handlers.execution import _start_loaded_quiz
         await _start_loaded_quiz(call.message, state, selected_quiz["quiz_data"], data["source_title"], origin="cached_file", quiz_id=quiz_uuid)
         
@@ -424,6 +441,9 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
         await _insufficient_balance(message, await _current_user(message), cost)
         return
     await state.update_data(debited_cost=cost, requested_count=count)
+    asyncio.create_task(log_usage_event(message.from_user.id, "quiz_generation_requested", {
+        "items": items, "questions": count, "mode": mode, "cost": cost, "is_album": is_album,
+    }))
     if mode == "Super-Processing":
         await message.answer(MSG_SUPER_PROCESSING_ALERT)
     await trigger_quiz_generation(message, message.from_user.id, count, state)
@@ -492,6 +512,12 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
                 if str(uq["id"]) not in existing_uuids:
                     new_quiz_id = str(uq["id"]) # هذا هو الـ UUID الصحيح المولد من الداتا بيز
                     break
+
+        asyncio.create_task(log_usage_event(user_id, "quiz_generated", {
+            "quiz_id": new_quiz_id,
+            "questions": len(quiz_data),
+            "source": "file" if is_media else "text",
+        }))
 
         from handlers.execution import _start_loaded_quiz
         await _start_loaded_quiz(message, state, quiz_data, data.get("source_title", "كويز"), origin="file" if is_media else "text", quiz_id=new_quiz_id)

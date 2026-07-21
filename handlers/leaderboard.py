@@ -3,7 +3,7 @@ Leaderboard module - handles publishing scores and displaying top 5 users.
 """
 import asyncio
 from aiogram import Router, types, F
-from supabase_helper import publish_score_to_leaderboard, get_top_5_leaderboard
+from supabase_helper import publish_score_to_leaderboard, get_top_5_leaderboard, log_usage_event
 from keyboards import get_quiz_result_keyboard
 from logger import get_logger, log_error
 
@@ -23,6 +23,7 @@ async def handle_publish_score(call: types.CallbackQuery):
         success = await publish_score_to_leaderboard(user_id, quiz_id)
         
         if success:
+            asyncio.create_task(log_usage_event(user_id, "score_published", {"quiz_id": quiz_id}))
             await call.answer("✅ تم نشر نتيجتك بنجاح في لوحة الشرف!", show_alert=True)
             # تحديث الأزرار لإزالة زر "مشاركة النتيجة" بعد نجاح العملية
             kb = get_quiz_result_keyboard(quiz_id=quiz_id, is_score_public=True)
@@ -70,6 +71,8 @@ async def handle_show_leaderboard(call: types.CallbackQuery):
             text += f"{medals[index]} **{full_name}**: {score} / {total}\n"
             
         text += "\n✨ *شد حيلك وادخل القائمة!*"
+
+        asyncio.create_task(log_usage_event(call.from_user.id, "leaderboard_viewed", {"quiz_id": quiz_id}))
         
         # إرسال قائمة الشرف كرسالة جديدة 
         await call.message.answer(text, parse_mode="Markdown")

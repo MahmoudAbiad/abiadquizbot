@@ -231,6 +231,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
             types.InlineKeyboardButton(text="📥 تصدير الطلاب", callback_data="admin_export_users")
         ],
+        [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
     ]
@@ -239,6 +240,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
 def get_admin_user_actions_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="💰 شحن رصيد الطالب", callback_data=f"admin_charge_menu_{user_id}")],
+        [types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}")],
         [types.InlineKeyboardButton(text="🔙 رجوع للوحة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
