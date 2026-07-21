@@ -382,9 +382,9 @@ async def process_search_user(msg: types.Message, state: FSMContext):
     
     if users_data:
         u = users_data[0] 
-        username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بدون يوزر"
-joined_at_str = u.get('joined_at', 'غير معروف')
-        
+        username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
+        joined_at_str = u.get('joined_at', 'غير معروف')
+
         report = (
             "👤 <b>معلومات المستخدم:</b>\n"
             f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
