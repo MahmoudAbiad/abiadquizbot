@@ -7,7 +7,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import BufferedInputFile
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from supabase import create_client
 
 from config import bot, ADMIN_ID
@@ -21,6 +21,8 @@ router = Router()
 class AdminState(StatesGroup):
     waiting_for_search_query = State()
     waiting_for_charge_amount = State()
+    waiting_for_broadcast_text = State()
+    waiting_for_broadcast_confirm = State()
 
 def _is_admin(user_id: int) -> bool:
     return str(user_id) == str(ADMIN_ID)
@@ -57,6 +59,7 @@ async def send_points_notification(target_id: int, amount: int, new_balance: int
 
 def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
+        [types.InlineKeyboardButton(text="📢 إرسال رسالة جماعية", callback_data="admin_broadcast_prompt")],
         [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
         [types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1")],
         [types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
@@ -186,7 +189,6 @@ async def admin_cmd_fetchall(msg: types.Message):
 async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, state: FSMContext):
     if not _is_admin(msg.from_user.id): return
     
-    # 1. إذا كتبت الأمر وبجانبه الآيدي مباشرة (مثال: /charge 51234567)
     if command.args:
         target_id = command.args.strip()
         if target_id.isdigit():
@@ -197,8 +199,6 @@ async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, st
             )
             return
 
-    # 2. إذا تم ضغط الأمر من القائمة الجانبية مباشرة دون كتابة معاملات (من القائمة)
-    # نقوم بتحويله لحالة انتظار البحث تلقائياً ليسهل عليك العمل
     await state.set_state(AdminState.waiting_for_search_query)
     await msg.answer(
         "💡 <b>طريقة الشحن السريع للمطور:</b>\n"
@@ -208,6 +208,145 @@ async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, st
         reply_markup=get_cancel_keyboard(),
         parse_mode="HTML"
     )
+
+# ==================== مسار الإرسال الجماعي (Broadcast) ====================
+
+@router.message(Command("broadcast"))
+async def admin_cmd_broadcast(msg: types.Message, command: CommandObject, state: FSMContext):
+    if not _is_admin(msg.from_user.id): return
+    
+    # 1. في حال كتب الآدمن النص مباشرة بعد الأمر (/broadcast أهلاً بالجميع)
+    if command.args:
+        text_to_send = command.args.strip()
+        await state.update_data(broadcast_text=text_to_send)
+        await state.set_state(AdminState.waiting_for_broadcast_confirm)
+        
+        kb = [
+            [
+                types.InlineKeyboardButton(text="🚀 تأكيد الإرسال", callback_data="admin_confirm_broadcast"),
+                types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_main_menu")
+            ]
+        ]
+        preview = (
+            "🔍 <b>معاينة الرسالة الجماعية:</b>\n"
+            "───────────────────\n"
+            f"{text_to_send}\n"
+            "───────────────────\n\n"
+            "⚠️ <b>هل أنت متأكد من إرسال هذه الرسالة لكافة الطلاب؟</b>"
+        )
+        await msg.answer(preview, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+        return
+
+    # 2. في حال ضغط الأمر بدون نص
+    await state.set_state(AdminState.waiting_for_broadcast_text)
+    await msg.answer(
+        "📢 <b>إرسال رسالة جماعية لكافة الطلاب</b>\n\n"
+        "أرسل الآن نص الرسالة التي تريد تعميمها على جميع مستخدمي البوت:",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "admin_broadcast_prompt")
+async def callback_broadcast_prompt(call: types.CallbackQuery, state: FSMContext):
+    if not _is_admin(call.from_user.id): return
+    await state.set_state(AdminState.waiting_for_broadcast_text)
+    await safe_edit_text(
+        call.message, 
+        "📢 <b>إرسال رسالة جماعية لكافة الطلاب</b>\n\nأرسل الآن نص الرسالة التي تريد تعميمها على جميع مستخدمي البوت:", 
+        reply_markup=get_cancel_keyboard()
+    )
+    await call.answer()
+
+@router.message(AdminState.waiting_for_broadcast_text)
+async def process_broadcast_text(msg: types.Message, state: FSMContext):
+    if not _is_admin(msg.from_user.id): return
+    text_to_send = msg.text
+    if not text_to_send:
+        return await msg.answer("⚠️ يرجى إرسال نص للرسالة.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
+
+    await state.update_data(broadcast_text=text_to_send)
+    await state.set_state(AdminState.waiting_for_broadcast_confirm)
+
+    kb = [
+        [
+            types.InlineKeyboardButton(text="🚀 تأكيد الإرسال", callback_data="admin_confirm_broadcast"),
+            types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_main_menu")
+        ]
+    ]
+    preview = (
+        "🔍 <b>معاينة الرسالة الجماعية:</b>\n"
+        "───────────────────\n"
+        f"{text_to_send}\n"
+        "───────────────────\n\n"
+        "⚠️ <b>هل أنت متأكد من إرسال هذه الرسالة لكافة الطلاب؟</b>"
+    )
+    await msg.answer(preview, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_confirm_broadcast", AdminState.waiting_for_broadcast_confirm)
+async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext):
+    if not _is_admin(call.from_user.id): return
+    data = await state.get_data()
+    text_to_send = data.get("broadcast_text")
+    await state.clear()
+
+    users = await asyncio.to_thread(fetch_users_sync)
+    if not users:
+        await safe_edit_text(call.message, "📭 لا يوجد طلاب مسجلين لإرسال الرسالة إليهم.", reply_markup=get_admin_dashboard_keyboard())
+        return
+
+    user_ids = [u['user_id'] for u in users if 'user_id' in u]
+    total_users = len(user_ids)
+
+    await safe_edit_text(call.message, f"⏳ <b>جاري الإرسال الجماعي...</b>\n\nالعدد الإجمالي المستهدف: <code>{total_users}</code> طالب")
+
+    success_count = 0
+    blocked_count = 0
+    failed_count = 0
+
+    for index, user_id in enumerate(user_ids, start=1):
+        try:
+            await bot.send_message(chat_id=user_id, text=text_to_send, parse_mode="HTML")
+            success_count += 1
+        except TelegramForbiddenError:
+            blocked_count += 1
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            try:
+                await bot.send_message(chat_id=user_id, text=text_to_send, parse_mode="HTML")
+                success_count += 1
+            except Exception:
+                failed_count += 1
+        except Exception:
+            failed_count += 1
+
+        # تأخير أمان (20 رسالة / ثانية)
+        await asyncio.sleep(0.05)
+
+        # تحديث التقرير الحي كل 25 مستخدم
+        if index % 25 == 0 or index == total_users:
+            try:
+                progress_text = (
+                    f"⏳ <b>جاري الإرسال الجماعي...</b> (<code>{index}/{total_users}</code>)\n\n"
+                    f"✅ تم التسليم: <code>{success_count}</code>\n"
+                    f"🚫 حظروا البوت: <code>{blocked_count}</code>\n"
+                    f"❌ فشل: <code>{failed_count}</code>"
+                )
+                await safe_edit_text(call.message, progress_text)
+            except Exception:
+                pass
+
+    final_report = (
+        "✅ <b>تم الانتهاء من الإرسال الجماعي بنجاح!</b>\n\n"
+        "📊 <b>التقرير النهائي:</b>\n"
+        f"┣ 👥 الإجمالي المستهدف: <code>{total_users}</code>\n"
+        f"┣ ✅ تم التسليم بنجاح: <code>{success_count}</code>\n"
+        f"┣ 🚫 مستخدمين حظروا البوت: <code>{blocked_count}</code>\n"
+        f"┗ ❌ أخطاء وفشل إرسال: <code>{failed_count}</code>"
+    )
+    await call.message.answer(final_report, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
+    await call.answer()
+
+
 # ==================== تفاعلات الأزرار (Callback Queries) ====================
 
 @router.callback_query(F.data == "admin_main_menu")
@@ -244,13 +383,16 @@ async def process_search_user(msg: types.Message, state: FSMContext):
     if users_data:
         u = users_data[0] 
         username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بدون يوزر"
+joined_at_str = u.get('joined_at', 'غير معروف')
+        
         report = (
             "👤 <b>معلومات المستخدم:</b>\n"
             f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
             f"┣ 📝 الاسم: <b>{u['first_name']} {u.get('last_name', '')}</b>\n"
             f"┣ 💰 النقاط الحالية: <code>{u['points']}</code>\n"
-            f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
+            f"┣ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>\n"
+            f"┗ 📅 تاريخ الانضمام: <code>{joined_at_str}</code>"
         )
         await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
     else:
@@ -277,7 +419,6 @@ async def process_quick_charge(call: types.CallbackQuery):
     if new_balance is not None:
         await safe_edit_text(call.message, f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard())
         
-        # إرسال إشعار للمستخدم هنا
         await send_points_notification(target_id, amount, new_balance)
     else:
         await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
@@ -305,7 +446,6 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
     if new_balance is not None:
         await msg.answer(f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
         
-        # إرسال إشعار للمخدم/المستخدم هنا
         await send_points_notification(target_id, amount, new_balance)
     else:
         await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
