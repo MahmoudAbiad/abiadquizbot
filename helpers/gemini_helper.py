@@ -59,6 +59,25 @@ LOADING_PHRASES = (
     "⏳ لحظات قليلة جداً ويصبح اختبارك التفاعلي جاهزاً للبدء...",
 )
 
+# 💡 قاموس إضافي لتحديد صيغ الملفات بدقة في بيئات Docker/Linux
+CUSTOM_MIME_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".txt": "text/plain",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+def get_safe_mime_type(file_path: str) -> str:
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in CUSTOM_MIME_TYPES:
+        return CUSTOM_MIME_TYPES[ext]
+    guess, _ = mimetypes.guess_type(file_path)
+    return guess or "application/octet-stream"
 
 class QuizQuestion(BaseModel):
     question: str = Field(description="Question text")
@@ -186,7 +205,7 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
                 total_size = INLINE_DATA_SIZE_THRESHOLD + 1  # فشل قراءة الحجم -> الأمان أولاً، ارفع عبر Files API
                 break
 
-        mime_types = [mimetypes.guess_type(path)[0] for path in paths]
+        mime_types = [get_safe_mime_type(path) for path in paths]
         # لو تعذّر تحديد نوع أي ملف (حالة نادرة، مثلاً مستند تيليجرام بدون اسم ملف)، لا نخمّن
         # نوعاً عاماً قد لا يفهمه Gemini بشكل صحيح؛ نرفع كل الملفات عبر Files API بدلاً من ذلك.
         use_inline = total_size <= INLINE_DATA_SIZE_THRESHOLD and all(mime_types)
