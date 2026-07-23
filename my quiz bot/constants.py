@@ -131,4 +131,4 @@ TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 
 # ==================== Support Bot Configuration ====================
 # 🔗 استبدل YourSupportBotUsername بيوزر بوت الدعم الخاص بك
-SUPPORT_BOT_URL = "https://t.me/@AbiadSupportBot"
+SUPPORT_BOT_URL = "https://t.me/AbiadSupportBot"
