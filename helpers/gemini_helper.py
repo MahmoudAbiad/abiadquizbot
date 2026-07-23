@@ -304,10 +304,14 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
         return None
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
+
+        # 💡 إيجاد الحل: إضافة نص صريح يحتوي على كلمة json للالتزام بشرط Groq API
+        formatted_content = f"{prompt}\n\nIMPORTANT: Respond in valid JSON format.\n\n{pure_text}"
+
         response = await asyncio.wait_for(
             client.chat.completions.create(
                 model="openai/gpt-oss-120b",
-                messages=[{"role": "user", "content": f"{prompt}\n\n{pure_text}"}],
+                messages=[{"role": "user", "content": formatted_content}],
                 response_format={"type": "json_object"},
                 temperature=0.7,
             ),
