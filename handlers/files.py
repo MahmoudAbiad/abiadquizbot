@@ -35,6 +35,7 @@ from constants import (
 )
 from gemini_helper import generate_quiz_smart, get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
+from keyboards import get_generation_confirm_keyboard
 from logger import get_logger, log_error
 from supabase_helper import (
     check_or_add_user,
@@ -62,7 +63,7 @@ processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
 
 # الحالات التي يوجد فيها "طلب معلّق" (ملف/صورة/نص بانتظار قرار المستخدم)
-PENDING_REQUEST_STATES = (QuizState.waiting_for_count, QuizState.waiting_for_cache_decision)
+PENDING_REQUEST_STATES = (QuizState.waiting_for_count, QuizState.waiting_for_cache_decision,QuizState.waiting_for_generation_confirm)
 
 
 def _combined_hash(paths: List[str]) -> str:
@@ -397,7 +398,7 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         "text_length": len(text),
     }))
     await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
-    
+
 
 @router.callback_query(F.data == "cancel_upload_request")
 async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
@@ -480,12 +481,13 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
 
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
 async def process_count(message: types.Message, state: FSMContext) -> None:
-    """معالج إدخال عدد الأسئلة المطلوبة والتحقق من التكلفة وحدود الحساب"""
+    """معالج إدخال عدد الأسئلة المطلوبة والتحقق من التكلفة وإظهار رسالة التأكيد"""
     count = int(message.text)
     valid, error = validate_question_count(count)
     if not valid:
         await message.answer(f"❌ {error}", reply_markup=_cancel_keyboard())
         return
+        
     data = await state.get_data()
     items = int(data.get("items_count") or 1)
     is_album = bool(data.get("is_album"))
@@ -505,22 +507,27 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
 
     user_info = await _current_user(message)
     await _renewal_notice(message, user_info)
-    await message.answer(_transparency_text(items, count, mode, cost), parse_mode="HTML")
+    
+    # 1. التحقق من كفاية الرصيد قبل عرض رسالة التأكيد
     if float(user_info["points"]) < cost:
         await _insufficient_balance(message, user_info, cost)
         return
-    remaining = await update_user_stats(message.from_user.id, cost, count)
-    if remaining is None:
-        await _insufficient_balance(message, await _current_user(message), cost)
-        return
-    await state.update_data(debited_cost=cost, requested_count=count)
-    asyncio.create_task(log_usage_event(message.from_user.id, "quiz_generation_requested", {
-        "items": items, "questions": count, "mode": mode, "cost": cost, "is_album": is_album,
-    }))
-    if mode == "Super-Processing":
-        await message.answer(MSG_SUPER_PROCESSING_ALERT)
-    await trigger_quiz_generation(message, message.from_user.id, count, state)
 
+    # 2. حفظ بيانات الطلب والتكلفة المحسوبة والانتقال لحالة التأكيد
+    await state.update_data(calculated_cost=cost, requested_count=count, execution_mode=mode)
+    await state.set_state(QuizState.waiting_for_generation_confirm)
+
+    confirm_kb = get_generation_confirm_keyboard()
+
+    # 4. تجهيز النص وعرض خيارات التأكيد للطالب
+    confirm_text = (
+        f"{_transparency_text(items, count, mode, cost)}\n\n"
+        f"❓ <b>هل تؤكد بدء التوليد وخصم {cost:.2f} نقطة من رصيدك؟</b>"
+    )
+    if mode == "Super-Processing":
+        confirm_text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
+
+    await message.answer(confirm_text, reply_markup=confirm_kb, parse_mode="HTML")
 
 @router.message(QuizState.waiting_for_count)
 async def process_count_invalid(message: types.Message) -> None:
@@ -662,3 +669,46 @@ async def _refund_after_failure(user_id: int, data: Dict[str, Any]) -> None:
 
 
 files_router = router
+
+@router.callback_query(QuizState.waiting_for_generation_confirm, F.data == "confirm_quiz_generation")
+async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMContext) -> None:
+    """معالج الضغط على زر التأكيد: يخصم النقاط ويطلق التوليد فوراً"""
+    try:
+        data = await state.get_data()
+        cost = float(data.get("calculated_cost") or 0)
+        count = int(data.get("requested_count") or 0)
+        items = int(data.get("items_count") or 1)
+        mode = data.get("execution_mode", "Standard")
+        is_album = bool(data.get("is_album"))
+
+        user_info = await _current_user(call.message, call.from_user)
+        if float(user_info["points"]) < cost:
+            await _insufficient_balance(call.message, user_info, cost)
+            return
+
+        # الخصم الفعلي للنقاط
+        remaining = await update_user_stats(call.from_user.id, cost, count)
+        if remaining is None:
+            await _insufficient_balance(call.message, user_info, cost)
+            return
+
+        await state.update_data(debited_cost=cost)
+        
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generation_requested", {
+            "items": items, "questions": count, "mode": mode, "cost": cost, "is_album": is_album,
+        }))
+
+        # حذف رسالة التأكيد لمنع الضغط التكراري
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+
+        # إطلاق التوليد بالخلفية
+        await trigger_quiz_generation(call.message, call.from_user.id, count, state)
+
+    except Exception as exc:
+        log_error(logger, f"Confirm quiz generation failed: {exc}", exception=exc)
+        await call.answer("❌ حدث خطأ أثناء تأكيد التوليد.", show_alert=True)
+    finally:
+        await call.answer()
