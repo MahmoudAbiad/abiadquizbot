@@ -357,7 +357,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
 
 
-@router.message(F.text, ~F.text.startswith("/"))
+@router.message(StateFilter(None, QuizState.answering_quiz), F.text, ~F.text.startswith("/"))
 async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     """معالج استقبال النصوص المباشرة المرسلة من الطالب"""
     text = message.text.strip()
@@ -398,7 +398,6 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         "text_length": len(text),
     }))
     await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
-
 
 @router.callback_query(F.data == "cancel_upload_request")
 async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
