@@ -271,7 +271,13 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
     try:
         current_state = await state.get_state()
         if current_state == QuizState.answering_quiz:
-            await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه قبل رفع محتوى جديد.")
+            from keyboards import get_active_quiz_warning_keyboard
+            await message.answer(
+                "⚠️ <b>لديك اختبار قائم حالياً!</b>\n\n"
+                "يرجى إكمال الاختبار الحالي، أو اضغط على الزر أدناه لإيقافه فوراً وتوليد كويز جديد:",
+                reply_markup=get_active_quiz_warning_keyboard(),
+                parse_mode="HTML"
+            )
             return
 
         if current_state in PENDING_REQUEST_STATES:
