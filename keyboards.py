@@ -1,4 +1,5 @@
 from aiogram import types
+from constants import SUPPORT_BOT_URL
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -11,6 +12,7 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
         kb = [
             [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
             [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
+            [types.InlineKeyboardButton(text="💬 الدعم الفني والمساعدة", url=SUPPORT_BOT_URL)],  # 🆕 زر يفتح بوت الدعم مباشرة
             [types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
         return types.InlineKeyboardMarkup(inline_keyboard=kb)

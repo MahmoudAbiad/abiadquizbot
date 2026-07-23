@@ -7,7 +7,7 @@ from config import bot, QuizState
 from keyboards import get_main_menu_keyboard
 from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, supabase, log_usage_event
 from logger import get_logger, log_warning, log_info
-from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS
+from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS, SUPPORT_BOT_URL
 
 logger = get_logger(__name__)
 router = Router()
@@ -225,3 +225,17 @@ async def set_bot_commands(bot):
         types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
     ]
     await bot.set_my_commands(commands)
+
+@router.message(Command("support"))
+async def cmd_support(message: types.Message):
+    """معالج أمر الدعم الفني من القائمة الزرقاء"""
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="💬 فتح محادثة الدعم الفني", url=SUPPORT_BOT_URL)]
+    ])
+    
+    text = (
+        "🛠️ <b>قسم الدعم الفني والمساعدة</b>\n\n"
+        "هل تواجه مشكلة، أو لديك استفسار بشأن الكويزات أو النقاط؟\n"
+        "يمكنك التواصل مباشرة مع فريق الدعم عبر بوت الدعم المخصص للرد على استفساراتكم 👇"
+    )
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")

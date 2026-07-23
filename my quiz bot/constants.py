@@ -128,3 +128,7 @@ WEBHOOK_HOST = "0.0.0.0"
 WEBHOOK_PORT = int(os.getenv("PORT", 8080))  
 WEBHOOK_PATH = "/webhook"
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+
+# ==================== Support Bot Configuration ====================
+# 🔗 استبدل YourSupportBotUsername بيوزر بوت الدعم الخاص بك
+SUPPORT_BOT_URL = "https://t.me/@AbiadSupportBot"
