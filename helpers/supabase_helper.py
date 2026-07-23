@@ -228,14 +228,23 @@ async def save_quiz_to_cache(file_hash: str, quiz_data: List[Dict[str, Any]], to
 def create_shared_quiz_id() -> str:
     return uuid.uuid4().hex[:12]
 
-async def save_shared_quiz(share_id: str, owner_id: int, title: str, quiz_data: List[Dict[str, Any]]) -> bool:
+async def save_shared_quiz(share_id: str, owner_id: int, title: str, quiz_data: List[Dict[str, Any]], quiz_id: Optional[str] = None) -> bool:
     """تفعيل ميزة المشاركة بدمج كود الرابط مباشرة بالخلية المركزية لمنع تكرار الـ JSONB وهدر المساحة"""
     try:
-        # البحث إن كان هذا الكويز موجود بالفعل لنقوم فقط بحقن رمز المشاركة داخله دون إنشاء صف جديد مكرر
-        check_res = await supabase.table("quizzes").select("id").eq("creator_id", owner_id).eq("source_title", title).order("created_at", desc=True).limit(1).execute()
-        
-        if check_res.data:
-            target_id = check_res.data[0]["id"]
+        target_id = None
+
+        # 🆕 الأولوية دائماً لمعرف الكويز الحقيقي (UUID) القادم من جلسة المستخدم الحالية،
+        # لأن المطابقة بالعنوان وحده غير موثوقة عند تكرار العناوين (مثلاً "كويز من ملف")
+        # وقد تحقن رمز المشاركة بصف كويز مختلف تماماً عن اللي المستخدم يقصده فعلاً.
+        if _is_valid_uuid(quiz_id):
+            target_id = quiz_id
+        else:
+            # مسار احتياطي فقط لو ما توفر quiz_id صالح (مثلاً كويز نصي قديم بدون سجل مركزي بعد)
+            check_res = await supabase.table("quizzes").select("id").eq("creator_id", owner_id).eq("source_title", title).order("created_at", desc=True).limit(1).execute()
+            if check_res.data:
+                target_id = check_res.data[0]["id"]
+
+        if target_id:
             await supabase.table("quizzes").update({"share_code": share_id}).eq("id", target_id).execute()
             log_info(logger, f"Injected share code {share_id} into existing central quiz {target_id}")
         else:
