@@ -27,9 +27,10 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
 
         share_id = data.get("share_id") or create_shared_quiz_id()
         title = _build_source_title(data)
-        
+        session_quiz_id = data.get("quiz_id")
+
         # حفظ الرابط بالجدول المركزي لمنع تكرار الـ JSONB وهدر المساحة
-        saved = await save_shared_quiz(share_id, call.from_user.id, title, questions)
+        saved = await save_shared_quiz(share_id, call.from_user.id, title, questions, quiz_id=session_quiz_id)
         if not saved:
             await call.answer("❌ تعذر حفظ رابط المشاركة حالياً", show_alert=True)
             return
