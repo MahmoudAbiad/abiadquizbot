@@ -5,6 +5,7 @@ Utility functions for file processing and hashing.
 import os
 import hashlib
 from logger import get_logger, log_error, log_info
+from typing import Optional  # 🟢 تم إضافة هذا السطر لإصلاح الخطأ
 
 logger = get_logger(__name__)
 
