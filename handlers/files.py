@@ -228,6 +228,81 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     await state.set_state(QuizState.waiting_for_count)
     await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
 
+# 🆕 === المعالج المسترد لإدخال عدد الأسئلة ===
+@router.message(QuizState.waiting_for_count, F.text.isdigit())
+async def process_count(message: types.Message, state: FSMContext) -> None:
+    """معالج إدخال عدد الأسئلة المطلوبة والتحقق من التكلفة وإظهار رسالة التأكيد"""
+    count = int(message.text)
+    valid, error = validate_question_count(count)
+    if not valid:
+        await message.answer(f"❌ {error}", reply_markup=_cancel_keyboard())
+        return
+        
+    data = await state.get_data()
+    items = int(data.get("items_count") or 1)
+    is_album = bool(data.get("is_album"))
+    file_hash = data.get("file_hash")
+    
+    if file_hash:
+        current_quizzes = await get_file_quizzes(file_hash)
+        max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
+        if len(current_quizzes) >= max_allowed:
+            await message.answer(MSG_MAX_QUIZZES_REACHED, parse_mode="HTML")
+            await state.clear()
+            return
+
+    cost = calculate_quiz_points_cost(items, count, is_album)
+    mode = determine_execution_mode(items, count)
+
+    user_info = await _current_user(message)
+    
+    if float(user_info["points"]) < cost:
+        await _insufficient_balance(message, user_info, cost)
+        return
+
+    await state.update_data(calculated_cost=cost, requested_count=count, execution_mode=mode)
+    await state.set_state(QuizState.waiting_for_generation_confirm)
+
+    confirm_kb = get_generation_confirm_keyboard()
+
+    confirm_text = (
+        f"{build_transparency_text(items, count, mode, cost)}\n\n"
+        f"❓ <b>هل تؤكد بدء التوليد وخصم {cost:.2f} نقطة من رصيدك؟</b>"
+    )
+    if mode == "Super-Processing":
+        confirm_text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
+
+    await message.answer(confirm_text, reply_markup=confirm_kb, parse_mode="HTML")
+
+@router.message(QuizState.waiting_for_count)
+async def process_count_invalid(message: types.Message) -> None:
+    """معالج إدخال قيمة غير رقمية لعدد الأسئلة"""
+    await message.answer(
+        "⚠️ <b>الرجاء إرسال رقم صحيح لعدد الأسئلة!</b>\n\nأو اعمد إلى استخدام زر التراجع أدناه لإلغاء العملية الحالية بشكل نظيف وعادل.",
+        reply_markup=_cancel_keyboard(),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "cancel_upload_request")
+async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
+    """معالج التراجع والضغط على زر إلغاء الطلب"""
+    try:
+        current_state = await state.get_state()
+        if current_state not in PENDING_REQUEST_STATES:
+            await call.answer(MSG_NOTHING_TO_CANCEL, show_alert=True)
+            return
+        await _discard_pending_upload(state)
+        await state.clear()
+        try:
+            await call.message.edit_text(MSG_REQUEST_CANCELLED)
+        except Exception:
+            await call.message.answer(MSG_REQUEST_CANCELLED)
+    except Exception as exc:
+        log_error(logger, f"Cancel request failed: {exc}", exception=exc)
+        await call.answer("❌ تعذر إلغاء الطلب، حاول مجدداً.", show_alert=True)
+    finally:
+        await call.answer()
+
 @router.callback_query(QuizState.waiting_for_generation_confirm, F.data == "confirm_quiz_generation")
 async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMContext) -> None:
     try:
@@ -259,7 +334,7 @@ async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMCo
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
             return
 
-        from handlers.quiz_runner import _start_loaded_quiz # تم توجيهه للـ Handler الجديد
+        from handlers.quiz_runner import _start_loaded_quiz
         await _start_loaded_quiz(call.message, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
 
