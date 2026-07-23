@@ -28,30 +28,24 @@ from constants import (
     MSG_REQUEST_CANCELLED,
     MSG_SUPER_PROCESSING_ALERT,
     SUCCESS_MEDIA_RECEIVED,
-    PAGES_PER_QUIZ_RATIO,       # 🆕 الخوارزمية: نسبة الصفحات لكل كويز
-    MAX_FILE_QUIZZES_LIMIT,     # 🆕 الحد الأقصى المطلق للكويزات للملخص الواحد
-    MIN_QUIZZES_PER_FILE,       # 🆕 الحد الأدنى المضمون للملفات الصغيرة
-    MSG_MAX_QUIZZES_REACHED,    # 🆕 رسالة الوصول للحد الأقصى
+    PAGES_PER_QUIZ_RATIO,
+    MAX_FILE_QUIZZES_LIMIT,
+    MIN_QUIZZES_PER_FILE,
+    MSG_MAX_QUIZZES_REACHED,
 )
 from gemini_helper import generate_quiz_smart, get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from logger import get_logger, log_error
 from supabase_helper import (
     check_or_add_user,
-    get_file_quizzes,           # 🆕 جلب الكويزات المتعددة من الجدول المركزي
+    get_file_quizzes,
     refund_user_points,
     save_shared_quiz,
     update_user_stats,
-    log_usage_event,            # 🆕 تتبع أحداث الاستخدام (رفع محتوى، توليد، استخدام كاش)
+    log_usage_event,
 )
-
-# 🟢 تم إضافة استيراد دالة استخراج النص المحلي لمستندات أوفيس والملفات النصية
-from utils import (
-    calculate_file_hash, 
-    ensure_directory_exists, 
-    safe_file_cleanup, 
-    extract_text_from_file  # 🆕 دالة قراءة نصوص Word / PPTX / TXT
-)
+# 🟢 تم إضافة استيراد دالة استخراج النص من ملفات Word/PPT/TXT
+from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, extract_text_from_file
 from validators import validate_file_size, validate_question_count
 
 logger = get_logger(__name__)
@@ -60,27 +54,20 @@ DOWNLOADS_DIR = "downloads"
 processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
 
-# الحالات التي يوجد فيها "طلب معلّق" (ملف/صورة/نص بانتظار قرار المستخدم)
 PENDING_REQUEST_STATES = (QuizState.waiting_for_count, QuizState.waiting_for_cache_decision)
 
-
 def _combined_hash(paths: List[str]) -> str:
-    """حساب الهاش الموحد لمجموعة ملفات/صور ألبوم بناءً على البايتات لمنع التكرار"""
     digest = hashlib.sha256()
     for path in paths:
         digest.update(calculate_file_hash(path).encode("ascii"))
     return digest.hexdigest()
 
-
 def _cancel_keyboard() -> types.InlineKeyboardMarkup:
-    """زر التراجع النظيف لإلغاء طلبات معالجة الملفات أو النصوص المعلقة"""
     return types.InlineKeyboardMarkup(
         inline_keyboard=[[types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
     )
 
-
 async def _discard_pending_upload(state: FSMContext) -> int:
-    """مسح وتنظيف الملفات المؤقتة المخزنة في المجلد محلياً عند إلغاء أو استبدال الطلب"""
     data = await state.get_data()
     file_paths = data.get("file_paths", []) or []
     removed = 0
@@ -89,19 +76,15 @@ async def _discard_pending_upload(state: FSMContext) -> int:
             removed += 1
     return removed
 
-
 # ==================== Core Processing Helpers ====================
 
 def _execution_mode(items: int, questions: int, cached: bool = False) -> str:
-    """تحديد وضع التنفيذ (عادي، متقدم، أو كاش) لحساب التكلفة بدقة"""
     if cached: return "Cached"
     if items > MAX_LIMIT_PAGES or questions > MAX_LIMIT_QUESTIONS: return "Super-Processing"
     if items > MAX_STANDARD_PAGES or questions > MAX_STANDARD_QUESTIONS: return "Over-Limit"
     return "Standard"
 
-
 def _transparency_text(items: int, questions: int, mode: str, cost: float) -> str:
-    """رسالة الشفافية المالية لعرض تفاصيل الخصم والتكلفة للطالب"""
     return (
         "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n\n"
         f"• العناصر/الصفحات: <code>{items}</code>\n"
@@ -110,15 +93,11 @@ def _transparency_text(items: int, questions: int, mode: str, cost: float) -> st
         f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>"
     )
 
-
 async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> None:
-    """إشعار تجديد النقاط اليومية المجانية إن استحقها المستخدم"""
     if user_info.get("status") == "renewed":
         await message.answer(f"☀️ تم تجديد رصيدك اليومي إلى <b>{DAILY_RENEWAL_POINTS} نقطة مجانية</b>.", parse_mode="HTML")
 
-
 async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float) -> None:
-    """إشعار عدم كفاية الرصيد مع توفير زر لشحن النقاط من الآدمن"""
     balance = float(user_info.get("points") or 0)
     deficit = max(0.0, required - balance)
     contact = ADMIN_CONTACT.lstrip("@")
@@ -132,15 +111,11 @@ async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any
         reply_markup=keyboard, parse_mode="HTML"
     )
 
-
 async def _current_user(message: types.Message, user: Any = None) -> Dict[str, Any]:
-    """جلب أو تسجيل بيانات المستخدم الحالية من قاعدة البيانات"""
     user = user or message.from_user
     return await check_or_add_user(user.id, user.username or "Unknown", user.first_name or "Unknown", user.last_name or "Unknown")
 
-
 async def _download_photos(message: types.Message, photos: List[Dict[str, Any]]) -> List[str]:
-    """تنزيل الصور الخاصة بالألبومات أو الصور المنفردة وتخزينها بمجلد التحميلات محلياً"""
     paths: List[str] = []
     try:
         for index, photo in enumerate(photos, start=1):
@@ -156,14 +131,9 @@ async def _download_photos(message: types.Message, photos: List[Dict[str, Any]])
         for path in paths: safe_file_cleanup(path)
         raise
 
-
 # ==================== Background Album Processor ====================
 
 async def process_album_background(message: types.Message, state: FSMContext):
-    """
-    مهمة خلفية (Background Task) للانتظار بصمت وتجميع الألبوم
-    دون تجميد استجابة السيرفر لتليجرام.
-    """
     try:
         await asyncio.sleep(1.5)
         
@@ -202,11 +172,9 @@ async def process_album_background(message: types.Message, state: FSMContext):
         log_error(logger, f"Album background processing failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
-
 # ==================== Common Finalization ====================
 
 async def _finalize_media_processing(message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int, is_album: bool, file_hash: str):
-    """المرحلة النهائية الموحدة لمعالجة الملفات والصور (للتحقق من الكاش المتعدد والحدود)"""
     try:
         content_type = "album" if is_album else ("photo" if len(file_paths) == 1 and file_paths[0].lower().endswith((".jpg", ".jpeg", ".png")) else "document")
         asyncio.create_task(log_usage_event(message.from_user.id, "content_uploaded", {
@@ -216,7 +184,6 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
             "file_hash": file_hash,
         }))
 
-        # 🆕 جلب قائمة كافة الكويزات المخزنة مسبقاً لهذا الهاش من الجدول المركزي المحسن
         cached_quizzes = await get_file_quizzes(file_hash)
         
         common_state = {
@@ -229,18 +196,15 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
         }
         
         if cached_quizzes:
-            # 🆕 خوارزمية احتساب الحد الأقصى للكويزات المسموحة بناءً على حجم صفحات الملف
             max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
             show_generate_btn = len(cached_quizzes) < max_allowed
             
-            # حساب تكلفة الكاش الافتراضية للكويز الأول المتوفر
             questions_count = len(cached_quizzes[0]["quiz_data"])
             cost = calculate_cached_points_cost(items, questions_count, is_album)
             
             await state.update_data(**common_state, available_quizzes=cached_quizzes, cache_cost=cost, max_allowed_quizzes=max_allowed)
             await state.set_state(QuizState.waiting_for_cache_decision)
             
-            # استدعاء لوحة المفاتيح المحدثة لعرض الخيارات المتعددة للطلاب وقفل التوليد إن لزم
             from keyboards import get_multiple_quizzes_keyboard
             keyboard = get_multiple_quizzes_keyboard(cached_quizzes, cost, show_generate_btn=show_generate_btn)
             
@@ -262,12 +226,10 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
         log_error(logger, f"Finalize media failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
 
-
 # ==================== Main Handlers ====================
 
 @router.message(F.document | F.photo)
 async def handle_media(message: types.Message, state: FSMContext) -> None:
-    """معالج استقبال الوسائط (المستندات، ملفات الـ PDF، أوفيس، والصور)"""
     try:
         current_state = await state.get_state()
         if current_state == QuizState.answering_quiz:
@@ -343,7 +305,6 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 
 @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
-    """معالج استقبال النصوص المباشرة المرسلة من الطالب"""
     text = message.text.strip()
     if len(text) < 30:
         await message.answer("⚠️ النص قصير جداً؛ اعمد إلى إرسال 30 حرفاً على الأقل لضمان صياغة أسئلة دقيقة.")
@@ -362,7 +323,6 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "cancel_upload_request")
 async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
-    """معالج التراجع والضغط على زر إلغاء الطلب"""
     try:
         current_state = await state.get_state()
         if current_state not in PENDING_REQUEST_STATES:
@@ -383,13 +343,11 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
 
 @router.message(StateFilter(*PENDING_REQUEST_STATES), Command("cancel"))
 async def handle_cancel_command(message: types.Message, state: FSMContext) -> None:
-    """معالج أمر /cancel النصي لإلغاء الطلب المعلق"""
     await _discard_pending_upload(state)
     await state.clear()
     await message.answer(MSG_REQUEST_CANCELLED)
 
 
-# 🆕 معالج تشغيل أحد الكويزات الجاهزة المتعددة المخزنة بالجدول المركزي
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data.startswith("use_multi_"))
 async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMContext) -> None:
     try:
@@ -433,7 +391,6 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
 
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
-    """في حال رفض الكاش ورغبة الطالب بتوليد كويز جديد كلياً"""
     await state.set_state(QuizState.waiting_for_count)
     await call.message.edit_text("📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
     await call.answer()
@@ -441,7 +398,6 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
 
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
 async def process_count(message: types.Message, state: FSMContext) -> None:
-    """معالج إدخال عدد الأسئلة المطلوبة والتحقق من التكلفة وحدود الحساب"""
     count = int(message.text)
     valid, error = validate_question_count(count)
     if not valid:
@@ -452,7 +408,6 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
     is_album = bool(data.get("is_album"))
     file_hash = data.get("file_hash")
     
-    # 🆕 جدار حماية خلفي لمنع التلاعب البرمجي وتجاوز الحد الأقصى للملف الواحد
     if file_hash:
         current_quizzes = await get_file_quizzes(file_hash)
         max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
@@ -485,7 +440,6 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
 
 @router.message(QuizState.waiting_for_count)
 async def process_count_invalid(message: types.Message) -> None:
-    """معالج إدخال قيمة غير رقمية لعدد الأسئلة"""
     await message.answer(
         "⚠️ <b>الرجاء إرسال رقم صحيح لعدد الأسئلة!</b>\n\nأو اعمد إلى استخدام زر التراجع أدناه لإلغاء العملية الحالية بشكل نظيف وعادل.",
         reply_markup=_cancel_keyboard(),
@@ -494,7 +448,6 @@ async def process_count_invalid(message: types.Message) -> None:
 
 
 async def trigger_quiz_generation(message: types.Message, user_id: int, count: int, state: FSMContext) -> None:
-    """إطلاق مهمة التوليد بالخلفية وحماية السيرفر من تكرار الطلبات لنفس الطالب"""
     async with processing_users_lock:
         if user_id in processing_users:
             await message.answer("⏳ طلبك قيد المعالجة حالياً بالخلفية.")
@@ -505,11 +458,6 @@ async def trigger_quiz_generation(message: types.Message, user_id: int, count: i
 
 
 async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state: FSMContext, status_message: types.Message) -> None:
-    """
-    التدفق التنفيذي المركزي لتوليد الكويز:
-    يتولى فحص المستندات (PDF، Word، PowerPoint، TXT)، استخراج النصوص،
-    استدعاء محرك AI (Groq/Gemini)، وإلغاء الرصيد تلقائياً في حال الفشل.
-    """
     data: Dict[str, Any] = {}
     try:
         data = await state.get_data()
@@ -518,21 +466,16 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
         file_paths = data.get("file_paths", []) or []
         pure_text = data.get("pure_text")
 
-        # 🟢 [التحديث الجوهري الجديد]: استخراج النص محلياً لملفات Word / PPTX / TXT قبل التوليد
+        # 🟢 [تحديث حيوي]: فحص استخراج النص محلياً لملفات Word / PPTX / TXT قبل التوليد
         if is_media and file_paths:
             first_path = file_paths[0]
             ext = os.path.splitext(first_path)[1].lower()
-            
-            # فحص امتدادات ملفات أوفيس والملفات النصية
             if ext in [".docx", ".doc", ".pptx", ".ppt", ".txt"]:
                 extracted_text = await asyncio.to_thread(extract_text_from_file, first_path)
-                
-                # التأكد من استخراج نص حقيقي وقابل للقراءة
                 if extracted_text and len(extracted_text.strip()) >= 30:
                     pure_text = extracted_text
-                    is_media = False  # تحويل المسار لتوليد نصي مباشر لتفادي خطأ الـ Unknown Mime Type
+                    is_media = False  # تحويل المسار لتوليد نصي مباشر لتفادي رفع الملف وتفادي خطأ MIME
                 else:
-                    # في حال كان ملف Word/PPT عبارة عن صور فقط أو فارغاً
                     await _refund_after_failure(user_id, data)
                     await state.set_state(None)
                     await status_message.edit_text(
@@ -541,7 +484,7 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
                     )
                     return
 
-        # 🆕 ميزة منع التكرار: سحب الأسئلة السابقة وتمريرها لحقنها في الـ Prompt لقمع التشابه
+        # ميزة منع التكرار: سحب الأسئلة السابقة وتمريرها لحقنها في الـ Prompt
         previous_questions = []
         existing_uuids = set()
         if file_hash:
@@ -558,7 +501,7 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
             skip_cache=True,
             file_hash=file_hash,
             status_message=status_message,
-            previous_questions=previous_questions if previous_questions else None, # مرر القائمة هنا
+            previous_questions=previous_questions if previous_questions else None,
         )
         if not quiz_data:
             await _refund_after_failure(user_id, data)
@@ -569,14 +512,13 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
             )
             return
 
-        # 🆕 استخراج المعرف الفريد (UUID) للكويز المولد حديثاً من السلسلة لتشغيل التقييمات بدقة
         new_quiz_id = None
         if file_hash:
-            await asyncio.sleep(0.5) # مهلة زمنية للتأكد من اكتمال المعاملة على خوادم سوبابيس
+            await asyncio.sleep(0.5)
             updated_quizzes = await get_file_quizzes(file_hash)
             for uq in updated_quizzes:
                 if str(uq["id"]) not in existing_uuids:
-                    new_quiz_id = str(uq["id"]) # هذا هو الـ UUID الصحيح المولد من الداتا بيز
+                    new_quiz_id = str(uq["id"])
                     break
 
         asyncio.create_task(log_usage_event(user_id, "quiz_generated", {
@@ -604,10 +546,8 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
 
 
 async def _refund_after_failure(user_id: int, data: Dict[str, Any]) -> None:
-    """استرجاع النقاط تلقائياً للطالب في حال تعثر عملية التوليد لأي سبب"""
     cost = float(data.get("debited_cost") or 0)
     if cost > 0:
         await refund_user_points(user_id, cost)
-
 
 files_router = router
