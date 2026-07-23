@@ -30,7 +30,8 @@ class QuizState(StatesGroup):
     waiting_for_custom_name = State()       # استقبال الاسم المخصص
     waiting_for_new_section_title = State() # استقبال اسم القسم الجديد
     waiting_for_quiz_feedback = State()     # 🆕 استقبال ملاحظات وشكاوى الطلاب بنهاية الاختبار
-
+    waiting_for_generation_confirm = State()
+    
 # ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:
     """جلب توكن البوت من ملف البيئة"""
