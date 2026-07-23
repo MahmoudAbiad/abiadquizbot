@@ -7,7 +7,7 @@ from config import bot, QuizState
 from keyboards import get_main_menu_keyboard
 from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, supabase, log_usage_event
 from logger import get_logger, log_warning, log_info
-from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS, SUPPORT_BOT_URL
+from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 
 logger = get_logger(__name__)
 router = Router()
@@ -237,5 +237,23 @@ async def cmd_support(message: types.Message):
         "🛠️ <b>قسم الدعم الفني والمساعدة</b>\n\n"
         "هل تواجه مشكلة، أو لديك استفسار بشأن الكويزات أو النقاط؟\n"
         "يمكنك التواصل مباشرة مع فريق الدعم عبر بوت الدعم المخصص للرد على استفساراتكم 👇"
+    )
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("channel"))
+async def cmd_channel(message: types.Message):
+    """معالج أمر قناة التحديثات"""
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📢 الانضمام لقناة الأخبار والتحديثات", url=OFFICIAL_CHANNEL_URL)]
+    ])
+    
+    text = (
+        "📢 <b>القناة الرسمية للبوت</b>\n\n"
+        "تابِع قناتنا الرسمية ليصلك كل جديد من:\n"
+        "• التحديثات والمميزات الجديدة ✨\n"
+        "• العروض واكواد شحن النقاط المجانية 🎁\n"
+        "• التنبيهات والصيانة المجدولة 🛠️\n\n"
+        "اضغط على الزر أدناه للانضمام 👇"
     )
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
