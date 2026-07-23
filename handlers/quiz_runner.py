@@ -1,7 +1,7 @@
 # Handlers/quiz_runner.py
 import asyncio
 import json
-from typing import Union
+from typing import Union, Optional
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
