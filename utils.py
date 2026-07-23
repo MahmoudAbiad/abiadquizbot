@@ -4,7 +4,6 @@ Utility functions for file processing and hashing.
 
 import os
 import hashlib
-from typing import Optional  # 🟢 تم إضافة هذا السطر لإصلاح الخطأ
 from logger import get_logger, log_error, log_info
 
 logger = get_logger(__name__)
@@ -53,35 +52,59 @@ def format_file_size(size_bytes: int) -> str:
         size_bytes /= 1024.0
     return f"{size_bytes:.2f} TB"
 
-def extract_text_from_file(file_path: str) -> Optional[str]:
-    """استخراج النص الصافي من ملفات Word, PowerPoint, TXT"""
+def extract_text_from_file(file_path: str) -> str | None:
+    """
+    استخراج النص الصافي من ملفات Word (.docx), PowerPoint (.pptx), TXT.
+    ملاحظة: الصيغ القديمة (.doc, .ppt) لا تُقرأ بواسطة python-docx/pptx مباشرة.
+    """
     ext = os.path.splitext(file_path)[1].lower()
     try:
+        # 1. ملفات النص المباشر
         if ext == ".txt":
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
 
-        elif ext in [".docx", ".doc"]:
+        # 2. مستندات Word الحديثة فقط
+        elif ext == ".docx":
             import docx
             doc = docx.Document(file_path)
-            full_text = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-            # قراءة النصوص داخل الجداول أيضاً
+            full_text = []
+
+            # استخراج النصوص من الفقرات
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    full_text.append(p.text.strip())
+
+            # استخراج النصوص من الجداول
             for table in doc.tables:
                 for row in table.rows:
                     for cell in row.cells:
-                        if cell.text.strip():
-                            full_text.append(cell.text.strip())
-            return "\n".join(full_text)
+                        cell_text = cell.text.strip()
+                        if cell_text:
+                            full_text.append(cell_text)
 
-        elif ext in [".pptx", ".ppt"]:
+            return "\n".join(full_text) if full_text else None
+
+        # 3. عروض PowerPoint الحديثة فقط
+        elif ext == ".pptx":
             from pptx import Presentation
             prs = Presentation(file_path)
             text_runs = []
+
             for slide in prs.slides:
                 for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        text_runs.append(shape.text.strip())
-            return "\n".join(text_runs)
+                    if shape.has_text_frame:
+                        for paragraph in shape.text_frame.paragraphs:
+                            text = paragraph.text.strip()
+                            if text:
+                                text_runs.append(text)
+
+            return "\n".join(text_runs) if text_runs else None
+
+        # 4. الصيغ الثنائية القديمة (Log Warning بدلاً من العطل)
+        elif ext in [".doc", ".ppt"]:
+            logger.warning(f"File {file_path} is legacy binary format ({ext}) and cannot be parsed directly.")
+            return None
 
     except Exception as e:
         logger.error(f"Error extracting text from {file_path}: {e}")
