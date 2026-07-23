@@ -27,7 +27,8 @@ from supabase_helper import (
     log_usage_event,          # 🆕 تتبع أحداث الاستخدام العامة
     start_quiz_attempt,       # 🆕 بدء تتبع محاولة كويز جديدة
     complete_quiz_attempt,    # 🆕 إغلاق محاولة الكويز عند الإكمال
-    mark_quiz_attempt_stopped # 🆕 تسجيل الخروج المبكر من الكويز
+    mark_quiz_attempt_stopped, # 🆕 تسجيل الخروج المبكر من الكويز
+    log_quiz_response         # 🆕 تسجيل إجابة كل سؤال على حدة (يشمل كل مصادر الكويز)
 )
 
 logger = get_logger(__name__)
@@ -335,16 +336,31 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
             return
         
         selected_opt = int(poll_answer.option_ids[0])
+        is_correct = (selected_opt == correct_opt)
         log_info(logger, f"🔍 DEBUG: الطالب اختار {selected_opt} | الصحيح هو {correct_opt}")
 
-        if selected_opt == correct_opt:
-            current_data = await state.get_data()
+        current_data = await state.get_data()
+
+        if is_correct:
             current_score = current_data.get('score', 0)
             new_score = current_score + 1
             await state.update_data(score=new_score)
             log_info(logger, f"✅ إجابة صحيحة! النتيجة الآن: {new_score}")
         else:
             log_info(logger, f"❌ إجابة خاطئة")
+
+        # 🆕 تسجيل هذا السؤال تحديداً بسجل الأسئلة التفصيلي لكل مستخدم (quiz_responses).
+        # هذا المعالج مشترك بين كل مصادر الكويز (ملف/نص/كاش/مشترك/مفضلة/تجربة إدارية)،
+        # لذا فالتسجيل هنا يشمل تلقائياً أسئلة الكويزات المشتركة والمحفوظة بالمفضلة أيضاً،
+        # وليس فقط الأسئلة المولّدة حديثاً من الملفات.
+        asyncio.create_task(log_quiz_response(
+            user_id=poll_answer.user.id,
+            username=poll_answer.user.username,
+            full_name=poll_answer.user.full_name,
+            quiz_id=current_data.get('quiz_id'),
+            question_number=current_data.get('current_index', 0) + 1,
+            is_correct=is_correct,
+        ))
 
     except Exception as e:
         log_error(logger, f"❌ خطأ في معالجة الإجابة: {e}", exception=e)

@@ -667,6 +667,134 @@ async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict
         log_error(logger, f"Error logging usage event '{event_type}' for user {user_id}: {e}")
 
 
+async def log_quiz_response(
+    user_id: int,
+    username: Optional[str],
+    full_name: Optional[str],
+    quiz_id: Optional[str],
+    question_number: int,
+    is_correct: bool,
+) -> None:
+    """🆕 تسجيل إجابة سؤال واحد بعينه ضمن سجل الأسئلة التفصيلي (quiz_responses).
+    يُستدعى من نفس معالج إجابات الـ Poll المشترك بين كل مصادر الكويز، لذا يشمل تلقائياً
+    أسئلة الملفات/النصوص + الكويزات المشتركة (shared) + الكويزات المحفوظة بالمفضلة (favorite) +
+    كويزات الكاش وتجربة الإدارة، دون أي تفريق أو استثناء.
+    Fire-and-forget بالكامل: لا يرمي استثناء أبداً حتى لا يؤثر على تدفق إجابة الطالب."""
+    if not _is_valid_uuid(quiz_id):
+        # كويز بدون معرف مركزي حقيقي (حالة نادرة جداً) - عمود quiz_id بجدول quiz_responses إلزامي (NOT NULL)
+        return
+    try:
+        await supabase.table("quiz_responses").insert({
+            "user_id": user_id,
+            "username": username,
+            "full_name": full_name,
+            "quiz_id": quiz_id,
+            "question_number": question_number,
+            "is_correct": bool(is_correct),
+        }).execute()
+    except Exception as e:
+        log_error(logger, f"Error logging quiz response for user {user_id}: {e}")
+
+
+# مجموعات تصنيف مصدر الكويز لأغراض عرض إجمالي الأسئلة "المحلولة" في لوحة الإدارة.
+# ملاحظة: هذا التصنيف منفصل تماماً عن users.total_questions (الذي يمثل فقط الأسئلة
+# التي دُفعت نقاطها عند التوليد من ملف/نص)، بينما التصنيف هنا يشمل كل شيء حلّه الطالب فعلياً:
+# كويزات مولّدة حديثاً + كويزات كاش + كويزات مشتركة (shared) + كويزات مفضلة (favorite).
+QUESTION_SOURCE_GROUPS: Dict[str, set] = {
+    "generated": {"file", "text", "cached_file"},
+    "shared": {"shared"},
+    "favorite": {"favorite"},
+}
+
+
+async def admin_get_users_question_totals(user_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    """🆕 إجمالي الأسئلة التي (حلّها فعلياً) كل مستخدم من قائمة مُعطاة، مقسّمة حسب مصدر الكويز:
+    مولّدة/كاش (من ملفات ونصوص) + مشتركة + مفضلة + أخرى (تجربة إدارية...). يعتمد على جدول
+    quiz_attempts الذي يُسجَّل تلقائياً عند بدء أي كويز أياً كان مصدره (بما فيها المشاركة والمفضلة)."""
+    def _empty() -> Dict[str, int]:
+        return {"practiced_total": 0, "generated": 0, "shared": 0, "favorite": 0, "other": 0, "attempts_count": 0}
+
+    result: Dict[int, Dict[str, int]] = {uid: _empty() for uid in user_ids}
+    if not user_ids:
+        return result
+    try:
+        res = await supabase.table("quiz_attempts").select("user_id, source_type, total_questions") \
+            .in_("user_id", user_ids).execute()
+
+        for row in (res.data or []):
+            uid = row.get("user_id")
+            if uid not in result:
+                result[uid] = _empty()
+            q = int(row.get("total_questions") or 0)
+            src = row.get("source_type") or "other"
+
+            result[uid]["practiced_total"] += q
+            result[uid]["attempts_count"] += 1
+
+            if src in QUESTION_SOURCE_GROUPS["generated"]:
+                result[uid]["generated"] += q
+            elif src in QUESTION_SOURCE_GROUPS["shared"]:
+                result[uid]["shared"] += q
+            elif src in QUESTION_SOURCE_GROUPS["favorite"]:
+                result[uid]["favorite"] += q
+            else:
+                result[uid]["other"] += q
+
+        return result
+    except Exception as e:
+        log_error(logger, f"Error computing users question totals: {e}")
+        return result
+
+
+async def admin_get_active_users(hours: int = 24, limit: int = 60) -> List[Dict[str, Any]]:
+    """🆕 قائمة الطلاب النشطين خلال آخر N ساعة (حسب usage_events) مع آخر نشاط قام به كل طالب
+    وعدد الأحداث التي سجّلها بهذه الفترة، مرتبة من الأحدث نشاطاً للأقدم."""
+    try:
+        since = (datetime.datetime.utcnow() - datetime.timedelta(hours=hours)).isoformat()
+        res = await supabase.table("usage_events").select("user_id, event_type, created_at") \
+            .gte("created_at", since).order("created_at", desc=True).limit(3000).execute()
+        rows = res.data or []
+        if not rows:
+            return []
+
+        latest_by_user: Dict[int, Dict[str, Any]] = {}
+        counts: Dict[int, int] = {}
+        for r in rows:
+            uid = r["user_id"]
+            counts[uid] = counts.get(uid, 0) + 1
+            if uid not in latest_by_user:
+                # الصفوف مرتبة تنازلياً بالفعل، فأول ظهور لكل مستخدم هو آخر نشاط له
+                latest_by_user[uid] = r
+
+        ordered_user_ids = list(latest_by_user.keys())[:limit]
+        if not ordered_user_ids:
+            return []
+
+        users_res = await supabase.table("users").select("user_id, first_name, last_name, username") \
+            .in_("user_id", ordered_user_ids).execute()
+        users_map = {u["user_id"]: u for u in (users_res.data or [])}
+
+        result = []
+        for uid in ordered_user_ids:
+            u = users_map.get(uid, {})
+            last = latest_by_user[uid]
+            result.append({
+                "user_id": uid,
+                "first_name": u.get("first_name") or "Unknown",
+                "last_name": u.get("last_name") or "",
+                "username": u.get("username"),
+                "last_event_type": last["event_type"],
+                "last_event_at": last["created_at"],
+                "events_in_window": counts.get(uid, 0),
+            })
+
+        result.sort(key=lambda x: x["last_event_at"], reverse=True)
+        return result
+    except Exception as e:
+        log_error(logger, f"Error fetching active users window ({hours}h): {e}")
+        return []
+
+
 def start_quiz_attempt(user_id: int, quiz_id: Optional[str], source_type: str, total_questions: int) -> str:
     """🚀 غير معطّلة إطلاقاً (Zero-latency): تُنشئ معرّف تتبع فوري بجانب البوت دون أي انتظار
     لقاعدة البيانات، وتُطلق عملية الإدراج الفعلية بمهمة خلفية منفصلة. يُستخدم الناتج (client_ref)

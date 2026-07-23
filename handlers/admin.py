@@ -27,6 +27,9 @@ from supabase_helper import (
     admin_get_daily_active_users,  # 🆕 نشاط المستخدمين اليومي
     admin_get_user_activity,       # 🆕 نشاط تفصيلي لطالب محدد
     admin_get_all_usage_events,    # 🆕 تصدير سجل الأحداث كـ CSV
+    admin_get_users_question_totals, # 🆕 إجمالي الأسئلة المحلولة لكل مستخدم (يشمل المشاركة والمفضلة)
+    admin_get_active_users,        # 🆕 الطلاب النشطون خلال نافذة زمنية معينة (ساعة/3/6/12/24)
+    log_usage_event,               # 🆕 تسجيل حدث شحن النقاط من الإدارة لأغراض التحليلات
 )
 from logger import get_logger
 from handlers.execution import _start_loaded_quiz  # 🆕 لتشغيل الكويز مباشرة كتجربة من لوحة الإدارة
@@ -58,6 +61,8 @@ router.callback_query.filter(IsAdminFilter())
 class AdminState(StatesGroup):
     waiting_for_search_query = State()
     waiting_for_charge_amount = State()
+    waiting_for_charge_custom_amount = State()   # 🆕 شحن مع رسالة: انتظار الكمية
+    waiting_for_charge_custom_message = State()  # 🆕 شحن مع رسالة: انتظار نص الرسالة
     waiting_for_broadcast_text = State()
     waiting_for_broadcast_confirm = State()
 
@@ -77,15 +82,19 @@ async def fetch_users_async():
     return res.data
 
 # دالة مساعدة لإرسال إشعار لبق للمستخدم عند شحن نقاطه
-async def send_points_notification(target_id: int, amount: int, new_balance: int):
+# 🆕 أصبحت تدعم إرفاق رسالة مخصصة من الإدارة داخل نفس إشعار الشحن (custom_message اختياري)
+async def send_points_notification(target_id: int, amount: int, new_balance: int, custom_message: Optional[str] = None):
     try:
         user_text = (
             "🎉 <b>أخبار سارة! تم تحديث رصيدك</b>\n\n"
             f"عزيزي الطالب، تم إضافة <code>{amount}</code> نقاط جديدة إلى حسابك بنجاح. ✨\n\n"
             f"🟢 <b>الكمية المضافة:</b> <code>+{amount}</code>\n"
-            f"💰 <b>رصيدك الحالي أصبح:</b> <code>{new_balance}</code> نقطة\n\n"
-            "نتمنى لك رحلة تعليمية ممتعة ومليئة بالتوفيق والنجاح! 🚀"
+            f"💰 <b>رصيدك الحالي أصبح:</b> <code>{new_balance}</code> نقطة\n"
         )
+        if custom_message:
+            user_text += f"\n💬 <b>رسالة من الإدارة:</b>\n{custom_message}\n"
+        user_text += "\nنتمنى لك رحلة تعليمية ممتعة ومليئة بالتوفيق والنجاح! 🚀"
+
         await bot.send_message(chat_id=target_id, text=user_text, parse_mode="HTML")
         logger.info(f"Notification sent successfully to user {target_id}")
     except Exception as e:
@@ -101,6 +110,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
          types.InlineKeyboardButton(text="📥 تصدير CSV", callback_data="admin_export_users")],
         [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
+        [types.InlineKeyboardButton(text="🟢 الطلاب النشطون الآن", callback_data="admin_active_24")],  # 🆕
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
     ]
@@ -122,8 +132,20 @@ def get_admin_charge_options_keyboard(target_id: int) -> types.InlineKeyboardMar
             types.InlineKeyboardButton(text="+100", callback_data=f"admin_charge_quick_100_{target_id}")
         ],
         [types.InlineKeyboardButton(text="✍️ إدخال كمية مخصصة (يدوي)", callback_data=f"admin_charge_manual_{target_id}")],
+        [types.InlineKeyboardButton(text="💬 شحن نقاط + رسالة مخصصة للطالب", callback_data=f"admin_charge_withmsg_{target_id}")],  # 🆕
         [types.InlineKeyboardButton(text="🔙 إلغاء والعودة", callback_data="admin_main_menu")]
     ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+# 🆕 لوحة اختيار النافذة الزمنية لعرض الطلاب النشطين
+def get_active_users_keyboard(hours: int) -> types.InlineKeyboardMarkup:
+    windows = [(1, "ساعة"), (3, "3 ساعات"), (6, "6 ساعات"), (12, "12 ساعة"), (24, "24 ساعة")]
+    buttons = []
+    for h, label in windows:
+        text = f"✅ {label}" if h == hours else label
+        buttons.append(types.InlineKeyboardButton(text=text, callback_data=f"admin_active_{h}"))
+    kb = [buttons[:3], buttons[3:]]
+    kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
@@ -180,10 +202,15 @@ async def render_users_page(event, page: int = 1):
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
     page_users = users[start_idx:end_idx]
-    
+
+    # 🆕 إجمالي الأسئلة "المحلولة فعلياً" لكل طالب بهذه الصفحة، مقسّم حسب المصدر
+    # (يشمل تلقائياً الكويزات المشتركة والمحفوظة بالمفضلة وليس فقط المولّدة من ملفات)
+    question_totals = await admin_get_users_question_totals([u['user_id'] for u in page_users])
+
     report = f"👥 <b>سجل الطلاب المسجلين ({page} من {total_pages}):</b>\n\n"
     for idx, u in enumerate(page_users, start=start_idx + 1):
         username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بدون يوزر"
+        qt = question_totals.get(u['user_id'], {})
         report += (
             f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
@@ -191,7 +218,11 @@ async def render_users_page(event, page: int = 1):
             f"┣ 🎁 المجاني: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
             f"┣ 💳 المدفوع: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
             f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
-            f"┗ 📊 الأسئلة: <code>{u.get('total_questions', 0)}</code>\n"
+            f"┣ 📝 أسئلة مولّدة (مدفوعة من ملفات/نصوص): <code>{u.get('total_questions', 0)}</code>\n"
+            f"┣ 🧾 إجمالي الأسئلة التي حلّها (كل المصادر): <code>{qt.get('practiced_total', 0)}</code>\n"
+            f"┗ 🗂 منها → ملفات/كاش: <code>{qt.get('generated', 0)}</code> "
+            f"| مشتركة: <code>{qt.get('shared', 0)}</code> "
+            f"| مفضلة: <code>{qt.get('favorite', 0)}</code>\n"
             f"──────────────────\n"
         )
         
@@ -341,7 +372,8 @@ async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext
     text_to_send = data.get("broadcast_text")
     await state.clear()
 
-    users = await asyncio.to_thread(fetch_users_sync)
+    # 🛠️ إصلاح: الدالة القديمة fetch_users_sync لم تكن معرّفة إطلاقاً بالملف (كانت ستكسر البرودكاست عند التنفيذ الفعلي)
+    users = await fetch_users_async()
     if not users:
         await safe_edit_text(call.message, "📭 لا يوجد طلاب مسجلين لإرسال الرسالة إليهم.", reply_markup=get_admin_dashboard_keyboard())
         return
@@ -431,6 +463,9 @@ async def process_search_user(msg: types.Message, state: FSMContext):
     if users_data:
         u = users_data[0] 
         username_str = f"@{u['username']}" if u['username'] and u['username'] != "Unknown" else "بدون يوزر"
+        # 🆕 إجمالي الأسئلة المحلولة فعلياً (يشمل المشاركة والمفضلة)، وليس فقط المولّدة من ملفات
+        question_totals = await admin_get_users_question_totals([u['user_id']])
+        qt = question_totals.get(u['user_id'], {})
         report = (
             "👤 <b>معلومات المستخدم:</b>\n"
             f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
@@ -439,7 +474,11 @@ async def process_search_user(msg: types.Message, state: FSMContext):
             f"┣ 🎁 النقاط المجانية: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
             f"┣ 💳 النقاط المدفوعة: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
             f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
-            f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
+            f"┣ 📝 أسئلة مولّدة (مدفوعة من ملفات/نصوص): <code>{u.get('total_questions', 0)}</code>\n"
+            f"┣ 🧾 إجمالي الأسئلة التي حلّها (كل المصادر): <code>{qt.get('practiced_total', 0)}</code>\n"
+            f"┗ 🗂 منها → ملفات/كاش: <code>{qt.get('generated', 0)}</code> "
+            f"| مشتركة: <code>{qt.get('shared', 0)}</code> "
+            f"| مفضلة: <code>{qt.get('favorite', 0)}</code>"
         )
         await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
     else:
@@ -649,6 +688,7 @@ async def process_quick_charge(call: types.CallbackQuery):
         await safe_edit_text(call.message, f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard())
         
         await send_points_notification(target_id, amount, new_balance)
+        asyncio.create_task(log_usage_event(target_id, "points_charged_by_admin", {"amount": amount, "method": "quick"}))
     else:
         await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
 
@@ -675,8 +715,73 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
         await msg.answer(f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
         
         await send_points_notification(target_id, amount, new_balance)
+        asyncio.create_task(log_usage_event(target_id, "points_charged_by_admin", {"amount": amount, "method": "manual"}))
     else:
         await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
+    await state.clear()
+
+# ==================== 🆕 مسار شحن النقاط مع رسالة مخصصة للطالب ====================
+
+@router.callback_query(F.data.startswith("admin_charge_withmsg_"))
+async def prompt_custom_charge_amount(call: types.CallbackQuery, state: FSMContext):
+    target_id = call.data.split("_")[3]
+    await state.update_data(charge_target_id=target_id)
+    await state.set_state(AdminState.waiting_for_charge_custom_amount)
+    await safe_edit_text(
+        call.message,
+        f"💬 <b>شحن نقاط مع رسالة مخصصة</b>\n\nأرسل الآن عدد النقاط المراد إضافتها للمستخدم <code>{target_id}</code>:",
+        reply_markup=get_cancel_keyboard()
+    )
+    await call.answer()
+
+@router.message(AdminState.waiting_for_charge_custom_amount)
+async def process_custom_charge_amount(msg: types.Message, state: FSMContext):
+    if not msg.text.isdigit():
+        return await msg.answer("❌ يرجى إرسال أرقام صحيحة فقط.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
+
+    await state.update_data(charge_amount=int(msg.text))
+    await state.set_state(AdminState.waiting_for_charge_custom_message)
+    await msg.answer(
+        "✍️ <b>الآن أرسل نص الرسالة المخصصة</b> التي تريد إرفاقها مع إشعار الشحن (ستظهر للطالب داخل نفس الرسالة):",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode="HTML"
+    )
+
+@router.message(AdminState.waiting_for_charge_custom_message)
+async def process_custom_charge_message(msg: types.Message, state: FSMContext):
+    custom_text = (msg.text or "").strip()
+    if not custom_text:
+        return await msg.answer("❌ الرسالة فارغة، يرجى إرسال نص واضح:", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
+
+    data = await state.get_data()
+    target_id = data.get("charge_target_id")
+    amount = data.get("charge_amount")
+    if not target_id or not amount:
+        await msg.answer("❌ انتهت صلاحية هذا الطلب، ابدأ عملية الشحن من جديد.", reply_markup=get_admin_dashboard_keyboard())
+        await state.clear()
+        return
+
+    target_id = int(target_id)
+    amount = int(amount)
+
+    new_balance = await admin_add_points(target_id, amount)
+    if new_balance is not None:
+        await msg.answer(
+            f"✅ <b>تم الشحن مع الرسالة المخصصة بنجاح!</b>\n\n"
+            f"المستخدم: <code>{target_id}</code>\n"
+            f"الكمية المضافة: <code>+{amount}</code> 🟢\n"
+            f"الرصيد الجديد: <code>{new_balance}</code> 💰\n\n"
+            f"💬 <b>الرسالة التي أُرسلت للطالب:</b>\n{custom_text}",
+            reply_markup=get_admin_dashboard_keyboard(),
+            parse_mode="HTML"
+        )
+        await send_points_notification(target_id, amount, new_balance, custom_message=custom_text)
+        asyncio.create_task(log_usage_event(target_id, "points_charged_by_admin", {
+            "amount": amount, "method": "custom_message", "message_length": len(custom_text),
+        }))
+    else:
+        await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
+
     await state.clear()
 
 @router.callback_query(F.data == "admin_stats")
@@ -706,6 +811,7 @@ EVENT_LABELS = {
     "feedback_submitted": "✍️ إرسال ملاحظة",
     "score_published": "🏆 نشر نتيجة",
     "leaderboard_viewed": "📋 عرض لوحة الشرف",
+    "points_charged_by_admin": "💰 شحن نقاط من الإدارة",  # 🆕
 }
 
 SOURCE_LABELS = {
@@ -774,6 +880,43 @@ async def show_daily_active_users(call: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error rendering daily active users: {e}")
         await call.answer("❌ تعذر تحميل النشاط اليومي.", show_alert=True)
+
+# ==================== 🆕 الطلاب النشطون خلال نافذة زمنية (ساعة/3/6/12/24) ====================
+
+@router.callback_query(F.data.regexp(r"^admin_active_(1|3|6|12|24)$"))
+async def show_active_users(call: types.CallbackQuery):
+    hours = int(call.data.replace("admin_active_", ""))
+    try:
+        active_users = await admin_get_active_users(hours=hours, limit=30)
+
+        if not active_users:
+            text = f"📭 لا يوجد أي طلاب نشطين خلال آخر {hours} ساعة."
+        else:
+            blocks = []
+            for i, u in enumerate(active_users, start=1):
+                username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
+                full_name = f"{u['first_name']} {u['last_name']}".strip() or "بدون اسم"
+                activity_label = EVENT_LABELS.get(u['last_event_type'], u['last_event_type'])
+                last_time = str(u['last_event_at'])[:16].replace('T', ' ')
+                blocks.append(
+                    f"<b>{i}. {full_name}</b>\n"
+                    f"┣ 👤 اليوزر: {username_str}\n"
+                    f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
+                    f"┣ 🕒 آخر نشاط: {activity_label} — <code>{last_time}</code>\n"
+                    f"┗ 📊 عدد الأحداث بهذه الفترة: <code>{u['events_in_window']}</code>"
+                )
+            text = f"🟢 <b>الطلاب النشطون خلال آخر {hours} ساعة</b> (الإجمالي: {len(active_users)})\n\n" + "\n\n".join(blocks)
+
+        # 🛡️ حماية من تجاوز الحد الأقصى لطول رسالة تيليجرام (4096 حرف)
+        if len(text) > 3900:
+            text = text[:3850] + "\n\n… (تم اقتصاص القائمة لطولها، هناك المزيد من الطلاب النشطين)"
+
+        await safe_edit_text(call.message, text, reply_markup=get_active_users_keyboard(hours))
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error rendering active users window: {e}")
+        await call.answer("❌ تعذر تحميل قائمة الطلاب النشطين.", show_alert=True)
+
 
 @router.callback_query(F.data.startswith("admin_user_activity_"))
 async def show_user_activity(call: types.CallbackQuery):
@@ -870,11 +1013,19 @@ async def export_all_users(call: types.CallbackQuery):
         if not users:
             return await safe_edit_text(call.message, "📭 لا يوجد طلاب لتصديرهم.", reply_markup=get_admin_dashboard_keyboard())
         
+        # 🆕 إجمالي الأسئلة المحلولة فعلياً لكل الطلاب دفعة واحدة (يشمل المشاركة والمفضلة)
+        question_totals = await admin_get_users_question_totals([u['user_id'] for u in users if 'user_id' in u])
+
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Joined At"])
-        
+        writer.writerow([
+            "User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points",
+            "Generated Questions (Paid)", "Practiced Questions Total", "Practiced From Files/Cache",
+            "Practiced From Shared", "Practiced From Favorites", "Joined At"
+        ])
+
         for u in users:
+            qt = question_totals.get(u.get('user_id'), {})
             writer.writerow([
                 sanitize_csv_value(u.get('user_id', '')),
                 sanitize_csv_value(u.get('username', 'Unknown')),
@@ -884,6 +1035,10 @@ async def export_all_users(call: types.CallbackQuery):
                 sanitize_csv_value(u.get('paid_points', 0)),
                 sanitize_csv_value(user_total_points(u)),
                 sanitize_csv_value(u.get('total_questions', 0)),
+                sanitize_csv_value(qt.get('practiced_total', 0)),
+                sanitize_csv_value(qt.get('generated', 0)),
+                sanitize_csv_value(qt.get('shared', 0)),
+                sanitize_csv_value(qt.get('favorite', 0)),
                 sanitize_csv_value(u.get('joined_at', ''))
             ])
             

@@ -232,6 +232,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(text="📥 تصدير الطلاب", callback_data="admin_export_users")
         ],
         [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
+        [types.InlineKeyboardButton(text="🟢 الطلاب النشطون الآن", callback_data="admin_active_24")],  # 🆕
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
     ]
@@ -255,8 +256,20 @@ def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarku
             types.InlineKeyboardButton(text="➕ 500 نقطة", callback_data=f"admin_charge_quick_500_{user_id}")
         ],
         [types.InlineKeyboardButton(text="✍️ إدخال كمية يدوياً", callback_data=f"admin_charge_manual_{user_id}")],
+        [types.InlineKeyboardButton(text="💬 شحن نقاط + رسالة مخصصة للطالب", callback_data=f"admin_charge_withmsg_{user_id}")],  # 🆕
         [types.InlineKeyboardButton(text="🔙 إلغاء والرجوع", callback_data="admin_cancel")]
     ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+# 🆕 لوحة اختيار النافذة الزمنية لعرض الطلاب النشطين (نسخة مطابقة لتلك المستخدمة فعلياً بـ admin.py)
+def get_active_users_keyboard(hours: int) -> types.InlineKeyboardMarkup:
+    windows = [(1, "ساعة"), (3, "3 ساعات"), (6, "6 ساعات"), (12, "12 ساعة"), (24, "24 ساعة")]
+    buttons = []
+    for h, label in windows:
+        text = f"✅ {label}" if h == hours else label
+        buttons.append(types.InlineKeyboardButton(text=text, callback_data=f"admin_active_{h}"))
+    kb = [buttons[:3], buttons[3:]]
+    kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
