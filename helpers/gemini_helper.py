@@ -1,4 +1,19 @@
-"""AI generation, SHA-256 cache lookup, PDF chunking, and loading feedback."""
+"""
+==============================================================================
+MODULE: AI Quiz Generation Helper (Gemini & Groq Integration)
+==============================================================================
+الوصف:
+موديول تنفيذي مسؤول عن تحويل المستندات (PDF/Images) والنصوص إلى أسئلة تفاعلية (Quizzes).
+
+الميزات المعمارية والقرارات الهندسية الرئيسية:
+1. Multi-Key Round-Robin & Fallback: إدارة مفاتيح Gemini بشكل ديناميكي لتجاوز حدود الاستخدام (Rate Limits).
+2. Inline Data vs. Files API: إرسال الملفات الصغيرة بأسلوب inline للتقليل من تأخير الشبكة (Latency).
+3. Resilience & Overload Handling: التمييز بين أخطاء الحصة (Quota Exhaustion) وأخطاء الازدحام (503 Overload).
+4. Super PDF Parallel Processing: تقسيم ملفات PDF الكبيرة ومعالجتها بشكل متوازي بطلب مستقل لكل ثلث.
+5. Robust Async Task Lifecycle: إدارة مهمة تحريك رسالة الانتظار بشكل آمن يمنع تسريب الاستثناءات (Log Pollution).
+6. Smart SHA-256 Caching: التخزين المؤقت للاستجابات لتفادي الاستدعاءات التكرارية للذكاء الاصطناعي.
+==============================================================================
+"""
 
 import asyncio
 import datetime
@@ -26,29 +41,33 @@ from constants import (
     KEY_BLOCK_QUOTA_EXHAUSTED,
     KEY_BLOCK_TEMPORARY_ERROR,
     MAX_LIMIT_PAGES,
+    OPTION_COUNT,
     QUOTA_ERROR_KEYWORDS,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
-    MSG_PREVIOUS_QUESTIONS_INSTRUCTION, # 🆕 تم استيراد الثابت الجديد الخاص بمنع تكرار الأسئلة
+    MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
 )
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import get_cached_quiz, save_quiz_to_cache
 from utils import calculate_file_hash, safe_file_cleanup
 
+# ==============================================================================
+# CONFIGURATION & GLOBAL STATE
+# ==============================================================================
 load_dotenv()
 logger = get_logger(__name__)
+
+# AI-NOTE: يتم تحميل مفاتيح Gemini كقائمة وتتبع المفاتيح المعطلة مؤقتاً في ذاكرة السيرفر
 API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") if key.strip()]
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 blocked_keys: Dict[int, datetime.datetime] = {}
 
-# 🆕 أخطاء Gemini المؤقتة (السيرفر مزدحم/غير متاح مؤقتاً) يجب إعادة محاولتها بدل الاستسلام فوراً،
-# بعكس أخطاء الحصة (quota) التي يجب فيها تبديل المفتاح مباشرة دون إضاعة وقت بإعادة المحاولة.
+# AI-NOTE: كلمات مفتاحية لتحديد أخطاء الضغط والازدحام في سيرفرات Gemini
 OVERLOAD_ERROR_KEYWORDS = ["overloaded", "unavailable", "503", "internal error", "500"]
-OVERLOAD_RETRY_ATTEMPTS = 2  # عدد إعادات المحاولة الإضافية بنفس المفتاح قبل الانتقال لمفتاح آخر
-OVERLOAD_RETRY_BASE_DELAY = 3  # ثوانٍ، يُضاعف تصاعدياً بين كل محاولة
+OVERLOAD_RETRY_ATTEMPTS = 2
+OVERLOAD_RETRY_BASE_DELAY = 3
 
-# 🆕 حد آمن للبيانات المضمّنة (inline) دون رفعها عبر Files API. حد Gemini الفعلي للطلب المضمّن
-# هو 20MB إجمالاً (يشمل نص البرومبت)، فأخذنا هامش أمان تحته. تقريباً كل صور/ملفات تيليجرام
-# العادية (حتى MAX_PHOTO_SIZE=10MB و MAX_DOC_SIZE=20MB لكل ملف) تقع ضمن هذا الحد غالباً.
+# AI-NOTE: الحد الأقصى لإرسال البيانات مباشرة ضمن الطلب (Inline) دون اللجوء لـ Files API.
+# رفع الملف عبر Files API يضيف Round-trip شبكة وتأخير معالجة، لذا يُفضل تحاشيه في الملفات الصغيرة.
 INLINE_DATA_SIZE_THRESHOLD = 15 * 1024 * 1024  # 15MB
 
 LOADING_PHRASES = (
@@ -59,7 +78,7 @@ LOADING_PHRASES = (
     "⏳ لحظات قليلة جداً ويصبح اختبارك التفاعلي جاهزاً للبدء...",
 )
 
-# 💡 قاموس إضافي لتحديد صيغ الملفات بدقة في بيئات Docker/Linux
+# AI-NOTE: قاموس مخصص لتجاوز مشاكل التعرف على MIME Types في بيئات Docker المجرّدة
 CUSTOM_MIME_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".doc": "application/msword",
@@ -73,12 +92,17 @@ CUSTOM_MIME_TYPES = {
 }
 
 def get_safe_mime_type(file_path: str) -> str:
+    """استرجاع نوع MIME للملف بشكل آمن ومضمون لاستخدامه في طلبات الـ API."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext in CUSTOM_MIME_TYPES:
         return CUSTOM_MIME_TYPES[ext]
     guess, _ = mimetypes.guess_type(file_path)
     return guess or "application/octet-stream"
 
+# ==============================================================================
+# PYDANTIC SCHEMAS (STRUCTURED OUTPUT)
+# ==============================================================================
+# AI-NOTE: نضمن إجبار Gemini و Groq على التقيُّد بهذه البنية الدقيقة لتفادي أخطاء Parsing
 class QuizQuestion(BaseModel):
     question: str = Field(description="Question text")
     options: List[str] = Field(description="Four answer options")
@@ -90,8 +114,11 @@ class QuizQuestion(BaseModel):
 class QuizResponse(BaseModel):
     questions: List[QuizQuestion]
 
-
+# ==============================================================================
+# HELPER FUNCTIONS & KEY MANAGEMENT
+# ==============================================================================
 def _available_key_indices() -> List[int]:
+    """تحديد المفاتيح المتاحة حالياً واستبعاد المفاتيح المحظورة مؤقتاً بسبب أخطاء سابقة."""
     now = datetime.datetime.now()
     indices: List[int] = []
     for index in range(len(API_KEYS)):
@@ -102,7 +129,7 @@ def _available_key_indices() -> List[int]:
 
 
 def _combined_file_hash(paths: Sequence[str]) -> str:
-    """Derive one SHA-256 cache key from ordered byte-payload digests only."""
+    """توليد SHA-256 فريد لمجموعة من الملفات لاستخدامه كمفتاح للتخزين المؤقت (Cache Key)."""
     digest = hashlib.sha256()
     for path in paths:
         digest.update(calculate_file_hash(path).encode("ascii"))
@@ -110,12 +137,13 @@ def _combined_file_hash(paths: Sequence[str]) -> str:
 
 
 def get_pdf_page_count_sync(file_path: str) -> int:
+    """حساب عدد صفحات ملف الـ PDF ميكانيكياً."""
     with fitz.open(file_path) as document:
         return len(document)
 
 
 def split_pdf_into_three_sync(file_path: str) -> List[str]:
-    """Split a PDF into three physical, nearly equal PDF files."""
+    """تقسيم ملف PDF إلى 3 أجزاء متساوية للمعالجة المتوازية في نمط Super PDF."""
     source = fitz.open(file_path)
     try:
         page_count = len(source)
@@ -140,6 +168,7 @@ def split_pdf_into_three_sync(file_path: str) -> List[str]:
 
 
 async def _safe_delete_gemini_file(client: genai.Client, file_name: str) -> None:
+    """حذف الملفات التابعة لـ Files API من خوادم جوجل بعد انتهاء التوليد لحفظ الخصوصية والنظافة."""
     try:
         await asyncio.to_thread(client.files.delete, name=file_name)
     except Exception as exc:
@@ -147,6 +176,10 @@ async def _safe_delete_gemini_file(client: genai.Client, file_name: str) -> None
 
 
 async def _loading_animation(message: Any, stop_event: asyncio.Event) -> None:
+    """
+    مهمة خلفية لتحديث رسالة الانتظار بعبارات تشجيعية.
+    IMPORTANT: تم التعامل مع asyncio.CancelledError صراحة لمنع أخطاء إلغاء المهمة في الـ Logs.
+    """
     phrase_index = 0
     while not stop_event.is_set():
         try:
@@ -156,14 +189,18 @@ async def _loading_animation(message: Any, stop_event: asyncio.Event) -> None:
             try:
                 await message.edit_text(LOADING_PHRASES[phrase_index])
             except TelegramBadRequest:
-                # Telegram raises this when a phrase is already displayed.
+                # تحدث هذه الاستثناءات إذا لم يتغير النص في تلغرام
                 pass
             except Exception as exc:
                 log_warning(logger, f"Loading-status update failed: {exc}")
             phrase_index = (phrase_index + 1) % len(LOADING_PHRASES)
+        except asyncio.CancelledError:
+            # الخروج النظيف عند إلغاء المهمة من دالة generate_quiz_smart
+            break
 
 
 def _mark_key_failure(key_index: int, error: Exception) -> None:
+    """حظر المفتاح الفاشل لفترة محددة حسب نوع الخطأ (حصة منتهية vs خطأ مؤقت)."""
     message = str(error).lower()
     if any(keyword in message for keyword in QUOTA_ERROR_KEYWORDS):
         blocked_keys[key_index] = datetime.datetime.now() + datetime.timedelta(hours=KEY_BLOCK_QUOTA_EXHAUSTED)
@@ -172,6 +209,7 @@ def _mark_key_failure(key_index: int, error: Exception) -> None:
 
 
 def _is_overload_error(error: Exception) -> bool:
+    """التحقق مما إذا كان الخطأ ناتجاً عن ضغط/ازدحام مؤقت في سيرفرات AI."""
     message = str(error).lower()
     return any(keyword in message for keyword in OVERLOAD_ERROR_KEYWORDS)
 
@@ -180,34 +218,26 @@ def _read_file_bytes_sync(path: str) -> bytes:
     with open(path, "rb") as f:
         return f.read()
 
-
+# ==============================================================================
+# CORE GENERATION LOGIC (GEMINI & GROQ)
+# ==============================================================================
 async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, model: str = GEMINI_PRIMARY_MODEL) -> tuple[List[Dict[str, Any]], int]:
+    """توليد الأسئلة باستخدام مفتاح محدد مع معالجة إعادة المحاولة الذكية عند الازدحام."""
     client = genai.Client(api_key=API_KEYS[key_index])
     uploaded = []
     try:
         contents: List[Any] = [prompt]
 
-        # 🆕 السبب الحقيقي للبطء الشديد على الصور والملفات على حد سواء: كان الكود يرفع كل ملف
-        # عبر Files API (client.files.upload) بغض النظر عن حجمه أو كونه يُستخدم لمرة واحدة فقط.
-        # توثيق جوجل الرسمي يوصي باستخدام Files API فقط للملفات الكبيرة أو التي تُستخدم بتكرار
-        # عبر عدة طلبات - وليس حالتنا إطلاقاً (كل كويز يُولَّد لمرة واحدة من ملف واحد). الرفع عبر
-        # Files API يضيف جولة شبكة كاملة (رفع) + انتظار معالجة الملف على خوادم جوجل حتى تصبح
-        # حالته ACTIVE، قبل حتى ما يبدأ طلب التوليد نفسه - وهذا الانتظار الإضافي هو ما كان يظهر
-        # كجزء من مهلة الـ 120 ثانية سابقاً، على كل من الصور والملفات بنفس الدرجة.
-        # الحل: تمرير بيانات الملف مباشرة (inline) ضمن نفس الطلب متى كان الحجم الإجمالي صغيراً
-        # بما يكفي، ما يلغي جولة الشبكة الإضافية بالكامل. نلجأ لـ Files API فقط كخيار احتياطي
-        # للملفات الكبيرة (نادر جداً ضمن حدود البوت الحالية).
+        # AI-NOTE: فحوصات اختيار استراتيجية رفع الملفات (Inline Bytes vs Files API)
         total_size = 0
         for path in paths:
             try:
                 total_size += os.path.getsize(path)
             except OSError:
-                total_size = INLINE_DATA_SIZE_THRESHOLD + 1  # فشل قراءة الحجم -> الأمان أولاً، ارفع عبر Files API
+                total_size = INLINE_DATA_SIZE_THRESHOLD + 1
                 break
 
         mime_types = [get_safe_mime_type(path) for path in paths]
-        # لو تعذّر تحديد نوع أي ملف (حالة نادرة، مثلاً مستند تيليجرام بدون اسم ملف)، لا نخمّن
-        # نوعاً عاماً قد لا يفهمه Gemini بشكل صحيح؛ نرفع كل الملفات عبر Files API بدلاً من ذلك.
         use_inline = total_size <= INLINE_DATA_SIZE_THRESHOLD and all(mime_types)
 
         if use_inline:
@@ -221,8 +251,7 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
                 contents.append(uploaded_file)
 
         last_exc: Optional[Exception] = None
-        # 🆕 إعادة محاولة نفس المفتاح عند خطأ مؤقت (مثل "model overloaded")، لأن تبديل المفاتيح
-        # لا يفيد هنا: الازدحام غالباً في السيرفر نفسه وليس في المفتاح المستخدم.
+        # AI-NOTE: إعادة المحاولة بنفس المفتاح عند خطأ الازدحام (Overload)، لأن المشكلة في السيرفر وليست الحصة
         for attempt in range(OVERLOAD_RETRY_ATTEMPTS + 1):
             try:
                 response = await asyncio.wait_for(
@@ -232,12 +261,6 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
                         config=types.GenerateContentConfig(
                             response_mime_type="application/json",
                             response_schema=QuizResponse,
-                            # 🆕 gemini-3.5-flash موديل تفكير (thinking) يعمل افتراضياً بمستوى تفكير
-                            # متوسط/عالٍ إن لم يُحدَّد صراحة، وهذا كان يجعل استخراج الأسئلة من
-                            # الصور يستغرق دقائق بدل ثوانٍ. استخراج أسئلة من ملف هو مهمة استخلاص
-                            # مباشرة وليست تفكيراً معقداً، لذا thinking_level="low" يعطي نفس الجودة
-                            # تقريباً بسرعة أعلى بكثير (راجع توثيق Gemini 3.5 Flash).
-                            # thinking_config=types.ThinkingConfig(thinking_level="low"),
                         ),
                     ),
                     timeout=AI_REQUEST_TIMEOUT,
@@ -255,31 +278,32 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
                     await asyncio.sleep(delay)
                     continue
                 raise
-        raise last_exc  # pragma: no cover - defensive, loop always returns or raises above
+        raise last_exc
     except Exception as exc:
         _mark_key_failure(key_index, exc)
         raise
     finally:
+        # AI-NOTE: تنظيف وتفريغ أي ملفات رُفعت مؤقتاً لـ Files API في الخلفية
         for uploaded_file in uploaded:
             asyncio.create_task(_safe_delete_gemini_file(client, uploaded_file.name))
 
 
 async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[tuple[List[Dict[str, Any]], int]]:
+    """محاولة التوليد عبر القائمة المتاحة من مفاتيح Gemini، مع الانتقال للموديل الاحتياطي عند الفشل الكامل."""
     if not API_KEYS:
         log_error(logger, "GEMINI_API_KEYS is not configured")
         return None
     candidates = _available_key_indices() or list(range(len(API_KEYS)))
     key_order = random.sample(candidates, len(candidates))
 
+    # 1. التجربة على النموذج الأساسي
     for key_index in key_order:
         try:
             return await _generate_with_key(paths, prompt, key_index, model=GEMINI_PRIMARY_MODEL)
         except Exception as exc:
             log_warning(logger, f"Gemini key {key_index} failed on primary model ({GEMINI_PRIMARY_MODEL}): {exc}")
 
-    # 🆕 كانت GEMINI_FALLBACK_MODEL معرّفة ومستوردة لكن غير مستخدمة إطلاقاً؛ الآن نجرب فعلياً
-    # موديل بديل مختلف عبر كل المفاتيح إذا فشل الموديل الأساسي على جميعها (خصوصاً مفيد عند ازدحام
-    # الموديل الأساسي تحديداً بينما البديل متاح).
+    # 2. التجربة على النموذج الاحتياطي (Fallback Model) عند فشل جميع المفاتيح
     log_warning(logger, f"All keys failed on primary model ({GEMINI_PRIMARY_MODEL}); trying fallback model ({GEMINI_FALLBACK_MODEL})")
     for key_index in key_order:
         try:
@@ -290,6 +314,7 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[tuple
 
 
 async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) -> Optional[tuple[List[Dict[str, Any]], int]]:
+    """معالجة متوازية لملفات الـ PDF الضخمة بتوزيع المهام على 3 مفاتيح API مختلفة بطلب واحد لكل جزء."""
     if len(API_KEYS) < 3:
         log_error(logger, "Super processing requires three distinct GEMINI_API_KEYS")
         return None
@@ -318,14 +343,12 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
 
 
 async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
+    """المسار السريع لتوليد الكويز من النص الصريح فقط عبر Groq API."""
     if not GROQ_API_KEY:
         log_warning(logger, "GROQ_API_KEY is not configured; skipping straight to Gemini for text generation")
         return None
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
-        
-        # 💡 إجبار Groq على إرجاع الأسماء الدقيقة للحقول المتوافقة مع Pydantic (QuizResponse)
-        from constants import OPTION_COUNT
         
         json_schema_instruction = f"""
 IMPORTANT: Respond in valid JSON structure matching this exact format:
@@ -342,8 +365,6 @@ IMPORTANT: Respond in valid JSON structure matching this exact format:
 }}
 Note: "correct_option_id" MUST be an integer representing the 0-based index of the correct option in "options" list.
 """
-        
-        # دمج التوجيهات وتنظيف المتغيرات
         formatted_prompt = prompt.replace("{option_count}", str(OPTION_COUNT))
         formatted_content = f"{formatted_prompt}\n\n{json_schema_instruction}\n\n[المحتوى التعليمي]:\n{pure_text}"
         
@@ -364,7 +385,7 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
 
 
 async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
-    """Fallback path: generate a quiz from plain text using Gemini directly (no file upload needed)."""
+    """المسار الاحتياطي لتوليد الكويز من النص باستخدام Gemini عند تعثر Groq."""
     if not API_KEYS:
         log_error(logger, "GEMINI_API_KEYS is not configured; cannot fall back for text generation")
         return None
@@ -406,7 +427,9 @@ async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Option
     log_warning(logger, f"All keys failed text generation on primary model ({GEMINI_PRIMARY_MODEL}); trying fallback ({GEMINI_FALLBACK_MODEL})")
     return await _attempt(GEMINI_FALLBACK_MODEL)
 
-
+# ==============================================================================
+# MAIN PUBLIC API ENTRYPOINT
+# ==============================================================================
 async def generate_quiz_smart(
     file_paths: Optional[List[str]] = None,
     pure_text: Optional[str] = None,
@@ -414,28 +437,37 @@ async def generate_quiz_smart(
     skip_cache: bool = False,
     file_hash: Optional[str] = None,
     status_message: Optional[Any] = None,
-    previous_questions: Optional[List[Dict[str, Any]]] = None, # 🆕 المعامل الجديد لاستقبال الأسئلة السابقة منعاً للتكرار
+    previous_questions: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Generate a quiz, using SHA-256 cache lookup before any external API call."""
+    """
+    الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
+    تتولى إدارة الـ Cache، توجيه الطلبات للمسار المناسب، وتنظيف مهام الرسائل التفاعلية.
+    """
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
+    
     try:
-        # بناء القالب الأساسي وحقن الأسئلة السابقة بداخله لمنع التكرار عِلمياً
-        base_prompt_template = SYSTEM_PROMPT_GENERATE_QUESTIONS
+        # IMPORTANT: استبدال {option_count} أولاً لضمان وصول العدد الصحيح للخيارات لكافة النماذج
+        base_prompt_template = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{option_count}", str(OPTION_COUNT))
+        
+        # حقن الأسئلة السابقة لمنع التكرار
         if previous_questions:
             old_q_texts = "\n".join([f"- {q['question']}" for q in previous_questions if 'question' in q])
             base_prompt_template += MSG_PREVIOUS_QUESTIONS_INSTRUCTION.format(previous_questions=old_q_texts)
 
         prompt = base_prompt_template.replace("{count}", str(count))
         
+        # 1. مسار النصوص الصريحة
         if pure_text:
             questions = await _generate_text_quiz(pure_text, prompt)
             if not questions:
                 questions = await _generate_text_quiz_with_gemini(pure_text, prompt)
             return questions
+            
         if not file_paths:
             return None
 
+        # 2. فحص الـ Cache أولاً للحد من استهلاك API
         cache_key = file_hash or await asyncio.to_thread(_combined_file_hash, file_paths)
         if not skip_cache:
             cached = await get_cached_quiz(cache_key)
@@ -443,6 +475,7 @@ async def generate_quiz_smart(
                 log_info(logger, f"Cache hit for {cache_key}; external generation bypassed")
                 return cached["questions_data"]
 
+        # 3. توجيه الملفات للمسار العادي أو مسار Super PDF للملفات الضخمة
         is_super_pdf = (
             len(file_paths) == 1
             and file_paths[0].lower().endswith(".pdf")
@@ -455,10 +488,17 @@ async def generate_quiz_smart(
         )
         if not generated:
             return None
+            
         questions, total_tokens = generated
         await save_quiz_to_cache(cache_key, questions, total_tokens)
         return questions
+
     finally:
+        # IMPORTANT: إيقاف وإلغاء مهمة التحريك بشكل فوري ونظيف في كتلة finally
         stop_event.set()
         if animation_task:
-            await animation_task
+            animation_task.cancel()
+            try:
+                await animation_task
+            except asyncio.CancelledError:
+                pass
