@@ -569,6 +569,18 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
             )
             return
 
+        # 🟢 [إصلاح كاش الوورد والأوفيس]: حفظ الكويز المولد لملفات Word/PPTX/TXT في الكاش المركزي
+        # لأن توليد النصوص المباشر (pure_text) يتخطى الحفظ التلقائي في الكاش داخل generate_quiz_smart
+        if file_hash and quiz_data and not is_media:
+            from supabase_helper import save_file_quiz_multiple
+            await save_file_quiz_multiple(
+                file_hash=file_hash,
+                creator_id=user_id,
+                source_title=data.get("source_title", "كويز من مستند"),
+                quiz_data=quiz_data,
+                total_tokens=0
+            )
+
         # 🆕 استخراج المعرف الفريد (UUID) للكويز المولد حديثاً من السلسلة لتشغيل التقييمات بدقة
         new_quiz_id = None
         if file_hash:
