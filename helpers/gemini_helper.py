@@ -304,10 +304,30 @@ async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict
         return None
     try:
         client = AsyncGroq(api_key=GROQ_API_KEY)
-
-        # 💡 إيجاد الحل: إضافة نص صريح يحتوي على كلمة json للالتزام بشرط Groq API
-        formatted_content = f"{prompt}\n\nIMPORTANT: Respond in valid JSON format.\n\n{pure_text}"
-
+        
+        # 💡 إجبار Groq على إرجاع الأسماء الدقيقة للحقول المتوافقة مع Pydantic (QuizResponse)
+        from constants import OPTION_COUNT
+        
+        json_schema_instruction = f"""
+IMPORTANT: Respond in valid JSON structure matching this exact format:
+{{
+  "questions": [
+    {{
+      "question": "نص السؤال",
+      "options": ["خيار 1", "خيار 2", "خيار 3", "خيار 4"],
+      "correct_option_id": 0,
+      "hint": "تلميح للمساعدة",
+      "explanation": "شرح الإجابة الصحيحة"
+    }}
+  ]
+}}
+Note: "correct_option_id" MUST be an integer representing the 0-based index of the correct option in "options" list.
+"""
+        
+        # دمج التوجيهات وتنظيف المتغيرات
+        formatted_prompt = prompt.replace("{option_count}", str(OPTION_COUNT))
+        formatted_content = f"{formatted_prompt}\n\n{json_schema_instruction}\n\n[المحتوى التعليمي]:\n{pure_text}"
+        
         response = await asyncio.wait_for(
             client.chat.completions.create(
                 model="openai/gpt-oss-120b",
