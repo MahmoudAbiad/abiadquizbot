@@ -5,9 +5,11 @@ import os
 import uuid
 from typing import Any, Dict, List, Tuple
 
-from config import bot, DOWNLOADS_DIR
+from config import bot
 from utils import calculate_file_hash, extract_text_from_file, safe_file_cleanup
 from validators import validate_file_size
+
+DOWNLOADS_DIR = "downloads"
 
 def compute_combined_hash(paths: List[str]) -> str:
     """حساب الهاش الموحد لمجموعة ملفات/صور ألبوم"""
