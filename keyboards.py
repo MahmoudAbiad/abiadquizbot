@@ -45,10 +45,10 @@ def get_quiz_start_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_exit_confirmation_keyboard() -> types.InlineKeyboardMarkup:
-    """لوحة حارسة تمنع خروج الطالب بالخطأ أثناء حل الأسئلة"""
+    """لوحة حارسة تؤكد رغبة الطالب في إنهاء الكويز وعرض النتيجة"""
     kb = [
         [
-            types.InlineKeyboardButton(text="⏹️ نعم، إيقاف وخروج", callback_data="quiz_stop_confirmed"),
+            types.InlineKeyboardButton(text="🏁 نعم، إنهاء وعرض النتيجة", callback_data="quiz_stop_confirmed"),
             types.InlineKeyboardButton(text="🔄 لا، إكمال الحل", callback_data="quiz_resume_flow")
         ]
     ]
@@ -183,7 +183,7 @@ def get_quiz_question_keyboard(options: list, show_hint: bool = True) -> types.I
         kb.append([types.InlineKeyboardButton(text="💡 طلب تلميح ذكي", callback_data="get_hint")])
     
     control_buttons = [
-        types.InlineKeyboardButton(text="⏹️ إيقاف", callback_data="quiz_stop"),
+        types.InlineKeyboardButton(text="🏁 إنهاء", callback_data="quiz_stop"),
         types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
         types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
     ]
@@ -199,7 +199,7 @@ def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: in
     
     kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
     kb.append([
-        types.InlineKeyboardButton(text="⏹️ إيقاف الكويز", callback_data="quiz_stop"),
+        types.InlineKeyboardButton(text="🏁 إنهاء الكويز", callback_data="quiz_stop"),
         types.InlineKeyboardButton(text="🔗 مشاركة الكويز", callback_data="quiz_share")
     ])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)

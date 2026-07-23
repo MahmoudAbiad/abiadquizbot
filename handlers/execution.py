@@ -241,8 +241,8 @@ async def request_stop_confirmation(call: types.CallbackQuery, state: FSMContext
     try:
         confirm_kb = get_quiz_exit_confirmation_keyboard()
         await call.message.answer(
-            "⚠️ <b>تأكيد الخروج وإيقاف الاختبار</b>\n\n"
-            "هل أنت متأكد تماماً من رغبتك في إيقاف هذا الكويز؟ خروجك الآن سيؤدي إلى تدمير جلسة الحل الحالية وخسارة كامل النتيجة.",
+            "🏁 <b>تأكيد إنهاء الاختبار</b>\n\n"
+            "هل أنت متأكد من رغبتك في إنهاء الكويز الآن؟ سيتم احتساب نتيجتك الحالية بناءً على الأسئلة التي أجبت عليها حتى هذه اللحظة.",
             reply_markup=confirm_kb,
             parse_mode="HTML"
         )
@@ -255,24 +255,31 @@ async def request_stop_confirmation(call: types.CallbackQuery, state: FSMContext
 async def stop_quiz_confirmed(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
-        # 🆕 تسجيل خروج الطالب المبكر من الكويز (نقطة تسرب) قبل مسح حالته
-        asyncio.create_task(mark_quiz_attempt_stopped(data.get("attempt_id")))
-        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_stopped", {
+        questions = data.get("questions", [])
+        user_id = call.from_user.id
+        
+        # 🟢 1. تسجيل حدث "إنهاء مبكر بطلب الطالب" للتحليلات قبل قفز الإندكس
+        asyncio.create_task(log_usage_event(user_id, "quiz_early_submitted", {
             "quiz_id": data.get("quiz_id"),
-            "at_question": data.get("current_index"),
-            "of_total": data.get("total_count"),
+            "answered_questions": data.get("current_index"),
+            "total_questions": len(questions),
+            "score_so_far": data.get("score", 0)
         }))
 
-        await state.clear() 
+        # 🟢 2. قفز إندكس الأسئلة للنهاية لإجبار النظام على استدعاء شاشة النتيجة
+        await state.update_data(current_index=len(questions))
+        
         try: 
             await call.message.delete()
         except Exception: 
             pass
-        await _send_main_menu(call, call.from_user.id)
-        await call.message.answer(MSG_QUIZ_STOPPED)
+
+        # 🚀 3. استدعاء send_question (ستقوم بإغلاق المحاولة وتسجيل complete_quiz_attempt تلقائياً)
+        await send_question(call, state)
+
     except Exception as e:
         log_error(logger, f"Error in stop_quiz: {e}", exception=e)
-        await call.answer("❌ تعذر إيقاف الكويز", show_alert=True)
+        await call.answer("❌ تعذر إنهاء الكويز", show_alert=True)
     finally:
         await call.answer()
 
