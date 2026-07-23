@@ -42,7 +42,8 @@ from supabase_helper import (
     refund_user_points,
     save_shared_quiz,
     update_user_stats,
-    log_usage_event,            # 🆕 تتبع أحداث الاستخدام (رفع محتوى، توليد، استخدام كاش)
+    log_usage_event,         # 🆕 تتبع أحداث الاستخدام (رفع محتوى، توليد، استخدام كاش)
+    mark_quiz_attempt_stopped, 
 )
 
 # 🟢 تم إضافة استيراد دالة استخراج النص المحلي لمستندات أوفيس والملفات النصية
@@ -270,17 +271,25 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
     """معالج استقبال الوسائط (المستندات، ملفات الـ PDF، أوفيس، والصور)"""
     try:
         current_state = await state.get_state()
+        
+        # 🟢 الاستبدال التلقائي: إذا كان هناك كويز قائم، نوقفه فوراً ونكمل معالجة الملف الجديد مباشرة
         if current_state == QuizState.answering_quiz:
-            from keyboards import get_active_quiz_warning_keyboard
-            await message.answer(
-                "⚠️ <b>لديك اختبار قائم حالياً!</b>\n\n"
-                "يرجى إكمال الاختبار الحالي، أو اضغط على الزر أدناه لإيقافه فوراً وتوليد كويز جديد:",
-                reply_markup=get_active_quiz_warning_keyboard(),
-                parse_mode="HTML"
-            )
-            return
+            data = await state.get_data()
+            attempt_id = data.get("attempt_id")
+            if attempt_id:
+                asyncio.create_task(mark_quiz_attempt_stopped(attempt_id))
 
-        if current_state in PENDING_REQUEST_STATES:
+            asyncio.create_task(log_usage_event(message.from_user.id, "quiz_auto_replaced", {
+                "quiz_id": data.get("quiz_id"),
+                "at_question": data.get("current_index")
+            }))
+
+            await _discard_pending_upload(state)
+            await state.clear()
+            await message.answer("ℹ️ <b>تم إيقاف اختبارك السابق تلقائياً وجاري معالجة المحتوى الجديد...</b>", parse_mode="HTML")
+            # 🚀 نواصل تنفيذ بقية الكود أدناه لتنزيل الملف الجديد والانتقال لسؤال العد فوراً!
+
+        elif current_state in PENDING_REQUEST_STATES:
             removed = await _discard_pending_upload(state)
             await state.clear()
             if removed:
@@ -347,16 +356,40 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
 
 
-@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
+@router.message(F.text, ~F.text.startswith("/"))
 async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     """معالج استقبال النصوص المباشرة المرسلة من الطالب"""
     text = message.text.strip()
+    
+    current_state = await state.get_state()
+    
+    # 🟢 إذا كان هناك كويز قائم وأرسل الطالب نصاً دراسياً (أكثر من 30 حرفاً)
+    if current_state == QuizState.answering_quiz:
+        if len(text) >= 30:
+            data = await state.get_data()
+            attempt_id = data.get("attempt_id")
+            if attempt_id:
+                asyncio.create_task(mark_quiz_attempt_stopped(attempt_id))
+
+            asyncio.create_task(log_usage_event(message.from_user.id, "quiz_auto_replaced", {
+                "quiz_id": data.get("quiz_id"),
+                "at_question": data.get("current_index")
+            }))
+
+            await _discard_pending_upload(state)
+            await state.clear()
+            await message.answer("ℹ️ <b>تم إيقاف الاختبار السابق تلقائياً لبدء الكويز النصي الجديد...</b>", parse_mode="HTML")
+        else:
+            await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه عبر الضغط على (⏹️ إيقاف) أولاً.")
+            return
+
     if len(text) < 30:
         await message.answer("⚠️ النص قصير جداً؛ اعمد إلى إرسال 30 حرفاً على الأقل لضمان صياغة أسئلة دقيقة.")
         return
     if len(text) > MAX_TEXT_INPUT_SIZE:
         await message.answer(f"❌ الحد الأقصى للنص المباشر هو {MAX_TEXT_INPUT_SIZE} حرفاً.")
         return
+
     await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
     await state.set_state(QuizState.waiting_for_count)
     asyncio.create_task(log_usage_event(message.from_user.id, "content_uploaded", {
@@ -364,7 +397,7 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         "text_length": len(text),
     }))
     await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
-
+    
 
 @router.callback_query(F.data == "cancel_upload_request")
 async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
