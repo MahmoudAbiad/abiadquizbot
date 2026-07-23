@@ -122,7 +122,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         if status == "new":
             welcome_text = (
                 "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
-                "مكانك الأول لتحويل المحاضرات لااختبارات تفاعلية بسهولة. 🚀\n\n"
+                "مكانك الأول لتحويل المحاضرات لاختبارات تفاعلية بسهولة. 🚀\n\n"
                 f"🎁 هدية البداية: ضفنا لحسابك <b>{points} نقطة مجانية</b> لتجرب البوت فوراً!\n"
             )
             if user_info["referrer"]:
