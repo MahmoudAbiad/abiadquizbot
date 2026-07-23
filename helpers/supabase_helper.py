@@ -23,6 +23,18 @@ load_dotenv(dotenv_path)
 logger = get_logger(__name__)
 
 
+def _is_valid_uuid(value: Optional[str]) -> bool:
+    """يتحقق أن القيمة UUID حقيقي وصالح قبل استخدامها في أعمدة uuid بقاعدة البيانات.
+    يمنع تكرار خطأ 22P02 (invalid input syntax for type uuid) في حال تمرير معرف وهمي/ناقص."""
+    if not value:
+        return False
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def _balance_payload(free_points: Any = 0, paid_points: Any = 0, **extra: Any) -> Dict[str, Any]:
     """Expose split balances while retaining ``points`` for older callers."""
     free = float(free_points or 0)
@@ -560,6 +572,9 @@ async def admin_search_user(query: str) -> Optional[list]:
 
 # ==================== Quiz Scores & Leaderboard Operations ====================
 async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: int, total_questions: int) -> Dict[str, Any]:
+    if not _is_valid_uuid(quiz_id):
+        log_warning(logger, f"Skipping high score update: invalid quiz_id '{quiz_id}' (not a real UUID)")
+        return {"previous_score": None, "highest_score": current_score, "is_public": False}
     try:
         res = await supabase.table("quiz_scores").select("*").eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
         
@@ -599,6 +614,9 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
         return {"previous_score": None, "highest_score": current_score, "is_public": False}
 
 async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
+    if not _is_valid_uuid(quiz_id):
+        log_warning(logger, f"Skipping leaderboard publish: invalid quiz_id '{quiz_id}' (not a real UUID)")
+        return False
     try:
         await supabase.table("quiz_scores").update({"is_public": True}).eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
         return True
@@ -607,6 +625,9 @@ async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
         return False
 
 async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
+    if not _is_valid_uuid(quiz_id):
+        log_warning(logger, f"Skipping leaderboard fetch: invalid quiz_id '{quiz_id}' (not a real UUID)")
+        return []
     try:
         res = await supabase.table("quiz_scores") \
             .select("highest_score, total_questions, users(first_name, last_name)") \

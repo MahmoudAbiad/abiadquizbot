@@ -504,7 +504,9 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
             return
 
         # 🆕 استخراج المعرف الفريد (UUID) للكويز المولد حديثاً من السلسلة لتشغيل التقييمات بدقة
-        new_quiz_id = uuid.uuid4().hex[:12] # فولباك افتراضي
+        # ملاحظة: لا نولّد معرفاً وهمياً هنا، لأن عمود quiz_id في قاعدة البيانات أصبح uuid صارم.
+        # أي معرف وهمي (غير UUID حقيقي) سيتسبب بخطأ 22P02 عند محاولة حفظ/قراءة النتيجة.
+        new_quiz_id = None
         if is_media and file_hash:
             await asyncio.sleep(0.5) # مهلة زمنية للتأكد من اكتمال المعاملة على خوادم سوبابيس
             updated_quizzes = await get_file_quizzes(file_hash)

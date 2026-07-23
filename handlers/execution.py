@@ -1,5 +1,5 @@
 import asyncio
-from typing import Union
+from typing import Union, Optional
 import json
 
 from aiogram import Router, types, F
@@ -50,7 +50,7 @@ async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQu
     else:
         await call_or_message.answer(text, reply_markup=menu)
 
-async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: str = "") -> None:
+async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: Optional[str] = "") -> None:
     user_id = msg_or_call.from_user.id
     # 🆕 بدء تتبع محاولة الكويز بدون أي انتظار لقاعدة البيانات (Zero-latency)؛
     # المعرف يُنشأ فوراً محلياً والإدراج الفعلي يعمل بمهمة خلفية منفصلة
