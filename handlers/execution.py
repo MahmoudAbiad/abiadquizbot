@@ -64,7 +64,8 @@ async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQue
         total_count=len(quiz_data), source_title=source_title,
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
         is_saved_in_session=False, is_switching_question=False,
-        attempt_id=attempt_id
+        attempt_id=attempt_id,
+        share_id=None  # 🆕 تصفير أي share_id متبقٍّ من كويز سابق بنفس الجلسة، لضمان رمز مشاركة جديد ومستقل لكل كويز
     )
     await state.set_state(QuizState.answering_quiz)
     if isinstance(msg_or_call, types.CallbackQuery):
