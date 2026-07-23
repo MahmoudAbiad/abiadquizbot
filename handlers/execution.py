@@ -700,3 +700,47 @@ async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext)
         await call.answer()
 
 execution_router = router
+
+@router.callback_query(F.data == "force_stop_previous_quiz")
+async def force_stop_previous_quiz_handler(call: types.CallbackQuery, state: FSMContext):
+    """إيقاف الكويز السابق تلقائياً بحركة واحدة، مسح الحالة، وحذف رسالة التنبيه"""
+    try:
+        data = await state.get_data()
+        attempt_id = data.get("attempt_id")
+
+        if attempt_id:
+            asyncio.create_task(mark_quiz_attempt_stopped(attempt_id))
+
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_force_stopped", {
+            "quiz_id": data.get("quiz_id"),
+            "at_question": data.get("current_index")
+        }))
+
+        await state.clear()
+
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+
+        await call.message.answer(
+            "✅ <b>تم إيقاف الاختبار السابق بنجاح!</b>\n\n"
+            "يمكنك الآن إعادة إرسال الملف، الصورة، أو النص لتوليد كويز جديد فوراً. 🚀",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in force_stop_previous_quiz: {e}")
+        await call.answer("❌ حدث خطأ أثناء إيقاف الاختبار.", show_alert=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "delete_warning_msg")
+async def delete_warning_msg_handler(call: types.CallbackQuery):
+    """حذف رسالة التنبيه فقط إذا اختار الطالب الإغلاق"""
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    finally:
+        await call.answer()
