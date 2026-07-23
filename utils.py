@@ -51,3 +51,39 @@ def format_file_size(size_bytes: int) -> str:
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024.0
     return f"{size_bytes:.2f} TB"
+
+def extract_text_from_file(file_path: str) -> Optional[str]:
+    """استخراج النص الصافي من ملفات Word, PowerPoint, TXT"""
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext == ".txt":
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+
+        elif ext in [".docx", ".doc"]:
+            import docx
+            doc = docx.Document(file_path)
+            full_text = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+            # قراءة النصوص داخل الجداول أيضاً
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            full_text.append(cell.text.strip())
+            return "\n".join(full_text)
+
+        elif ext in [".pptx", ".ppt"]:
+            from pptx import Presentation
+            prs = Presentation(file_path)
+            text_runs = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        text_runs.append(shape.text.strip())
+            return "\n".join(text_runs)
+
+    except Exception as e:
+        logger.error(f"Error extracting text from {file_path}: {e}")
+        return None
+
+    return None

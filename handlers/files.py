@@ -28,23 +28,24 @@ from constants import (
     MSG_REQUEST_CANCELLED,
     MSG_SUPER_PROCESSING_ALERT,
     SUCCESS_MEDIA_RECEIVED,
-    PAGES_PER_QUIZ_RATIO,       # 🆕 الخوارزمية: نسبة الصفحات لكل كويز
-    MAX_FILE_QUIZZES_LIMIT,     # 🆕 الحد الأقصى المطلق للكويزات للملخص الواحد
-    MIN_QUIZZES_PER_FILE,       # 🆕 الحد الأدنى المضمون للملفات الصغيرة
-    MSG_MAX_QUIZZES_REACHED,    # 🆕 رسالة الوصول للحد الأقصى
+    PAGES_PER_QUIZ_RATIO,
+    MAX_FILE_QUIZZES_LIMIT,
+    MIN_QUIZZES_PER_FILE,
+    MSG_MAX_QUIZZES_REACHED,
 )
 from gemini_helper import generate_quiz_smart, get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from logger import get_logger, log_error
 from supabase_helper import (
     check_or_add_user,
-    get_file_quizzes,           # 🆕 جلب الكويزات المتعددة من الجدول المركزي
+    get_file_quizzes,
     refund_user_points,
     save_shared_quiz,
     update_user_stats,
-    log_usage_event,            # 🆕 تتبع أحداث الاستخدام (رفع محتوى، توليد، استخدام كاش)
+    log_usage_event,
 )
-from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup
+# 🟢 تم إضافة استيراد دالة استخراج النص من ملفات Word/PPT/TXT
+from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, extract_text_from_file
 from validators import validate_file_size, validate_question_count
 
 logger = get_logger(__name__)
@@ -53,7 +54,6 @@ DOWNLOADS_DIR = "downloads"
 processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
 
-# الحالات التي يوجد فيها "طلب معلّق" (ملف/صورة/نص بانتظار قرار المستخدم)
 PENDING_REQUEST_STATES = (QuizState.waiting_for_count, QuizState.waiting_for_cache_decision)
 
 def _combined_hash(paths: List[str]) -> str:
@@ -134,10 +134,6 @@ async def _download_photos(message: types.Message, photos: List[Dict[str, Any]])
 # ==================== Background Album Processor ====================
 
 async def process_album_background(message: types.Message, state: FSMContext):
-    """
-    مهمة خلفية (Background Task) للانتظار بصمت وتجميع الألبوم
-    دون تجميد استجابة السيرفر لتليجرام.
-    """
     try:
         await asyncio.sleep(1.5)
         
@@ -179,7 +175,6 @@ async def process_album_background(message: types.Message, state: FSMContext):
 # ==================== Common Finalization ====================
 
 async def _finalize_media_processing(message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int, is_album: bool, file_hash: str):
-    """المرحلة النهائية الموحدة لمعالجة الملفات والصور (للتحقق من الكاش المتعدد والحدود)"""
     try:
         content_type = "album" if is_album else ("photo" if len(file_paths) == 1 and file_paths[0].lower().endswith((".jpg", ".jpeg", ".png")) else "document")
         asyncio.create_task(log_usage_event(message.from_user.id, "content_uploaded", {
@@ -189,7 +184,6 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
             "file_hash": file_hash,
         }))
 
-        # 🆕 جلب قائمة كافة الكويزات المخزنة مسبقاً لهذا الهاش من الجدول المركزي المحسن
         cached_quizzes = await get_file_quizzes(file_hash)
         
         common_state = {
@@ -202,18 +196,15 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
         }
         
         if cached_quizzes:
-            # 🆕 خوارزمية احتساب الحد الأقصى للكويزات المسموحة بناءً على حجم صفحات الملف
             max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
             show_generate_btn = len(cached_quizzes) < max_allowed
             
-            # حساب تكلفة الكاش الافتراضية للكويز الأول المتوفر
             questions_count = len(cached_quizzes[0]["quiz_data"])
             cost = calculate_cached_points_cost(items, questions_count, is_album)
             
             await state.update_data(**common_state, available_quizzes=cached_quizzes, cache_cost=cost, max_allowed_quizzes=max_allowed)
             await state.set_state(QuizState.waiting_for_cache_decision)
             
-            # استدعاء لوحة المفاتيح المحدثة لعرض الخيارات المتعددة للطلاب وقفل التوليد إن لزم
             from keyboards import get_multiple_quizzes_keyboard
             keyboard = get_multiple_quizzes_keyboard(cached_quizzes, cost, show_generate_btn=show_generate_btn)
             
@@ -357,7 +348,6 @@ async def handle_cancel_command(message: types.Message, state: FSMContext) -> No
     await message.answer(MSG_REQUEST_CANCELLED)
 
 
-# 🆕 معالج تشغيل أحد الكويزات الجاهزة المتعددة المخزنة بالجدول المركزي
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data.startswith("use_multi_"))
 async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMContext) -> None:
     try:
@@ -418,7 +408,6 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
     is_album = bool(data.get("is_album"))
     file_hash = data.get("file_hash")
     
-    # 🆕 جدار حماية خلفي لمنع التلاعب البرمجي وتجاوز الحد الأقصى للملف الواحد
     if file_hash:
         current_quizzes = await get_file_quizzes(file_hash)
         max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
@@ -474,11 +463,31 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
         data = await state.get_data()
         is_media = data.get("input_type") == "media"
         file_hash = data.get("file_hash")
-        
-        # 🆕 ميزة منع التكرار: سحب الأسئلة السابقة وتمريرها لحقنها في الـ Prompt لقمع التشابه
+        file_paths = data.get("file_paths", []) or []
+        pure_text = data.get("pure_text")
+
+        # 🟢 [تحديث حيوي]: فحص استخراج النص محلياً لملفات Word / PPTX / TXT قبل التوليد
+        if is_media and file_paths:
+            first_path = file_paths[0]
+            ext = os.path.splitext(first_path)[1].lower()
+            if ext in [".docx", ".doc", ".pptx", ".ppt", ".txt"]:
+                extracted_text = await asyncio.to_thread(extract_text_from_file, first_path)
+                if extracted_text and len(extracted_text.strip()) >= 30:
+                    pure_text = extracted_text
+                    is_media = False  # تحويل المسار لتوليد نصي مباشر لتفادي رفع الملف وتفادي خطأ MIME
+                else:
+                    await _refund_after_failure(user_id, data)
+                    await state.set_state(None)
+                    await status_message.edit_text(
+                        "⚠️ <b>تعذر استخراج نص مفيد من المستند!</b>\n\nيرجى التأكد من أن ملف Word/PowerPoint يحتوي على نصوص قابلة للقراءة وليس صوراً فقط. تم إرجاع نقاطك بالكامل.",
+                        parse_mode="HTML"
+                    )
+                    return
+
+        # ميزة منع التكرار: سحب الأسئلة السابقة وتمريرها لحقنها في الـ Prompt
         previous_questions = []
         existing_uuids = set()
-        if is_media and file_hash:
+        if file_hash:
             old_quizzes = await get_file_quizzes(file_hash)
             for qz in old_quizzes:
                 existing_uuids.add(str(qz["id"]))
@@ -486,13 +495,13 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
                     previous_questions.extend(qz["quiz_data"])
                     
         quiz_data = await generate_quiz_smart(
-            file_paths=data.get("file_paths") if is_media else None,
-            pure_text=data.get("pure_text") if not is_media else None,
+            file_paths=file_paths if is_media else None,
+            pure_text=pure_text if not is_media else None,
             count=count,
             skip_cache=True,
             file_hash=file_hash,
             status_message=status_message,
-            previous_questions=previous_questions if previous_questions else None, # مرر القائمة هنا
+            previous_questions=previous_questions if previous_questions else None,
         )
         if not quiz_data:
             await _refund_after_failure(user_id, data)
@@ -503,16 +512,13 @@ async def _run_quiz_flow(message: types.Message, user_id: int, count: int, state
             )
             return
 
-        # 🆕 استخراج المعرف الفريد (UUID) للكويز المولد حديثاً من السلسلة لتشغيل التقييمات بدقة
-        # ملاحظة: لا نولّد معرفاً وهمياً هنا، لأن عمود quiz_id في قاعدة البيانات أصبح uuid صارم.
-        # أي معرف وهمي (غير UUID حقيقي) سيتسبب بخطأ 22P02 عند محاولة حفظ/قراءة النتيجة.
         new_quiz_id = None
-        if is_media and file_hash:
-            await asyncio.sleep(0.5) # مهلة زمنية للتأكد من اكتمال المعاملة على خوادم سوبابيس
+        if file_hash:
+            await asyncio.sleep(0.5)
             updated_quizzes = await get_file_quizzes(file_hash)
             for uq in updated_quizzes:
                 if str(uq["id"]) not in existing_uuids:
-                    new_quiz_id = str(uq["id"]) # هذا هو الـ UUID الصحيح المولد من الداتا بيز
+                    new_quiz_id = str(uq["id"])
                     break
 
         asyncio.create_task(log_usage_event(user_id, "quiz_generated", {
