@@ -39,7 +39,11 @@ DOWNLOADS_DIR = "downloads"
 processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
 
-PENDING_REQUEST_STATES = (QuizState.waiting_for_count, QuizState.waiting_for_cache_decision, QuizState.waiting_for_generation_confirm)
+PENDING_REQUEST_STATES = (
+    QuizState.waiting_for_count, 
+    QuizState.waiting_for_cache_decision, 
+    QuizState.waiting_for_generation_confirm
+)
 
 def _cancel_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]])
@@ -49,6 +53,10 @@ async def _discard_pending_upload(state: FSMContext) -> int:
     file_paths = data.get("file_paths", []) or []
     removed = sum(1 for path in file_paths if safe_file_cleanup(path))
     return removed
+
+async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> None:
+    if user_info.get("status") == "renewed":
+        await message.answer(f"☀️ تم تجديد رصيدك اليومي إلى <b>{DAILY_RENEWAL_POINTS} نقطة مجانية</b>.", parse_mode="HTML")
 
 async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float) -> None:
     balance = float(user_info.get("points") or 0)
@@ -228,7 +236,58 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     await state.set_state(QuizState.waiting_for_count)
     await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
 
-# 🆕 === المعالج المسترد لإدخال عدد الأسئلة ===
+# ==================== معالجات قرار الكاش والأزرار المتعددة ====================
+
+@router.callback_query(QuizState.waiting_for_cache_decision, F.data.startswith("use_multi_"))
+async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMContext) -> None:
+    """معالج تشغيل أحد الكويزات الجاهزة المخزنة بالجدول المركزي"""
+    try:
+        quiz_uuid = call.data.replace("use_multi_", "")
+        data = await state.get_data()
+        cost = float(data.get("cache_cost", 0))
+        
+        user_info = await _current_user(call.message, call.from_user)
+        await _renewal_notice(call.message, user_info)
+        
+        available_quizzes = data.get("available_quizzes", [])
+        selected_quiz = next((q for q in available_quizzes if str(q["id"]) == quiz_uuid), None)
+        if not selected_quiz:
+            await call.answer("❌ عذراً، لم نتمكن من جلب الكويز المختار.", show_alert=True)
+            return
+            
+        if float(user_info["points"]) < cost:
+            await _insufficient_balance(call.message, user_info, cost)
+            return
+            
+        remaining = await update_user_stats(call.from_user.id, cost, len(selected_quiz["quiz_data"]))
+        if remaining is None:
+            await _insufficient_balance(call.message, await _current_user(call.message, call.from_user), cost)
+            return
+            
+        asyncio.create_task(log_usage_event(call.from_user.id, "cached_quiz_used", {
+            "quiz_id": quiz_uuid, "cost": cost,
+        }))
+
+        from handlers.quiz_runner import _start_loaded_quiz
+        await _start_loaded_quiz(call.message, state, selected_quiz["quiz_data"], data.get("source_title", "كويز"), origin="cached_file", quiz_id=quiz_uuid)
+        
+        for path in data.get("file_paths", []):
+            safe_file_cleanup(path)
+    except Exception as exc:
+        log_error(logger, f"Multi-cached selection trigger failed: {exc}", exception=exc)
+        await call.message.answer("❌ تعذر بدء تشغيل الاختبار المخزّن.")
+    finally:
+        await call.answer()
+
+@router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
+async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
+    """في حال رفض الكاش ورغبة الطالب بتوليد كويز جديد كلياً"""
+    await state.set_state(QuizState.waiting_for_count)
+    await call.message.edit_text("📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
+    await call.answer()
+
+# ==================== معالجات تحديد الأسئلة والتأكيد ====================
+
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
 async def process_count(message: types.Message, state: FSMContext) -> None:
     """معالج إدخال عدد الأسئلة المطلوبة والتحقق من التكلفة وإظهار رسالة التأكيد"""
