@@ -270,10 +270,10 @@ def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_active_quiz_warning_keyboard() -> types.InlineKeyboardMarkup:
-    """لوحة تنبيه تفاعلية تتيح للطالب إيقاف الكويز القائم فوراً أو إغلاق التنبيه"""
-    kb = [
-        [types.InlineKeyboardButton(text="⏹️ إيقاف الاختبار السابق والبدء من جديد", callback_data="force_stop_previous_quiz")],
-        [types.InlineKeyboardButton(text="❌ إغلاق التنبيه", callback_data="delete_warning_msg")]
-    ]
-    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+# def get_active_quiz_warning_keyboard() -> types.InlineKeyboardMarkup:
+#     """لوحة تنبيه تفاعلية تتيح للطالب إيقاف الكويز القائم فوراً أو إغلاق التنبيه"""
+#     kb = [
+#         [types.InlineKeyboardButton(text="⏹️ إيقاف الاختبار السابق والبدء من جديد", callback_data="force_stop_previous_quiz")],
+#         [types.InlineKeyboardButton(text="❌ إغلاق التنبيه", callback_data="delete_warning_msg")]
+#     ]
+#     return types.InlineKeyboardMarkup(inline_keyboard=kb)
