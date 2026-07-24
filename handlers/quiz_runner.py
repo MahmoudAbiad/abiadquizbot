@@ -297,28 +297,17 @@ async def quiz_home(call: types.CallbackQuery, state: FSMContext):
 async def handle_ignored_click(call: types.CallbackQuery):
     await call.answer("✅ تم تسجيل إجابتك")
 
-@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "quiz_share")
-async def handle_inline_quiz_share(call: types.CallbackQuery, state: FSMContext):
-    try:
-        bot_info = await bot.get_me()
-        data = await state.get_data()
-        quiz_id = data.get("quiz_id", "")
-        title = data.get("source_title", "اختبار مميز")
-        
-        start_param = f"quiz_{quiz_id}" if quiz_id else f"start_{call.from_user.id}"
-        share_text = f"🎯 جرب حل كويز «{title}» وتحدى نفسك معي في الدراسة!"
-        share_url = f"https://t.me/share/url?url=https://t.me/{bot_info.username}?start={start_param}&text={share_text}"
-        
-        share_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🚀 شارك هذا الكويز الآن", url=share_url)]
-        ])
-        
-        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_shared", {"quiz_id": quiz_id}))
-        await call.message.answer(f"🔗 يمكنك مشاركة كويز «{title}» مع أصدقائك عبر الضغط على الزر أدناه:", reply_markup=share_kb)
-    except Exception as e:
-        log_error(logger, f"Error in handle_inline_quiz_share: {e}", exception=e)
-    finally:
-        await call.answer()
+# ملاحظة: زر "🔗 مشاركة" (callback_data == "quiz_share") — سواء أثناء الكويز
+# (get_quiz_question_keyboard / get_quiz_answered_keyboard) أو بعد انتهائه
+# (get_quiz_result_keyboard) — تتم معالجته حصرياً من handlers/sharing.py الآن.
+# كان هنا سابقاً هاندلر مواز مقيّد بحالة الكويز النشطة (ACTIVE_QUIZ_STATES) وكان
+# يعترض الضغطة قبل أن تصل لـ sharing.py، وكان يبني رابط deep-link بصيغة
+# "quiz_<quiz_id>" باستخدام الـ UUID المركزي مباشرة — وهذا الرابط لا يُحل بنجاح:
+# start.py يبحث أولاً في جدول المفضلة (favorite_id) ثم في جدول المشاركات
+# (share_id)، وأيّهما لا يطابق UUID الكويز المركزي الخام. أي أن أي مشاركة أثناء
+# حل الكويز (قبل شاشة النتيجة) كانت تنتج رابطاً معطلاً لا يعمل عند فتحه. الحذف
+# هنا يضمن إن كل ضغطة "مشاركة" — بأي توقيت — تمر عبر share_quiz في sharing.py
+# اللي بينشئ share_id حقيقي محفوظ بقاعدة البيانات ويعمل فعلياً.
 
 # ==================== معالجات التقييم والملاحظات ====================
 

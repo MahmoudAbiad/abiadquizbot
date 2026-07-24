@@ -15,9 +15,15 @@ from supabase_helper import (
 )
 from keyboards import get_analytics_keyboard, get_admin_dashboard_keyboard
 from logger import get_logger
+from .dashboard import IsAdminFilter
 
 logger = get_logger(__name__)
 router = Router()
+
+# 🔒 حماية أمنية: هذا الراوتر كان بدون فلتر أدمن، ما يعني أن أي مستخدم
+# قادر يستدعي أوامر التحليلات والتصدير عبر إرسال callback_data مباشرة.
+router.message.filter(IsAdminFilter())
+router.callback_query.filter(IsAdminFilter())
 
 QUIZZES_PAGE_SIZE = 4  # عدد الكويزات المعروضة في الصفحة الواحدة
 
