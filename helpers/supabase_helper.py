@@ -977,7 +977,7 @@ async def admin_get_today_quizzes():
     """جلب الكويزات التي تم توليدها اليوم (آخر 24 ساعة) مع معلومات الطالب."""
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
-    since_time = (now - datetime.timedelta(hours=24)).isoformat()
+    since_time = (now - datetime.timedelta(hours=72)).isoformat()
     
     # استعلام جلب الكويزات وربطها ببيانات المستخدم
     res = await supabase.table("quizzes") \
