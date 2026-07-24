@@ -43,18 +43,13 @@ def user_total_points(user: dict) -> float:
 
 
 async def fetch_users_async():
-    """جلب سجل الطلاب المسجلين مرتبين من الأحدث مع التعامل الآمن مع اسم العمود."""
+    """جلب سجل الطلاب المسجلين مرتبين من الأحدث بناءً على joined_at."""
     try:
-        res = await supabase.table("users").select("*").order("created_at", desc=True).execute()
+        res = await supabase.table("users").select("*").order("joined_at", desc=True).execute()
         return res.data or []
     except Exception as e:
-        logger.warning(f"Failed to order by created_at, trying fallback: {e}")
-        try:
-            res = await supabase.table("users").select("*").execute()
-            return res.data or []
-        except Exception as err:
-            logger.error(f"Error fetching users: {err}")
-            return []
+        logger.error(f"Error fetching users: {e}")
+        return []
 
 
 async def send_points_notification(target_id: int, amount: int, new_balance: int):
