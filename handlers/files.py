@@ -232,6 +232,11 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         await message.answer(f"❌ الحد الأقصى للنص المباشر هو {MAX_TEXT_INPUT_SIZE} حرفاً.")
         return
 
+    # إصلاح التتبع: تسجيل حدث رفع النص المباشر
+    asyncio.create_task(log_usage_event(message.from_user.id, "content_uploaded", {
+        "content_type": "text", "text_length": len(text)
+    }))
+
     await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
     await state.set_state(QuizState.waiting_for_count)
     await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
@@ -241,7 +246,6 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data.startswith("use_multi_"))
 async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMContext) -> None:
     """معالج تشغيل أحد الكويزات الجاهزة المخزنة بالجدول المركزي"""
-    # نؤكد استلام الضغطة فورًا؛ لا نستدعي call.answer() مرة أخرى لاحقًا بهذه الدالة
     await call.answer()
     try:
         quiz_uuid = call.data.replace("use_multi_", "")
@@ -319,6 +323,11 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
         await _insufficient_balance(message, user_info, cost)
         return
 
+    # إصلاح التتبع: تسجيل حدث طلب التوليد
+    asyncio.create_task(log_usage_event(message.from_user.id, "quiz_generation_requested", {
+        "requested_count": count, "items_count": items, "cost": cost, "mode": mode
+    }))
+
     await state.update_data(calculated_cost=cost, requested_count=count, execution_mode=mode)
     await state.set_state(QuizState.waiting_for_generation_confirm)
 
@@ -350,6 +359,10 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
         if current_state not in PENDING_REQUEST_STATES:
             await call.answer(MSG_NOTHING_TO_CANCEL, show_alert=True)
             return
+        
+        # إصلاح التتبع: تسجيل حدث إلغاء الطلب
+        asyncio.create_task(log_usage_event(call.from_user.id, "request_cancelled", {"cancelled_from_state": str(current_state)}))
+        
         await _discard_pending_upload(state)
         await state.clear()
         try:
@@ -363,8 +376,6 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
 
 @router.callback_query(QuizState.waiting_for_generation_confirm, F.data == "confirm_quiz_generation")
 async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMContext) -> None:
-    # نؤكد استلام الضغطة فورًا قبل أي عملية بطيئة (توليد الكويز عبر الـ AI قد يأخذ أكثر من 15 ثانية،
-    # وتيليجرام يلغي صلاحية الـ callback query بعد هذه المدة إن لم يُرد عليه)
     await call.answer()
     try:
         data = await state.get_data()
@@ -395,6 +406,11 @@ async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMCo
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
             return
 
+        # إصلاح التتبع: تسجيل نجاح توليد الكويز الفعلي
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generated", {
+            "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost
+        }))
+
         from handlers.quiz_runner import _start_loaded_quiz
         await _start_loaded_quiz(call.message, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
@@ -403,7 +419,6 @@ async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMCo
         log_error(logger, f"Confirm quiz generation failed: {exc}", exception=exc)
         await refund_user_on_failure(call.from_user.id, await state.get_data())
         await state.set_state(None)
-        # ملاحظة: تم الرد على الـ callback query مسبقًا بالأعلى، لذا نستخدم رسالة عادية بدل call.answer(show_alert=True)
         await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً.")
     finally:
         for path in (await state.get_data()).get("file_paths", []):

@@ -1,6 +1,8 @@
+# handlers/sharing.py
 import asyncio
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
 
 from config import bot
 from supabase_helper import create_shared_quiz_id, save_shared_quiz, get_shared_quiz, log_usage_event
@@ -41,8 +43,8 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
         share_link = f"https://t.me/{bot_info.username}?start=share_{share_id}"
         old_style_text = (
             "تم إنشاء رابط مشاركة الكويز\n\n"
-            f"{share_link}\n"
-            "يمكنك مشاركته"
+            f"{share_link}\n\n"
+            "يمكنك مشاركته مع زملائك بسهولة! 🚀"
         )
         
         asyncio.create_task(log_usage_event(call.from_user.id, "share_link_created", {"share_id": share_id}))
@@ -52,7 +54,10 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
         log_error(logger, f"Error in share_quiz: {e}", exception=e)
         await call.answer("❌ حدث خطأ أثناء إنشاء رابط المشاركة", show_alert=True)
     finally:
-        await call.answer()
+        try:
+            await call.answer()
+        except TelegramBadRequest:
+            pass
 
 @router.callback_query(F.data.startswith("share_load_"))
 async def open_shared_quiz(call: types.CallbackQuery, state: FSMContext):
@@ -78,4 +83,9 @@ async def open_shared_quiz(call: types.CallbackQuery, state: FSMContext):
         log_error(logger, f"Error in open_shared_quiz: {e}", exception=e)
         await call.answer("❌ تعذر فتح الكويز المشترك", show_alert=True)
     finally:
-        await call.answer()
+        try:
+            await call.answer()
+        except TelegramBadRequest:
+            pass
+
+sharing_router = router
