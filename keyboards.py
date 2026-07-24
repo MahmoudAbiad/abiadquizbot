@@ -228,11 +228,18 @@ def get_pagination_keyboard(current_page: int, total_pages: int, query: str) -> 
 # ==================== Admin Keyboards ====================
 
 def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
+    """لوحة تحكم الإدارة الرئيسية محدثة مع زر الإرسال الجماعي واستعراض الطلاب والكويزات والنشطين"""
     kb = [
-        [types.InlineKeyboardButton(text="🔍 بحث عن مستخدم", callback_data="admin_search_prompt")],
+        [types.InlineKeyboardButton(text="📢 إرسال رسالة جماعية", callback_data="admin_broadcast_prompt")],
+        [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
+        [types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1")],
+        [
+            types.InlineKeyboardButton(text="⚡ الطلاب النشطون اليوم", callback_data="admin_analytics_today"),
+            types.InlineKeyboardButton(text="🎯 كويزات اليوم", callback_data="admin_today_quizzes_p_1")
+        ],
         [
             types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
-            types.InlineKeyboardButton(text="📥 تصدير الطلاب", callback_data="admin_export_users")
+            types.InlineKeyboardButton(text="📥 تصدير CSV", callback_data="admin_export_users")
         ],
         [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
@@ -244,27 +251,25 @@ def get_admin_user_actions_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="💰 شحن رصيد الطالب", callback_data=f"admin_charge_menu_{user_id}")],
         [types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}")],
-        [types.InlineKeyboardButton(text="🔙 رجوع للوحة", callback_data="admin_cancel")]
+        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
     kb = [
         [
+            types.InlineKeyboardButton(text="➕ 10 نقاط", callback_data=f"admin_charge_quick_10_{user_id}"),
             types.InlineKeyboardButton(text="➕ 50 نقطة", callback_data=f"admin_charge_quick_50_{user_id}"),
             types.InlineKeyboardButton(text="➕ 100 نقطة", callback_data=f"admin_charge_quick_100_{user_id}")
         ],
-        [
-            types.InlineKeyboardButton(text="➕ 500 نقطة", callback_data=f"admin_charge_quick_500_{user_id}")
-        ],
         [types.InlineKeyboardButton(text="✍️ إدخال كمية يدوياً", callback_data=f"admin_charge_manual_{user_id}")],
-        [types.InlineKeyboardButton(text="🔙 إلغاء والرجوع", callback_data="admin_cancel")]
+        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
-        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_cancel")]
+        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 

@@ -92,7 +92,8 @@ async def set_bot_commands(bot_instance: Bot):
                 types.BotCommand(command="charge", description="💰 شحن نقاط لطالب"),
                 types.BotCommand(command="dbstats", description="📊 إحصائيات قاعدة البيانات"),
                 types.BotCommand(command="searchuser", description="🔍 فحص بيانات طالب"),
-                types.BotCommand(command="fetchall", description="👥 استعراض جميع الطلاب")
+                types.BotCommand(command="fetchall", description="👥 استعراض جميع الطلاب"),
+                types.BotCommand(command="admin", description="⚙️ لوحة تحكم الإدارة"),
             ]
             await bot_instance.set_my_commands(
                 admin_commands,

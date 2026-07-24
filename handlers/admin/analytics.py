@@ -6,10 +6,10 @@ from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest
 
 from supabase_helper import (
-    admin_get_global_stats,
     admin_get_usage_overview,
     admin_get_daily_active_users,
     admin_get_today_active_users,
+    admin_get_today_quizzes,  # 🆕 استيراد دالة جلب كويزات اليوم
     admin_get_user_activity,
     admin_get_all_usage_events
 )
@@ -18,6 +18,8 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 router = Router()
+
+QUIZZES_PAGE_SIZE = 4  # عدد الكويزات المعروضة في الصفحة الواحدة
 
 EVENT_LABELS = {
     "bot_start": "▶️ تشغيل البوت",
@@ -71,7 +73,7 @@ async def show_today_active_users_handler(call: types.CallbackQuery):
         report_lines = []
         for idx, u in enumerate(active_users, 1):
             username_str = f"@{u['username']}" if u.get("username") and u['username'] != "Unknown" else "بدون يوزر"
-            name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+            name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or "بدون اسم"
             event_desc = EVENT_LABELS.get(u['last_event'], u['last_event'])
             
             report_lines.append(
@@ -92,6 +94,76 @@ async def show_today_active_users_handler(call: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error rendering 24h active users: {e}")
         await call.answer("❌ تعذر جلب قائمة النشطين.", show_alert=True)
+
+# 🎯 معالج عرض الكويزات التي تم توليدها اليوم حصراً مع خيار التجربة والتصفح
+@router.callback_query(F.data.startswith("admin_today_quizzes_p_"))
+async def show_today_quizzes_handler(call: types.CallbackQuery):
+    try:
+        page = int(call.data.replace("admin_today_quizzes_p_", "", 1))
+        quizzes = await admin_get_today_quizzes()
+        
+        if not quizzes:
+            await call.answer("📭 لم يتم توليد أي كويزات جديدة اليوم حتى الآن.", show_alert=True)
+            return
+
+        total = len(quizzes)
+        total_pages = max(1, -(-total // QUIZZES_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+
+        start_idx = (page - 1) * QUIZZES_PAGE_SIZE
+        end_idx = start_idx + QUIZZES_PAGE_SIZE
+        page_quizzes = quizzes[start_idx:end_idx]
+
+        report_lines = []
+        kb = []
+
+        for idx, q in enumerate(page_quizzes, start=start_idx + 1):
+            quiz_id = q["id"]
+            title = q.get("source_title") or "كويز بدون عنوان"
+            time_str = str(q.get("created_at", ""))[:16].replace("T", " ")
+            
+            student = q.get("users") or {}
+            user_id = q.get("user_id") or student.get("user_id", "غير معروف")
+            username = f"@{student['username']}" if student.get("username") and student['username'] != "Unknown" else "بدون يوزر"
+            name = f"{student.get('first_name', '')} {student.get('last_name', '')}".strip() or "بدون اسم"
+
+            report_lines.append(
+                f"<b>{idx}. {title}</b>\n"
+                f" ┣ 👤 الطالب: <b>{name}</b> ({username})\n"
+                f" ┣ 🆔 الآيدي: <code>{user_id}</code>\n"
+                f" ┗ 🕒 الوقت: <code>{time_str}</code>\n"
+                f"───────────────────"
+            )
+
+            # زر تجربة الكويز مباشرة باستخدام callback_data الموجود في feedbacks.py
+            kb.append([types.InlineKeyboardButton(
+                text=f"🎯 تجربة #{idx}: {title[:25]}",
+                callback_data=f"afb_try_{quiz_id}"
+            )])
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"admin_today_quizzes_p_{page - 1}"))
+        if page < total_pages:
+            nav_row.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"admin_today_quizzes_p_{page + 1}"))
+        if nav_row:
+            kb.append(nav_row)
+
+        kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+
+        text = (
+            f"🎯 <b>الكويزات المُولدة اليوم (الصفحة {page}/{total_pages})</b>\n"
+            f"👥 الإجمالي: <code>{total}</code> كويز\n"
+            f"───────────────────\n\n" +
+            "\n".join(report_lines)
+        )
+
+        await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+        await call.answer()
+
+    except Exception as e:
+        logger.error(f"Error rendering today quizzes: {e}")
+        await call.answer("❌ تعذر جلب قائمة كويزات اليوم.", show_alert=True)
 
 @router.callback_query(F.data.regexp(r"^admin_analytics_(7|30|90)$"))
 async def show_usage_analytics(call: types.CallbackQuery):
