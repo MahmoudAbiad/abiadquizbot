@@ -981,7 +981,7 @@ async def admin_get_today_quizzes():
     
     # استعلام جلب الكويزات وربطها ببيانات المستخدم
     res = await supabase.table("quizzes") \
-        .select("id, source_title, created_at, user_id, users(user_id, username, first_name, last_name)") \
+        .select("id, source_title, created_at, creator_id, users!quizzes_creator_id_fkey(user_id, username, first_name, last_name)") \
         .gte("created_at", since_time) \
         .order("created_at", desc=True) \
         .execute()
