@@ -3,7 +3,9 @@ import asyncio
 import io
 import csv
 from typing import Optional, Dict
-
+from datetime import datetime, timezone, timedelta
+from constants import SYRIA_TZ, USER_QUIZZES_PAGE_SIZE
+from supabase_helper import admin_get_user_quizzes
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -438,3 +440,80 @@ async def export_all_users(call: types.CallbackQuery):
             await safe_edit_text(call.message, "❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
         except TelegramBadRequest:
             await call.message.answer("❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
+
+def format_syria_time(iso_str: str) -> str:
+    """تحويل توقيت قاعدة البيانات إلى توقيت سوريا (12 ساعة بتنسيق صباحاً/مساءً)."""
+    if not iso_str:
+        return "غير معروف"
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace('Z', '+00:00'))
+        dt_syria = dt.astimezone(SYRIA_TZ)
+        return dt_syria.strftime("%Y-%m-%d %I:%M %p")
+    except Exception:
+        return str(iso_str)[:16].replace("T", " ")
+
+@router.callback_query(F.data.startswith("admin_user_quizzes_"))
+async def show_user_quizzes_handler(call: types.CallbackQuery):
+    try:
+        # استخراج آيدي الطالب ورقم الصفحة من الـ callback_data
+        parts = call.data.split("_")
+        target_id = int(parts[3])
+        page = int(parts[5])
+
+        offset = (page - 1) * USER_QUIZZES_PAGE_SIZE
+        quizzes, total = await admin_get_user_quizzes(creator_id=target_id, limit=USER_QUIZZES_PAGE_SIZE, offset=offset)
+
+        if not quizzes or total == 0:
+            await call.answer("📭 هذا الطالب لم يقم بتوليد أي كويزات بعد.", show_alert=True)
+            return
+
+        total_pages = max(1, -(-total // USER_QUIZZES_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+
+        report_lines = []
+        kb = []
+
+        for idx, q in enumerate(quizzes, start=offset + 1):
+            quiz_id = q["id"]
+            title = q.get("source_title") or "كويز بدون عنوان"
+            time_syria = format_syria_time(q.get("created_at"))
+            likes = q.get("likes", 0)
+            dislikes = q.get("dislikes", 0)
+
+            report_lines.append(
+                f"<b>{idx}. {title}</b>\n"
+                f" ┣ 🕒 التاريخ (توقيت سوريا): <code>{time_syria}</code>\n"
+                f" ┗ 👍 {likes} | 👎 {dislikes}\n"
+                f"───────────────────"
+            )
+
+            # زر مباشر لتجربة الكويز
+            kb.append([types.InlineKeyboardButton(
+                text=f"🎯 تجربة #{idx}: {title[:22]}",
+                callback_data=f"afb_try_{quiz_id}"
+            )])
+
+        # أزرار التنقل (السابق / التالي)
+        nav_row = []
+        if page > 1:
+            nav_row.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"admin_user_quizzes_{target_id}_p_{page - 1}"))
+        if page < total_pages:
+            nav_row.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"admin_user_quizzes_{target_id}_p_{page + 1}"))
+        if nav_row:
+            kb.append(nav_row)
+
+        kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+
+        text = (
+            f"🎯 <b>الكويزات المُولدة بواسطة الطالب (<code>{target_id}</code>)</b>\n"
+            f"📄 الصفحة {page} من أصل {total_pages} (الإجمالي: <code>{total}</code> كويز)\n"
+            f"───────────────────\n\n" +
+            "\n".join(report_lines)
+        )
+
+        await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+        await call.answer()
+
+    except Exception as e:
+        logger.error(f"Error rendering user quizzes: {e}")
+        await call.answer("❌ تعذر جلب كويزات هذا الطالب.", show_alert=True)

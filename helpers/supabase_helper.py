@@ -987,3 +987,23 @@ async def admin_get_today_quizzes():
         .execute()
         
     return res.data or []
+
+async def admin_get_user_quizzes(creator_id: int, limit: int = 5, offset: int = 0):
+    """جلب الكويزات الخاصة بطالب محدد مرتبة من الأحدث إلى الأقدم مع التصفح."""
+    # جلب العدد الإجمالي للكويزات
+    count_res = await supabase.table("quizzes") \
+        .select("id", count="exact") \
+        .eq("creator_id", creator_id) \
+        .execute()
+    
+    total = count_res.count or 0
+
+    # جلب قائمة الكويزات لهذه الصفحة
+    res = await supabase.table("quizzes") \
+        .select("id, source_title, created_at, likes, dislikes") \
+        .eq("creator_id", creator_id) \
+        .order("created_at", desc=True) \
+        .range(offset, offset + limit - 1) \
+        .execute()
+
+    return res.data or [], total
