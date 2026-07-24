@@ -150,7 +150,7 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
         for idx, q in enumerate(page_quizzes, start=start_idx + 1):
             quiz_id = q["id"]
             title = q.get("source_title") or "كويز بدون عنوان"
-            time_str = str(q.get("created_at", ""))[:16].replace("T", " ")
+            time_str = q.get("time_str") or str(q.get("created_at", ""))[:16].replace("T", " ")
             
             student = q.get("users") or {}
             user_id = q.get("creator_id") or student.get("user_id", "غير معروف")

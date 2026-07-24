@@ -946,18 +946,49 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
 
 
 async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
-    """جلب الكويزات التي تم توليدها اليوم (آخر 72 ساعة) مع معلومات الطالب."""
+    """جلب الكويزات التي تم توليدها خلال الـ 24 ساعة الأخيرة حصراً مع معلومات الطالب والتوقيت المحلي."""
     try:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        since_time = (now - datetime.timedelta(hours=72)).isoformat()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        twenty_four_hours_ago = (now_utc - datetime.timedelta(hours=24)).isoformat()
         
+        # 1. جلب كويزات الـ 24 ساعة الأخيرة فقط
         res = await supabase.table("quizzes") \
-            .select("id, source_title, created_at, creator_id, users!quizzes_creator_id_fkey(user_id, username, first_name, last_name)") \
-            .gte("created_at", since_time) \
+            .select("id, source_title, created_at, creator_id") \
+            .gte("created_at", twenty_four_hours_ago) \
             .order("created_at", desc=True) \
             .execute()
             
-        return res.data or []
+        quizzes = res.data or []
+        if not quizzes:
+            return []
+
+        # 2. جلب بيانات الطلاب المنشئين بطلب آمن (بدون الاعتماد على اسم Foreign Key صريح)
+        creator_ids = list({q["creator_id"] for q in quizzes if q.get("creator_id")})
+        users_map = {}
+        if creator_ids:
+            users_res = await supabase.table("users") \
+                .select("user_id, username, first_name, last_name") \
+                .in_("user_id", creator_ids) \
+                .execute()
+            users_map = {u["user_id"]: u for u in (users_res.data or [])}
+
+        # 3. دمج البيانات وتحويل التوقيت إلى توقيت سوريا (UTC+3)
+        syria_tz = datetime.timezone(datetime.timedelta(hours=3))
+        for q in quizzes:
+            cid = q.get("creator_id")
+            q["users"] = users_map.get(cid, {})
+            
+            if q.get("created_at"):
+                try:
+                    raw_dt = datetime.datetime.fromisoformat(str(q["created_at"]).replace("Z", "+00:00"))
+                    syria_dt = raw_dt.astimezone(syria_tz)
+                    q["time_str"] = syria_dt.strftime("%I:%M %p (%Y-%m-%d)").replace("AM", "ص").replace("PM", "م")
+                except Exception:
+                    q["time_str"] = str(q["created_at"])[:16].replace("T", " ")
+            else:
+                q["time_str"] = "غير معروف"
+
+        return quizzes
     except Exception as e:
         log_error(logger, f"Error fetching today quizzes: {e}")
         return []
