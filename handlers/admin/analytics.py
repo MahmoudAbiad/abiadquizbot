@@ -10,7 +10,7 @@ from supabase_helper import (
     admin_get_usage_overview,
     admin_get_daily_active_users,
     admin_get_today_active_users,
-    admin_get_today_quizzes,  # 🆕 استيراد دالة جلب كويزات اليوم
+    admin_get_today_quizzes,
     admin_get_user_activity,
     admin_get_all_usage_events
 )
@@ -21,12 +21,12 @@ from .dashboard import IsAdminFilter
 logger = get_logger(__name__)
 router = Router()
 
-# 🔒 حماية أمنية: هذا الراوتر كان بدون فلتر أدمن، ما يعني أن أي مستخدم
-# قادر يستدعي أوامر التحليلات والتصدير عبر إرسال callback_data مباشرة.
+# 🔒 حماية أمنية للراوتر
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
 
-QUIZZES_PAGE_SIZE = 4  # عدد الكويزات المعروضة في الصفحة الواحدة
+QUIZZES_PAGE_SIZE = 4      # عدد الكويزات المعروضة في الصفحة الواحدة
+TODAY_USERS_PAGE_SIZE = 5  # عدد الطلاب النشطين المعروضين في الصفحة الواحدة
 
 EVENT_LABELS = {
     "bot_start": "▶️ تشغيل البوت",
@@ -67,18 +67,29 @@ async def safe_edit_text(message: types.Message, text: str, reply_markup=None):
     except TelegramBadRequest:
         pass
 
-# ⚡ معالج عرض الطلاب النشطين خلال الـ 24 ساعة الأخيرة (بتوقيت سوريا)
-@router.callback_query(F.data == "admin_analytics_today")
+# ⚡ 1. معالج عرض الطلاب النشطين خلال الـ 24 ساعة الأخيرة مصفحاً (بتوقيت سوريا)
+@router.callback_query(F.data.startswith("admin_analytics_today"))
 async def show_today_active_users_handler(call: types.CallbackQuery):
     try:
+        page = 1
+        if "_p_" in call.data:
+            page = int(call.data.split("_p_")[1])
+
         active_users = await admin_get_today_active_users()
         if not active_users:
             await call.answer("📭 لا يوجد أي نشاط للطلاب خلال الـ 24 ساعة الأخيرة.", show_alert=True)
             return
 
         total = len(active_users)
+        total_pages = max(1, -(-total // TODAY_USERS_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+
+        start_idx = (page - 1) * TODAY_USERS_PAGE_SIZE
+        end_idx = start_idx + TODAY_USERS_PAGE_SIZE
+        page_users = active_users[start_idx:end_idx]
+
         report_lines = []
-        for idx, u in enumerate(active_users, 1):
+        for idx, u in enumerate(page_users, start=start_idx + 1):
             username_str = f"@{u['username']}" if u.get("username") and u['username'] != "Unknown" else "بدون يوزر"
             name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or "بدون اسم"
             event_desc = EVENT_LABELS.get(u['last_event'], u['last_event'])
@@ -90,19 +101,31 @@ async def show_today_active_users_handler(call: types.CallbackQuery):
                 f" └ 📝 آخر نشاط: <b>{event_desc}</b>\n"
             )
 
+        kb = []
+        nav_row = []
+        if page > 1:
+            nav_row.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"admin_analytics_today_p_{page - 1}"))
+        if page < total_pages:
+            nav_row.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"admin_analytics_today_p_{page + 1}"))
+        if nav_row:
+            kb.append(nav_row)
+
+        kb.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
+        kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+
         text = (
             f"⚡ <b>الطلاب النشطون (خلال الـ 24 ساعة الماضية - توقيت سوريا)</b>\n"
-            f"👥 الإجمالي: <code>{total}</code> طالب\n"
+            f"📄 الصفحة {page} من أصل {total_pages} (الإجمالي: <code>{total}</code> طالب)\n"
             f"───────────────────\n\n" +
             "\n".join(report_lines)
         )
-        await safe_edit_text(call.message, text, reply_markup=get_analytics_keyboard(7))
+        await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
         await call.answer()
     except Exception as e:
         logger.error(f"Error rendering 24h active users: {e}")
         await call.answer("❌ تعذر جلب قائمة النشطين.", show_alert=True)
 
-# 🎯 معالج عرض الكويزات التي تم توليدها اليوم حصراً مع خيار التجربة والتصفح
+# 🎯 2. معالج عرض الكويزات التي تم توليدها اليوم حصراً مع خيار التجربة والتصفح
 @router.callback_query(F.data.startswith("admin_today_quizzes_p_"))
 async def show_today_quizzes_handler(call: types.CallbackQuery):
     try:
@@ -142,7 +165,6 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
                 f"───────────────────"
             )
 
-            # زر تجربة الكويز مباشرة باستخدام callback_data الموجود في feedbacks.py
             kb.append([types.InlineKeyboardButton(
                 text=f"🎯 تجربة #{idx}: {title[:25]}",
                 callback_data=f"afb_try_{quiz_id}"
@@ -172,6 +194,7 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
         logger.error(f"Error rendering today quizzes: {e}")
         await call.answer("❌ تعذر جلب قائمة كويزات اليوم.", show_alert=True)
 
+# 📈 3. معالج تحليلات الاستخدام (7، 30، 90 يوماً)
 @router.callback_query(F.data.regexp(r"^admin_analytics_(7|30|90)$"))
 async def show_usage_analytics(call: types.CallbackQuery):
     days = int(call.data.replace("admin_analytics_", ""))
@@ -197,68 +220,24 @@ async def show_usage_analytics(call: types.CallbackQuery):
         logger.error(f"Error rendering analytics: {e}")
         await call.answer("❌ تعذر تحميل بيانات التحليلات.", show_alert=True)
 
-TODAY_USERS_PAGE_SIZE = 5  # عدد الطلاب المعروضين في الصفحة الواحدة
-
-# ⚡ معالج عرض الطلاب النشطين خلال الـ 24 ساعة الأخيرة مصفحاً (بتوقيت سوريا)
-@router.callback_query(F.data.startswith("admin_analytics_today"))
-async def show_today_active_users_handler(call: types.CallbackQuery):
+# 📅 4. معالج النشاط اليومي (آخر 14 يوم)
+@router.callback_query(F.data == "admin_analytics_daily")
+async def show_daily_active_users(call: types.CallbackQuery):
     try:
-        # استخراج رقم الصفحة إن وجد (مثل: admin_analytics_today_p_2)
-        page = 1
-        if "_p_" in call.data:
-            page = int(call.data.split("_p_")[1])
-
-        active_users = await admin_get_today_active_users()
-        if not active_users:
-            await call.answer("📭 لا يوجد أي نشاط للطلاب خلال الـ 24 ساعة الأخيرة.", show_alert=True)
+        daily = await admin_get_daily_active_users(days=14)
+        if not daily:
+            await call.answer("📭 لا توجد بيانات كافية.", show_alert=True)
             return
-
-        total = len(active_users)
-        total_pages = max(1, -(-total // TODAY_USERS_PAGE_SIZE))
-        page = max(1, min(page, total_pages))
-
-        start_idx = (page - 1) * TODAY_USERS_PAGE_SIZE
-        end_idx = start_idx + TODAY_USERS_PAGE_SIZE
-        page_users = active_users[start_idx:end_idx]
-
-        report_lines = []
-        for idx, u in enumerate(page_users, start=start_idx + 1):
-            username_str = f"@{u['username']}" if u.get("username") and u['username'] != "Unknown" else "بدون يوزر"
-            name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or "بدون اسم"
-            event_desc = EVENT_LABELS.get(u['last_event'], u['last_event'])
-            
-            report_lines.append(
-                f"<b>{idx}. {name}</b> ({username_str})\n"
-                f" └ 🆔 <code>{u['user_id']}</code>\n"
-                f" └ 🕒 <code>{u['time_str']}</code>\n"
-                f" └ 📝 آخر نشاط: <b>{event_desc}</b>\n"
-            )
-
-        # بناء أزرار التنقل (السابق / التالي)
-        kb = []
-        nav_row = []
-        if page > 1:
-            nav_row.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"admin_analytics_today_p_{page - 1}"))
-        if page < total_pages:
-            nav_row.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"admin_analytics_today_p_{page + 1}"))
-        if nav_row:
-            kb.append(nav_row)
-
-        kb.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
-        kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
-
-        text = (
-            f"⚡ <b>الطلاب النشطون (خلال الـ 24 ساعة الماضية - توقيت سوريا)</b>\n"
-            f"📄 الصفحة {page} من أصل {total_pages} (الإجمالي: <code>{total}</code> طالب)\n"
-            f"───────────────────\n\n" +
-            "\n".join(report_lines)
-        )
-        await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+        max_active = max(d["active_users"] for d in daily) or 1
+        lines = [f"<code>{row['day']}</code> {'█' * max(1, round((row['active_users'] / max_active) * 12))} {row['active_users']}" for row in daily]
+        text = "📅 <b>المستخدمون النشطون يومياً (آخر 14 يوم):</b>\n\n" + "\n".join(lines)
+        await safe_edit_text(call.message, text, reply_markup=get_analytics_keyboard(7))
         await call.answer()
     except Exception as e:
-        logger.error(f"Error rendering 24h active users: {e}")
-        await call.answer("❌ تعذر جلب قائمة النشطين.", show_alert=True)
+        logger.error(f"Error rendering daily active: {e}")
+        await call.answer("❌ تعذر تحميل النشاط اليومي.", show_alert=True)
 
+# 📥 5. معالج تصدير الأحداث كـ CSV
 @router.callback_query(F.data == "admin_export_events")
 async def export_usage_events(call: types.CallbackQuery):
     await safe_edit_text(call.message, "⏳ جاري استخراج سجل الأحداث CSV...")
@@ -288,7 +267,8 @@ async def export_usage_events(call: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error exporting events: {e}")
         await safe_edit_text(call.message, "❌ حدث خطأ أثناء استخراج الملف.", reply_markup=get_analytics_keyboard(7))
-        
+
+# 📈 6. معالج نشاط طالب محدد
 @router.callback_query(F.data.startswith("admin_user_activity_"))
 async def show_user_activity(call: types.CallbackQuery):
     try:
