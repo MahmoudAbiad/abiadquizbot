@@ -851,3 +851,74 @@ async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
     except Exception as e:
         log_error(logger, f"Error exporting usage events: {e}")
         return []
+
+        # أضف هذه الاستيرادات والدوال في نهاية supabase_helper.py
+
+import json
+from config import redis_client
+
+# 1️⃣ تسجيل الحدث في Redis فقط (سرعة 0 ملي ثانية)
+async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    """إدراج الحدث في قائمة Redis مؤقتاً لتجميع التحديثات"""
+    try:
+        payload = json.dumps({
+            "user_id": user_id,
+            "event_type": event_type,
+            "metadata": metadata or {},
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        })
+        await redis_client.rpush("analytics_queue", payload)
+    except Exception as e:
+        log_error(logger, f"Error enqueuing event in Redis: {e}")
+
+# 2️⃣ رفِع التحديثات دفعة واحدة إلى Supabase (تُستدعى كل دقيقة)
+async def flush_analytics_queue() -> None:
+    """تفريغ الأحداث المتجمعة في Redis ورفعها دفعة واحدة إلى Supabase"""
+    try:
+        events = []
+        for _ in range(500): # سحب بحد أقصى 500 حدث في الدفعة
+            raw = await redis_client.lpop("analytics_queue")
+            if not raw:
+                break
+            events.append(json.loads(raw))
+
+        if events:
+            await supabase.table("usage_events").insert(events).execute()
+            log_info(logger, f"Successfully flushed {len(events)} analytics events to Supabase.")
+    except Exception as e:
+        log_error(logger, f"Error flushing analytics queue: {e}")
+
+# 3️⃣ دالة تنظيف الجداول من البيانات التي تجاوزت 3 أيام
+async def auto_cleanup_3days_data() -> None:
+    """حذف سجلات الأحداث والكويزات السيئة التي تجاوزت 3 أيام"""
+    try:
+        three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).isoformat()
+        
+        # تنظيف سجل الأحداث القديمة
+        await supabase.table("usage_events").delete().lt("created_at", three_days_ago).execute()
+        
+        # تنظيف الكويزات ذات التقييم السلبي التي تجاوزت 3 أيام
+        await supabase.table("quizzes").delete().lt("created_at", three_days_ago).lt("score", 0).execute()
+        
+        log_info(logger, "Automated 3-day database cleanup executed successfully.")
+    except Exception as e:
+        log_error(logger, f"Error in 3-day database cleanup: {e}")
+
+# 4️⃣ دالة استعلام الطلاب النشطين اليوم حصراً
+async def admin_get_today_active_users() -> List[Dict[str, Any]]:
+    """جلب قائمة الطلاب الذين تفاعلوا مع البوت خلال اليوم الحالي حصراً"""
+    try:
+        today_start = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        
+        res = await supabase.table("usage_events").select("user_id").gte("created_at", today_start).execute()
+        rows = res.data or []
+        unique_user_ids = list({r["user_id"] for r in rows})
+
+        if not unique_user_ids:
+            return []
+
+        users_res = await supabase.table("users").select("user_id, first_name, last_name, username, free_points, paid_points").in_("user_id", unique_user_ids).execute()
+        return users_res.data or []
+    except Exception as e:
+        log_error(logger, f"Error fetching today active users: {e}")
+        return []

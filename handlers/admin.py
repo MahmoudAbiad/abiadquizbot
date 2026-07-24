@@ -907,3 +907,39 @@ async def export_all_users(call: types.CallbackQuery):
             await safe_edit_text(call.message, "❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
         except TelegramBadRequest:
             await call.message.answer("❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
+
+# أضف هذا المعالج داخل handlers/admin.py
+
+from supabase_helper import admin_get_today_active_users
+
+@router.callback_query(F.data == "admin_analytics_today")
+async def show_today_active_users_handler(call: types.CallbackQuery):
+    try:
+        active_users = await admin_get_today_active_users()
+        if not active_users:
+            await call.answer("📭 لا يوجد أي نشاط للطلاب اليوم حتى الآن.", show_alert=True)
+            return
+
+        total = len(active_users)
+        report_lines = []
+        for idx, u in enumerate(active_users, 1):
+            username_str = f"@{u['username']}" if u.get("username") and u['username'] != "Unknown" else "بدون يوزر"
+            name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+            total_pts = float(u.get('free_points') or 0) + float(u.get('paid_points') or 0)
+            
+            report_lines.append(
+                f"<b>{idx}. {name}</b> ({username_str})\n"
+                f"   └ 🆔 <code>{u['user_id']}</code> | 💰 الرصيد: <code>{total_pts:.1f}</code>"
+            )
+
+        text = (
+            f"⚡ <b>قائمة الطلاب النشطين اليوم حصراً</b>\n"
+            f"👥 العدد الإجمالي: <code>{total}</code> طالب\n"
+            f"───────────────────\n\n" +
+            "\n".join(report_lines)
+        )
+        await safe_edit_text(call.message, text, reply_markup=get_analytics_keyboard(7))
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error rendering today active users: {e}")
+        await call.answer("❌ تعذر جلب قائمة النشطين اليوم.", show_alert=True)

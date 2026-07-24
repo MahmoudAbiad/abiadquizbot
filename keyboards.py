@@ -279,3 +279,20 @@ def get_generation_confirm_keyboard() -> types.InlineKeyboardMarkup:
         ]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+# داخل keyboards.py عدّل دالة get_analytics_keyboard:
+
+def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
+    period_row = []
+    for d, label in [(7, "7 أيام"), (30, "30 يوم"), (90, "90 يوم")]:
+        text = f"✅ {label}" if d == days else label
+        period_row.append(types.InlineKeyboardButton(text=text, callback_data=f"admin_analytics_{d}"))
+    
+    kb = [
+        period_row,
+        [types.InlineKeyboardButton(text="⚡ النشطون اليوم حصراً", callback_data="admin_analytics_today")], # 🆕 الزر الجديد
+        [types.InlineKeyboardButton(text="📅 النشاط اليومي (آخر 14 يوم)", callback_data="admin_analytics_daily")],
+        [types.InlineKeyboardButton(text="📥 تصدير سجل الأحداث CSV", callback_data="admin_export_events")],
+        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
