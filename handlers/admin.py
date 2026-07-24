@@ -9,31 +9,29 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from supabase import create_client
 
-# 🚀 تم تعديل الاستيراد لاستجلاب كائن supabase المشترك لمنع تسريب الاتصالات
 from config import bot, ADMIN_ID
 from supabase_helper import (
     supabase, 
     admin_add_points, 
     admin_get_global_stats, 
     admin_search_user,
-    admin_get_feedbacks_page,      # 🆕 تصفح ملاحظات الكويزات (صفحة مع معلومات الكويز والطالب)
-    admin_get_feedback_by_id,      # 🆕 تفاصيل ملاحظة واحدة
-    admin_get_quiz_board_position, # 🆕 رقم الكويز ضمن لوحة كويزات نفس الملف
-    admin_get_quiz_by_id,          # 🆕 لجلب بيانات الكويز عند تجربته
-    admin_delete_quiz,             # 🆕 حذف كويز من لوحة الإدارة
-    admin_get_usage_overview,      # 🆕 ملخص تحليلات الاستخدام
-    admin_get_daily_active_users,  # 🆕 نشاط المستخدمين اليومي
-    admin_get_user_activity,       # 🆕 نشاط تفصيلي لطالب محدد
-    admin_get_all_usage_events,    # 🆕 تصدير سجل الأحداث كـ CSV
+    admin_get_feedbacks_page,      # تصفح ملاحظات الكويزات
+    admin_get_feedback_by_id,      # تفاصيل ملاحظة واحدة
+    admin_get_quiz_board_position, # رقم الكويز ضمن لوحة كويزات نفس الملف
+    admin_get_quiz_by_id,          # لجلب بيانات الكويز عند تجربته
+    admin_delete_quiz,             # حذف كويز من لوحة الإدارة
+    admin_get_usage_overview,      # ملخص تحليلات الاستخدام
+    admin_get_daily_active_users,  # نشاط المستخدمين اليومي
+    admin_get_user_activity,       # نشاط تفصيلي لطالب محدد
+    admin_get_all_usage_events,    # تصدير سجل الأحداث كـ CSV
+    admin_get_today_active_users   # 🆕 قائمة الطلاب النشطين اليوم حصراً
 )
 from logger import get_logger
-from handlers.execution import _start_loaded_quiz  # 🆕 لتشغيل الكويز مباشرة كتجربة من لوحة الإدارة
+from handlers.quiz_runner import _start_loaded_quiz
 
 logger = get_logger(__name__)
 router = Router()
-
 
 def user_total_points(user: dict) -> float:
     """Calculate a display balance from the segregated database columns."""
@@ -50,7 +48,7 @@ class IsAdminFilter(BaseFilter):
             return False
         return str(user.id) == str(ADMIN_ID)
 
-# 🛡️ تطبيق الفلتر المركزي على الراوتر بالكامل لجميع الأحداث القادمة
+# تطبيق الفلتر المركزي على الراوتر بالكامل
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
 
@@ -64,19 +62,16 @@ class AdminState(StatesGroup):
 def _is_admin(user_id: int) -> bool:
     return str(user_id) == str(ADMIN_ID)
 
-# دالة مساعدة آمنة لتعديل الرسائل لتجنب خطأ الـ Telegram التكراري
 async def safe_edit_text(message: types.Message, text: str, reply_markup=None):
     try:
         await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
     except TelegramBadRequest:
         pass
 
-# 🚀 تم التعديل: تحويل جلب المستخدمين إلى دالة Async أصيلة ومباشرة
 async def fetch_users_async():
     res = await supabase.table("users").select("*").order("joined_at", desc=True).execute()
     return res.data
 
-# دالة مساعدة لإرسال إشعار لبق للمستخدم عند شحن نقاطه
 async def send_points_notification(target_id: int, amount: int, new_balance: int):
     try:
         user_text = (
@@ -137,12 +132,12 @@ def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
         period_row.append(types.InlineKeyboardButton(text=text, callback_data=f"admin_analytics_{d}"))
     kb = [
         period_row,
+        [types.InlineKeyboardButton(text="⚡ النشطون اليوم حصراً", callback_data="admin_analytics_today")],
         [types.InlineKeyboardButton(text="📅 النشاط اليومي (آخر 14 يوم)", callback_data="admin_analytics_daily")],
         [types.InlineKeyboardButton(text="📥 تصدير سجل الأحداث CSV", callback_data="admin_export_events")],
         [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
 
 # ==================== Central Renderers ====================
 
@@ -159,7 +154,6 @@ async def render_admin_dashboard(event, state: FSMContext = None):
         await event.answer()
 
 async def render_users_page(event, page: int = 1):
-    # ✅ تم التعديل: استدعاء مباشر غير متزامن
     users = await fetch_users_async()
     if not users:
         text = "📭 لا يوجد أي طلاب مسجلين حالياً."
@@ -214,8 +208,7 @@ async def render_users_page(event, page: int = 1):
         await safe_edit_text(event.message, report, reply_markup=reply_markup)
         await event.answer()
 
-
-# ==================== الأوامر النصية (دعم القائمة الجانبية للبوت) ====================
+# ==================== الأوامر النصية ====================
 
 @router.message(Command("admin"))
 async def admin_cmd_dashboard(msg: types.Message, state: FSMContext):
@@ -228,7 +221,6 @@ async def admin_cmd_search(msg: types.Message, state: FSMContext):
 
 @router.message(Command("dbstats"))
 async def admin_cmd_stats(msg: types.Message):
-    # ✅ تم التعديل: استدعاء مباشر غير متزامن
     stats = await admin_get_global_stats()
     text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة: <code>{stats['total_questions']}</code>\n"
     await msg.answer(text, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
@@ -267,7 +259,6 @@ async def admin_cmd_charge_direct(msg: types.Message, command: CommandObject, st
 async def admin_cmd_broadcast(msg: types.Message, command: CommandObject, state: FSMContext):
     if not _is_admin(msg.from_user.id): return
     
-    # 1. في حال كتب الآدمن النص مباشرة بعد الأمر (/broadcast أهلاً بالجميع)
     if command.args:
         text_to_send = command.args.strip()
         await state.update_data(broadcast_text=text_to_send)
@@ -289,7 +280,6 @@ async def admin_cmd_broadcast(msg: types.Message, command: CommandObject, state:
         await msg.answer(preview, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
         return
 
-    # 2. في حال ضغط الأمر بدون نص
     await state.set_state(AdminState.waiting_for_broadcast_text)
     await msg.answer(
         "📢 <b>إرسال رسالة جماعية لكافة الطلاب</b>\n\n"
@@ -341,7 +331,8 @@ async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext
     text_to_send = data.get("broadcast_text")
     await state.clear()
 
-    users = await asyncio.to_thread(fetch_users_sync)
+    # 🚀 تم الإصلاح: استخدام fetch_users_async مباشرة
+    users = await fetch_users_async()
     if not users:
         await safe_edit_text(call.message, "📭 لا يوجد طلاب مسجلين لإرسال الرسالة إليهم.", reply_markup=get_admin_dashboard_keyboard())
         return
@@ -351,9 +342,7 @@ async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext
 
     await safe_edit_text(call.message, f"⏳ <b>جاري الإرسال الجماعي...</b>\n\nالعدد الإجمالي المستهدف: <code>{total_users}</code> طالب")
 
-    success_count = 0
-    blocked_count = 0
-    failed_count = 0
+    success_count, blocked_count, failed_count = 0, 0, 0
 
     for index, user_id in enumerate(user_ids, start=1):
         try:
@@ -371,10 +360,8 @@ async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext
         except Exception:
             failed_count += 1
 
-        # تأخير أمان (20 رسالة / ثانية)
         await asyncio.sleep(0.05)
 
-        # تحديث التقرير الحي كل 25 مستخدم
         if index % 25 == 0 or index == total_users:
             try:
                 progress_text = (
@@ -398,8 +385,7 @@ async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext
     await call.message.answer(final_report, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
     await call.answer()
 
-
-# ==================== تفاعلات الأزرار (Callback Queries) ====================
+# ==================== تفاعلات الأزرار ====================
 
 @router.callback_query(F.data == "admin_main_menu")
 async def admin_callback_main_menu(call: types.CallbackQuery, state: FSMContext):
@@ -425,7 +411,6 @@ async def callback_search_prompt(call: types.CallbackQuery, state: FSMContext):
 @router.message(AdminState.waiting_for_search_query)
 async def process_search_user(msg: types.Message, state: FSMContext):
     query = msg.text.strip()
-    # ✅ تم التعديل: استدعاء مباشر غير متزامن
     users_data = await admin_search_user(query)
     
     if users_data:
@@ -446,16 +431,13 @@ async def process_search_user(msg: types.Message, state: FSMContext):
         await msg.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
     await state.clear()
 
-# 🆕 تصفح ملاحظات الكويزات: قائمة مصفّحة + شاشة تفاصيل غنية لكل ملاحظة
 FEEDBACKS_PAGE_SIZE = 5
-
 
 def _student_label(student: Optional[Dict]) -> str:
     if not student:
         return "طالب غير معروف"
     name = " ".join(filter(None, [student.get("first_name"), student.get("last_name")])).strip()
     return name or (f"@{student['username']}" if student.get("username") else "بدون اسم")
-
 
 def get_feedbacks_list_keyboard(feedbacks: list, page: int, total: int) -> types.InlineKeyboardMarkup:
     kb = []
@@ -480,7 +462,6 @@ def get_feedbacks_list_keyboard(feedbacks: list, page: int, total: int) -> types
     kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-
 def get_feedback_details_keyboard(feedback_id: int, quiz_id) -> types.InlineKeyboardMarkup:
     kb = []
     if quiz_id:
@@ -488,7 +469,6 @@ def get_feedback_details_keyboard(feedback_id: int, quiz_id) -> types.InlineKeyb
         kb.append([types.InlineKeyboardButton(text="🗑 حذف الكويز نهائياً", callback_data=f"afb_del_{quiz_id}_{feedback_id}")])
     kb.append([types.InlineKeyboardButton(text="🔙 رجوع للقائمة", callback_data="afb_p_1")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
 
 async def _render_feedback_list(page: int):
     offset = (page - 1) * FEEDBACKS_PAGE_SIZE
@@ -498,7 +478,6 @@ async def _render_feedback_list(page: int):
     total_pages = max(1, -(-total // FEEDBACKS_PAGE_SIZE))
     text = f"📋 <b>ملاحظات الكويزات</b> — صفحة {page}/{total_pages} (الإجمالي: {total})\n\nاختر ملاحظة لعرض تفاصيلها الكاملة:"
     return text, get_feedbacks_list_keyboard(feedbacks, page, total)
-
 
 @router.callback_query(F.data == "admin_view_feedbacks")
 async def admin_callback_view_feedbacks(call: types.CallbackQuery):
@@ -511,7 +490,6 @@ async def admin_callback_view_feedbacks(call: types.CallbackQuery):
     finally:
         await call.answer()
 
-
 @router.callback_query(F.data.startswith("afb_p_"))
 async def admin_callback_feedbacks_page(call: types.CallbackQuery):
     try:
@@ -523,7 +501,6 @@ async def admin_callback_feedbacks_page(call: types.CallbackQuery):
         await call.answer("❌ حدث خطأ أثناء التنقل بين الصفحات.", show_alert=True)
     finally:
         await call.answer()
-
 
 @router.callback_query(F.data.startswith("afb_v_"))
 async def admin_callback_feedback_details(call: types.CallbackQuery):
@@ -557,7 +534,6 @@ async def admin_callback_feedback_details(call: types.CallbackQuery):
         )
 
         kb = get_feedback_details_keyboard(feedback_id, quiz_id)
-        # 🆕 زر مباشر لمحادثة الطالب - يفتح محادثته الخاصة في تيليجرام مباشرة بدون الحاجة لليوزرنيم
         kb.inline_keyboard.insert(0, [types.InlineKeyboardButton(
             text=f"💬 مراسلة {student_name}",
             url=f"tg://user?id={student_id}"
@@ -569,7 +545,6 @@ async def admin_callback_feedback_details(call: types.CallbackQuery):
         await call.answer("❌ حدث خطأ أثناء جلب تفاصيل الملاحظة.", show_alert=True)
     finally:
         await call.answer()
-
 
 @router.callback_query(F.data.startswith("afb_try_"))
 async def admin_callback_try_quiz(call: types.CallbackQuery, state: FSMContext):
@@ -590,10 +565,8 @@ async def admin_callback_try_quiz(call: types.CallbackQuery, state: FSMContext):
         logger.error(f"Error starting admin quiz trial: {e}")
         await call.answer("❌ تعذر بدء تجربة الكويز.", show_alert=True)
 
-
 @router.callback_query(F.data.startswith("afb_del_"))
 async def admin_callback_delete_quiz_confirm(call: types.CallbackQuery):
-    """خطوة تأكيد قبل الحذف النهائي - إجراء حذف فعلي يحتاج تأكيداً صريحاً"""
     try:
         raw = call.data.replace("afb_del_", "", 1)
         quiz_id, feedback_id = raw.rsplit("_", 1)
@@ -611,7 +584,6 @@ async def admin_callback_delete_quiz_confirm(call: types.CallbackQuery):
         await call.answer("❌ حدث خطأ.", show_alert=True)
     finally:
         await call.answer()
-
 
 @router.callback_query(F.data.startswith("afb_delok_"))
 async def admin_callback_delete_quiz_execute(call: types.CallbackQuery):
@@ -643,11 +615,9 @@ async def process_quick_charge(call: types.CallbackQuery):
     amount = int(parts[3])
     target_id = int(parts[4])
     
-    # ✅ تم التعديل: استدعاء مباشر غير متزامن
     new_balance = await admin_add_points(target_id, amount)
     if new_balance is not None:
         await safe_edit_text(call.message, f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard())
-        
         await send_points_notification(target_id, amount, new_balance)
     else:
         await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
@@ -669,11 +639,9 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     target_id = int(data.get('target_id'))
     
-    # ✅ تم التعديل: استدعاء مباشر غير متزامن
     new_balance = await admin_add_points(target_id, amount)
     if new_balance is not None:
         await msg.answer(f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
-        
         await send_points_notification(target_id, amount, new_balance)
     else:
         await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
@@ -681,13 +649,12 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_stats")
 async def show_db_stats(call: types.CallbackQuery):
-    # ✅ تم التعديل: استدعاء مباشر غير متزامن
     stats = await admin_get_global_stats()
     text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب المسجلين: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة المُولدة: <code>{stats['total_questions']}</code>\n"
     await safe_edit_text(call.message, text, reply_markup=get_admin_dashboard_keyboard())
     await call.answer()
 
-# ==================== 🆕 تحليلات الاستخدام (Usage Analytics) ====================
+# ==================== تحليلات الاستخدام ====================
 
 EVENT_LABELS = {
     "bot_start": "▶️ تشغيل البوت",
@@ -775,6 +742,39 @@ async def show_daily_active_users(call: types.CallbackQuery):
         logger.error(f"Error rendering daily active users: {e}")
         await call.answer("❌ تعذر تحميل النشاط اليومي.", show_alert=True)
 
+# 🆕 معالج عرض قائمة الطلاب النشطين اليوم حصراً
+@router.callback_query(F.data == "admin_analytics_today")
+async def show_today_active_users_handler(call: types.CallbackQuery):
+    try:
+        active_users = await admin_get_today_active_users()
+        if not active_users:
+            await call.answer("📭 لا يوجد أي نشاط للطلاب اليوم حتى الآن.", show_alert=True)
+            return
+
+        total = len(active_users)
+        report_lines = []
+        for idx, u in enumerate(active_users, 1):
+            username_str = f"@{u['username']}" if u.get("username") and u['username'] != "Unknown" else "بدون يوزر"
+            name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+            total_pts = float(u.get('free_points') or 0) + float(u.get('paid_points') or 0)
+            
+            report_lines.append(
+                f"<b>{idx}. {name}</b> ({username_str})\n"
+                f"   └ 🆔 <code>{u['user_id']}</code> | 💰 الرصيد: <code>{total_pts:.1f}</code>"
+            )
+
+        text = (
+            f"⚡ <b>قائمة الطلاب النشطين اليوم حصراً</b>\n"
+            f"👥 العدد الإجمالي: <code>{total}</code> طالب\n"
+            f"───────────────────\n\n" +
+            "\n".join(report_lines)
+        )
+        await safe_edit_text(call.message, text, reply_markup=get_analytics_keyboard(7))
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error rendering today active users: {e}")
+        await call.answer("❌ تعذر جلب قائمة النشطين اليوم.", show_alert=True)
+
 @router.callback_query(F.data.startswith("admin_user_activity_"))
 async def show_user_activity(call: types.CallbackQuery):
     try:
@@ -852,9 +852,6 @@ async def export_usage_events(call: types.CallbackQuery):
 # ==================== تصدير البيانات إلى ملف CSV ====================
 
 def sanitize_csv_value(val) -> str:
-    """
-    تأمين النصوص المدخلة لمنع ثغرة الـ CSV Injection في برامج الجداول الحسابية مثل Excel
-    """
     val_str = str(val) if val is not None else ""
     if val_str.startswith(('=', '+', '-', '@')):
         return f"'{val_str}"
@@ -865,7 +862,6 @@ async def export_all_users(call: types.CallbackQuery):
     await safe_edit_text(call.message, "⏳ جاري استخراج البيانات وبناء ملف الـ CSV، يرجى الانتظار...")
     
     try:
-        # ✅ تم التعديل: استدعاء مباشر غير متزامن
         users = await fetch_users_async()
         if not users:
             return await safe_edit_text(call.message, "📭 لا يوجد طلاب لتصديرهم.", reply_markup=get_admin_dashboard_keyboard())
@@ -907,39 +903,3 @@ async def export_all_users(call: types.CallbackQuery):
             await safe_edit_text(call.message, "❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
         except TelegramBadRequest:
             await call.message.answer("❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
-
-# أضف هذا المعالج داخل handlers/admin.py
-
-from supabase_helper import admin_get_today_active_users
-
-@router.callback_query(F.data == "admin_analytics_today")
-async def show_today_active_users_handler(call: types.CallbackQuery):
-    try:
-        active_users = await admin_get_today_active_users()
-        if not active_users:
-            await call.answer("📭 لا يوجد أي نشاط للطلاب اليوم حتى الآن.", show_alert=True)
-            return
-
-        total = len(active_users)
-        report_lines = []
-        for idx, u in enumerate(active_users, 1):
-            username_str = f"@{u['username']}" if u.get("username") and u['username'] != "Unknown" else "بدون يوزر"
-            name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
-            total_pts = float(u.get('free_points') or 0) + float(u.get('paid_points') or 0)
-            
-            report_lines.append(
-                f"<b>{idx}. {name}</b> ({username_str})\n"
-                f"   └ 🆔 <code>{u['user_id']}</code> | 💰 الرصيد: <code>{total_pts:.1f}</code>"
-            )
-
-        text = (
-            f"⚡ <b>قائمة الطلاب النشطين اليوم حصراً</b>\n"
-            f"👥 العدد الإجمالي: <code>{total}</code> طالب\n"
-            f"───────────────────\n\n" +
-            "\n".join(report_lines)
-        )
-        await safe_edit_text(call.message, text, reply_markup=get_analytics_keyboard(7))
-        await call.answer()
-    except Exception as e:
-        logger.error(f"Error rendering today active users: {e}")
-        await call.answer("❌ تعذر جلب قائمة النشطين اليوم.", show_alert=True)
