@@ -19,6 +19,17 @@ logger = get_logger(__name__)
 
 # ==================== Background Tasks ====================
 
+async def process_update_safely(update: Update):
+    """
+    معالجة التحديث الخاص بـ Telegram في الخلفية مع التقاط الأخطاء
+    لضمان عدم توقف المهمة أو ضياع السجلات عند حدوث استثناء.
+    """
+    try:
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        logger.error(f"Error processing update in background task: {e}", exc_info=True)
+
+
 async def scheduled_analytics_batch_loop():
     """
     مهمة خلفية دورية تعمل كل دقيقة (60 ثانية) لتفريغ قائمة الأحداث المتجمعة
@@ -116,26 +127,25 @@ async def health_check():
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
     """
-    استقبال التحديثات من تلغرام وتحليلها بشكل صحيح.
+    استقبال التحديثات من تلغرام والتحقق منها، ثم إحالتها للمعالجة في الخلفية
+    والرد فوراً لـ Telegram بـ OK لمنع الـ Retries والبطء.
     """
-    try:
-        if TELEGRAM_WEBHOOK_SECRET:
-            incoming_secret = request.headers.get("x-telegram-bot-api-secret-token")
-            if incoming_secret != TELEGRAM_WEBHOOK_SECRET:
-                raise HTTPException(status_code=403, detail="Forbidden")
+    if TELEGRAM_WEBHOOK_SECRET:
+        incoming_secret = request.headers.get("x-telegram-bot-api-secret-token")
+        if incoming_secret != TELEGRAM_WEBHOOK_SECRET:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
+    try:
         update_data = await request.json()
-        
-        # استخدام model_validate لتحليل البيانات المتداخلة بالكامل
         update = Update.model_validate(update_data)
         
-        # تمرير التحديث للـ Dispatcher الخاص بـ aiogram
-        await dp.feed_update(bot, update)
+        # ⚡ تشغيل المعالجة الكاملة للتحديث في الخلفية دون انتظار
+        asyncio.create_task(process_update_safely(update))
         
     except Exception as e:
-        logger.error(f"Error processing webhook update: {e}", exc_info=True)
+        logger.error(f"Error parsing incoming webhook update: {e}", exc_info=True)
 
-    # الرد دائماً بـ OK لتلغرام لمنع الـ Retry Loop
+    # الرد فوراً بـ OK لتلغرام لإنهاء طلب الـ HTTP بلمح البصر
     return {"ok": True}
 
 # ==================== Run Server Function ====================
