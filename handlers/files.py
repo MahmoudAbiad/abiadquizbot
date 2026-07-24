@@ -241,6 +241,8 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data.startswith("use_multi_"))
 async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMContext) -> None:
     """معالج تشغيل أحد الكويزات الجاهزة المخزنة بالجدول المركزي"""
+    # نؤكد استلام الضغطة فورًا؛ لا نستدعي call.answer() مرة أخرى لاحقًا بهذه الدالة
+    await call.answer()
     try:
         quiz_uuid = call.data.replace("use_multi_", "")
         data = await state.get_data()
@@ -252,7 +254,7 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
         available_quizzes = data.get("available_quizzes", [])
         selected_quiz = next((q for q in available_quizzes if str(q["id"]) == quiz_uuid), None)
         if not selected_quiz:
-            await call.answer("❌ عذراً، لم نتمكن من جلب الكويز المختار.", show_alert=True)
+            await call.message.answer("❌ عذراً، لم نتمكن من جلب الكويز المختار.")
             return
             
         if float(user_info["points"]) < cost:
@@ -276,8 +278,6 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
     except Exception as exc:
         log_error(logger, f"Multi-cached selection trigger failed: {exc}", exception=exc)
         await call.message.answer("❌ تعذر بدء تشغيل الاختبار المخزّن.")
-    finally:
-        await call.answer()
 
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
@@ -356,14 +356,16 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
             await call.message.edit_text(MSG_REQUEST_CANCELLED)
         except Exception:
             await call.message.answer(MSG_REQUEST_CANCELLED)
+        await call.answer()
     except Exception as exc:
         log_error(logger, f"Cancel request failed: {exc}", exception=exc)
         await call.answer("❌ تعذر إلغاء الطلب، حاول مجدداً.", show_alert=True)
-    finally:
-        await call.answer()
 
 @router.callback_query(QuizState.waiting_for_generation_confirm, F.data == "confirm_quiz_generation")
 async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMContext) -> None:
+    # نؤكد استلام الضغطة فورًا قبل أي عملية بطيئة (توليد الكويز عبر الـ AI قد يأخذ أكثر من 15 ثانية،
+    # وتيليجرام يلغي صلاحية الـ callback query بعد هذه المدة إن لم يُرد عليه)
+    await call.answer()
     try:
         data = await state.get_data()
         cost, count = float(data.get("calculated_cost") or 0), int(data.get("requested_count") or 0)
@@ -401,10 +403,10 @@ async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMCo
         log_error(logger, f"Confirm quiz generation failed: {exc}", exception=exc)
         await refund_user_on_failure(call.from_user.id, await state.get_data())
         await state.set_state(None)
-        await call.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً.", show_alert=True)
+        # ملاحظة: تم الرد على الـ callback query مسبقًا بالأعلى، لذا نستخدم رسالة عادية بدل call.answer(show_alert=True)
+        await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً.")
     finally:
         for path in (await state.get_data()).get("file_paths", []):
             safe_file_cleanup(path)
-        await call.answer()
 
 files_router = router
