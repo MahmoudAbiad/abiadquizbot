@@ -7,7 +7,7 @@ from supabase_helper import create_shared_quiz_id, save_shared_quiz, get_shared_
 from logger import get_logger, log_error
 
 # استيراد الوظيفة المشتركة لتشغيل الكويز الجاهز
-from handlers.execution import _start_loaded_quiz
+from handlers.quiz_runner import _start_loaded_quiz
 
 logger = get_logger(__name__)
 router = Router()

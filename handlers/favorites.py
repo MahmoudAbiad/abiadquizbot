@@ -6,15 +6,13 @@ from typing import Union, Optional
 
 from config import QuizState
 from constants import (
-    MAX_FAVORITE_TITLE_LENGTH, MAX_FAVORITE_SECTIONS, DEFAULT_FAVORITE_SECTION_TITLE,
-    MSG_FAVORITES_SEARCH_EMPTY, MSG_FAVORITE_NAME_PROMPT, MSG_FAVORITE_NAME_INVALID,
-    MSG_FAVORITE_SECTION_PROMPT, MSG_FAVORITE_SECTION_CREATE, MSG_FAVORITE_SAVED,
-    MSG_FAVORITES_SEARCH_PROMPT
+    DEFAULT_FAVORITE_SECTION_TITLE,
+    MSG_FAVORITES_SEARCH_EMPTY, MSG_FAVORITES_SEARCH_PROMPT
 )
 from supabase_helper import (
-    save_favorite_quiz, list_favorite_quizzes, list_favorite_sections,
-    create_favorite_section, can_create_more_favorite_sections, get_favorite_quiz, 
-    remove_favorite_quiz, supabase # 🆕 تم استيراد كائن سوبابيس لعمل الاستعلام المباشر للـ UUID
+    list_favorite_quizzes, list_favorite_sections,
+    get_favorite_quiz, remove_favorite_quiz,
+    supabase # 🆕 تم استيراد كائن سوبابيس لعمل الاستعلام المباشر للـ UUID
 )
 from keyboards import (
     get_favorites_list_keyboard, get_sections_list_keyboard, 
@@ -22,8 +20,8 @@ from keyboards import (
 )
 from logger import get_logger, log_error
 
-# استيراد الوظائف المشتركة من ملف التنفيذ لمنع التعارض الدائري
-from handlers.execution import _send_main_menu, _start_loaded_quiz
+# استيراد الوظائف المشتركة من ملف تشغيل الكويز لمنع التعارض الدائري
+from handlers.quiz_runner import _send_main_menu, _start_loaded_quiz
 
 logger = get_logger(__name__)
 router = Router()
@@ -64,35 +62,6 @@ def _build_sections_text(sections: list, quiz_counts: dict[str, int]) -> str:
     return "\n".join(lines)
 
 # ==================== دوال الإرسال والتحديث الأساسية ====================
-
-async def _save_pending_favorite(target: Union[types.Message, types.CallbackQuery], state: FSMContext, section_id: Optional[str] = None) -> bool:
-    data = await state.get_data()
-    questions = data.get("questions", [])
-    favorite_name = data.get("pending_favorite_name")
-    source_title = data.get("source_title") or "كويز"
-
-    if not questions or not favorite_name:
-        if isinstance(target, types.CallbackQuery): 
-            await target.answer("❌ لا يمكن حفظ هذا الكويز حالياً", show_alert=True)
-        else: 
-            await target.answer("❌ لا يمكن حفظ هذا الكويز حالياً")
-        return False
-
-    favorite_id = await save_favorite_quiz(target.from_user.id, favorite_name, questions, section_id, source_title)
-    if not favorite_id:
-        if isinstance(target, types.CallbackQuery): 
-            await target.answer("❌ تعذر حفظ الكويز في المفضلة", show_alert=True)
-        else: 
-            await target.answer("❌ تعذر حفظ الكويز في المفضلة")
-        return False
-
-    await state.update_data(pending_favorite_name=None)
-    await state.set_state(QuizState.answering_quiz)
-    if isinstance(target, types.CallbackQuery): 
-        await target.message.answer(MSG_FAVORITE_SAVED)
-    else: 
-        await target.answer(MSG_FAVORITE_SAVED)
-    return True
 
 async def _send_favorites_menu(target: Union[types.Message, types.CallbackQuery], state: FSMContext, page: int = 1, section_filter: Optional[str] = None) -> None:
     data = await state.get_data()
@@ -136,80 +105,12 @@ async def _send_sections_menu(target: Union[types.Message, types.CallbackQuery],
     else:
         await target.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
-# ==================== معالجات الحفظ والتصنيف ====================
-
-@router.callback_query(F.data == "quiz_favorite")
-async def favorite_quiz(call: types.CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-        if not data.get("questions", []):
-            await call.answer("❌ لا يوجد كويز نشط لحفظه حالياً", show_alert=True)
-            return
-        await state.update_data(pending_favorite_name=None)
-        await state.set_state(QuizState.saving_favorite_name)
-        await call.message.answer(MSG_FAVORITE_NAME_PROMPT)
-    except Exception as e:
-        log_error(logger, f"Error in favorite_quiz: {e}", exception=e)
-        await call.answer("❌ حدث خطأ داخلي أثناء معالجة الحفظ", show_alert=True)
-    finally:
-        await call.answer()
-
-@router.message(QuizState.saving_favorite_name, F.text)
-async def process_favorite_name(msg: types.Message, state: FSMContext):
-    try:
-        name = msg.text.strip()
-        if len(name) < 2 or len(name) > MAX_FAVORITE_TITLE_LENGTH:
-            await msg.answer(MSG_FAVORITE_NAME_INVALID.format(max_len=MAX_FAVORITE_TITLE_LENGTH))
-            return
-        await state.update_data(pending_favorite_name=name)
-        sections = await list_favorite_sections(msg.from_user.id)
-        allow_new = await can_create_more_favorite_sections(msg.from_user.id)
-        await msg.answer(MSG_FAVORITE_SECTION_PROMPT, reply_markup=get_favorite_section_keyboard(sections, allow_new=allow_new, allow_default=True))
-    except Exception as e:
-        log_error(logger, f"Error in process_favorite_name: {e}", exception=e)
-        await msg.answer("❌ تعذر استكمال خطوات حفظ الكويز")
-
-@router.message(QuizState.saving_favorite_section_name, F.text)
-async def process_favorite_section_name(msg: types.Message, state: FSMContext):
-    try:
-        s_name = msg.text.strip()
-        if not s_name:
-            await msg.answer("❌ اسم القسم الدراسي لا يمكن أن يكون فارغاً")
-            return
-        if not await can_create_more_favorite_sections(msg.from_user.id):
-            await msg.answer(f"❌ وصلت للحد الأقصى المسموح به وهو {MAX_FAVORITE_SECTIONS} قسماً")
-            await state.set_state(QuizState.answering_quiz)
-            return
-        sid = await create_favorite_section(msg.from_user.id, s_name)
-        if not sid:
-            await msg.answer("❌ تعذر بناء وإنشاء القسم الدراسي الجديد")
-            return
-        if await _save_pending_favorite(msg, state, section_id=sid):
-            await msg.answer(f"📁 تم إنشاء القسم وحفظ الكويز داخله بنجاح: {s_name}")
-    except Exception as e:
-        log_error(logger, f"Error in process_favorite_section_name: {e}", exception=e)
-        await msg.answer("❌ حدث خطأ أثناء إنشاء القسم")
-
-@router.callback_query(F.data.startswith("fav_section_"))
-async def favorite_section_existing(call: types.CallbackQuery, state: FSMContext):
-    try:
-        sid = call.data.replace("fav_section_", "", 1)
-        if sid == "new":
-            if not await can_create_more_favorite_sections(call.from_user.id):
-                await call.answer(f"❌ وصلت للحد الأقصى وهو {MAX_FAVORITE_SECTIONS} قسماً", show_alert=True)
-                return
-            await state.set_state(QuizState.saving_favorite_section_name)
-            await call.message.answer(MSG_FAVORITE_SECTION_CREATE)
-            return
-        if sid == "default":
-            await _save_pending_favorite(call, state, section_id=None)
-            return
-        await _save_pending_favorite(call, state, section_id=sid)
-    except Exception as e:
-        log_error(logger, f"Error in favorite_section_existing: {e}", exception=e)
-        await call.answer("❌ تعذر إتمام حفظ الكويز", show_alert=True)
-    finally:
-        await call.answer()
+# ملاحظة: مسار حفظ الكويز إلى المفضلة (زر "quiz_favorite" / "save_quiz") أصبح
+# مُدارًا بالكامل من handlers/quiz_runner.py (الويزارد بخطوتين: تسمية ثم اختيار قسم).
+# كان هنا سابقاً مسار مواز مكرر لنفس الغرض لم يعد أي مستخدم يصله فعلياً بسبب
+# ترتيب تسجيل الراوترات (quiz_runner_router مسجّل قبل favorites_router)، وكان
+# استدعاؤه لـ save_favorite_quiz متأخراً عن آخر تعديل لتوقيع الدالة (بدون quiz_id).
+# تم حذفه هنا لتفادي ازدواجية مصدر الحقيقة.
 
 # ==================== معالجات التصفح والقوائم الذكية ====================
 

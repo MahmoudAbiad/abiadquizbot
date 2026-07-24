@@ -45,7 +45,7 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
             target_msg.from_user.last_name or "Unknown",
             None
         )
-        from handlers.execution import _start_loaded_quiz
+        from handlers.quiz_runner import _start_loaded_quiz
         quiz_title = shared.get('title') or shared.get('source_title') or 'كويز مشترك'
 
         asyncio.create_task(log_usage_event(target_msg.from_user.id, "shared_link_opened", {
