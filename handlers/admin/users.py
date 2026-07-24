@@ -105,10 +105,13 @@ async def render_users_page(event, page: int = 1):
     report = f"👥 <b>سجل الطلاب المسجلين ({page} من {total_pages}):</b>\n\n"
     for idx, u in enumerate(page_users, start=start_idx + 1):
         username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
+        joined_time_syria = format_syria_time(u.get('created_at') or u.get('joined_at'))
+        
         report += (
             f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
             f"┣ 📝 الاسم: <b>{u.get('first_name', 'Unknown')} {u.get('last_name', 'Unknown')}</b>\n"
+            f"┣ 🕒 انضم: <code>{joined_time_syria}</code>\n"  # 👈 إضافة تاريخ الانضمام بتوقيت سوريا
             f"┣ 🎁 المجاني: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
             f"┣ 💳 المدفوع: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
             f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
@@ -426,7 +429,7 @@ async def export_all_users(call: types.CallbackQuery):
         writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Created At"])
         
         for u in users:
-            created_time = u.get('created_at') or u.get('joined_at', '')
+            created_time_syria = format_syria_time(u.get('created_at') or u.get('joined_at'))
             writer.writerow([
                 sanitize_csv_value(u.get('user_id', '')),
                 sanitize_csv_value(u.get('username', 'Unknown')),
@@ -436,7 +439,7 @@ async def export_all_users(call: types.CallbackQuery):
                 sanitize_csv_value(u.get('paid_points', 0)),
                 sanitize_csv_value(user_total_points(u)),
                 sanitize_csv_value(u.get('total_questions', 0)),
-                sanitize_csv_value(created_time)
+                sanitize_csv_value(created_time_syria)  # 👈 تصدير التاريخ بتوقيت سوريا
             ])
             
         csv_bytes = output.getvalue().encode('utf-8-sig')
