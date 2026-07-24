@@ -972,3 +972,18 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
     except Exception as e:
         log_error(logger, f"Error fetching 24h active users: {e}")
         return []
+
+async def admin_get_today_quizzes():
+    """جلب الكويزات التي تم توليدها اليوم (آخر 24 ساعة) مع معلومات الطالب."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    since_time = (now - datetime.timedelta(hours=24)).isoformat()
+    
+    # استعلام جلب الكويزات وربطها ببيانات المستخدم
+    res = await supabase.table("quizzes") \
+        .select("id, source_title, created_at, user_id, users(user_id, username, first_name, last_name)") \
+        .gte("created_at", since_time) \
+        .order("created_at", desc=True) \
+        .execute()
+        
+    return res.data or []
