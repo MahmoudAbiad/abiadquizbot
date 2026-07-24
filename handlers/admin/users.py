@@ -43,7 +43,7 @@ def user_total_points(user: dict) -> float:
 
 
 async def fetch_users_async():
-    """جلب سجل الطلاب المسجلين مرتبين من الأحدث بناءً على joined_at."""
+    """جلب سجل الطلاب المسجلين مرتبين من الأحدث بناءً على joined_at مباشرة."""
     try:
         res = await supabase.table("users").select("*").order("joined_at", desc=True).execute()
         return res.data or []
@@ -77,7 +77,13 @@ def sanitize_csv_value(val) -> str:
 
 
 async def render_users_page(event, page: int = 1):
-    """عرض قائمة الطلاب المصفحة."""
+    """عرض قائمة الطلاب المصفحة مع معالجة آمنة لـ Callbacks."""
+    if isinstance(event, types.CallbackQuery):
+        try:
+            await event.answer()
+        except TelegramBadRequest:
+            pass
+
     users = await fetch_users_async()
     if not users:
         text = "📭 لا يوجد أي طلاب مسجلين حالياً."
@@ -85,12 +91,11 @@ async def render_users_page(event, page: int = 1):
             await event.answer(text, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
         elif isinstance(event, types.CallbackQuery):
             await safe_edit_text(event.message, text, reply_markup=get_admin_dashboard_keyboard())
-            await event.answer()
         return
 
     total_users = len(users)
     per_page = 5
-    total_pages = (total_users + per_page - 1) // per_page
+    total_pages = max(1, (total_users + per_page - 1) // per_page)
     
     page = max(1, min(page, total_pages))
     start_idx = (page - 1) * per_page
@@ -100,13 +105,12 @@ async def render_users_page(event, page: int = 1):
     report = f"👥 <b>سجل الطلاب المسجلين ({page} من {total_pages}):</b>\n\n"
     for idx, u in enumerate(page_users, start=start_idx + 1):
         username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
-        joined_time_syria = format_syria_time(u.get('created_at') or u.get('joined_at'))
-        
+        joined_time = format_syria_time(u.get('joined_at'))
         report += (
             f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
             f"┣ 📝 الاسم: <b>{u.get('first_name', 'Unknown')} {u.get('last_name', 'Unknown')}</b>\n"
-            f"┣ 🕒 انضم: <code>{joined_time_syria}</code>\n"  # 👈 إضافة تاريخ الانضمام بتوقيت سوريا
+            f"┣ 🕒 انضم: <code>{joined_time}</code>\n"
             f"┣ 🎁 المجاني: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
             f"┣ 💳 المدفوع: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
             f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
@@ -131,7 +135,6 @@ async def render_users_page(event, page: int = 1):
         await event.answer(report, reply_markup=reply_markup, parse_mode="HTML")
     elif isinstance(event, types.CallbackQuery):
         await safe_edit_text(event.message, report, reply_markup=reply_markup)
-        await event.answer()
 
 
 # ==================== الأوامر النصية ====================
@@ -219,7 +222,10 @@ async def callback_broadcast_prompt(call: types.CallbackQuery, state: FSMContext
         "📢 <b>إرسال رسالة جماعية لكافة الطلاب</b>\n\nأرسل الآن نص الرسالة التي تريد تعميمها على جميع مستخدمي البوت:", 
         reply_markup=get_cancel_keyboard()
     )
-    await call.answer()
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
 
 
 @router.message(AdminState.waiting_for_broadcast_text)
@@ -249,8 +255,11 @@ async def process_broadcast_text(msg: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_confirm_broadcast", AdminState.waiting_for_broadcast_confirm)
 async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext):
-    # التأكيد الفوري للطلب لتفادي الـ Callback Timeout أثناء الحلقة
-    await call.answer()
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
+
     data = await state.get_data()
     text_to_send = data.get("broadcast_text")
     await state.clear()
@@ -320,7 +329,10 @@ async def admin_callback_users_page(call: types.CallbackQuery):
 async def callback_search_prompt(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminState.waiting_for_search_query)
     await safe_edit_text(call.message, "🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):", reply_markup=get_cancel_keyboard())
-    await call.answer()
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
 
 
 @router.message(AdminState.waiting_for_search_query)
@@ -351,7 +363,10 @@ async def process_search_user(msg: types.Message, state: FSMContext):
 async def show_charge_menu(call: types.CallbackQuery):
     target_id = call.data.split("_")[3]
     await safe_edit_text(call.message, f"💰 <b>شحن رصيد للمستخدم</b> <code>{target_id}</code>\n\nاختر كمية شحن سريعة أو إدخال يدوي:", reply_markup=get_admin_charge_options_keyboard(target_id))
-    await call.answer()
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(F.data.startswith("admin_charge_quick_"))
@@ -365,7 +380,10 @@ async def process_quick_charge(call: types.CallbackQuery):
         await safe_edit_text(call.message, f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard())
         await send_points_notification(target_id, amount, new_balance)
     else:
-        await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
+        try:
+            await call.answer("❌ حدث خطأ أثناء الشحن.", show_alert=True)
+        except TelegramBadRequest:
+            pass
 
 
 @router.callback_query(F.data.startswith("admin_charge_manual_"))
@@ -374,7 +392,10 @@ async def prompt_manual_charge(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(target_id=target_id)
     await state.set_state(AdminState.waiting_for_charge_amount)
     await safe_edit_text(call.message, f"✍️ <b>شحن يدوي</b>\n\nأرسل عدد النقاط المراد إضافتها للمستخدم <code>{target_id}</code>:", reply_markup=get_cancel_keyboard())
-    await call.answer()
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
 
 
 @router.message(AdminState.waiting_for_charge_amount)
@@ -407,7 +428,10 @@ async def show_db_stats(call: types.CallbackQuery):
     stats = await admin_get_global_stats()
     text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب المسجلين: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة المُولدة: <code>{stats['total_questions']}</code>\n"
     await safe_edit_text(call.message, text, reply_markup=get_admin_dashboard_keyboard())
-    await call.answer()
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(F.data == "admin_export_users")
@@ -421,10 +445,10 @@ async def export_all_users(call: types.CallbackQuery):
         
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Created At"])
+        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Joined At"])
         
         for u in users:
-            created_time_syria = format_syria_time(u.get('created_at') or u.get('joined_at'))
+            joined_time_syria = format_syria_time(u.get('joined_at'))
             writer.writerow([
                 sanitize_csv_value(u.get('user_id', '')),
                 sanitize_csv_value(u.get('username', 'Unknown')),
@@ -434,7 +458,7 @@ async def export_all_users(call: types.CallbackQuery):
                 sanitize_csv_value(u.get('paid_points', 0)),
                 sanitize_csv_value(user_total_points(u)),
                 sanitize_csv_value(u.get('total_questions', 0)),
-                sanitize_csv_value(created_time_syria)  # 👈 تصدير التاريخ بتوقيت سوريا
+                sanitize_csv_value(joined_time_syria)
             ])
             
         csv_bytes = output.getvalue().encode('utf-8-sig')
@@ -466,7 +490,7 @@ def format_syria_time(iso_str: str) -> str:
     try:
         dt = datetime.fromisoformat(str(iso_str).replace('Z', '+00:00'))
         dt_syria = dt.astimezone(SYRIA_TZ)
-        return dt_syria.strftime("%Y-%m-%d %I:%M %p")
+        return dt_syria.strftime("%Y-%m-%d %I:%M %p").replace("AM", "ص").replace("PM", "م")
     except Exception:
         return str(iso_str)[:16].replace("T", " ")
 
@@ -482,7 +506,10 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
         quizzes, total = await admin_get_user_quizzes(creator_id=target_id, limit=USER_QUIZZES_PAGE_SIZE, offset=offset)
 
         if not quizzes or total == 0:
-            await call.answer("📭 هذا الطالب لم يقم بتوليد أي كويزات بعد.", show_alert=True)
+            try:
+                await call.answer("📭 هذا الطالب لم يقم بتوليد أي كويزات بعد.", show_alert=True)
+            except TelegramBadRequest:
+                pass
             return
 
         total_pages = max(1, -(-total // USER_QUIZZES_PAGE_SIZE))
@@ -528,8 +555,14 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
         )
 
         await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
-        await call.answer()
+        try:
+            await call.answer()
+        except TelegramBadRequest:
+            pass
 
     except Exception as e:
         logger.error(f"Error rendering user quizzes: {e}")
-        await call.answer("❌ تعذر جلب كويزات هذا الطالب.", show_alert=True)
+        try:
+            await call.answer("❌ تعذر جلب كويزات هذا الطالب.", show_alert=True)
+        except TelegramBadRequest:
+            pass
