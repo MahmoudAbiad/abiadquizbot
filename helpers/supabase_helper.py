@@ -905,20 +905,70 @@ async def auto_cleanup_3days_data() -> None:
         log_error(logger, f"Error in 3-day database cleanup: {e}")
 
 # 4️⃣ دالة استعلام الطلاب النشطين اليوم حصراً
-async def admin_get_today_active_users() -> List[Dict[str, Any]]:
-    """جلب قائمة الطلاب الذين تفاعلوا مع البوت خلال اليوم الحالي حصراً"""
-    try:
-        today_start = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        
-        res = await supabase.table("usage_events").select("user_id").gte("created_at", today_start).execute()
-        rows = res.data or []
-        unique_user_ids = list({r["user_id"] for r in rows})
+# أضف / استبدل هذه الدالة داخل supabase_helper.py
 
-        if not unique_user_ids:
+async def admin_get_today_active_users() -> List[Dict[str, Any]]:
+    """
+    جلب قائمة الطلاب النشطين خلال الـ 24 ساعة الأخيرة حصراً،
+    مع تحديد آخر نشاط وتوقيت حدوثه بتوقيت سوريا (UTC+3).
+    """
+    try:
+        # 1. تحديد بداية النافذة الزمنية (قبل 24 ساعة بالضبط)
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        twenty_four_hours_ago = (now_utc - datetime.timedelta(hours=24)).isoformat()
+
+        # 2. جلب كافة الأحداث المسجلة خلال الـ 24 ساعة الأخيرة مرّتبة من الأحدث للأقدم
+        res = await supabase.table("usage_events") \
+            .select("user_id, event_type, created_at") \
+            .gte("created_at", twenty_four_hours_ago) \
+            .order("created_at", desc=True) \
+            .execute()
+
+        rows = res.data or []
+        if not rows:
             return []
 
-        users_res = await supabase.table("users").select("user_id, first_name, last_name, username, free_points, paid_points").in_("user_id", unique_user_ids).execute()
-        return users_res.data or []
+        # 3. تصفية الأحداث لأخذ "أحدث نشاط فقط" لكل طالب (أول ظهور لكل user_id)
+        latest_event_per_user: Dict[int, Dict[str, Any]] = {}
+        for r in rows:
+            uid = r["user_id"]
+            if uid not in latest_event_per_user:
+                latest_event_per_user[uid] = r
+
+        user_ids = list(latest_event_per_user.keys())
+
+        # 4. جلب أسماء وبيانات الطلاب من جدول users
+        users_res = await supabase.table("users") \
+            .select("user_id, first_name, last_name, username") \
+            .in_("user_id", user_ids) \
+            .execute()
+
+        users_map = {u["user_id"]: u for u in (users_res.data or [])}
+
+        # 5. إعداد منطقة توقيت سوريا (UTC+3)
+        syria_tz = datetime.timezone(datetime.timedelta(hours=3))
+        active_list = []
+
+        for uid, ev in latest_event_per_user.items():
+            u_info = users_map.get(uid, {})
+            
+            # تحويل تاريخ UTC إلى توقيت سوريا ورسمنة صيغته
+            raw_dt = datetime.datetime.fromisoformat(str(ev["created_at"]).replace("Z", "+00:00"))
+            syria_dt = raw_dt.astimezone(syria_tz)
+            
+            formatted_time = syria_dt.strftime("%I:%M %p").replace("AM", "ص").replace("PM", "م")
+            formatted_date = syria_dt.strftime("%Y-%m-%d")
+
+            active_list.append({
+                "user_id": uid,
+                "first_name": u_info.get("first_name", "طالب"),
+                "last_name": u_info.get("last_name", ""),
+                "username": u_info.get("username", "Unknown"),
+                "last_event": ev["event_type"],
+                "time_str": f"{formatted_time} ({formatted_date})"
+            })
+
+        return active_list
     except Exception as e:
-        log_error(logger, f"Error fetching today active users: {e}")
+        log_error(logger, f"Error fetching 24h active users: {e}")
         return []
