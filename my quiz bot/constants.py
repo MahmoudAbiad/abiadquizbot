@@ -1,7 +1,6 @@
 from datetime import timedelta
 import os
-from time import timezone  # 🔥 تم نقل الاستيراد إلى بداية الملف تماماً لحل مشكلة الـ NameError
-
+from datetime import timezone, timedelta
 # ==================== File,Photo, Text Size Limits ====================
 MAX_DOC_SIZE = 20 * 1024 * 1024  # 20MB
 MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
