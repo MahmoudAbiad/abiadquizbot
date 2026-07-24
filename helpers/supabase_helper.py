@@ -656,9 +656,18 @@ async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
 import json
 from config import redis_client
 
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+except (ValueError, TypeError):
+    ADMIN_ID = 0
+    
 # 1️⃣ تسجيل الأحداث (تعريف واحد موحد: حفظ مباشر في الداتابيز مع مسار احتياطي لـ Redis)
 async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-    """تسجيل حدث استخدام آمن؛ يحاول الحفظ المباشر لضمان عدم ضياع البيانات."""
+    """تسجيل حدث استخدام آمن (يستثني الآدمن لعدم التأثير على التحليلات)."""
+    # 🚫 تجنب تسجيل نشاط الآدمن في التحليلات
+    if ADMIN_ID and user_id == ADMIN_ID:
+        return
+
     try:
         payload = {
             "user_id": user_id,
@@ -668,12 +677,10 @@ async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict
         }
         await supabase.table("usage_events").insert(payload).execute()
     except Exception as e:
-        # مسار احتياطي في حال تعثر الاتصال بقاعدة البيانات
         try:
             await redis_client.rpush("analytics_queue", json.dumps(payload))
         except Exception as redis_err:
             log_error(logger, f"Error logging usage event for user {user_id}: {e} | Redis fallback failed: {redis_err}")
-
 
 # 2️⃣ تفريغ طابور Redis بأمان دون فقدان البيانات (Transactional Pop)
 async def flush_analytics_queue() -> None:
@@ -703,8 +710,12 @@ async def flush_analytics_queue() -> None:
 
 # 3️⃣ إدارة محاولات الكويز مع تفادي الـ Race Conditions
 def start_quiz_attempt(user_id: int, quiz_id: Optional[str], source_type: str, total_questions: int) -> str:
-    """توليد معرف فريد وبدء المحاولة غير المعطلة."""
+    """توليد معرف فريد وبدء المحاولة (تستثني الآدمن)."""
     client_ref = uuid.uuid4().hex
+    # 🚫 تجنب تسجيل محاولات الآدمن بجدول المحاولات
+    if ADMIN_ID and user_id == ADMIN_ID:
+        return client_ref
+        
     asyncio.create_task(_insert_quiz_attempt(client_ref, user_id, quiz_id, source_type, total_questions))
     return client_ref
 
@@ -773,7 +784,7 @@ async def mark_quiz_attempt_stopped(attempt_ref: Optional[str]) -> None:
 # 4️⃣ دوال الاستعلامات الخاصة بـ لوحة التحكم والإدارة (Admin Analytics Queries)
 
 async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
-    """ملخص شامل لسلوك الاستخدام خلال آخر N يوم."""
+    """ملخص شامل لسلوك الاستخدام لـ الطلاب حصراً."""
     empty = {
         "days": days, "active_users": 0, "event_counts": {}, "total_attempts": 0,
         "completed_attempts": 0, "completion_rate": 0.0, "avg_duration_seconds": 0,
@@ -782,7 +793,11 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
     try:
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
 
-        events_res = await supabase.table("usage_events").select("user_id, event_type").gte("created_at", since).execute()
+        # استعلام الأحداث مع استبعاد الآدمن
+        events_query = supabase.table("usage_events").select("user_id, event_type").gte("created_at", since)
+        if ADMIN_ID:
+            events_query = events_query.neq("user_id", ADMIN_ID)
+        events_res = await events_query.execute()
         events = events_res.data or []
 
         active_users = len({e["user_id"] for e in events})
@@ -790,9 +805,13 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
         for e in events:
             event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
-        attempts_res = await supabase.table("quiz_attempts").select(
+        # استعلام المحاولات مع استبعاد الآدمن
+        attempts_query = supabase.table("quiz_attempts").select(
             "is_completed, source_type, duration_seconds, score, total_questions"
-        ).gte("started_at", since).execute()
+        ).gte("started_at", since)
+        if ADMIN_ID:
+            attempts_query = attempts_query.neq("user_id", ADMIN_ID)
+        attempts_res = await attempts_query.execute()
         attempts = attempts_res.data or []
 
         total_attempts = len(attempts)
@@ -828,10 +847,13 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
 
 
 async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
-    """عدد المستخدمين النشطين يومياً خلال آخر N يوم."""
+    """عدد المستخدمين النشطين يومياً (استبعاد الآدمن)."""
     try:
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
-        res = await supabase.table("usage_events").select("user_id, created_at").gte("created_at", since).execute()
+        query = supabase.table("usage_events").select("user_id, created_at").gte("created_at", since)
+        if ADMIN_ID:
+            query = query.neq("user_id", ADMIN_ID)
+        res = await query.execute()
         rows = res.data or []
 
         by_day: Dict[str, set] = {}
@@ -846,7 +868,6 @@ async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
     except Exception as e:
         log_error(logger, f"Error computing daily active users: {e}")
         return []
-
 
 async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[str, Any]:
     """سجل نشاط تفصيلي لطالب محدد."""
@@ -879,10 +900,12 @@ async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[s
 
 
 async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
-    """جلب سجل الأحداث الخام لتصديره كملف CSV."""
+    """جلب سجل الأحداث الخام لـ الطلاب حصراً كملف CSV."""
     try:
-        res = await supabase.table("usage_events").select("user_id, event_type, metadata, created_at") \
-            .order("created_at", desc=True).limit(limit).execute()
+        query = supabase.table("usage_events").select("user_id, event_type, metadata, created_at")
+        if ADMIN_ID:
+            query = query.neq("user_id", ADMIN_ID)
+        res = await query.order("created_at", desc=True).limit(limit).execute()
         return res.data or []
     except Exception as e:
         log_error(logger, f"Error exporting usage events: {e}")
@@ -890,17 +913,18 @@ async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
 
 
 async def admin_get_today_active_users() -> List[Dict[str, Any]]:
-    """جلب قائمة الطلاب النشطين خلال الـ 24 ساعة الأخيرة حصراً بتوقيت سوريا (UTC+3)."""
+    """جلب قائمة الطلاب النشطين خلال الـ 24 ساعة الأخيرة حصراً (استبعاد الآدمن)."""
     try:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         twenty_four_hours_ago = (now_utc - datetime.timedelta(hours=24)).isoformat()
 
-        res = await supabase.table("usage_events") \
+        query = supabase.table("usage_events") \
             .select("user_id, event_type, created_at") \
-            .gte("created_at", twenty_four_hours_ago) \
-            .order("created_at", desc=True) \
-            .execute()
-
+            .gte("created_at", twenty_four_hours_ago)
+        if ADMIN_ID:
+            query = query.neq("user_id", ADMIN_ID)
+            
+        res = await query.order("created_at", desc=True).execute()
         rows = res.data or []
         if not rows:
             return []
