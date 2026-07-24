@@ -1,4 +1,6 @@
-import os  # 🔥 تم نقل الاستيراد إلى بداية الملف تماماً لحل مشكلة الـ NameError
+from datetime import timedelta
+import os
+from time import timezone  # 🔥 تم نقل الاستيراد إلى بداية الملف تماماً لحل مشكلة الـ NameError
 
 # ==================== File,Photo, Text Size Limits ====================
 MAX_DOC_SIZE = 20 * 1024 * 1024  # 20MB
@@ -138,3 +140,8 @@ TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 # 🔗 استبدل YourSupportBotUsername بيوزر بوت الدعم الخاص بك
 SUPPORT_BOT_URL = "https://t.me/AbiadSupportBot"
 OFFICIAL_CHANNEL_URL = "https://t.me/abiadquizmaker"
+
+    # ==================== Users.py Configuration ====================
+
+SYRIA_TZ = timezone(timedelta(hours=3))
+USER_QUIZZES_PAGE_SIZE = 5
