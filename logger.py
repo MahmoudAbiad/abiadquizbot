@@ -5,6 +5,7 @@ Provides consistent logging across all modules with proper formatting.
 
 import logging
 import os
+import sys  # 👈 إضافة sys لتحديد القنوات الصريحة
 from datetime import datetime
 from typing import Optional
 
@@ -20,14 +21,32 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 # Create log file name with date
 log_file = os.path.join(LOGS_DIR, f"bot_{datetime.now().strftime('%Y-%m-%d')}.log")
 
+# 1. فلتر لمنع الرسائل ذات المستوى WARNING فما فوق من الذهاب لـ stdout
+class MaxLevelFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.WARNING
+
+# 2. Handler للرسائل العادية (DEBUG, INFO) -> sys.stdout
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.DEBUG)
+stdout_handler.addFilter(MaxLevelFilter())
+
+# 3. Handler للأخطاء والتحذيرات (WARNING, ERROR, CRITICAL) -> sys.stderr
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.WARNING)
+
+# 4. Handler للملف (يحفظ كل المستويات)
+file_handler = logging.FileHandler(log_file, encoding='utf-8')
+
 # Configure root logger with UTF-8 encoding
 logging.basicConfig(
     level=logging.DEBUG,
     format=LOG_FORMAT,
     datefmt=DATE_FORMAT,
     handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
-        logging.StreamHandler()  # Also print to console
+        file_handler,
+        stdout_handler,  # يرسل INFO و DEBUG فقط للكونسول العادي
+        stderr_handler   # يرسل ERROR و WARNING لكونسول الأخطاء
     ]
 )
 
