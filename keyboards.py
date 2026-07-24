@@ -13,8 +13,8 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
             [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
             [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
             [
-                types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),     # 🆕 زر القناة
-                types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)         # زر الدعم
+                types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
+                types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
             [types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
@@ -75,15 +75,13 @@ def get_multiple_quizzes_keyboard(quizzes: list, cost: float, show_generate_btn:
     if show_generate_btn:
         kb.append([types.InlineKeyboardButton(text="🆕 توليد كويز جديد كلياً (تكلفة كاملة)", callback_data="cache_action_no")])
     else:
-        # إشعار شفاف في حال قفل التوليد للوصول للحد الأقصى للملف بناءً على حجمه
         kb.append([types.InlineKeyboardButton(text="🔒 تم استنفاد الحد الأقصى لتنوع هذا الملف", callback_data="ignored")])
         
     kb.append([types.InlineKeyboardButton(text="❌ إلغاء الطلب والتراجع", callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None, is_score_public: bool = False) -> types.InlineKeyboardMarkup:
-    """لوحة نتيجة الاختبار الكاملة (إعادة/مشاركة/مفضلة/لوحة الشرف) + صف تقييم الكويز المركزي مضاف فوقها،
-    بدلاً من استبدال اللوحة الأصلية بالكامل وفقدان بقية الأزرار."""
+    """لوحة نتيجة الاختبار الكاملة + صف تقييم الكويز المركزي مضاف فوقها"""
     base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id, is_score_public=is_score_public)
     kb = list(base_kb.inline_keyboard)
     kb.insert(0, [
@@ -280,8 +278,6 @@ def get_generation_confirm_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-# داخل keyboards.py عدّل دالة get_analytics_keyboard:
-
 def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
     period_row = []
     for d, label in [(7, "7 أيام"), (30, "30 يوم"), (90, "90 يوم")]:
@@ -290,7 +286,7 @@ def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
     
     kb = [
         period_row,
-        [types.InlineKeyboardButton(text="⚡ النشطون اليوم حصراً", callback_data="admin_analytics_today")], # 🆕 الزر الجديد
+        [types.InlineKeyboardButton(text="⚡ النشطون اليوم حصراً", callback_data="admin_analytics_today")],
         [types.InlineKeyboardButton(text="📅 النشاط اليومي (آخر 14 يوم)", callback_data="admin_analytics_daily")],
         [types.InlineKeyboardButton(text="📥 تصدير سجل الأحداث CSV", callback_data="admin_export_events")],
         [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
