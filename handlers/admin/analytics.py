@@ -1,6 +1,7 @@
 import asyncio
 import io
 import csv
+import json
 from aiogram import Router, types, F
 from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest
@@ -224,21 +225,24 @@ async def export_usage_events(call: types.CallbackQuery):
         writer = csv.writer(output)
         writer.writerow(["User ID", "Event Type", "Metadata", "Created At"])
         for e in events:
+            meta = json.dumps(e.get("metadata", {}), ensure_ascii=False) if isinstance(e.get("metadata"), dict) else str(e.get("metadata", ""))
             writer.writerow([
                 sanitize_csv_value(e.get("user_id", "")),
                 sanitize_csv_value(e.get("event_type", "")),
-                sanitize_csv_value(e.get("metadata", {})),
+                sanitize_csv_value(meta),
                 sanitize_csv_value(e.get("created_at", "")),
             ])
 
         file = BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename="usage_events.csv")
-        try: await call.message.delete()
-        except TelegramBadRequest: pass
+        try: 
+            await call.message.delete()
+        except TelegramBadRequest: 
+            pass
         await call.message.answer_document(document=file, caption="📥 <b>تم استخراج ملف سجل الأحداث!</b>", reply_markup=get_analytics_keyboard(7), parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error exporting events: {e}")
         await safe_edit_text(call.message, "❌ حدث خطأ أثناء استخراج الملف.", reply_markup=get_analytics_keyboard(7))
-
+        
 @router.callback_query(F.data.startswith("admin_user_activity_"))
 async def show_user_activity(call: types.CallbackQuery):
     try:

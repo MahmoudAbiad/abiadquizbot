@@ -30,7 +30,8 @@ from supabase_helper import (
     log_usage_event,
     start_quiz_attempt,
     complete_quiz_attempt,
-    mark_quiz_attempt_stopped
+    mark_quiz_attempt_stopped,
+    _is_valid_uuid
 )
 from services.quiz_engine import send_quiz_poll
 
@@ -82,7 +83,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         questions = data['questions']
         idx = data['current_index']
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
-        user_id = state.key.user_id
+        user_id = msg_or_call.from_user.id
 
         # 1. حالة انتهاء الاختبار
         if idx >= len(questions):
@@ -121,11 +122,12 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
 async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext, data: dict):
     score, total = data['score'], data['total_count']
     quiz_id = data.get('quiz_id')
+    current_idx = data.get('current_index', 0)
     percentage = (score / total * 100) if total > 0 else 0
     previous_score_text = ""
     is_public = False
 
-    if quiz_id and quiz_id.strip():
+    if quiz_id and str(quiz_id).strip():
         score_data = await get_or_update_high_score(user_id, quiz_id, score, total)
         is_public = score_data["is_public"]
         if score_data["previous_score"] is not None:
@@ -143,7 +145,8 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
         f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
     )
 
-    if quiz_id and "-" in str(quiz_id):
+    # التحقق من صحة المعرف لإظهار لوحة التقييم بشكل آمن
+    if quiz_id and _is_valid_uuid(quiz_id):
         keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, is_score_public=is_public)
         result_text += "\n\n⭐ <b>كيف تقيم هذا الكويز؟</b> تقييمك المباشر يساعد الدفعة على فرز الكويزات الممتازة وتصفية الرديئة تلقائياً!"
     else:
@@ -151,7 +154,12 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
 
     await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
 
-    asyncio.create_task(complete_quiz_attempt(data.get("attempt_id"), score))
+    # التمييز الدقيق في التتبع بين الكويز المكتمل والتوقف المبكر
+    if current_idx >= total:
+        asyncio.create_task(complete_quiz_attempt(data.get("attempt_id"), score))
+    else:
+        asyncio.create_task(mark_quiz_attempt_stopped(data.get("attempt_id")))
+
     asyncio.create_task(log_usage_event(user_id, "quiz_completed", {
         "quiz_id": quiz_id, "score": score, "total": total, "percentage": round(percentage, 1),
     }))
@@ -296,18 +304,6 @@ async def quiz_home(call: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "ignored")
 async def handle_ignored_click(call: types.CallbackQuery):
     await call.answer("✅ تم تسجيل إجابتك")
-
-# ملاحظة: زر "🔗 مشاركة" (callback_data == "quiz_share") — سواء أثناء الكويز
-# (get_quiz_question_keyboard / get_quiz_answered_keyboard) أو بعد انتهائه
-# (get_quiz_result_keyboard) — تتم معالجته حصرياً من handlers/sharing.py الآن.
-# كان هنا سابقاً هاندلر مواز مقيّد بحالة الكويز النشطة (ACTIVE_QUIZ_STATES) وكان
-# يعترض الضغطة قبل أن تصل لـ sharing.py، وكان يبني رابط deep-link بصيغة
-# "quiz_<quiz_id>" باستخدام الـ UUID المركزي مباشرة — وهذا الرابط لا يُحل بنجاح:
-# start.py يبحث أولاً في جدول المفضلة (favorite_id) ثم في جدول المشاركات
-# (share_id)، وأيّهما لا يطابق UUID الكويز المركزي الخام. أي أن أي مشاركة أثناء
-# حل الكويز (قبل شاشة النتيجة) كانت تنتج رابطاً معطلاً لا يعمل عند فتحه. الحذف
-# هنا يضمن إن كل ضغطة "مشاركة" — بأي توقيت — تمر عبر share_quiz في sharing.py
-# اللي بينشئ share_id حقيقي محفوظ بقاعدة البيانات ويعمل فعلياً.
 
 # ==================== معالجات التقييم والملاحظات ====================
 
@@ -532,6 +528,7 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
         fav_id = await save_favorite_quiz(user_id, title, questions, new_section_id, None, quiz_id)
         if not fav_id:
             await msg.answer("❌ تعذر حفظ الاختبار، حاول مجدداً.")
+            await state.set_state(None if data.get("quiz_completed") else QuizState.answering_quiz)
             return
         await state.update_data(is_saved_in_session=True)
         asyncio.create_task(log_usage_event(user_id, "quiz_saved_favorite", {"quiz_id": quiz_id, "new_section": section_title}))
@@ -539,6 +536,7 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
         await state.set_state(None if data.get("quiz_completed") else QuizState.answering_quiz)
     except Exception as e:
         log_error(logger, f"Error in creating section and saving: {e}", exception=e)
+        await state.set_state(QuizState.answering_quiz)
 
 @router.callback_query(F.data == "force_stop_previous_quiz")
 async def force_stop_previous_quiz_handler(call: types.CallbackQuery, state: FSMContext):
@@ -565,3 +563,5 @@ async def delete_warning_msg_handler(call: types.CallbackQuery):
         pass
     finally:
         await call.answer()
+
+quiz_runner_router = router

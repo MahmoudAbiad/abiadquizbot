@@ -5,7 +5,10 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from config import bot, QuizState
 from keyboards import get_main_menu_keyboard
-from supabase_helper import check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, supabase, log_usage_event
+from supabase_helper import (
+    check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, 
+    supabase, log_usage_event, mark_quiz_attempt_stopped
+)
 from logger import get_logger, log_warning, log_info
 from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 
@@ -136,24 +139,24 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             welcome_text = "👋 <b>يا مرحباً بك مجدداً!</b>\n جاهز لاختبار جديد اليوم؟ ✍️\n"
         
         welcome_text += (
-         f"\n💡 <b>طريقة الاستخدام في ثوانٍ:</b>\n"
-         f"1️⃣ <b>أرسل المحتوى التعليمي بأي صيغة تناسبك:</b>\n"
-         f"   • ملفات: <code>PDF</code> (حتى {MAX_PDF_PAGES} صفحة)، <code>Word</code>, <code>PowerPoint</code>, <code>TXT</code>\n"
-         f"   • وسائط: صور واضحة (أو ألبوم صور) 🖼\n"
-         f"   • أو حتى ارسل <b>نصاً مباشراً</b> تريد التمرن عليه! 📝\n\n"
-         f"2️⃣ حدد عدد الأسئلة التي تفضلها.\n"
-         f"3️⃣ ابدأ حل الكويز التفاعلي واختبر معلوماتك! 🔥\n\n"
-         f"💰 <b>تكلفة إنشاء الكويز بالنقاط:</b>\n"
-         f"<blockquote>"
-         f"• 1 نقطة لكل صفحة PDF/مستند أو صورة (حتى 15 صفحة)\n"
-         f"• 1 نقطة لكل سؤال يتم توليده (حتى 30 سؤالاً)\n"
-         f"• 1.5 نقطة للصفحات والأسئلة الإضافية/الكبيرة\n"
-         f"• ⚡ خصم 90% عند فتح كويز جاهز تم توليده سابقاً!"
-         f"</blockquote>\n\n"
-         f"📊 <b>رصيدك الحالي:</b> <code>{points:.2f}</code> نقطة\n"
-         f"🎁 مجاني: <code>{free_points:.2f}</code> | 💳 مدفوع: <code>{paid_points:.2f}</code>\n\n"
-         f"🎯 <b>نصيحة ذكية:</b> شارك البوت مع زملائك عبر رابط الدعوة الخاص بك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁"
-)
+            f"\n💡 <b>طريقة الاستخدام في ثوانٍ:</b>\n"
+            f"1️⃣ <b>أرسل المحتوى التعليمي بأي صيغة تناسبك:</b>\n"
+            f"   • ملفات: <code>PDF</code> (حتى {MAX_PDF_PAGES} صفحة)، <code>Word</code>, <code>PowerPoint</code>, <code>TXT</code>\n"
+            f"   • وسائط: صور واضحة (أو ألبوم صور) 🖼\n"
+            f"   • أو حتى ارسل <b>نصاً مباشراً</b> تريد التمرن عليه! 📝\n\n"
+            f"2️⃣ حدد عدد الأسئلة التي تفضلها.\n"
+            f"3️⃣ ابدأ حل الكويز التفاعلي واختبر معلوماتك! 🔥\n\n"
+            f"💰 <b>تكلفة إنشاء الكويز بالنقاط:</b>\n"
+            f"<blockquote>"
+            f"• 1 نقطة لكل صفحة PDF/مستند أو صورة (حتى 15 صفحة)\n"
+            f"• 1 نقطة لكل سؤال يتم توليده (حتى 30 سؤالاً)\n"
+            f"• 1.5 نقطة للصفحات والأسئلة الإضافية/الكبيرة\n"
+            f"• ⚡ خصم 90% عند فتح كويز جاهز تم توليده سابقاً!"
+            f"</blockquote>\n\n"
+            f"📊 <b>رصيدك الحالي:</b> <code>{points:.2f}</code> نقطة\n"
+            f"🎁 مجاني: <code>{free_points:.2f}</code> | 💳 مدفوع: <code>{paid_points:.2f}</code>\n\n"
+            f"🎯 <b>نصيحة ذكية:</b> شارك البوت مع زملائك عبر رابط الدعوة الخاص بك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁"
+        )
         
         await msg.answer(
             welcome_text,
@@ -177,6 +180,11 @@ async def handle_deep_link_overwrite_confirm(call: types.CallbackQuery, state: F
     try:
         data = await state.get_data()
         payload = data.get("interrupted_deep_link")
+        
+        # إصلاح التتبع: إغلاق محاولة الكويز القائم قبل مسح الحالة كي لا تبقى معلقة بالداتابيز
+        if data.get("attempt_id"):
+            asyncio.create_task(mark_quiz_attempt_stopped(data["attempt_id"]))
+
         await state.clear()
         if payload:
             await call.message.delete()
@@ -215,6 +223,9 @@ async def show_recharge_info(call: types.CallbackQuery):
         )
         await call.message.answer(recharge_text, parse_mode="HTML")
         log_info(logger, f"User {call.from_user.id} requested recharge info")
+        
+        # تسجيل حدث طلب معلومات الشحن
+        asyncio.create_task(log_usage_event(call.from_user.id, "recharge_info_viewed"))
     except Exception as e:
         logger.error(f"Error in show_recharge_info: {e}")
     finally:
@@ -242,6 +253,9 @@ async def cmd_support(message: types.Message):
         "يمكنك التواصل مباشرة مع فريق الدعم عبر بوت الدعم المخصص للرد على استفساراتكم 👇"
     )
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    
+    # تسجيل حدث فتح الدعم الفني
+    asyncio.create_task(log_usage_event(message.from_user.id, "support_opened"))
 
 
 @router.message(Command("channel"))
@@ -260,3 +274,6 @@ async def cmd_channel(message: types.Message):
         "اضغط على الزر أدناه للانضمام 👇"
     )
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    
+    # تسجيل حدث فتح القناة
+    asyncio.create_task(log_usage_event(message.from_user.id, "channel_opened"))

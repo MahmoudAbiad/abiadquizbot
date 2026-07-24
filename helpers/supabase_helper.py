@@ -651,69 +651,106 @@ async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
         log_error(logger, f"Error getting leaderboard: {e}", exception=e)
         return []
 
-# ==================== Usage Analytics & Tracking ====================
-# 🆕 نظام تتبع نمط استخدام الطلاب: سجل أحداث عام + تتبع تفصيلي لكل محاولة كويز.
-# مبدأ أساسي: التسجيل يجب ألا يكسر تدفق البوت أبداً، لذلك كل الدوال هنا "صامتة" عند الفشل.
+# ==================== Usage Analytics & Tracking (Fixed & Complete) ====================
 
+import json
+from config import redis_client
+
+# 1️⃣ تسجيل الأحداث (تعريف واحد موحد: حفظ مباشر في الداتابيز مع مسار احتياطي لـ Redis)
 async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-    """تسجيل حدث استخدام (Fire-and-forget). لا يرمي استثناء أبداً حتى لا يعطل تجربة الطالب."""
+    """تسجيل حدث استخدام آمن؛ يحاول الحفظ المباشر لضمان عدم ضياع البيانات."""
     try:
-        await supabase.table("usage_events").insert({
+        payload = {
             "user_id": user_id,
             "event_type": event_type,
-            "metadata": metadata or {}
-        }).execute()
+            "metadata": metadata or {},
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        await supabase.table("usage_events").insert(payload).execute()
     except Exception as e:
-        log_error(logger, f"Error logging usage event '{event_type}' for user {user_id}: {e}")
+        # مسار احتياطي في حال تعثر الاتصال بقاعدة البيانات
+        try:
+            await redis_client.rpush("analytics_queue", json.dumps(payload))
+        except Exception as redis_err:
+            log_error(logger, f"Error logging usage event for user {user_id}: {e} | Redis fallback failed: {redis_err}")
 
 
+# 2️⃣ تفريغ طابور Redis بأمان دون فقدان البيانات (Transactional Pop)
+async def flush_analytics_queue() -> None:
+    """تفريغ الأحداث الاحتياطية من Redis ورفعها دفعة واحدة إلى Supabase مع ضمان عدم الفقدان."""
+    try:
+        events = []
+        raw_items = []
+        for _ in range(500):
+            raw = await redis_client.lpop("analytics_queue")
+            if not raw:
+                break
+            raw_items.append(raw)
+            events.append(json.loads(raw))
+
+        if events:
+            try:
+                await supabase.table("usage_events").insert(events).execute()
+                log_info(logger, f"Successfully flushed {len(events)} analytics events to Supabase.")
+            except Exception as db_err:
+                # إرجاع البيانات إلى طابور Redis في حال فشل الإدراج لعدم ضياعها
+                for item in reversed(raw_items):
+                    await redis_client.lpush("analytics_queue", item)
+                log_error(logger, f"Failed to insert flushed events into Supabase, re-queued items: {db_err}")
+    except Exception as e:
+        log_error(logger, f"Error flushing analytics queue: {e}")
+
+
+# 3️⃣ إدارة محاولات الكويز مع تفادي الـ Race Conditions
 def start_quiz_attempt(user_id: int, quiz_id: Optional[str], source_type: str, total_questions: int) -> str:
-    """🚀 غير معطّلة إطلاقاً (Zero-latency): تُنشئ معرّف تتبع فوري بجانب البوت دون أي انتظار
-    لقاعدة البيانات، وتُطلق عملية الإدراج الفعلية بمهمة خلفية منفصلة. يُستخدم الناتج (client_ref)
-    لاحقاً لإغلاق المحاولة عند الإكمال أو التوقف المبكر."""
+    """توليد معرف فريد وبدء المحاولة غير المعطلة."""
     client_ref = uuid.uuid4().hex
     asyncio.create_task(_insert_quiz_attempt(client_ref, user_id, quiz_id, source_type, total_questions))
     return client_ref
 
 
 async def _insert_quiz_attempt(client_ref: str, user_id: int, quiz_id: Optional[str], source_type: str, total_questions: int) -> None:
-    """المهمة الخلفية الفعلية لإدراج سجل المحاولة؛ لا تُستدعى مباشرة من الهاندلرز."""
     try:
-        clean_quiz_id = None
-        if quiz_id:
-            try:
-                uuid.UUID(str(quiz_id))
-                clean_quiz_id = str(quiz_id)
-            except ValueError:
-                clean_quiz_id = None
+        clean_quiz_id = str(quiz_id) if _is_valid_uuid(quiz_id) else None
 
         await supabase.table("quiz_attempts").insert({
             "client_ref": client_ref,
             "user_id": user_id,
             "quiz_id": clean_quiz_id,
             "source_type": source_type,
-            "total_questions": total_questions
+            "total_questions": total_questions,
+            "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }).execute()
     except Exception as e:
-        log_error(logger, f"Error inserting quiz attempt tracking row: {e}")
+        log_error(logger, f"Error inserting quiz attempt tracking row ({client_ref}): {e}")
 
 
 async def complete_quiz_attempt(attempt_ref: Optional[str], score: int) -> None:
-    """إغلاق محاولة الكويز عند اكتمالها وتسجيل النتيجة النهائية والمدة الزمنية المستغرقة.
-    تُستدعى دوماً عبر asyncio.create_task من الهاندلر فلا تؤخر إرسال نتيجة الكويز للطالب."""
+    """إغلاق المحاولة المكتملة وحساب الوقت بدقة مع معالجة تأخير السجلات."""
     if not attempt_ref:
         return
     try:
-        row = await supabase.table("quiz_attempts").select("started_at").eq("client_ref", attempt_ref).limit(1).execute()
+        row = None
+        for _ in range(3):
+            res = await supabase.table("quiz_attempts").select("started_at").eq("client_ref", attempt_ref).limit(1).execute()
+            if res.data:
+                row = res.data[0]
+                break
+            await asyncio.sleep(0.4)  # انتظار 400ms في حال وجود تأخير في الشبكة
+
         duration = None
-        if row.data and row.data[0].get("started_at"):
-            started = datetime.datetime.fromisoformat(str(row.data[0]["started_at"]).replace("Z", "+00:00"))
-            duration = int((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds())
+        if row and row.get("started_at"):
+            try:
+                started_str = str(row["started_at"]).replace("Z", "+00:00")
+                started = datetime.datetime.fromisoformat(started_str)
+                duration = int((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds())
+            except Exception as dt_err:
+                log_warning(logger, f"Duration calculation issue for {attempt_ref}: {dt_err}")
 
         await supabase.table("quiz_attempts").update({
             "score": score,
             "is_completed": True,
-            "completed_at": datetime.datetime.utcnow().isoformat(),
+            "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "duration_seconds": duration
         }).eq("client_ref", attempt_ref).execute()
     except Exception as e:
@@ -721,30 +758,29 @@ async def complete_quiz_attempt(attempt_ref: Optional[str], score: int) -> None:
 
 
 async def mark_quiz_attempt_stopped(attempt_ref: Optional[str]) -> None:
-    """تسجيل خروج الطالب المبكر من الكويز دون إكماله، مفيد لتحديد نقاط التسرب.
-    تُستدعى دوماً عبر asyncio.create_task فلا تؤخر رجوع الطالب للقائمة الرئيسية."""
+    """تسجيل توقف الطالب المبكر."""
     if not attempt_ref:
         return
     try:
         await supabase.table("quiz_attempts").update({
             "is_completed": False,
-            "completed_at": datetime.datetime.utcnow().isoformat()
+            "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }).eq("client_ref", attempt_ref).execute()
     except Exception as e:
         log_error(logger, f"Error marking quiz attempt {attempt_ref} as stopped: {e}")
 
 
-# ---- تجميع البيانات لعرضها في لوحة الإدارة ----
+# 4️⃣ دوال الاستعلامات الخاصة بـ لوحة التحكم والإدارة (Admin Analytics Queries)
 
 async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
-    """ملخص شامل لسلوك الاستخدام خلال آخر N يوم: مستخدمون نشطون، توزيع الأحداث، معدل إكمال الكويزات، متوسط النتائج."""
+    """ملخص شامل لسلوك الاستخدام خلال آخر N يوم."""
     empty = {
         "days": days, "active_users": 0, "event_counts": {}, "total_attempts": 0,
         "completed_attempts": 0, "completion_rate": 0.0, "avg_duration_seconds": 0,
         "source_breakdown": {}, "avg_score_percentage": 0.0,
     }
     try:
-        since = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+        since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
 
         events_res = await supabase.table("usage_events").select("user_id, event_type").gte("created_at", since).execute()
         events = events_res.data or []
@@ -792,9 +828,9 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
 
 
 async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
-    """عدد المستخدمين النشطين يومياً خلال آخر N يوم، لعرض رسم بياني نصي بسيط بلوحة الإدارة."""
+    """عدد المستخدمين النشطين يومياً خلال آخر N يوم."""
     try:
-        since = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+        since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
         res = await supabase.table("usage_events").select("user_id, created_at").gte("created_at", since).execute()
         rows = res.data or []
 
@@ -813,7 +849,7 @@ async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
 
 
 async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[str, Any]:
-    """سجل نشاط تفصيلي لطالب محدد: آخر الأحداث + إحصائيات محاولات الكويزات الخاصة به."""
+    """سجل نشاط تفصيلي لطالب محدد."""
     empty = {"recent_events": [], "total_attempts": 0, "completed_attempts": 0, "avg_score_percentage": 0.0, "recent_attempts": []}
     try:
         events_res = await supabase.table("usage_events").select("event_type, metadata, created_at") \
@@ -843,7 +879,7 @@ async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[s
 
 
 async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
-    """جلب سجل الأحداث الخام لتصديره كملف CSV من لوحة الإدارة."""
+    """جلب سجل الأحداث الخام لتصديره كملف CSV."""
     try:
         res = await supabase.table("usage_events").select("user_id, event_type, metadata, created_at") \
             .order("created_at", desc=True).limit(limit).execute()
@@ -852,72 +888,13 @@ async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
         log_error(logger, f"Error exporting usage events: {e}")
         return []
 
-        # أضف هذه الاستيرادات والدوال في نهاية supabase_helper.py
-
-import json
-from config import redis_client
-
-# 1️⃣ تسجيل الحدث في Redis فقط (سرعة 0 ملي ثانية)
-async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-    """إدراج الحدث في قائمة Redis مؤقتاً لتجميع التحديثات"""
-    try:
-        payload = json.dumps({
-            "user_id": user_id,
-            "event_type": event_type,
-            "metadata": metadata or {},
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-        })
-        await redis_client.rpush("analytics_queue", payload)
-    except Exception as e:
-        log_error(logger, f"Error enqueuing event in Redis: {e}")
-
-# 2️⃣ رفِع التحديثات دفعة واحدة إلى Supabase (تُستدعى كل دقيقة)
-async def flush_analytics_queue() -> None:
-    """تفريغ الأحداث المتجمعة في Redis ورفعها دفعة واحدة إلى Supabase"""
-    try:
-        events = []
-        for _ in range(500): # سحب بحد أقصى 500 حدث في الدفعة
-            raw = await redis_client.lpop("analytics_queue")
-            if not raw:
-                break
-            events.append(json.loads(raw))
-
-        if events:
-            await supabase.table("usage_events").insert(events).execute()
-            log_info(logger, f"Successfully flushed {len(events)} analytics events to Supabase.")
-    except Exception as e:
-        log_error(logger, f"Error flushing analytics queue: {e}")
-
-# 3️⃣ دالة تنظيف الجداول من البيانات التي تجاوزت 3 أيام
-async def auto_cleanup_3days_data() -> None:
-    """حذف سجلات الأحداث والكويزات السيئة التي تجاوزت 3 أيام"""
-    try:
-        three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).isoformat()
-        
-        # تنظيف سجل الأحداث القديمة
-        await supabase.table("usage_events").delete().lt("created_at", three_days_ago).execute()
-        
-        # تنظيف الكويزات ذات التقييم السلبي التي تجاوزت 3 أيام
-        await supabase.table("quizzes").delete().lt("created_at", three_days_ago).lt("score", 0).execute()
-        
-        log_info(logger, "Automated 3-day database cleanup executed successfully.")
-    except Exception as e:
-        log_error(logger, f"Error in 3-day database cleanup: {e}")
-
-# 4️⃣ دالة استعلام الطلاب النشطين اليوم حصراً
-# أضف / استبدل هذه الدالة داخل supabase_helper.py
 
 async def admin_get_today_active_users() -> List[Dict[str, Any]]:
-    """
-    جلب قائمة الطلاب النشطين خلال الـ 24 ساعة الأخيرة حصراً،
-    مع تحديد آخر نشاط وتوقيت حدوثه بتوقيت سوريا (UTC+3).
-    """
+    """جلب قائمة الطلاب النشطين خلال الـ 24 ساعة الأخيرة حصراً بتوقيت سوريا (UTC+3)."""
     try:
-        # 1. تحديد بداية النافذة الزمنية (قبل 24 ساعة بالضبط)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         twenty_four_hours_ago = (now_utc - datetime.timedelta(hours=24)).isoformat()
 
-        # 2. جلب كافة الأحداث المسجلة خلال الـ 24 ساعة الأخيرة مرّتبة من الأحدث للأقدم
         res = await supabase.table("usage_events") \
             .select("user_id, event_type, created_at") \
             .gte("created_at", twenty_four_hours_ago) \
@@ -928,7 +905,6 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
         if not rows:
             return []
 
-        # 3. تصفية الأحداث لأخذ "أحدث نشاط فقط" لكل طالب (أول ظهور لكل user_id)
         latest_event_per_user: Dict[int, Dict[str, Any]] = {}
         for r in rows:
             uid = r["user_id"]
@@ -937,22 +913,17 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
 
         user_ids = list(latest_event_per_user.keys())
 
-        # 4. جلب أسماء وبيانات الطلاب من جدول users
         users_res = await supabase.table("users") \
             .select("user_id, first_name, last_name, username") \
             .in_("user_id", user_ids) \
             .execute()
 
         users_map = {u["user_id"]: u for u in (users_res.data or [])}
-
-        # 5. إعداد منطقة توقيت سوريا (UTC+3)
         syria_tz = datetime.timezone(datetime.timedelta(hours=3))
         active_list = []
 
         for uid, ev in latest_event_per_user.items():
             u_info = users_map.get(uid, {})
-            
-            # تحويل تاريخ UTC إلى توقيت سوريا ورسمنة صيغته
             raw_dt = datetime.datetime.fromisoformat(str(ev["created_at"]).replace("Z", "+00:00"))
             syria_dt = raw_dt.astimezone(syria_tz)
             
@@ -973,37 +944,58 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
         log_error(logger, f"Error fetching 24h active users: {e}")
         return []
 
-async def admin_get_today_quizzes():
-    """جلب الكويزات التي تم توليدها اليوم (آخر 24 ساعة) مع معلومات الطالب."""
-    import datetime
-    now = datetime.datetime.now(datetime.timezone.utc)
-    since_time = (now - datetime.timedelta(hours=72)).isoformat()
-    
-    # استعلام جلب الكويزات وربطها ببيانات المستخدم
-    res = await supabase.table("quizzes") \
-        .select("id, source_title, created_at, creator_id, users!quizzes_creator_id_fkey(user_id, username, first_name, last_name)") \
-        .gte("created_at", since_time) \
-        .order("created_at", desc=True) \
-        .execute()
+
+async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
+    """جلب الكويزات التي تم توليدها اليوم (آخر 72 ساعة) مع معلومات الطالب."""
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        since_time = (now - datetime.timedelta(hours=72)).isoformat()
         
-    return res.data or []
+        res = await supabase.table("quizzes") \
+            .select("id, source_title, created_at, creator_id, users!quizzes_creator_id_fkey(user_id, username, first_name, last_name)") \
+            .gte("created_at", since_time) \
+            .order("created_at", desc=True) \
+            .execute()
+            
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error fetching today quizzes: {e}")
+        return []
 
-async def admin_get_user_quizzes(creator_id: int, limit: int = 5, offset: int = 0):
-    """جلب الكويزات الخاصة بطالب محدد مرتبة من الأحدث إلى الأقدم مع التصفح."""
-    # جلب العدد الإجمالي للكويزات
-    count_res = await supabase.table("quizzes") \
-        .select("id", count="exact") \
-        .eq("creator_id", creator_id) \
-        .execute()
-    
-    total = count_res.count or 0
 
-    # جلب قائمة الكويزات لهذه الصفحة
-    res = await supabase.table("quizzes") \
-        .select("id, source_title, created_at, likes, dislikes") \
-        .eq("creator_id", creator_id) \
-        .order("created_at", desc=True) \
-        .range(offset, offset + limit - 1) \
-        .execute()
+async def admin_get_user_quizzes(creator_id: int, limit: int = 5, offset: int = 0) -> tuple[List[Dict[str, Any]], int]:
+    """جلب الكويزات الخاصة بطالب محدد مرتبة مع التصفح."""
+    try:
+        count_res = await supabase.table("quizzes") \
+            .select("id", count="exact") \
+            .eq("creator_id", creator_id) \
+            .execute()
+        
+        total = count_res.count or 0
 
-    return res.data or [], total
+        res = await supabase.table("quizzes") \
+            .select("id, source_title, created_at, likes, dislikes") \
+            .eq("creator_id", creator_id) \
+            .order("created_at", desc=True) \
+            .range(offset, offset + limit - 1) \
+            .execute()
+
+        return res.data or [], total
+    except Exception as e:
+        log_error(logger, f"Error fetching user quizzes for {creator_id}: {e}")
+        return [], 0
+
+
+# 5️⃣ دالة تنظيف البيانات القديمة
+async def auto_cleanup_old_analytics_data() -> None:
+    """حذف سجلات الأحداث القديمة جداً والسيئة."""
+    try:
+        thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).isoformat()
+        three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).isoformat()
+        
+        await supabase.table("usage_events").delete().lt("created_at", thirty_days_ago).execute()
+        await supabase.table("quizzes").delete().lt("created_at", three_days_ago).lt("score", 0).execute()
+        
+        log_info(logger, "Automated database cleanup executed successfully.")
+    except Exception as e:
+        log_error(logger, f"Error in database cleanup: {e}")

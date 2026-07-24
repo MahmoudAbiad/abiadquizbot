@@ -2,6 +2,7 @@
 import asyncio
 import io
 import csv
+import json
 from typing import Optional, Dict
 from datetime import datetime, timezone, timedelta
 from constants import SYRIA_TZ, USER_QUIZZES_PAGE_SIZE
@@ -42,9 +43,18 @@ def user_total_points(user: dict) -> float:
 
 
 async def fetch_users_async():
-    """جلب سجل الطلاب المسجلين مرتبين من الأحدث."""
-    res = await supabase.table("users").select("*").order("joined_at", desc=True).execute()
-    return res.data or []
+    """جلب سجل الطلاب المسجلين مرتبين من الأحدث مع التعامل الآمن مع اسم العمود."""
+    try:
+        res = await supabase.table("users").select("*").order("created_at", desc=True).execute()
+        return res.data or []
+    except Exception as e:
+        logger.warning(f"Failed to order by created_at, trying fallback: {e}")
+        try:
+            res = await supabase.table("users").select("*").execute()
+            return res.data or []
+        except Exception as err:
+            logger.error(f"Error fetching users: {err}")
+            return []
 
 
 async def send_points_notification(target_id: int, amount: int, new_balance: int):
@@ -241,6 +251,8 @@ async def process_broadcast_text(msg: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_confirm_broadcast", AdminState.waiting_for_broadcast_confirm)
 async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext):
+    # التأكيد الفوري للطلب لتفادي الـ Callback Timeout أثناء الحلقة
+    await call.answer()
     data = await state.get_data()
     text_to_send = data.get("broadcast_text")
     await state.clear()
@@ -296,7 +308,6 @@ async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext
         f"┗ ❌ أخطاء وفشل إرسال: <code>{failed_count}</code>"
     )
     await call.message.answer(final_report, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
-    await call.answer()
 
 
 # ==================== تفاعلات البحث والشحن وتصفح الطلاب ====================
@@ -375,7 +386,14 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
     
     amount = int(msg.text)
     data = await state.get_data()
-    target_id = int(data.get('target_id'))
+    raw_target_id = data.get('target_id')
+    
+    if not raw_target_id:
+        await msg.answer("❌ انتهت جلسة الشحن، يرجى إعادة اختيار الطالب مجدداً.", reply_markup=get_admin_dashboard_keyboard())
+        await state.clear()
+        return
+
+    target_id = int(raw_target_id)
     
     new_balance = await admin_add_points(target_id, amount)
     if new_balance is not None:
@@ -405,9 +423,10 @@ async def export_all_users(call: types.CallbackQuery):
         
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Joined At"])
+        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Created At"])
         
         for u in users:
+            created_time = u.get('created_at') or u.get('joined_at', '')
             writer.writerow([
                 sanitize_csv_value(u.get('user_id', '')),
                 sanitize_csv_value(u.get('username', 'Unknown')),
@@ -417,7 +436,7 @@ async def export_all_users(call: types.CallbackQuery):
                 sanitize_csv_value(u.get('paid_points', 0)),
                 sanitize_csv_value(user_total_points(u)),
                 sanitize_csv_value(u.get('total_questions', 0)),
-                sanitize_csv_value(u.get('joined_at', ''))
+                sanitize_csv_value(created_time)
             ])
             
         csv_bytes = output.getvalue().encode('utf-8-sig')
@@ -441,6 +460,7 @@ async def export_all_users(call: types.CallbackQuery):
         except TelegramBadRequest:
             await call.message.answer("❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
 
+
 def format_syria_time(iso_str: str) -> str:
     """تحويل توقيت قاعدة البيانات إلى توقيت سوريا (12 ساعة بتنسيق صباحاً/مساءً)."""
     if not iso_str:
@@ -452,10 +472,10 @@ def format_syria_time(iso_str: str) -> str:
     except Exception:
         return str(iso_str)[:16].replace("T", " ")
 
+
 @router.callback_query(F.data.startswith("admin_user_quizzes_"))
 async def show_user_quizzes_handler(call: types.CallbackQuery):
     try:
-        # استخراج آيدي الطالب ورقم الصفحة من الـ callback_data
         parts = call.data.split("_")
         target_id = int(parts[3])
         page = int(parts[5])
@@ -487,13 +507,11 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
                 f"───────────────────"
             )
 
-            # زر مباشر لتجربة الكويز
             kb.append([types.InlineKeyboardButton(
                 text=f"🎯 تجربة #{idx}: {title[:22]}",
                 callback_data=f"afb_try_{quiz_id}"
             )])
 
-        # أزرار التنقل (السابق / التالي)
         nav_row = []
         if page > 1:
             nav_row.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"admin_user_quizzes_{target_id}_p_{page - 1}"))
