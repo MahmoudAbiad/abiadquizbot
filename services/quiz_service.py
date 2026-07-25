@@ -91,7 +91,7 @@ async def execute_quiz_generation_workflow(
         return None, None, "ai_failed"
 
     # 4. حفظ الكاش لملفات أوفيس والنصوص
-    if file_hash and quiz_data and not is_media:
+    if file_hash and quiz_data:
         await save_file_quiz_multiple(
             file_hash=file_hash,
             creator_id=user_id,
