@@ -1,7 +1,6 @@
 from aiogram import types
 from constants import OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL
 from logger import get_logger
-from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
 
 logger = get_logger(__name__)
 
@@ -24,24 +23,12 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
         logger.error(f"Error generating main menu keyboard: {e}")
         return types.InlineKeyboardMarkup(inline_keyboard=[])
 
-def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMarkup:
-    """لوحة اختيار شكل تنسيق الملف (بسيط / عصري / أكاديمي) - أول خطوة بمسار التصدير."""
-    suffix = f"_{favorite_id}" if favorite_id else ""
-    prefix = "fav_export_style_" if favorite_id else "export_style_"
-    kb = [
-        [types.InlineKeyboardButton(text=f"⚪ {STYLE_LABELS_AR[name]}", callback_data=f"{prefix}{code}{suffix}")]
-        for code, name in STYLE_CODE_TO_NAME.items()
-    ]
-    return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
-def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
-    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF)، مع الحفاظ على الستايل المختار،
-    تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
+def get_export_format_keyboard(favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF)، تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
     if favorite_id:
-        docx_cb = f"fav_export_docx_{style_code}_{favorite_id}"
-        pdf_cb = f"fav_export_pdf_{style_code}_{favorite_id}"
+        docx_cb, pdf_cb = f"fav_export_docx_{favorite_id}", f"fav_export_pdf_{favorite_id}"
     else:
-        docx_cb, pdf_cb = f"export_docx_{style_code}", f"export_pdf_{style_code}"
+        docx_cb, pdf_cb = "export_docx", "export_pdf"
     kb = [
         [
             types.InlineKeyboardButton(text="📄 Word (docx)", callback_data=docx_cb),
