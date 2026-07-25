@@ -23,11 +23,26 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
         logger.error(f"Error generating main menu keyboard: {e}")
         return types.InlineKeyboardMarkup(inline_keyboard=[])
 
+def get_export_format_keyboard(favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF)، تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
+    if favorite_id:
+        docx_cb, pdf_cb = f"fav_export_docx_{favorite_id}", f"fav_export_pdf_{favorite_id}"
+    else:
+        docx_cb, pdf_cb = "export_docx", "export_pdf"
+    kb = [
+        [
+            types.InlineKeyboardButton(text="📄 Word (docx)", callback_data=docx_cb),
+            types.InlineKeyboardButton(text="📕 PDF", callback_data=pdf_cb)
+        ]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 def get_quiz_result_keyboard(quiz_id: str = None, is_score_public: bool = False) -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="🔄 إعادة الاختبار", callback_data="quiz_replay")],
         [types.InlineKeyboardButton(text="🔗 مشاركة هذا الكويز", callback_data="quiz_share")],
-        [types.InlineKeyboardButton(text="⭐ حفظ في المفضلة", callback_data="quiz_favorite")]
+        [types.InlineKeyboardButton(text="⭐ حفظ في المفضلة", callback_data="quiz_favorite")],
+        [types.InlineKeyboardButton(text="📁 تحميل الكويز (Word/PDF)", callback_data="export_menu")]
     ]
     
     if quiz_id:
@@ -143,6 +158,7 @@ def get_favorite_details_keyboard(favorite_id: str, section_id: str = None) -> t
     back_target = f"fav_sec_view_{section_id}" if section_id else "favorites_menu"
     kb = [
         [types.InlineKeyboardButton(text="▶️ بدء الاختبار الآن", callback_data=f"fav_open_{favorite_id}")],
+        [types.InlineKeyboardButton(text="📁 تحميل الكويز (Word/PDF)", callback_data=f"fav_export_menu_{favorite_id}")],
         [types.InlineKeyboardButton(text="🗑️ حذف الكويز", callback_data=f"fav_del_{favorite_id}")],
         [
             types.InlineKeyboardButton(text="🔙 رجوع", callback_data=back_target),
