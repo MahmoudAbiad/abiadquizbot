@@ -89,11 +89,9 @@ async def set_bot_commands(bot_instance: Bot):
         if ADMIN_ID != 0:
             admin_commands = [
                 types.BotCommand(command="start", description="🔄 تشغيل البوت وعرض الرصيد"),
-                types.BotCommand(command="charge", description="💰 شحن نقاط لطالب"),
-                types.BotCommand(command="dbstats", description="📊 إحصائيات قاعدة البيانات"),
-                types.BotCommand(command="searchuser", description="🔍 فحص بيانات طالب"),
-                types.BotCommand(command="fetchall", description="👥 استعراض جميع الطلاب"),
+                types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
                 types.BotCommand(command="admin", description="⚙️ لوحة تحكم الإدارة"),
+                types.BotCommand(command="charge", description="💰 شحن نقاط لطالب"),
             ]
             await bot_instance.set_my_commands(
                 admin_commands,

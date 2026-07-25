@@ -95,7 +95,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
             [
-                types.InlineKeyboardButton(text="⏹ إيقاف", callback_data="quiz_stop"),
+                types.InlineKeyboardButton(text="⏹ إنهاء", callback_data="quiz_stop"),
                 types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
                 types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
             ],
