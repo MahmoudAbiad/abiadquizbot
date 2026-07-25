@@ -38,12 +38,27 @@ class ExportError(Exception):
     """خطأ عام أثناء توليد ملف التصدير (يُعرض للمستخدم برسالة ودّية)."""
 
 
+_PARENS_RE = re.compile(r"\([^()]*\)|\uFF08[^\uFF08\uFF09]*\uFF09")
+
+
+def _strip_parens(text: str) -> str:
+    """يشيل أي نص محصور بين قوسين (زي ترجمة أو توضيح) قبل حساب لغة الكويز -
+    حتى ترجمة عربية بين قوسين ضمن سؤال إنكليزي (أو العكس) ما تأثر على تحديد
+    اللغة الأساسية للمستند كله."""
+    prev = None
+    while prev != text:
+        prev = text
+        text = _PARENS_RE.sub(" ", text)
+    return text
+
+
 def detect_language(questions: List[Dict[str, Any]]) -> str:
-    """يكتشف لغة الكويز: 'ar' أو 'en' اعتماداً على نسبة الأحرف العربية في عينة من النص."""
+    """يكتشف لغة الكويز: 'ar' أو 'en' اعتماداً على نسبة الأحرف العربية في عينة من النص
+    (بعد تجاهل أي نص بين قوسين، مثل الترجمات أو التوضيحات)."""
     sample_parts = []
     for q in questions[:12]:
-        sample_parts.append(str(q.get("question", "")))
-        sample_parts.extend(str(o) for o in (q.get("options") or []))
+        sample_parts.append(_strip_parens(str(q.get("question", ""))))
+        sample_parts.extend(_strip_parens(str(o)) for o in (q.get("options") or []))
     sample = " ".join(sample_parts)
 
     letters = _LETTER_RE.findall(sample)
@@ -74,9 +89,11 @@ def _set_paragraph_rtl(paragraph, align_right: bool = True) -> None:
 
 
 def _style_run(run, font_name: str, size_pt: float, bold: bool = False,
-                color: Tuple[int, int, int] = None, rtl: bool = False) -> None:
+                color: Tuple[int, int, int] = None, rtl: bool = False,
+                italic: bool = False) -> None:
     run.font.size = Pt(size_pt)
     run.bold = bold
+    run.italic = italic
     if color:
         run.font.color.rgb = RGBColor(*color)
     rPr = run._element.get_or_add_rPr()
@@ -86,7 +103,11 @@ def _style_run(run, font_name: str, size_pt: float, bold: bool = False,
         rPr.append(rFonts)
     rFonts.set(qn("w:ascii"), font_name)
     rFonts.set(qn("w:hAnsi"), font_name)
-    rFonts.set(qn("w:cs"), font_name)
+    # خط الكتابة المعقّدة (w:cs) يبقى ثابت على خط يدعم العربي دايماً، حتى لو باقي
+    # الفقرة بخط لا يدعم العربي (Calibri مثلاً). Word بيفرز عرض كل حرف تلقائياً
+    # حسب نوعه (لاتيني/عربي) داخل نفس الـ run الواحد — فهيك أي كلمة أو جملة عربية
+    # جوا سؤال/اختيار إنكليزي (أو العكس) بترسم صح بلا ما نحتاج نفصّل النص لأجزاء.
+    rFonts.set(qn("w:cs"), "Arial")
     if rtl:
         rPr.append(OxmlElement("w:rtl"))
 
@@ -280,16 +301,42 @@ def _font_available(name: str) -> bool:
     return name in pdfmetrics.getRegisteredFontNames()
 
 
-def _shape(text: str, is_ar: bool) -> str:
-    if not is_ar or not _BIDI_AVAILABLE:
+def _shape(text: str, base_ar: bool) -> str:
+    """يهيئ وييعيد ترتيب النص للعرض الصحيح (bidi) - يشتغل كل ما كان في نص عربي
+    بالسطر، بغض النظر عن كون الفقرة ككل عربي أو إنكليزي. base_ar يحدد اتجاه
+    القراءة الأساسي للسطر (يهم بترتيب الأجزاء غير-العربية المدسوسة وسطه)."""
+    if not _BIDI_AVAILABLE or not _ARABIC_RE.search(text):
         return text
     try:
-        return get_display(arabic_reshaper.reshape(text))
+        return get_display(arabic_reshaper.reshape(text), base_dir=("R" if base_ar else "L"))
     except Exception:
         return text
 
 
-def _wrap_line(text: str, font_name: str, size: float, max_width: float, is_ar: bool) -> List[str]:
+_SCRIPT_SPLIT_RE = re.compile(
+    r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+"
+    r"|[^\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+"
+)
+
+
+def _split_script_runs(shaped_text: str) -> List[Tuple[str, bool]]:
+    """يقسّم نص (بعد التهيئة/bidi) إلى أجزاء متتالية عربي/غير-عربي، بنفس ترتيب
+    الرسم من اليسار لليمين على الصفحة - كل جزء جاهز يترسم بخطّه المناسب."""
+    if not shaped_text:
+        return [("", False)]
+    return [(tok, bool(_ARABIC_RE.match(tok))) for tok in _SCRIPT_SPLIT_RE.findall(shaped_text)]
+
+
+def _mixed_width(text: str, base_ar: bool, font_en: str, font_ar: str, size: float) -> float:
+    shaped = _shape(text, base_ar)
+    total = 0.0
+    for seg, seg_is_ar in _split_script_runs(shaped):
+        total += pdfmetrics.stringWidth(seg, font_ar if seg_is_ar else font_en, size)
+    return total
+
+
+def _wrap_line(text: str, base_ar: bool, font_en: str, font_ar: str, size: float,
+               max_width: float) -> List[str]:
     words = text.split()
     if not words:
         return [""]
@@ -297,9 +344,7 @@ def _wrap_line(text: str, font_name: str, size: float, max_width: float, is_ar: 
     current: List[str] = []
     for w in words:
         trial = current + [w]
-        trial_text = " ".join(trial)
-        measure = _shape(trial_text, is_ar)
-        width = pdfmetrics.stringWidth(measure, font_name, size)
+        width = _mixed_width(" ".join(trial), base_ar, font_en, font_ar, size)
         if width <= max_width or not current:
             current = trial
         else:
@@ -308,6 +353,29 @@ def _wrap_line(text: str, font_name: str, size: float, max_width: float, is_ar: 
     if current:
         lines.append(" ".join(current))
     return lines
+
+
+def _draw_mixed_line(c, text: str, base_ar: bool, font_en: str, font_ar: str, size: float,
+                      y: float, color: str, margin: float, page_w: float,
+                      extra_indent: float = 0, center: bool = False) -> None:
+    """يرسم سطر واحد ممكن يحوي عربي وإنكليزي مع بعض، كل جزء بخطّه الصحيح،
+    مع محاذاة يمين/يسار/وسط محسوبة على العرض الكلي الحقيقي للسطر."""
+    shaped = _shape(text, base_ar)
+    runs = _split_script_runs(shaped)
+    total_w = sum(pdfmetrics.stringWidth(seg, font_ar if seg_is_ar else font_en, size)
+                  for seg, seg_is_ar in runs)
+    if center:
+        x = page_w / 2 - total_w / 2
+    elif base_ar:
+        x = page_w - margin - extra_indent - total_w
+    else:
+        x = margin + extra_indent
+    c.setFillColor(HexColor(color))
+    for seg, seg_is_ar in runs:
+        font = font_ar if seg_is_ar else font_en
+        c.setFont(font, size)
+        c.drawString(x, y, seg)
+        x += pdfmetrics.stringWidth(seg, font, size)
 
 
 class _QuizPDFRenderer:
@@ -325,12 +393,17 @@ class _QuizPDFRenderer:
         self.page_num = 1
 
         _register_pdf_fonts()
+        self.font_ar_regular = "Arabic" if _font_available("Arabic") else None
+        self.font_ar_bold = "Arabic-Bold" if _font_available("Arabic-Bold") else None
+        self.font_en_regular = "Latin" if _font_available("Latin") else "Helvetica"
+        self.font_en_bold = "Latin-Bold" if _font_available("Latin-Bold") else "Helvetica-Bold"
+
         if is_ar:
-            self.font_regular = "Arabic" if _font_available("Arabic") else None
-            self.font_bold = "Arabic-Bold" if _font_available("Arabic-Bold") else None
+            self.font_regular = self.font_ar_regular
+            self.font_bold = self.font_ar_bold
         else:
-            self.font_regular = "Latin" if _font_available("Latin") else "Helvetica"
-            self.font_bold = "Latin-Bold" if _font_available("Latin-Bold") else "Helvetica-Bold"
+            self.font_regular = self.font_en_regular
+            self.font_bold = self.font_en_bold
 
         if is_ar and (not self.font_regular or not self.font_bold):
             raise ExportError(
@@ -355,51 +428,45 @@ class _QuizPDFRenderer:
         if self.y - needed < self.margin + 25:
             self._new_page()
 
-    def _draw_paragraph(self, text: str, font: str, size: float, bold: bool = False,
+    def _draw_paragraph(self, text: str, size: float, bold: bool = False,
                          color: str = "#111111", extra_indent: float = 0, gap_after: float = 6,
-                         center: bool = False):
-        use_font = self.font_bold if bold else font
+                         center: bool = False, is_ar: bool = None):
+        # is_ar=None يعني "استخدم اتجاه المستند العام"؛ تمرير قيمة صريحة يسمح
+        # برسم فقرة واحدة بعكس اتجاه بقية المستند لو احتجنا لهيك مستقبلاً.
+        direction_ar = self.is_ar if is_ar is None else is_ar
+        font_en = self.font_en_bold if bold else self.font_en_regular
+        font_ar = (self.font_ar_bold if bold else self.font_ar_regular) or font_en
         max_width = self.page_w - 2 * self.margin - extra_indent
-        lines = _wrap_line(text, use_font, size, max_width, self.is_ar)
-        self.c.setFillColor(HexColor(color))
+        lines = _wrap_line(text, direction_ar, font_en, font_ar, size, max_width)
         for line in lines:
             self._ensure_space(size + 5)
-            draw_text = _shape(line, self.is_ar)
-            self.c.setFont(use_font, size)
-            if center:
-                self.c.drawCentredString(self.page_w / 2, self.y, draw_text)
-            elif self.is_ar:
-                x = self.page_w - self.margin - extra_indent
-                self.c.drawRightString(x, self.y, draw_text)
-            else:
-                x = self.margin + extra_indent
-                self.c.drawString(x, self.y, draw_text)
+            _draw_mixed_line(self.c, line, direction_ar, font_en, font_ar, size, self.y, color,
+                              self.margin, self.page_w, extra_indent=extra_indent, center=center)
             self.y -= (size + 5)
         self.y -= gap_after
 
     # ---------- الأقسام ----------
 
     def _render_header(self):
-        self._draw_paragraph(self.title, self.font_regular, 19, bold=True,
+        self._draw_paragraph(self.title, 19, bold=True,
                               color="#14376E", gap_after=4, center=True)
         sub = f"عدد الأسئلة: {len(self.questions)}" if self.is_ar else f"Total Questions: {len(self.questions)}"
-        self._draw_paragraph(sub, self.font_regular, 10.5, color="#666666", gap_after=16, center=True)
+        self._draw_paragraph(sub, 10.5, color="#666666", gap_after=16, center=True)
 
     def _render_questions(self):
         for idx, q in enumerate(self.questions, 1):
             label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {str(q.get('question', '')).strip()}"
             self._ensure_space(30)
-            self._draw_paragraph(label, self.font_regular, 12.5, bold=True, gap_after=4)
+            self._draw_paragraph(label, 12.5, bold=True, gap_after=4)
             for oidx, opt in enumerate(q.get("options") or []):
                 letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
-                self._draw_paragraph(f"{letter}) {opt}", self.font_regular, 11,
-                                      extra_indent=18, gap_after=2)
+                self._draw_paragraph(f"{letter}) {opt}", 11, extra_indent=18, gap_after=2)
             self.y -= 8
 
     def _render_answer_table(self):
         self._new_page()
         title = "🗝️ جدول الإجابات الصحيحة" if self.is_ar else "🗝️ Answer Key"
-        self._draw_paragraph(title, self.font_regular, 15, bold=True, color="#14376E", gap_after=12)
+        self._draw_paragraph(title, 15, bold=True, color="#14376E", gap_after=12)
 
         total_w = self.page_w - 2 * self.margin
         col_ratios = [0.09, 0.31, 0.60]
@@ -420,13 +487,17 @@ class _QuizPDFRenderer:
 
         row_font_size = 9.5
         pad = 5
+        font_en = self.font_en_regular
+        font_ar = self.font_ar_regular or font_en
+        font_en_b = self.font_en_bold
+        font_ar_b = self.font_ar_bold or font_en_b
 
         def draw_row(values, is_header=False):
-            font = self.font_bold if is_header else self.font_regular
+            fen, far = (font_en_b, font_ar_b) if is_header else (font_en, font_ar)
             # التفاف كل خلية أولاً لتحديد ارتفاع الصف
             wrapped_cols = []
             for val, w in zip(values, col_widths):
-                wrapped_cols.append(_wrap_line(str(val), font, row_font_size, w - 2 * pad, self.is_ar))
+                wrapped_cols.append(_wrap_line(str(val), self.is_ar, fen, far, row_font_size, w - 2 * pad))
             n_lines = max(len(w) for w in wrapped_cols)
             row_h = n_lines * (row_font_size + 4) + 2 * pad
             self._ensure_space(row_h)
@@ -441,16 +512,20 @@ class _QuizPDFRenderer:
             for x_left in col_x_left[1:]:
                 self.c.line(x_left, top_y, x_left, top_y - row_h)
 
-            self.c.setFont(font, row_font_size)
-            self.c.setFillColor(HexColor("#111111"))
             for lines, x_left, x_right in zip(wrapped_cols, col_x_left, col_x_right):
                 line_y = top_y - pad - row_font_size
                 for line in lines:
-                    draw_text = _shape(line, self.is_ar)
-                    if self.is_ar:
-                        self.c.drawRightString(x_right - pad, line_y, draw_text)
-                    else:
-                        self.c.drawString(x_left + pad, line_y, draw_text)
+                    shaped = _shape(line, self.is_ar)
+                    runs = _split_script_runs(shaped)
+                    run_w = sum(pdfmetrics.stringWidth(seg, far if a else fen, row_font_size)
+                                for seg, a in runs)
+                    cx = (x_right - pad - run_w) if self.is_ar else (x_left + pad)
+                    self.c.setFillColor(HexColor("#111111"))
+                    for seg, seg_is_ar in runs:
+                        f = far if seg_is_ar else fen
+                        self.c.setFont(f, row_font_size)
+                        self.c.drawString(cx, line_y, seg)
+                        cx += pdfmetrics.stringWidth(seg, f, row_font_size)
                     line_y -= (row_font_size + 4)
             self.y = top_y - row_h
 
