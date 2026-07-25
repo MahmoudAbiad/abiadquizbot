@@ -21,7 +21,8 @@ from handlers import (
     quiz_runner_router, 
     favorites_router, 
     sharing_router,
-    leaderboard_router
+    leaderboard_router,
+    export_router
 )
 from middlewares import ThrottlingMiddleware
 
@@ -54,6 +55,7 @@ def main():
         quiz_runner_router,  # 👈 الـ Router الجديد لإدارة حركة الكويز
         favorites_router,
         leaderboard_router,
+        export_router,  # 👈 تصدير الكويز إلى Word/PDF
     )
     
     webhook_url = os.getenv("WEBHOOK_URL")
