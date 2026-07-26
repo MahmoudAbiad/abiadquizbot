@@ -857,8 +857,10 @@ async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
         rows = res.data or []
 
         by_day: Dict[str, set] = {}
+        syria_tz = datetime.timezone(datetime.timedelta(hours=3))
         for r in rows:
-            day = str(r["created_at"])[:10]
+            raw_dt = datetime.datetime.fromisoformat(str(r["created_at"]).replace("Z", "+00:00"))
+            day = raw_dt.astimezone(syria_tz).strftime("%Y-%m-%d")
             by_day.setdefault(day, set()).add(r["user_id"])
 
         return sorted(
@@ -975,10 +977,13 @@ async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         twenty_four_hours_ago = (now_utc - datetime.timedelta(hours=24)).isoformat()
         
-        # 1. جلب كويزات الـ 24 ساعة الأخيرة فقط
-        res = await supabase.table("quizzes") \
+        # 1. جلب كويزات الـ 24 ساعة الأخيرة فقط (باستثناء الآدمن، أسوة ببقية دوال التحليلات)
+        query = supabase.table("quizzes") \
             .select("id, source_title, created_at, creator_id") \
-            .gte("created_at", twenty_four_hours_ago) \
+            .gte("created_at", twenty_four_hours_ago)
+        if ADMIN_ID:
+            query = query.neq("creator_id", ADMIN_ID)
+        res = await query \
             .order("created_at", desc=True) \
             .execute()
             
