@@ -275,7 +275,7 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
         }))
 
         from handlers.quiz_runner import _start_loaded_quiz
-        await _start_loaded_quiz(call.message, state, selected_quiz["quiz_data"], data.get("source_title", "كويز"), origin="cached_file", quiz_id=quiz_uuid)
+        await _start_loaded_quiz(call, state, selected_quiz["quiz_data"], data.get("source_title", "كويز"), origin="cached_file", quiz_id=quiz_uuid)
         
         for path in data.get("file_paths", []):
             safe_file_cleanup(path)
@@ -412,7 +412,7 @@ async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMCo
         }))
 
         from handlers.quiz_runner import _start_loaded_quiz
-        await _start_loaded_quiz(call.message, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
+        await _start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
 
     except Exception as exc:
