@@ -13,4 +13,4 @@ COPY . .
 RUN mkdir -p downloads logs
 
 # Run the bot
-CMD ["python", "my quiz bot/main.py"]
+CMD ["python", "main.py"]

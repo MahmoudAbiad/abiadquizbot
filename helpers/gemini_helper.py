@@ -47,7 +47,7 @@ from constants import (
     MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
 )
 from logger import get_logger, log_error, log_info, log_warning
-from supabase_helper import get_cached_quiz, save_quiz_to_cache
+from supabase_helper import get_cached_quiz
 from utils import calculate_file_hash, safe_file_cleanup
 
 # ==============================================================================
@@ -490,7 +490,6 @@ async def generate_quiz_smart(
             return None
             
         questions, total_tokens = generated
-        await save_quiz_to_cache(cache_key, questions, total_tokens)
         return questions
 
     finally:
