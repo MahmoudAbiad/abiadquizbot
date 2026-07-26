@@ -533,13 +533,50 @@ async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
         log_error(logger, f"Error saving student feedback on quiz: {e}")
         return False
 
+async def _get_safe_to_delete_quiz_ids(threshold: str) -> List[str]:
+    """يرجع فقط IDs الكويزات المؤهلة للحذف الفعلي: قديمة + سيئة التقييم،
+    وبنفس الوقت ماإلها share_code (مو مشاركة)، مو محفوظة بمفضلة أي مستخدم،
+    وما حدا رجع لعبها أبداً (ما إلها أي صف بجدول quiz_scores).
+    هيك منتجنب خرق foreign key constraint (quiz_scores_quiz_id_fkey) ومنحافظ
+    على أي كويز عندو قيمة فعلية (مشاركة/مفضلة/استخدام)."""
+    try:
+        candidates_res = await supabase.table("quizzes") \
+            .select("id") \
+            .lt("created_at", threshold) \
+            .lt("score", 0) \
+            .is_("share_code", "null") \
+            .execute()
+        candidate_ids = [q["id"] for q in (candidates_res.data or [])]
+        if not candidate_ids:
+            return []
+
+        fav_res = await supabase.table("favorite_quizzes") \
+            .select("quiz_id") \
+            .in_("quiz_id", candidate_ids) \
+            .execute()
+        favorited_ids = {r["quiz_id"] for r in (fav_res.data or [])}
+
+        scores_res = await supabase.table("quiz_scores") \
+            .select("quiz_id") \
+            .in_("quiz_id", candidate_ids) \
+            .execute()
+        used_ids = {r["quiz_id"] for r in (scores_res.data or [])}
+
+        return [qid for qid in candidate_ids if qid not in favorited_ids and qid not in used_ids]
+    except Exception as e:
+        log_error(logger, f"Error resolving safe-to-delete quiz ids: {e}")
+        return []
+
+
 async def auto_cleanup_bad_quizzes():
-    """تنظيف تلقائي شامل للكويزات المرفوضة من الطلاب (ديسلايكات عالية) والتي تجاوزت 48 ساعة"""
+    """تنظيف تلقائي شامل للكويزات المرفوضة من الطلاب (ديسلايكات عالية) والتي تجاوزت 48 ساعة،
+    باستثناء أي كويز عندو share_code أو محفوظ بالمفضلة أو تم استخدامه ولو مرة."""
     try:
         threshold = (datetime.datetime.utcnow() - datetime.timedelta(days=2)).isoformat()
-        # السياسة: حذف أي كويز قديم مجموعه سلبي (Score < 0) تلقائياً بفعل مجتمع الطلاب النشط
-        await supabase.table("quizzes").delete().lt("created_at", threshold).lt("score", 0).execute()
-        log_info(logger, "Automated database garbage cleanup loop executed successfully.")
+        deletable_ids = await _get_safe_to_delete_quiz_ids(threshold)
+        if deletable_ids:
+            await supabase.table("quizzes").delete().in_("id", deletable_ids).execute()
+        log_info(logger, f"Automated database garbage cleanup loop executed successfully. Deleted {len(deletable_ids)} quizzes.")
     except Exception as e:
         log_error(logger, f"Error running the background auto cleanup query: {e}")
 
@@ -1054,8 +1091,11 @@ async def auto_cleanup_old_analytics_data() -> None:
         three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).isoformat()
         
         await supabase.table("usage_events").delete().lt("created_at", thirty_days_ago).execute()
-        await supabase.table("quizzes").delete().lt("created_at", three_days_ago).lt("score", 0).execute()
-        
-        log_info(logger, "Automated database cleanup executed successfully.")
+
+        deletable_ids = await _get_safe_to_delete_quiz_ids(three_days_ago)
+        if deletable_ids:
+            await supabase.table("quizzes").delete().in_("id", deletable_ids).execute()
+
+        log_info(logger, f"Automated database cleanup executed successfully. Deleted {len(deletable_ids)} quizzes.")
     except Exception as e:
         log_error(logger, f"Error in database cleanup: {e}")
