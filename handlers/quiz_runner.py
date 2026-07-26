@@ -45,6 +45,13 @@ ACTIVE_QUIZ_STATES = (
     QuizState.waiting_for_quiz_feedback
 )
 
+# 🩹 نفس حالات الكويز النشط + None: تُستخدم حصراً لهاندلرات ويزارد "حفظ في المفضلة"
+# لأن state يُصفَّر إلى None عند اكتمال الكويز (_handle_quiz_completion) قبل أن
+# يصل المستخدم لصفحة النتيجة، وزر "⭐ حفظ في المفضلة" يظهر هناك تحديداً.
+# لا تُستخدم لهاندلرات الكويز النشط الأخرى (next_question, get_hint, quiz_stop...)
+# التي يجب أن تبقى مقيدة بحالة كويز فعلياً جارٍ.
+SAVE_WIZARD_STATES = ACTIVE_QUIZ_STATES + (None,)
+
 async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
     bot_info = await bot.get_me()
     menu = get_main_menu_keyboard(bot_info.username, user_id)
@@ -372,7 +379,7 @@ async def process_quiz_feedback(msg: types.Message, state: FSMContext):
 
 # ==================== معالجات ويزارد حفظ الكويز للمفضلة ====================
 
-@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data.in_({"save_quiz", "quiz_favorite"}))
+@router.callback_query(StateFilter(*SAVE_WIZARD_STATES), F.data.in_({"save_quiz", "quiz_favorite"}))
 async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
@@ -402,7 +409,7 @@ async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
     finally:
         await call.answer()
 
-@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "save_name_current")
+@router.callback_query(StateFilter(*SAVE_WIZARD_STATES), F.data == "save_name_current")
 async def save_name_current_handler(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
@@ -418,7 +425,7 @@ async def save_name_current_handler(call: types.CallbackQuery, state: FSMContext
     finally:
         await call.answer()
 
-@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "save_name_custom")
+@router.callback_query(StateFilter(*SAVE_WIZARD_STATES), F.data == "save_name_custom")
 async def save_name_custom_handler(call: types.CallbackQuery, state: FSMContext):
     try:
         await state.set_state(QuizState.waiting_for_custom_name)
@@ -447,7 +454,7 @@ async def _prompt_section_selection(msg_or_call_msg: types.Message, state: FSMCo
     ])
     await msg_or_call_msg.answer("📁 **خطوة 2 من 2: تصنيف مكان الحفظ**\n\nأين تريد تصنيف هذا الاختبار في المفضلة؟", reply_markup=kb, parse_mode="Markdown")
 
-@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "save_sec_general")
+@router.callback_query(StateFilter(*SAVE_WIZARD_STATES), F.data == "save_sec_general")
 async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
@@ -467,7 +474,7 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
     finally:
         await call.answer()
 
-@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "save_sec_choose")
+@router.callback_query(StateFilter(*SAVE_WIZARD_STATES), F.data == "save_sec_choose")
 async def handle_save_choose_section(call: types.CallbackQuery, state: FSMContext):
     try:
         sections = await list_favorite_sections(call.from_user.id)
@@ -482,7 +489,7 @@ async def handle_save_choose_section(call: types.CallbackQuery, state: FSMContex
     finally:
         await call.answer()
 
-@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data.startswith("save_to_sec_"))
+@router.callback_query(StateFilter(*SAVE_WIZARD_STATES), F.data.startswith("save_to_sec_"))
 async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMContext):
     try:
         section_id = call.data.replace("save_to_sec_", "")
@@ -502,7 +509,7 @@ async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMC
     finally:
         await call.answer()
 
-@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "save_sec_create_new")
+@router.callback_query(StateFilter(*SAVE_WIZARD_STATES), F.data == "save_sec_create_new")
 async def handle_request_new_section(call: types.CallbackQuery, state: FSMContext):
     try:
         await state.set_state(QuizState.waiting_for_new_section_title)
