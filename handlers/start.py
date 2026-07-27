@@ -138,24 +138,15 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         else:
             welcome_text = "👋 <b>يا مرحباً بك مجدداً!</b>\n جاهز لاختبار جديد اليوم؟ ✍️\n"
         
+        # 📌 نسخة مختصرة وقابلة للمسح البصري (Scannable): سطر واحد للبدء + صندوق مضغوط
+        # للتكلفة والرصيد. الشرح التفصيلي لخطوات الاستخدام انتقل بالكامل إلى الدليل
+        # التفاعلي (/help أو زر «كيف يعمل البوت؟») لتفادي إغراق المستخدم بجدار نصوص.
         welcome_text += (
-            f"\n💡 <b>طريقة الاستخدام في ثوانٍ:</b>\n"
-            f"1️⃣ <b>أرسل المحتوى التعليمي بأي صيغة تناسبك:</b>\n"
-            f"   • ملفات: <code>PDF</code> (حتى {MAX_PDF_PAGES} صفحة)، <code>Word</code>, <code>PowerPoint</code>, <code>TXT</code>\n"
-            f"   • وسائط: صور واضحة (أو ألبوم صور) 🖼\n"
-            f"   • أو حتى ارسل <b>نصاً مباشراً</b> تريد التمرن عليه! 📝\n\n"
-            f"2️⃣ حدد عدد الأسئلة التي تفضلها.\n"
-            f"3️⃣ ابدأ حل الكويز التفاعلي واختبر معلوماتك! 🔥\n\n"
-            f"💰 <b>تكلفة إنشاء الكويز بالنقاط:</b>\n"
-            f"<blockquote>"
-            f"• 1 نقطة لكل صفحة PDF/مستند أو صورة (حتى 15 صفحة)\n"
-            f"• 1 نقطة لكل سؤال يتم توليده (حتى 30 سؤالاً)\n"
-            f"• 1.5 نقطة للصفحات والأسئلة الإضافية/الكبيرة\n"
-            f"• ⚡ خصم 90% عند فتح كويز جاهز تم توليده سابقاً!"
-            f"</blockquote>\n\n"
-            f"📊 <b>رصيدك الحالي:</b> <code>{points:.2f}</code> نقطة\n"
-            f"🎁 مجاني: <code>{free_points:.2f}</code> | 💳 مدفوع: <code>{paid_points:.2f}</code>\n\n"
-            f"🎯 <b>نصيحة ذكية:</b> شارك البوت مع زملائك عبر رابط الدعوة الخاص بك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁"
+            f"\n📥 <b>ابدأ الآن:</b> أرسل ملف (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشراً — وحدد عدد الأسئلة. ذلك كل شيء! 🔥\n\n"
+            f"💰 <code>1</code> نقطة تقريباً لكل صفحة/سؤال، وخصم <code>90%</code> عند إعادة استخدام كويز جاهز.\n"
+            f"📊 رصيدك: <code>{points:.2f}</code> نقطة (🎁 {free_points:.2f} · 💳 {paid_points:.2f})\n\n"
+            f"🎯 شارك رابط دعوتك مع زملائك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁\n"
+            f"❓ محتاج شرح أوضح بالخطوات؟ اضغط 🎬 «كيف يعمل البوت؟» بالأسفل، أو أرسل /help بأي وقت."
         )
         
         await msg.answer(
@@ -164,6 +155,14 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
         )
         log_info(logger, f"User {msg.from_user.id} started bot. Status: {status}, Points: {points}")
+
+        # 🆕 نقطة الألم الأساسية: مستخدم جديد يضغط /start ولا يعرف كيف يتعامل مع البوت.
+        # لذلك نعرض عليه تلقائياً أول خطوة من الدليل التفاعلي القابل للتصفح (Next/Prev)
+        # بدل تركه يواجه جدار النص وحده. لا يظهر هذا تلقائياً للمستخدمين العائدين
+        # حتى لا يُزعجهم بتكرار شيء يعرفونه أصلاً؛ يبقى متاحاً لهم عبر زر القائمة أو /help.
+        if status == "new":
+            from handlers.tutorial import send_tutorial
+            await send_tutorial(msg, 0)
         
     except Exception as e:
         logger.error(f"Error in start handler: {e}")
@@ -236,6 +235,7 @@ async def set_bot_commands(bot):
     # النسخة الفعلية المستخدمة على Railway/الويبهوك هي config.py::set_bot_commands
     commands = [
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
+        types.BotCommand(command="help", description="🎬 كيف يعمل البوت؟ (دليل سريع)"),
         types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
     ]
     await bot.set_my_commands(commands)
