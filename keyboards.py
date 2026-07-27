@@ -11,6 +11,7 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
     try:
         ref_link = f"https://t.me/{bot_username}?start={user_id}"
         kb = [
+            [types.InlineKeyboardButton(text="🎬 كيف يعمل البوت؟ (دليل سريع)", callback_data="how_to_use")],
             [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
             [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
             [
