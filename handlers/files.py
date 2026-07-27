@@ -19,7 +19,7 @@ from constants import (
 )
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
-from keyboards import get_generation_confirm_keyboard, get_multiple_quizzes_keyboard
+from keyboards import get_generation_confirm_keyboard, get_multiple_quizzes_keyboard, get_question_count_quick_keyboard
 from logger import get_logger, log_error
 from supabase_helper import (
     check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped
@@ -68,7 +68,11 @@ async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any
         f"🎁 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
         f"💳 المدفوع: <code>{float(user_info.get('paid_points') or 0):.2f}</code>\n"
         f"💰 الإجمالي الحالي: <code>{balance:.2f}</code> / المطلوب: <code>{required:.2f}</code>\n"
-        f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>",
+        f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>\n\n"
+        # 🩹 UX: أهم لحظة لذكر التجديد اليومي المجاني — الطالب هنا على وشك اتخاذ قرار
+        # الدفع، ومن حقه يعرف أن لديه بديلاً مجانياً إن لم يكن مستعجلاً.
+        f"💡 <b>تذكير:</b> نقاطك المجانية تتجدد تلقائياً كل يوم بـ <b>{DAILY_RENEWAL_POINTS} نقطة</b> — "
+        "إن لم تكن مستعجلاً يمكنك الانتظار لتجديد الغد بدل الشحن الآن.",
         reply_markup=keyboard, parse_mode="HTML"
     )
 
@@ -144,7 +148,7 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
 
         await state.update_data(**common_state)
         await state.set_state(QuizState.waiting_for_count)
-        await message.answer(SUCCESS_MEDIA_RECEIVED, reply_markup=_cancel_keyboard())
+        await message.answer(SUCCESS_MEDIA_RECEIVED, reply_markup=get_question_count_quick_keyboard())
     except Exception as exc:
         for path in file_paths: safe_file_cleanup(path)
         log_error(logger, f"Finalize media failed: {exc}", exception=exc)
@@ -239,7 +243,10 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
 
     await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
     await state.set_state(QuizState.waiting_for_count)
-    await message.answer("✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
+    await message.answer(
+        "✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
+        reply_markup=get_question_count_quick_keyboard()
+    )
 
 # ==================== معالجات قرار الكاش والأزرار المتعددة ====================
 
@@ -287,44 +294,46 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
     """في حال رفض الكاش ورغبة الطالب بتوليد كويز جديد كلياً"""
     await state.set_state(QuizState.waiting_for_count)
-    await call.message.edit_text("📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟", reply_markup=_cancel_keyboard())
+    await call.message.edit_text(
+        "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
+        reply_markup=get_question_count_quick_keyboard()
+    )
     await call.answer()
 
 # ==================== معالجات تحديد الأسئلة والتأكيد ====================
 
-@router.message(QuizState.waiting_for_count, F.text.isdigit())
-async def process_count(message: types.Message, state: FSMContext) -> None:
-    """معالج إدخال عدد الأسئلة المطلوبة والتحقق من التكلفة وإظهار رسالة التأكيد"""
-    count = int(message.text)
+async def _process_question_count(reply_target: types.Message, state: FSMContext, user, count: int) -> None:
+    """المنطق المشترك للتحقق من عدد الأسئلة وحساب التكلفة وعرض شاشة التأكيد،
+    يُستدعى سواء أرسل الطالب رقماً كتابة أو ضغط أحد أزرار الاختيار السريع."""
     valid, error = validate_question_count(count)
     if not valid:
-        await message.answer(f"❌ {error}", reply_markup=_cancel_keyboard())
+        await reply_target.answer(f"❌ {error}", reply_markup=get_question_count_quick_keyboard())
         return
-        
+
     data = await state.get_data()
     items = int(data.get("items_count") or 1)
     is_album = bool(data.get("is_album"))
     file_hash = data.get("file_hash")
-    
+
     if file_hash:
         current_quizzes = await get_file_quizzes(file_hash)
         max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
         if len(current_quizzes) >= max_allowed:
-            await message.answer(MSG_MAX_QUIZZES_REACHED, parse_mode="HTML")
+            await reply_target.answer(MSG_MAX_QUIZZES_REACHED, parse_mode="HTML")
             await state.clear()
             return
 
     cost = calculate_quiz_points_cost(items, count, is_album)
     mode = determine_execution_mode(items, count)
 
-    user_info = await _current_user(message)
-    
+    user_info = await _current_user(reply_target, user)
+
     if float(user_info["points"]) < cost:
-        await _insufficient_balance(message, user_info, cost)
+        await _insufficient_balance(reply_target, user_info, cost)
         return
 
     # إصلاح التتبع: تسجيل حدث طلب التوليد
-    asyncio.create_task(log_usage_event(message.from_user.id, "quiz_generation_requested", {
+    asyncio.create_task(log_usage_event(user.id, "quiz_generation_requested", {
         "requested_count": count, "items_count": items, "cost": cost, "mode": mode
     }))
 
@@ -340,14 +349,35 @@ async def process_count(message: types.Message, state: FSMContext) -> None:
     if mode == "Super-Processing":
         confirm_text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
-    await message.answer(confirm_text, reply_markup=confirm_kb, parse_mode="HTML")
+    await reply_target.answer(confirm_text, reply_markup=confirm_kb, parse_mode="HTML")
+
+@router.message(QuizState.waiting_for_count, F.text.isdigit())
+async def process_count(message: types.Message, state: FSMContext) -> None:
+    """معالج إدخال عدد الأسئلة المطلوبة كتابةً والتحقق من التكلفة وإظهار رسالة التأكيد"""
+    await _process_question_count(message, state, message.from_user, int(message.text))
+
+@router.callback_query(QuizState.waiting_for_count, F.data.startswith("qcount_"))
+async def process_count_quick_select(call: types.CallbackQuery, state: FSMContext) -> None:
+    """معالج الضغط على أحد أزرار الاختيار السريع لعدد الأسئلة (5/10/15/20)"""
+    try:
+        count = int(call.data.replace("qcount_", ""))
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+        await _process_question_count(call.message, state, call.from_user, count)
+    except Exception as exc:
+        log_error(logger, f"Quick count selection failed: {exc}", exception=exc)
+        await call.message.answer("❌ تعذر تنفيذ الاختيار، أرسل الرقم يدوياً من فضلك.", reply_markup=get_question_count_quick_keyboard())
+    finally:
+        await call.answer()
 
 @router.message(QuizState.waiting_for_count)
 async def process_count_invalid(message: types.Message) -> None:
     """معالج إدخال قيمة غير رقمية لعدد الأسئلة"""
     await message.answer(
-        "⚠️ <b>الرجاء إرسال رقم صحيح لعدد الأسئلة!</b>\n\nأو اعمد إلى استخدام زر التراجع أدناه لإلغاء العملية الحالية بشكل نظيف وعادل.",
-        reply_markup=_cancel_keyboard(),
+        "⚠️ <b>الرجاء إرسال رقم صحيح لعدد الأسئلة!</b>\n\nيمكنك اختيار أحد الأزرار أدناه، أو استخدام زر التراجع لإلغاء العملية الحالية بشكل نظيف وعادل.",
+        reply_markup=get_question_count_quick_keyboard(),
         parse_mode="HTML"
     )
 

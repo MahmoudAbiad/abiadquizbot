@@ -121,16 +121,35 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             "has_referrer": bool(referrer_id),
         }))
         
-        welcome_text = ""
+        # 🆕 نقطة ألم في تجربة أول 3 ثوانٍ: كان المستخدم الجديد يستقبل رسالتين متتاليتين
+        # فوراً (ترحيب طويل بـ6 أزرار، ثم خطوة 1 من الدليل بأزرار إضافية) تحتويان معلومة
+        # مكررة حرفياً ("أرسل ملف/صورة/نص" تتكرر مرتين). هنا نُدمجهما في رسالة واحدة
+        # مختصرة: ترحيب + رصيد فقط، متبوعة مباشرة بخطوة 1 من الدليل كبديل لها لا كإضافة
+        # عليها. أزرار القائمة الرئيسية (شحن الرصيد/الدعم/الإحالة...) تبقى متاحة لاحقاً
+        # عبر /start مجدداً أو تلقائياً بمجرد إغلاق/إنهاء الدليل (راجع tutorial.py).
         if status == "new":
-            welcome_text = (
+            intro_text = (
                 "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
                 "مكانك الأول لتحويل المحاضرات لاختبارات تفاعلية بسهولة. 🚀\n\n"
-                f"🎁 هدية البداية: ضفنا لحسابك <b>{points} نقطة مجانية</b> لتجرب البوت فوراً!\n"
+                f"🎁 هدية البداية: أضفنا لحسابك <b>{points} نقطة مجانية</b> لتجربته فوراً!"
             )
             if user_info["referrer"]:
-                welcome_text += "✨ وجميلك ما ننساه! تم منح زميلك الذي دعاك مكافأة إضافية أيضاً. 🤝\n"
-        elif status == "renewed":
+                intro_text += "\n✨ وجميلك ما ننساه! تم منح زميلك الذي دعاك مكافأة إضافية أيضاً. 🤝"
+            intro_text += f"\n📊 رصيدك الحالي: <code>{points:.2f}</code> نقطة (تقريباً نقطة واحدة لكل سؤال)"
+            intro_text += f"\n🔄 وتتجدد نقاطك المجانية تلقائياً كل يوم بـ <b>{DAILY_RENEWAL_POINTS} نقطة</b> إضافية."
+
+            from handlers.tutorial import get_tutorial_step_content
+            step_text, step_kb = get_tutorial_step_content(0)
+
+            await msg.answer(
+                f"{intro_text}\n\n━━━━━━━━━━━━━━━\n\n{step_text}",
+                parse_mode="HTML",
+                reply_markup=step_kb
+            )
+            log_info(logger, f"User {msg.from_user.id} started bot. Status: new, Points: {points}")
+            return
+
+        if status == "renewed":
             welcome_text = (
                 "☀️ <b>يا أهلاً، يومك سعيد!</b>\n\n"
                 f"دائماً معك في رحلتك الدراسية.. تم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄\n"
@@ -155,14 +174,6 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
         )
         log_info(logger, f"User {msg.from_user.id} started bot. Status: {status}, Points: {points}")
-
-        # 🆕 نقطة الألم الأساسية: مستخدم جديد يضغط /start ولا يعرف كيف يتعامل مع البوت.
-        # لذلك نعرض عليه تلقائياً أول خطوة من الدليل التفاعلي القابل للتصفح (Next/Prev)
-        # بدل تركه يواجه جدار النص وحده. لا يظهر هذا تلقائياً للمستخدمين العائدين
-        # حتى لا يُزعجهم بتكرار شيء يعرفونه أصلاً؛ يبقى متاحاً لهم عبر زر القائمة أو /help.
-        if status == "new":
-            from handlers.tutorial import send_tutorial
-            await send_tutorial(msg, 0)
         
     except Exception as e:
         logger.error(f"Error in start handler: {e}")
@@ -213,6 +224,10 @@ async def show_recharge_info(call: types.CallbackQuery):
             "🔋 <b>شحن النقاط وزيادة الرصيد</b>\n\n"
             "هل استهلكت نقاطك المجانية وتحتاج للمزيد? لا تقلق! "
             "يمكنك شحن رصيدك بكميات مخصصة لتوليد اختبارات بلا حدود والتحضير للامتحانات بكل راحة. 📚\n\n"
+            # 🩹 UX: نذكّر بالبديل المجاني قبل الدفع مباشرة — الشحن مفيد فقط لمن يحتاج
+            # نقاطاً أكثر الآن، لا لمن يستطيع الانتظار ليوم واحد فقط.
+            f"💡 <b>تذكير:</b> نقاطك المجانية تتجدد تلقائياً كل يوم بـ <b>{DAILY_RENEWAL_POINTS} نقطة</b> "
+            "بدون أي مقابل — الشحن اختياري فقط إن احتجت نقاطاً إضافية الآن.\n\n"
             "لطلب الشحن، كل ما عليك هو التواصل مباشرة مع الدعم والإدارة عبر الرابط التالي:\n"
             f"👉 <b>{ADMIN_CONTACT}</b>\n\n"
             "📝 <b>طريقة الشحن:</b>\n"

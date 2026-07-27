@@ -1,5 +1,5 @@
 from aiogram import types
-from constants import OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL
+from constants import OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL, BTN_CANCEL_REQUEST
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
 
@@ -83,6 +83,14 @@ def get_quiz_exit_confirmation_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineKeyboardMarkup:
+    """🩹 UX: أزرار سريعة لعدد الأسئلة الشائعة، بدل إجبار الطالب على كتابة رقم من دون أي
+    مرجع (خصوصاً أن السقف الأقصى قد يصل إلى 120 سؤالاً). تبقى كتابة رقم مخصص متاحة دائماً."""
+    suggestions = suggestions or [5, 10, 15, 20]
+    row = [types.InlineKeyboardButton(text=f"{n}", callback_data=f"qcount_{n}") for n in suggestions]
+    kb = [row, [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 def get_cancel_upload_keyboard() -> types.InlineKeyboardMarkup:
     """زر التراجع النظيف لإلغاء طلبات معالجة الملفات أو النصوص المباشرة المعلقة"""
     kb = [
@@ -98,7 +106,10 @@ def get_multiple_quizzes_keyboard(quizzes: list, cost: float, show_generate_btn:
     for idx, q in enumerate(quizzes, 1):
         likes = q.get('likes', 0)
         dislikes = q.get('dislikes', 0)
-        btn_text = f"📝 كويز {idx} الجاهز | 👍 {likes} | 👎 {dislikes}"
+        # 🩹 UX: إضافة عدد الأسئلة لكل كويز جاهز، فالطالب كان يختار بين "كويز 1" و"كويز 2"
+        # دون معرفة عدد أسئلة أي منهما قبل الدفع.
+        q_count = len(q.get('quiz_data') or [])
+        btn_text = f"📝 كويز {idx} الجاهز ({q_count} سؤال) | 👍 {likes} | 👎 {dislikes}"
         kb.append([types.InlineKeyboardButton(text=btn_text, callback_data=f"use_multi_{q['id']}")])
     
     if show_generate_btn:
