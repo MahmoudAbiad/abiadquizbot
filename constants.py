@@ -40,7 +40,7 @@ GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 AI_REQUEST_TIMEOUT = 120  # Seconds
 
 # ==================== Points & Token System ====================
-WELCOME_POINTS = 50           # 50 نقطة ترحيبية = 50,000 توكن مجاني
+WELCOME_POINTS = 80           # 50 نقطة ترحيبية = 50,000 توكن مجاني
 DAILY_RENEWAL_POINTS = 50     # التجديد المجاني اليومي 50 نقطة = 50,000 توكن
 REFERRAL_BONUS_POINTS = 10
 DISCOUNT_RATE_FOR_CACHED = 0.1  # تكلفة 10% فقط للكويز المعاد استخدامه (خصم 90%)
