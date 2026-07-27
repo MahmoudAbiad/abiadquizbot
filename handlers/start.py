@@ -135,7 +135,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             )
             if user_info["referrer"]:
                 intro_text += "\n✨ وجميلك ما ننساه! تم منح زميلك الذي دعاك مكافأة إضافية أيضاً. 🤝"
-            intro_text += f"\n📊 رصيدك الحالي: <code>{points:.2f}</code> نقطة (تقريباً نقطة واحدة لكل سؤال)"
+            intro_text += f"\n📊 رصيدك الحالي: <code>{points:.2f}</code> نقطة (تقريباً نقطة واحدة لكل صفحة/سؤال)"
             intro_text += f"\n🔄 وتتجدد نقاطك المجانية تلقائياً كل يوم بـ <b>{DAILY_RENEWAL_POINTS} نقطة</b> إضافية."
 
             from handlers.tutorial import get_tutorial_step_content
