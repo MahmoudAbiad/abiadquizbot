@@ -24,14 +24,14 @@ def validate_question_count(count: int) -> Tuple[bool, str]:
         Tuple[bool, str]: (is_valid, error_message)
     """
     if not isinstance(count, int):
-        return False, "Number must be an integer"
+        return False, "الرجاء إرسال رقم صحيح فقط."
     
     min_q, max_q = VALID_QUESTIONS_RANGE
     if count < min_q:
-        return False, f"Minimum {min_q} question required"
+        return False, f"الحد الأدنى لعدد الأسئلة هو {min_q}."
     
     if count > max_q:
-        return False, f"Maximum {max_q} questions allowed"
+        return False, f"الحد الأقصى لعدد الأسئلة هو {max_q} سؤالاً. أرسل رقماً أصغر."
     
     return True, ""
 

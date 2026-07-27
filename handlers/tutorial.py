@@ -13,6 +13,8 @@ import asyncio
 from aiogram import Router, types, F
 from aiogram.filters import Command
 
+from config import bot
+from keyboards import get_main_menu_keyboard
 from supabase_helper import log_usage_event
 from logger import get_logger, log_error
 
@@ -112,6 +114,12 @@ def _tutorial_keyboard(step_index: int) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def get_tutorial_step_content(step_index: int):
+    """يُستخدم خارجياً (مثلاً في رسالة ترحيب مستخدم جديد) لدمج نص وأزرار خطوة من الدليل
+    داخل رسالة واحدة بدل إرسال رسالة منفصلة بعدها مباشرة."""
+    return _render_step(step_index), _tutorial_keyboard(step_index)
+
+
 async def send_tutorial(message: types.Message, step_index: int = 0) -> None:
     """يرسل رسالة جديدة تحتوي خطوة من الدليل (يُستخدم عند أول ظهور له في الشات)."""
     await message.answer(
@@ -169,8 +177,16 @@ async def finish_tutorial(call: types.CallbackQuery) -> None:
     try:
         await call.message.edit_text(
             "✅ <b>جاهز تماماً!</b>\n\n"
-            "📥 أرسل الآن أي ملف، صورة، أو نص مباشرة في هذه المحادثة لتبدأ أول اختبار لك فوراً 🚀",
+            "📥 أرسل الآن أي ملف، صورة، أو نص مباشرة في هذه المحادثة لتبدأ أول اختبار لك فوراً 🚀\n\n"
+            "👇 أو استخدم القائمة الرئيسية في أي وقت:",
             parse_mode="HTML",
+        )
+        # 🩹 UX: بدون هذا، يبقى المستخدم بلا أي أزرار وصول (شحن رصيد/مفضلة/دعم) إلى
+        # أن يكتب /start يدوياً من جديد — نعيد له القائمة الرئيسية فور إغلاق الدليل.
+        bot_info = await bot.get_me()
+        await call.message.answer(
+            "🏠 القائمة الرئيسية",
+            reply_markup=get_main_menu_keyboard(bot_info.username, call.from_user.id)
         )
         asyncio.create_task(log_usage_event(call.from_user.id, "tutorial_completed"))
     except Exception as exc:
@@ -181,13 +197,16 @@ async def finish_tutorial(call: types.CallbackQuery) -> None:
 
 @router.callback_query(F.data == "tut_close")
 async def close_tutorial(call: types.CallbackQuery) -> None:
-    """إغلاق الدليل دون فرض أي خطوة إضافية على المستخدم."""
+    """إغلاق الدليل دون فرض أي خطوة إضافية على المستخدم، مع إبقاء القائمة الرئيسية متاحة."""
     try:
-        await call.message.delete()
-    except Exception:
+        bot_info = await bot.get_me()
+        menu_kb = get_main_menu_keyboard(bot_info.username, call.from_user.id)
         try:
-            await call.message.edit_text("ℹ️ يمكنك دائماً فتح الدليل مجدداً عبر الأمر /help")
+            await call.message.delete()
         except Exception:
             pass
+        await call.message.answer("🏠 القائمة الرئيسية", reply_markup=menu_kb)
+    except Exception as exc:
+        log_error(logger, f"close_tutorial failed: {exc}", exception=exc)
     finally:
         await call.answer()

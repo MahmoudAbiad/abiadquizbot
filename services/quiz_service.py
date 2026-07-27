@@ -23,13 +23,21 @@ def determine_execution_mode(items: int, questions: int, cached: bool = False) -
     if items > MAX_STANDARD_PAGES or questions > MAX_STANDARD_QUESTIONS: return "Over-Limit"
     return "Standard"
 
+MODE_LABELS_AR = {
+    "Standard": "⚡ عادي",
+    "Over-Limit": "📈 موسّع",
+    "Super-Processing": "🚀 معالجة فائقة (ملف كبير)",
+    "Cached": "🗃️ من الكاش",
+}
+
 def build_transparency_text(items: int, questions: int, mode: str, cost: float) -> str:
     """رسالة الشفافية المالية لعرض تفاصيل الخصم"""
+    mode_label = MODE_LABELS_AR.get(mode, mode)
     return (
         "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n\n"
         f"• العناصر/الصفحات: <code>{items}</code>\n"
         f"• الأسئلة المطلوبة: <code>{questions}</code>\n"
-        f"• وضع المعالجة: <code>{mode}</code>\n"
+        f"• وضع المعالجة: <code>{mode_label}</code>\n"
         f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>"
     )
 

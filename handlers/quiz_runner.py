@@ -221,7 +221,9 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         q = data['questions'][data['current_index']]
-        await call.answer(f"💡 تلميح ذكي: {q['hint']}", show_alert=False)
+        # 🩹 UX: show_alert=True لأن التلميح نص يحتاج وقتاً ليُقرأ؛ الإشعار الخاطف
+        # (toast) كان يختفي خلال ثانية أو ثانيتين قبل أن يتمكن الطالب من قراءته كاملاً.
+        await call.answer(f"💡 تلميح ذكي:\n{q['hint']}", show_alert=True)
     except Exception as e:
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
         await call.answer("❌ خطأ في جلب التلميح", show_alert=True)
