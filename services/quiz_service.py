@@ -1,6 +1,7 @@
 # services/quiz_service.py
 import asyncio
 import os
+import random
 from typing import Any, Dict, Tuple, Optional, List
 
 from constants import MAX_LIMIT_PAGES, MAX_LIMIT_QUESTIONS, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS
@@ -40,6 +41,35 @@ def build_transparency_text(items: int, questions: int, mode: str, cost: float) 
         f"• وضع المعالجة: <code>{mode_label}</code>\n"
         f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>"
     )
+
+def _shuffle_question_options(question: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    يخلط ترتيب الخيارات عشوائياً ويحدّث correct_option_id ليطابق الموضع الجديد.
+    هذا ضروري لأن Gemini غالباً ما ينحاز لوضع الإجابة الصحيحة في نفس الترتيب
+    (عادة الخيار الأول) بشكل متكرر، فبدون خلط تصبح كل الاختبارات المولّدة
+    إجابتها الصحيحة رقم 1 دائماً.
+    """
+    options = question.get("options") or []
+    try:
+        correct_id = int(question.get("correct_option_id", 0))
+    except (TypeError, ValueError):
+        return question
+
+    if not options or not (0 <= correct_id < len(options)):
+        return question
+
+    indices = list(range(len(options)))
+    random.shuffle(indices)
+
+    question["options"] = [options[i] for i in indices]
+    question["correct_option_id"] = indices.index(correct_id)
+    return question
+
+
+def shuffle_quiz_options(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """يطبّق خلط الخيارات على كل أسئلة الكويز المولّد."""
+    return [_shuffle_question_options(q) for q in quiz_data]
+
 
 async def refund_user_on_failure(user_id: int, data: Dict[str, Any]) -> None:
     """إعادة النقاط تلقائياً في حال فشل التوليد"""
@@ -97,6 +127,10 @@ async def execute_quiz_generation_workflow(
 
     if not quiz_data:
         return None, None, "ai_failed"
+
+    # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
+    #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
+    quiz_data = shuffle_quiz_options(quiz_data)
 
     # 4. حفظ الكاش لملفات أوفيس والنصوص
     if file_hash and quiz_data:
