@@ -233,8 +233,8 @@ async def show_recharge_info(call: types.CallbackQuery):
             "📝 <b>طريقة الشحن:</b>\n"
             "1️⃣ تواصل معنا وحدد عدد النقاط التي تحتاجها.\n"
             "2️⃣ سيتم تأكيد وتفعيل النقاط في حسابك فوراً.\n"
-            "3️⃣ يمكنك العودة ومتابعة المذاكرة وتوليد الكويزات دون أي انقطاع! 🚀"
-            "الاسعار تبدأ من 0.5$ فقط ! \n"
+            "3️⃣ يمكنك العودة ومتابعة المذاكرة وتوليد الكويزات دون أي انقطاع! 🚀\n"
+            "<b>الاسعار تبدأ من 0.5$ فقط ! 💰</b>\n\n"
         )
         await call.message.answer(recharge_text, parse_mode="HTML")
         log_info(logger, f"User {call.from_user.id} requested recharge info")
