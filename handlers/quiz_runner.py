@@ -73,7 +73,7 @@ async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQue
         total_count=len(quiz_data), source_title=source_title,
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
         is_saved_in_session=False, is_switching_question=False,
-        attempt_id=attempt_id,
+        attempt_id=attempt_id, stopped_early=False,
         share_id=None
     )
     await state.set_state(QuizState.answering_quiz)
@@ -129,7 +129,11 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
 async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext, data: dict):
     score, total = data['score'], data['total_count']
     quiz_id = data.get('quiz_id')
-    current_idx = data.get('current_index', 0)
+    # ⚠️ current_index يكون دائماً >= total هنا (send_question لا تستدعي هذه الدالة
+    # إلا في هذه الحالة تحديداً)، لذلك لا يصلح كمعيار للتفريق بين "أكمل الطالب كل
+    # الأسئلة" و"أوقف الاختبار مبكراً". نعتمد بدلاً منه على العلم الصريح stopped_early
+    # الذي تضبطه stop_quiz_confirmed عند الإيقاف اليدوي.
+    stopped_early = bool(data.get('stopped_early'))
     percentage = (score / total * 100) if total > 0 else 0
     previous_score_text = ""
     is_public = False
@@ -162,14 +166,16 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
     await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
 
     # التمييز الدقيق في التتبع بين الكويز المكتمل والتوقف المبكر
-    if current_idx >= total:
-        asyncio.create_task(complete_quiz_attempt(data.get("attempt_id"), score))
-    else:
+    if stopped_early:
         asyncio.create_task(mark_quiz_attempt_stopped(data.get("attempt_id")))
-
-    asyncio.create_task(log_usage_event(user_id, "quiz_completed", {
-        "quiz_id": quiz_id, "score": score, "total": total, "percentage": round(percentage, 1),
-    }))
+        asyncio.create_task(log_usage_event(user_id, "quiz_stopped", {
+            "quiz_id": quiz_id, "score": score, "total": total, "percentage": round(percentage, 1),
+        }))
+    else:
+        asyncio.create_task(complete_quiz_attempt(data.get("attempt_id"), score))
+        asyncio.create_task(log_usage_event(user_id, "quiz_completed", {
+            "quiz_id": quiz_id, "score": score, "total": total, "percentage": round(percentage, 1),
+        }))
     await state.update_data(quiz_completed=True, is_switching_question=False)
     await state.set_state(None)
 
@@ -258,7 +264,10 @@ async def stop_quiz_confirmed(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         questions = data.get("questions", [])
-        await state.update_data(current_index=len(questions))
+        # 🩹 نضع علامة صريحة على التوقف المبكر بدل الاعتماد على مساواة current_index
+        # بـ len(questions) (كان هذا يجعل _handle_quiz_completion يحتسبها دائماً
+        # "مكتملة" لأن send_question لا يستدعيها إلا عندما current_index >= total أصلاً).
+        await state.update_data(current_index=len(questions), stopped_early=True)
         try:
             await call.message.delete()
         except Exception:
@@ -290,7 +299,18 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
             return
         
         await state.set_state(QuizState.answering_quiz)
-        await state.update_data(current_index=0, score=0, quiz_completed=False, is_switching_question=False)
+        # 🩹 إعادة التشغيل يجب أن تُسجَّل كمحاولة جديدة تماماً في قاعدة البيانات، وإلا
+        # فإن complete_quiz_attempt اللاحقة ستستخدم نفس attempt_id القديم وتكتب فوق
+        # بيانات المحاولة الأولى (النتيجة والمدة) بدل تسجيل محاولة مستقلة.
+        user_id = call.from_user.id
+        new_attempt_id = start_quiz_attempt(user_id, data.get("quiz_id") or None, data.get("quiz_origin", "shared"), len(questions))
+        asyncio.create_task(log_usage_event(user_id, "quiz_started", {
+            "origin": data.get("quiz_origin", "shared"), "quiz_id": data.get("quiz_id"), "questions": len(questions),
+        }))
+        await state.update_data(
+            current_index=0, score=0, quiz_completed=False, is_switching_question=False,
+            stopped_early=False, attempt_id=new_attempt_id
+        )
         try:
             await call.message.delete()
         except Exception:
