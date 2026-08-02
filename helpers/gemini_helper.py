@@ -45,6 +45,7 @@ from constants import (
     QUOTA_ERROR_KEYWORDS,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
     MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
+    SYSTEM_PROMPT_MATH_QUESTIONS,
 )
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import get_cached_quiz
@@ -438,17 +439,22 @@ async def generate_quiz_smart(
     file_hash: Optional[str] = None,
     status_message: Optional[Any] = None,
     previous_questions: Optional[List[Dict[str, Any]]] = None,
+    is_math: bool = False,  # 🟢 إضافة المعامل بدعم افتراضي للنمط النصي
 ) -> Optional[List[Dict[str, Any]]]:
     """
     الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
-    تتولى إدارة الـ Cache، توجيه الطلبات للمسار المناسب، وتنظيف مهام الرسائل التفاعلية.
+    تتولى إدارة الـ Cache، توجيه الطلبات للمسار المناسب (نصي عادي أو رياضيات بـ LaTeX)،
+    وتنظيف مهام الرسائل التفاعلية.
     """
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
     
     try:
+        # 🟢 اختيار البرومبت المناسب بناءً على قيمة is_math
+        selected_prompt = SYSTEM_PROMPT_MATH_QUESTIONS if is_math else SYSTEM_PROMPT_GENERATE_QUESTIONS
+
         # IMPORTANT: استبدال {option_count} أولاً لضمان وصول العدد الصحيح للخيارات لكافة النماذج
-        base_prompt_template = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{option_count}", str(OPTION_COUNT))
+        base_prompt_template = selected_prompt.replace("{option_count}", str(OPTION_COUNT))
         
         # حقن الأسئلة السابقة لمنع التكرار
         if previous_questions:
