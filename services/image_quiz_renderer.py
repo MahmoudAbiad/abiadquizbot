@@ -31,7 +31,6 @@ matplotlib.use("Agg")
 import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 from matplotlib.mathtext import MathTextParser
-from matplotlib.patches import FancyBboxPatch, Circle
 
 from logger import get_logger, log_warning
 
@@ -52,26 +51,13 @@ ENGLISH_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"]
 
 FIG_WIDTH_PX = 1000
 DPI = 150
-MARGIN_PX = 60            # هامش خارجي بين حافة الصورة ومنطقة المحتوى (زودناه عشان السؤال ميبقاش لازق في حافة الصورة)
+MARGIN_PX = 65            # هامش خارجي بين حافة الصورة ومنطقة المحتوى (زودناه عشان السؤال ميبقاش لازق في حافة الصورة)
 HEADER_HEIGHT_PX = 76
-LINE_HEIGHT_PX = 40
+QUESTION_LINE_HEIGHT_PX = 52   # تباعد عمودي بين أسطر السؤال (أكبر شوية من الافتراضي)
+OPTION_LINE_HEIGHT_PX = 50     # تباعد عمودي بين أسطر الخيار الواحد لو التف على أكتر من سطر
+OPTION_GAP_PX = 22
 QUESTION_FONT_SIZE = 21
 OPTION_FONT_SIZE = 19
-
-Q_TO_OPTIONS_GAP_PX = 26   # مسافة بين آخر سطر بالسؤال وأول بطاقة خيار
-OPTION_CARD_GAP_PX = 14    # مسافة بين بطاقة وأخرى
-OPTION_PAD_Y_PX = 16       # حشو رأسي داخل كل بطاقة (أعلى/أسفل)
-OPTION_PAD_X_PX = 20       # حشو أفقي داخل كل بطاقة (من حافة البطاقة للنص/الشارة)
-CARD_RADIUS_PX = 10        # استدارة زوايا بطاقة كل خيار
-
-BADGE_D_PX = 32            # قطر الدائرة الملوّنة التي تحمل حرف/رقم الخيار
-BADGE_TEXT_GAP_PX = 14     # مسافة بين الشارة الدائرية وبداية نص الخيار
-BADGE_FONT_SIZE = 15
-
-CARD_FILL = "#F7F8FA"      # خلفية فاتحة موحّدة لكل بطاقة خيار (بدل خطوط فصل رفيعة)
-CARD_BORDER = "#ECEEF2"
-OUTER_BORDER = "#E3E6EC"   # إطار خفيف حول الصورة كاملة يمنحها شكل "بطاقة"
-
 BADGE_COLORS = ["#2E86DE", "#10AC84", "#EE5253", "#F5A623", "#8854D0", "#00B8D9", "#EA5455", "#5E5CE6"]
 
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
@@ -233,37 +219,26 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     options = [str(o).strip() for o in (question.get("options") or [])]
     letters = letters_for(is_ar, len(options))
 
-    content_left = MARGIN_PX
-    content_right = FIG_WIDTH_PX - MARGIN_PX
-    content_width = content_right - content_left
-
+    max_width_px = FIG_WIDTH_PX - 2 * MARGIN_PX
     q_font_prop = _font_prop_sized(is_ar, bold=True, size=QUESTION_FONT_SIZE)
     opt_font_prop = _font_prop_sized(is_ar, bold=False, size=OPTION_FONT_SIZE)
-    badge_font_prop = _font_prop_sized(is_ar, bold=True, size=BADGE_FONT_SIZE)
 
     # هامش أمان إضافي عند لف نص السؤال تحديداً: قياس عرض الأسطر المختلطة (عربي + LaTeX)
     # بيبقى أحياناً أقل شوية من العرض الفعلي وقت الرسم، فبيخلي آخر سطر يوصل لحافة
     # الصورة تقريباً. نلف السؤال على عرض أضيق شوية (96%) عشان يفضل فيه هامش واضح دايماً.
-    question_wrap_width = content_width * 0.96
+    question_wrap_width = max_width_px * 0.96
     q_lines = _wrap_and_shape(question_text, is_ar, question_wrap_width, q_font_prop)
 
-    # عرض النص المتاح داخل كل بطاقة خيار = عرض المحتوى ناقص حشو البطاقة الأفقي
-    # على الجانبين وناقص عمود الشارة الدائرية + المسافة بينها وبين النص.
-    option_text_width = content_width - 2 * OPTION_PAD_X_PX - BADGE_D_PX - BADGE_TEXT_GAP_PX
-    option_blocks: List[List[str]] = [
-        _wrap_and_shape(opt, is_ar, option_text_width, opt_font_prop) for opt in options
-    ]
-    card_heights = [
-        max(len(block) * LINE_HEIGHT_PX, BADGE_D_PX) + 2 * OPTION_PAD_Y_PX
-        for block in option_blocks
-    ]
+    option_blocks: List[List[str]] = []
+    for letter, opt in zip(letters, options):
+        combined = f"({letter} {opt}" if is_ar else f"{letter}) {opt}"
+        option_blocks.append(_wrap_and_shape(combined, is_ar, max_width_px, opt_font_prop))
 
     height_px = (
         HEADER_HEIGHT_PX + MARGIN_PX * 2
-        + len(q_lines) * LINE_HEIGHT_PX
-        + Q_TO_OPTIONS_GAP_PX
-        + sum(card_heights)
-        + max(len(option_blocks) - 1, 0) * OPTION_CARD_GAP_PX
+        + len(q_lines) * QUESTION_LINE_HEIGHT_PX
+        + sum(len(block) * OPTION_LINE_HEIGHT_PX for block in option_blocks)
+        + len(option_blocks) * OPTION_GAP_PX
     )
     height_px = max(height_px, 380)
 
@@ -273,10 +248,6 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     ax.axis("off")
     ax.set_xlim(0, FIG_WIDTH_PX)
     ax.set_ylim(0, height_px)
-
-    # إطار خفيف حول الصورة كلها يمنحها شكل بطاقة منفصلة عن خلفية الشات
-    ax.add_patch(plt.Rectangle((1, 1), FIG_WIDTH_PX - 2, height_px - 2,
-                                facecolor="none", edgecolor=OUTER_BORDER, linewidth=1.5, zorder=5))
 
     # شريط العنوان العلوي
     ax.add_patch(plt.Rectangle((0, height_px - HEADER_HEIGHT_PX), FIG_WIDTH_PX, HEADER_HEIGHT_PX,
@@ -288,53 +259,30 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
             fontproperties=_font_prop(is_ar, bold=True))
 
     align = "right" if is_ar else "left"
-    x = content_right if is_ar else content_left
+    x = FIG_WIDTH_PX - MARGIN_PX if is_ar else MARGIN_PX
     y = height_px - HEADER_HEIGHT_PX - MARGIN_PX + 6
 
     for line in q_lines:
         ax.text(x, y, _sanitize_line_for_mathtext(line), ha=align, va="top",
                 fontsize=QUESTION_FONT_SIZE, color="#1a1a1a", fontweight="bold",
                 fontproperties=_font_prop(is_ar, bold=True))
-        y -= LINE_HEIGHT_PX
+        y -= QUESTION_LINE_HEIGHT_PX
 
-    y -= Q_TO_OPTIONS_GAP_PX
-
-    # موضع عمود الشارة الدائرية ونص الخيار بحسب اتجاه اللغة
-    if is_ar:
-        badge_cx = content_right - OPTION_PAD_X_PX - BADGE_D_PX / 2
-        text_x = content_right - OPTION_PAD_X_PX - BADGE_D_PX - BADGE_TEXT_GAP_PX
-    else:
-        badge_cx = content_left + OPTION_PAD_X_PX + BADGE_D_PX / 2
-        text_x = content_left + OPTION_PAD_X_PX + BADGE_D_PX + BADGE_TEXT_GAP_PX
-
-    for i, (block, card_h, letter) in enumerate(zip(option_blocks, card_heights, letters)):
-        card_top = y
-        card_bottom = card_top - card_h
+    y -= OPTION_GAP_PX
+    for i, block in enumerate(option_blocks):
+        if i > 0:
+            sep_y = y + OPTION_GAP_PX / 2
+            ax.plot([MARGIN_PX, FIG_WIDTH_PX - MARGIN_PX], [sep_y, sep_y], color="#e8e8e8", linewidth=1.2)
         color = BADGE_COLORS[i % len(BADGE_COLORS)]
-
-        # بطاقة الخيار: خلفية فاتحة موحّدة بزوايا مستديرة بدل خط فصل رفيع
-        ax.add_patch(FancyBboxPatch(
-            (content_left, card_bottom), content_width, card_h,
-            boxstyle=f"round,pad=0,rounding_size={CARD_RADIUS_PX}",
-            facecolor=CARD_FILL, edgecolor=CARD_BORDER, linewidth=1, zorder=1,
-        ))
-
-        # الشارة الدائرية الملوّنة تحمل حرف/رقم الخيار، تتمركز رأسياً وسط البطاقة
-        badge_cy = (card_top + card_bottom) / 2
-        ax.add_patch(Circle((badge_cx, badge_cy), BADGE_D_PX / 2, facecolor=color, edgecolor="none", zorder=3))
-        ax.text(badge_cx, badge_cy, letter, ha="center", va="center",
-                fontsize=BADGE_FONT_SIZE, color="white", fontproperties=badge_font_prop, zorder=4)
-
-        # نص الخيار، يبدأ من أعلى البطاقة مع حشو رأسي، ويتوسّط رأسياً لو سطر واحد فقط
-        text_block_h = len(block) * LINE_HEIGHT_PX
-        text_y = card_top - max(OPTION_PAD_Y_PX, (card_h - text_block_h) / 2) + 4
+        # نقطة ملوّنة صغيرة بجانب كل خيار لتمييزه بصرياً (بدون تكرار الحرف - موجود أصلاً بالنص)
+        badge_x = MARGIN_PX - 20 if not is_ar else FIG_WIDTH_PX - MARGIN_PX + 20
+        ax.scatter([badge_x], [y + 10], s=90, color=color, zorder=3, clip_on=False)
         for line in block:
-            ax.text(text_x, text_y, _sanitize_line_for_mathtext(line), ha=align, va="top",
+            ax.text(x, y, _sanitize_line_for_mathtext(line), ha=align, va="top",
                     fontsize=OPTION_FONT_SIZE, color="#2c2c2c",
-                    fontproperties=_font_prop(is_ar), zorder=4)
-            text_y -= LINE_HEIGHT_PX
-
-        y = card_bottom - OPTION_CARD_GAP_PX
+                    fontproperties=_font_prop(is_ar))
+            y -= OPTION_LINE_HEIGHT_PX
+        y -= OPTION_GAP_PX
 
     buf = io.BytesIO()
     try:
