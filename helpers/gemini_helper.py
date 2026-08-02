@@ -1,3 +1,4 @@
+# helpers/gemini_helper.py
 """
 ==============================================================================
 MODULE: AI Quiz Generation Helper (Gemini & Groq Integration)
@@ -12,6 +13,7 @@ MODULE: AI Quiz Generation Helper (Gemini & Groq Integration)
 4. Super PDF Parallel Processing: تقسيم ملفات PDF الكبيرة ومعالجتها بشكل متوازي بطلب مستقل لكل ثلث.
 5. Robust Async Task Lifecycle: إدارة مهمة تحريك رسالة الانتظار بشكل آمن يمنع تسريب الاستثناءات (Log Pollution).
 6. Smart SHA-256 Caching: التخزين المؤقت للاستجابات لتفادي الاستدعاءات التكرارية للذكاء الاصطناعي.
+7. Hybrid Content Type Routing: دمج فحص Regex السريع مع الـ AI للحسم بين الرياضيات والنصوص العادية.
 ==============================================================================
 """
 
@@ -22,6 +24,7 @@ import json
 import mimetypes
 import os
 import random
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -68,7 +71,6 @@ OVERLOAD_RETRY_ATTEMPTS = 2
 OVERLOAD_RETRY_BASE_DELAY = 3
 
 # AI-NOTE: الحد الأقصى لإرسال البيانات مباشرة ضمن الطلب (Inline) دون اللجوء لـ Files API.
-# رفع الملف عبر Files API يضيف Round-trip شبكة وتأخير معالجة، لذا يُفضل تحاشيه في الملفات الصغيرة.
 INLINE_DATA_SIZE_THRESHOLD = 15 * 1024 * 1024  # 15MB
 
 LOADING_PHRASES = (
@@ -103,7 +105,6 @@ def get_safe_mime_type(file_path: str) -> str:
 # ==============================================================================
 # PYDANTIC SCHEMAS (STRUCTURED OUTPUT)
 # ==============================================================================
-# AI-NOTE: نضمن إجبار Gemini و Groq على التقيُّد بهذه البنية الدقيقة لتفادي أخطاء Parsing
 class QuizQuestion(BaseModel):
     question: str = Field(description="Question text")
     options: List[str] = Field(description="Four answer options")
@@ -179,7 +180,6 @@ async def _safe_delete_gemini_file(client: genai.Client, file_name: str) -> None
 async def _loading_animation(message: Any, stop_event: asyncio.Event) -> None:
     """
     مهمة خلفية لتحديث رسالة الانتظار بعبارات تشجيعية.
-    IMPORTANT: تم التعامل مع asyncio.CancelledError صراحة لمنع أخطاء إلغاء المهمة في الـ Logs.
     """
     phrase_index = 0
     while not stop_event.is_set():
@@ -190,13 +190,11 @@ async def _loading_animation(message: Any, stop_event: asyncio.Event) -> None:
             try:
                 await message.edit_text(LOADING_PHRASES[phrase_index])
             except TelegramBadRequest:
-                # تحدث هذه الاستثناءات إذا لم يتغير النص في تلغرام
                 pass
             except Exception as exc:
                 log_warning(logger, f"Loading-status update failed: {exc}")
             phrase_index = (phrase_index + 1) % len(LOADING_PHRASES)
         except asyncio.CancelledError:
-            # الخروج النظيف عند إلغاء المهمة من دالة generate_quiz_smart
             break
 
 
@@ -229,7 +227,6 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
     try:
         contents: List[Any] = [prompt]
 
-        # AI-NOTE: فحوصات اختيار استراتيجية رفع الملفات (Inline Bytes vs Files API)
         total_size = 0
         for path in paths:
             try:
@@ -252,7 +249,6 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
                 contents.append(uploaded_file)
 
         last_exc: Optional[Exception] = None
-        # AI-NOTE: إعادة المحاولة بنفس المفتاح عند خطأ الازدحام (Overload)، لأن المشكلة في السيرفر وليست الحصة
         for attempt in range(OVERLOAD_RETRY_ATTEMPTS + 1):
             try:
                 response = await asyncio.wait_for(
@@ -284,7 +280,6 @@ async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, 
         _mark_key_failure(key_index, exc)
         raise
     finally:
-        # AI-NOTE: تنظيف وتفريغ أي ملفات رُفعت مؤقتاً لـ Files API في الخلفية
         for uploaded_file in uploaded:
             asyncio.create_task(_safe_delete_gemini_file(client, uploaded_file.name))
 
@@ -297,14 +292,12 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[tuple
     candidates = _available_key_indices() or list(range(len(API_KEYS)))
     key_order = random.sample(candidates, len(candidates))
 
-    # 1. التجربة على النموذج الأساسي
     for key_index in key_order:
         try:
             return await _generate_with_key(paths, prompt, key_index, model=GEMINI_PRIMARY_MODEL)
         except Exception as exc:
             log_warning(logger, f"Gemini key {key_index} failed on primary model ({GEMINI_PRIMARY_MODEL}): {exc}")
 
-    # 2. التجربة على النموذج الاحتياطي (Fallback Model) عند فشل جميع المفاتيح
     log_warning(logger, f"All keys failed on primary model ({GEMINI_PRIMARY_MODEL}); trying fallback model ({GEMINI_FALLBACK_MODEL})")
     for key_index in key_order:
         try:
@@ -439,7 +432,7 @@ async def generate_quiz_smart(
     file_hash: Optional[str] = None,
     status_message: Optional[Any] = None,
     previous_questions: Optional[List[Dict[str, Any]]] = None,
-    is_math: bool = False,  # 🟢 إضافة المعامل بدعم افتراضي للنمط النصي
+    is_math: bool = False,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
@@ -450,10 +443,10 @@ async def generate_quiz_smart(
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
     
     try:
-        # 🟢 اختيار البرومبت المناسب بناءً على قيمة is_math
+        # اختيار البرومبت المناسب بناءً على قيمة is_math
         selected_prompt = SYSTEM_PROMPT_MATH_QUESTIONS if is_math else SYSTEM_PROMPT_GENERATE_QUESTIONS
 
-        # IMPORTANT: استبدال {option_count} أولاً لضمان وصول العدد الصحيح للخيارات لكافة النماذج
+        # استبدال {option_count} أولاً لضمان وصول العدد الصحيح للخيارات لكافة النماذج
         base_prompt_template = selected_prompt.replace("{option_count}", str(OPTION_COUNT))
         
         # حقن الأسئلة السابقة لمنع التكرار
@@ -499,7 +492,6 @@ async def generate_quiz_smart(
         return questions
 
     finally:
-        # IMPORTANT: إيقاف وإلغاء مهمة التحريك بشكل فوري ونظيف في كتلة finally
         stop_event.set()
         if animation_task:
             animation_task.cancel()
@@ -513,20 +505,31 @@ async def detect_content_type(
     pure_text: Optional[str] = None
 ) -> str:
     """
-    يفحص العينة الأولى من المستند/النص باستخدام النموذج السريع لحسم هل المحتوى رياضي أم نصي.
+    فحص ذكي وسريع لحسم هل المحتوى يحوي رياضيات/فيزياء أم نص عادي.
     يرجع "MATH" أو "TEXT".
     """
+    # 1. فحص برميجي سريع عبر الرموز والكلمات المفتاحية الرياضية/الفيزيائية (الفحص الأسرع)
+    sample_check = pure_text[:2000] if pure_text else ""
+    
+    # البحث عن صيغ LaTeX أو رموز الفيزياء والرياضيات الشائعة والكلمات الأكاديمية
+    math_regex = r'(\$.*?\$|\\\(.*?\\\)|\\\[.*?\\\]|\\[a-zA-Z]+|\^|_|\=|\b(eta|omega|alpha|beta|pi|mu|lambda)\b)'
+    keywords = ["معامل اللزوجة", "الأبعاد", "قانون", "السرعة", "التسارع", "مصفوفة", "تكامل", "مشتقة", "تفاضل"]
+    
+    if sample_check and (re.search(math_regex, sample_check, re.IGNORECASE) or any(kw in sample_check for kw in keywords)):
+        log_info(logger, "Smart Routing: Regex/Keyword detected MATH content instantly.")
+        return "MATH"
+
     if not API_KEYS:
         return "TEXT"
 
+    # 2. الاستعانة بالذكاء الاصطناعي كمسار ثانٍ عند الشك أو للمستندات والصور
     prompt = (
         "تحقق من هذا المحتوى بدقة: هل يحتوي على معادلات رياضية، قوانين فيزيائية، كسور، جذور، "
-        "مصفوفات، أو رموز رياضية تتطلب تنسيق LaTeX؟ "
+        "مصفوفات، أبعاد فيزيائية، أو رموز تتطلب تنسيق LaTeX؟ "
         "أجب بكلمة واحدة فقط وبشكل صريح: إما MATH أو TEXT."
     )
 
     try:
-        # اختيار أول مفتاح أتاحي
         candidates = _available_key_indices() or list(range(len(API_KEYS)))
         key_index = candidates[0]
         client = genai.Client(api_key=API_KEYS[key_index])
@@ -534,10 +537,8 @@ async def detect_content_type(
         contents: List[Any] = [prompt]
 
         if pure_text:
-            # أخذ أول 1000 حرف فقط كعينة سريعة
             contents.append(pure_text[:1000])
         elif file_paths and len(file_paths) > 0:
-            # أخذ أول صفحة/صورة فقط
             first_file = file_paths[0]
             file_bytes = await asyncio.to_thread(_read_file_bytes_sync, first_file)
             mime_type = get_safe_mime_type(first_file)
@@ -545,22 +546,22 @@ async def detect_content_type(
 
         response = await asyncio.wait_for(
             client.aio.models.generate_content(
-                model=GEMINI_FALLBACK_MODEL, # gemini-3.5-flash-lite لتوفير الوقت والتوكنز
+                model=GEMINI_FALLBACK_MODEL,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     temperature=0.0,
                     max_output_tokens=10
                 )
             ),
-            timeout=15 # زمن استجابة سريع جداً
+            timeout=10
         )
 
         result_text = (response.text or "").strip().upper()
         if "MATH" in result_text:
-            log_info(logger, "Smart Routing: Detected MATH content.")
+            log_info(logger, "Smart Routing: Gemini detected MATH content.")
             return "MATH"
 
-        log_info(logger, "Smart Routing: Detected TEXT content.")
+        log_info(logger, "Smart Routing: Gemini detected TEXT content.")
         return "TEXT"
 
     except Exception as e:
