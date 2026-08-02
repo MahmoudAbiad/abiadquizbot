@@ -3,6 +3,7 @@
 \geometry{top=1.8cm, bottom=1.8cm, left=1.8cm, right=1.8cm}
 \usepackage{amsmath, amssymb, amsfonts}
 \usepackage{xcolor}
+\usepackage{tabularx}
 
 % تعريف لون الستايل المختار ديناميكياً
 \definecolor{accentcolor}{HTML}{<< cfg.accent_color >>}
@@ -62,20 +63,18 @@ ENDBLOCK
 
 % 3. جدول الإجابات الصحيحة في الصفحة الأخيرة
 \begin{center}
-    {\Large \textcolor{accentcolor}{\textbf{🗝️ جدول الإجابات الصحيحة}}}
+    {\Large \textcolor{accentcolor}{\textbf{جدول الإجابات الصحيحة والتوضيحات}}}
 \end{center}
 \rule{\linewidth}{1pt}
 \vspace{0.3cm}
 
-\begin{table}[h!]
-\centering
-\begin{tabular}{|c|c|p{10cm}|}
+\noindent
+\begin{tabularx}{\linewidth}{|c|c|X|}
 \hline
-\textbf{\#} & \textbf{الإجابة} & \textbf{الشرح} \\ \hline
+\textbf{\#} & \textbf{الإجابة} & \textbf{الشرح والتوضيح} \\ \hline
 BLOCK for q in questions
 << loop.index >> & << q.correct_letter >> & << q.explanation >> \\ \hline
 ENDBLOCK
-\end{tabular}
-\end{table}
+\end{tabularx}
 
 \end{document}

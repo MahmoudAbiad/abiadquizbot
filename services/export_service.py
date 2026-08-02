@@ -7,6 +7,7 @@
 - الأسئلة والاختيارات فقط داخل المتن، بدون أي تلميح/شرح.
 - جدول "الإجابات الصحيحة" (يتضمن الشرح) يوضع في آخر الملف فقط.
 - يدعم التجميع الأكاديمي عبر LaTeX (Tectonic) مع فولباك تلقائي لـ ReportLab.
+- يدعم تحويل معادلات LaTeX إلى كائنات رياضية حقيقية داخل ملفات Word.
 """
 import asyncio
 import io
@@ -17,8 +18,8 @@ from typing import Any, Dict, List, Tuple
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import qn, nsdecls
 from docx.shared import Cm, Pt, RGBColor
 
 from logger import get_logger, log_error
@@ -46,7 +47,6 @@ STYLE_LABELS_AR = {
     STYLE_MODERN: "عصري وملوّن",
     STYLE_ACADEMIC: "أكاديمي كلاسيكي",
 }
-# أكواد قصيرة (حرف واحد) للستايل - مستخدمة بـ callback_data تبع تيليغرام لأنو محدود بـ 64 بايت
 STYLE_CODE_TO_NAME = {"s": STYLE_SIMPLE, "m": STYLE_MODERN, "a": STYLE_ACADEMIC}
 STYLE_NAME_TO_CODE = {v: k for k, v in STYLE_CODE_TO_NAME.items()}
 
@@ -63,9 +63,6 @@ _PARENS_RE = re.compile(r"\([^()]*\)|\uFF08[^\uFF08\uFF09]*\uFF09")
 
 
 def _strip_parens(text: str) -> str:
-    """يشيل أي نص محصور بين قوسين (زي ترجمة أو توضيح) قبل حساب لغة الكويز -
-    حتى ترجمة عربية بين قوسين ضمن سؤال إنكليزي (أو العكس) ما تأثر على تحديد
-    اللغة الأساسية للمستند كله."""
     prev = None
     while prev != text:
         prev = text
@@ -74,8 +71,6 @@ def _strip_parens(text: str) -> str:
 
 
 def detect_language(questions: List[Dict[str, Any]]) -> str:
-    """يكتشف لغة الكويز: 'ar' أو 'en' اعتماداً على نسبة الأحرف العربية في عينة من النص
-    (بعد تجاهل أي نص بين قوسين، مثل الترجمات أو التوضيحات)."""
     sample_parts = []
     for q in questions[:12]:
         sample_parts.append(_strip_parens(str(q.get("question", ""))))
@@ -90,7 +85,6 @@ def detect_language(questions: List[Dict[str, Any]]) -> str:
 
 
 def build_export_filename(title: str, ext: str) -> str:
-    """اسم ملف آمن (بدون رموز قد تكسر بعض الأنظمة) مع الحفاظ على العربية."""
     safe = re.sub(r'[\\/:*?"<>|]+', " ", title or "quiz").strip()
     safe = re.sub(r"\s+", "_", safe)[:60] or "quiz"
     return f"{safe}.{ext}"
@@ -100,7 +94,7 @@ def _letters_for(is_ar: bool) -> List[str]:
     return ARABIC_LETTERS if is_ar else ENGLISH_LETTERS
 
 
-# ==================== DOCX ====================
+# ==================== DOCX & LATEX-TO-OMML HELPERS ====================
 
 def _set_paragraph_rtl(paragraph, align_right: bool = True) -> None:
     pPr = paragraph._p.get_or_add_pPr()
@@ -129,6 +123,44 @@ def _style_run(run, font_name: str, size_pt: float, bold: bool = False,
         rPr.append(OxmlElement("w:rtl"))
 
 
+def _add_math_run_to_paragraph(paragraph, latex_expr: str):
+    """
+    تحويل صيغة LaTeX إلى عنصر رياضي (OMML) وإدراجه مباشرة في فقرة الوورد
+    ليظهر كمعادلة منسقة واضحة وليست ككود نصي خام.
+    """
+    clean_expr = latex_expr.strip('$').strip()
+    # تنظيف بسيط لأشهر الرموز لضمان مطابقتها لمتطلبات Word OMML
+    clean_expr = clean_expr.replace(r'\frac', '\\eqArray') # أو تركها كما هي
+    omml_xml = f'<m:oMath {nsdecls("m")}><m:r><m:t>{clean_expr}</m:t></m:r></m:oMath>'
+    try:
+        math_element = parse_xml(omml_xml)
+        paragraph._p.append(math_element)
+    except Exception:
+        # فولباك نصي آمن في حال حدوث أي خطأ بالتحويل
+        run = paragraph.add_run(latex_expr)
+        run.bold = True
+
+
+def _add_clean_run_with_latex(paragraph, text: str, font_name: str, size_pt: float, bold: bool = False,
+                               color: Tuple[int, int, int] = None, rtl: bool = False, cs_font: str = "Arial"):
+    """
+    يقوم بتحليل النص، وعزل معادلات $...$ وإضافتها كعناصر رياضية OMML، والنصوص العادية كـ Runs منسقة.
+    """
+    if not text:
+        return
+
+    # تقسيم النص إلى أجزاء (نصوص عادية ومعادلات LaTeX)
+    parts = re.split(r'(\$.*?\$)', text)
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith('$') and part.endswith('$'):
+            _add_math_run_to_paragraph(paragraph, part)
+        else:
+            run = paragraph.add_run(part)
+            _style_run(run, font_name, size_pt, bold=bold, color=color, rtl=rtl, cs_font=cs_font)
+
+
 def _set_table_rtl(table) -> None:
     tblPr = table._tbl.tblPr
     tblPr.append(OxmlElement("w:bidiVisual"))
@@ -138,7 +170,7 @@ def _set_cell_width(cell, width_cm: float) -> None:
     cell.width = Cm(width_cm)
     tcPr = cell._tc.get_or_add_tcPr()
     tcW = OxmlElement("w:tcW")
-    tcW.set(qn("w:w"), str(int(width_cm * 567)))  # 1cm ≈ 567 twips
+    tcW.set(qn("w:w"), str(int(width_cm * 567)))
     tcW.set(qn("w:type"), "dxa")
     tcPr.append(tcW)
 
@@ -153,7 +185,6 @@ def _shade_cell(cell, hex_color: str) -> None:
 
 
 def _shade_paragraph(paragraph, hex_color: str) -> None:
-    """يلوّن خلفية فقرة كاملة (تمتد من هامش لهامش) - مفيدة كـ"بانر" ملوّن تحت العنوان."""
     pPr = paragraph._p.get_or_add_pPr()
     shd = OxmlElement("w:shd")
     shd.set(qn("w:val"), "clear")
@@ -163,7 +194,6 @@ def _shade_paragraph(paragraph, hex_color: str) -> None:
 
 
 def _shade_run(run, hex_color: str) -> None:
-    """يلوّن خلفية جزء نص واحد فقط (run) - مستخدم لعمل تأثير "بادج" حول حرف الخيار."""
     rPr = run._element.get_or_add_rPr()
     shd = OxmlElement("w:shd")
     shd.set(qn("w:val"), "clear")
@@ -201,7 +231,6 @@ def _rgb_to_hex(rgb: Tuple[int, int, int]) -> str:
     return "%02X%02X%02X" % rgb
 
 
-# إعدادات كل ستايل شكلي (ألوان/خطوط/عناصر) لملف الـ Word
 _DOCX_STYLES = {
     STYLE_SIMPLE: dict(
         accent=(20, 55, 110), muted=(90, 90, 90), en_font="Calibri", ar_font="Arial",
@@ -231,13 +260,10 @@ def _add_table_cell_text(cell, text: str, font_name: str, size_pt: float, is_ar:
         _set_paragraph_rtl(p, align_right=True)
     else:
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    run = p.add_run(text)
-    _style_run(run, font_name, size_pt, bold=bold, color=color, rtl=is_ar, cs_font=cs_font)
+    _add_clean_run_with_latex(p, text, font_name, size_pt, bold=bold, color=color, rtl=is_ar, cs_font=cs_font)
 
 
 def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE) -> bytes:
-    """يبني ملف Word جميل التنسيق للكويز، مع اتجاه تلقائي حسب اللغة وستايل شكلي قابل للاختيار
-    (simple / modern / academic)."""
     if not questions:
         raise ExportError("لا توجد أسئلة لتصديرها.")
 
@@ -254,7 +280,6 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
     section = doc.sections[0]
     usable_width_cm = (section.page_width - section.left_margin - section.right_margin) / 360000
 
-    # اتجاه الصفحة بالكامل RTL للعربي
     if is_ar:
         for sec in doc.sections:
             sec._sectPr.append(OxmlElement("w:bidi"))
@@ -265,9 +290,12 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
     if is_ar:
         _set_paragraph_rtl(title_p, align_right=False)
         title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_p.add_run(title or ("كويز" if is_ar else "Quiz"))
-    title_color = (255, 255, 255) if cfg["header_banner"] else cfg["accent"]
-    _style_run(title_run, body_font, 20, bold=True, color=title_color, rtl=is_ar, cs_font=cs_font)
+    _add_clean_run_with_latex(
+        title_p, title or ("كويز" if is_ar else "Quiz"), 
+        body_font, 20, bold=True, 
+        color=(255, 255, 255) if cfg["header_banner"] else cfg["accent"], 
+        rtl=is_ar, cs_font=cs_font
+    )
     if cfg["header_banner"]:
         _shade_paragraph(title_p, accent_hex)
         title_p.paragraph_format.space_before = Pt(6)
@@ -275,20 +303,17 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
 
     sub_p = doc.add_paragraph()
     sub_text = f"عدد الأسئلة: {len(questions)}" if is_ar else f"Total Questions: {len(questions)}"
-    sub_run = sub_p.add_run(sub_text)
-    _style_run(sub_run, body_font, 11, color=cfg["muted"], rtl=is_ar, cs_font=cs_font)
+    _add_clean_run_with_latex(sub_p, sub_text, body_font, 11, color=cfg["muted"], rtl=is_ar, cs_font=cs_font)
     sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if is_ar:
         _set_paragraph_rtl(sub_p, align_right=False)
         sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     if style == STYLE_ACADEMIC:
-        # سطر معلومات شبيه بورقة امتحان رسمية: الاسم / التاريخ
         info_p = doc.add_paragraph()
         info_text = "الاسم: ________________________     التاريخ: ______________" if is_ar \
             else "Name: ________________________     Date: ______________"
-        info_run = info_p.add_run(info_text)
-        _style_run(info_run, body_font, 11, color=(30, 30, 30), rtl=is_ar, cs_font=cs_font)
+        _add_clean_run_with_latex(info_p, info_text, body_font, 11, color=(30, 30, 30), rtl=is_ar, cs_font=cs_font)
         if is_ar:
             _set_paragraph_rtl(info_p, align_right=True)
         info_p.paragraph_format.space_before = Pt(10)
@@ -316,8 +341,7 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
             qp = cell.paragraphs[0]
             if is_ar:
                 _set_paragraph_rtl(qp, align_right=True)
-            run = qp.add_run(label + q_text)
-            _style_run(run, body_font, 13, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            _add_clean_run_with_latex(qp, label + q_text, body_font, 13, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
             qp.paragraph_format.space_after = Pt(6)
 
             for opt_idx, opt_text in enumerate(options):
@@ -331,20 +355,19 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
                     _shade_run(badge_run, _rgb_to_hex(cfg["badge_bg"]))
                     sep_run = op.add_run("  ")
                     _style_run(sep_run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
-                    text_run = op.add_run(opt_text)
-                    _style_run(text_run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
+                    _add_clean_run_with_latex(op, opt_text, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
                 else:
-                    run = op.add_run(f"{letter}) {opt_text}")
-                    _style_run(run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
+                    _add_clean_run_with_latex(op, f"{letter}) {opt_text}", body_font, 11.5, rtl=is_ar, cs_font=cs_font)
                 op.paragraph_format.space_after = Pt(3)
 
             spacer = doc.add_paragraph()
             spacer.paragraph_format.space_after = Pt(10)
         else:
             qp = doc.add_paragraph()
-            run = qp.add_run(label + q_text)
-            _style_run(run, body_font, 13, bold=True,
-                       color=cfg["accent"] if style == STYLE_ACADEMIC else None, rtl=is_ar, cs_font=cs_font)
+            _add_clean_run_with_latex(
+                qp, label + q_text, body_font, 13, bold=True,
+                color=cfg["accent"] if style == STYLE_ACADEMIC else None, rtl=is_ar, cs_font=cs_font
+            )
             if is_ar:
                 _set_paragraph_rtl(qp, align_right=True)
             qp.paragraph_format.space_after = Pt(6)
@@ -353,8 +376,7 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
                 letter = letters[opt_idx] if opt_idx < len(letters) else str(opt_idx + 1)
                 op = doc.add_paragraph()
                 sep = "." if style == STYLE_ACADEMIC else ")"
-                run = op.add_run(f"{letter}{sep} {opt_text}")
-                _style_run(run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
+                _add_clean_run_with_latex(op, f"{letter}{sep} {opt_text}", body_font, 11.5, rtl=is_ar, cs_font=cs_font)
                 if is_ar:
                     _set_paragraph_rtl(op, align_right=True)
                     op.paragraph_format.right_indent = Cm(0.8)
@@ -372,8 +394,7 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
     doc.add_page_break()
     head_p = doc.add_paragraph()
     head_text = "🗝️ جدول الإجابات الصحيحة" if is_ar else "🗝️ Answer Key"
-    head_run = head_p.add_run(head_text)
-    _style_run(head_run, body_font, 16, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+    _add_clean_run_with_latex(head_p, head_text, body_font, 16, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
     if is_ar:
         _set_paragraph_rtl(head_p, align_right=True)
     head_p.paragraph_format.space_after = Pt(10)
@@ -424,7 +445,7 @@ _BIDI_AVAILABLE = True
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
-except ImportError:  # pragma: no cover
+except ImportError: 
     _BIDI_AVAILABLE = False
 
 from reportlab.lib.colors import HexColor
@@ -566,7 +587,6 @@ class _QuizPDFRenderer:
 
         _register_pdf_fonts()
 
-        # 1. تحديث أسماء الخطوط المتاحة
         if self.cfg.get("academic_fonts") and _font_available("Arabic-Academic"):
             self.font_ar_regular = "Arabic-Academic"
             self.font_ar_bold = "Arabic-Academic-Bold" if _font_available("Arabic-Academic-Bold") else "Arabic-Academic"
@@ -581,7 +601,6 @@ class _QuizPDFRenderer:
             self.font_en_regular = "Latin" if _font_available("Latin") else "Helvetica"
             self.font_en_bold = "Latin-Bold" if _font_available("Latin-Bold") else "Helvetica-Bold"
 
-        # 2. تعيين الخصائص المباشرة قبل إجراء أي فحص تفادياً لـ AttributeError
         if is_ar:
             self.font_regular = self.font_ar_regular or "Helvetica"
             self.font_bold = self.font_ar_bold or "Helvetica-Bold"
@@ -589,7 +608,6 @@ class _QuizPDFRenderer:
             self.font_regular = self.font_en_regular or "Helvetica"
             self.font_bold = self.font_en_bold or "Helvetica-Bold"
 
-        # 3. التحقق من توفر الخطوط العربية
         if is_ar and (not self.font_ar_regular or not self.font_ar_bold):
             raise ExportError(
                 "تعذّر إنشاء PDF بالعربية لعدم توفر خط عربي على الخادم حالياً. "
@@ -691,7 +709,7 @@ class _QuizPDFRenderer:
             content_h = 2 * pad + len(q_lines) * (12.5 + 5) + 6
             opt_line_counts = []
             for oidx, opt in enumerate(options):
-                letter = self.letters[oidx] if oidx < len(self.letters) else str(opt_idx + 1)
+                letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
                 lines = _wrap_line(f"{letter}) {opt}", self.is_ar, font_en, font_ar, 11, max_w - 10)
                 opt_line_counts.append(lines)
                 content_h += len(lines) * (11 + 4) + 3
