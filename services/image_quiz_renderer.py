@@ -52,7 +52,7 @@ ENGLISH_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"]
 
 FIG_WIDTH_PX = 1000
 DPI = 150
-MARGIN_PX = 50            # هامش خارجي بين حافة الصورة ومنطقة المحتوى
+MARGIN_PX = 60            # هامش خارجي بين حافة الصورة ومنطقة المحتوى (زودناه عشان السؤال ميبقاش لازق في حافة الصورة)
 HEADER_HEIGHT_PX = 76
 LINE_HEIGHT_PX = 40
 QUESTION_FONT_SIZE = 21
@@ -241,7 +241,11 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     opt_font_prop = _font_prop_sized(is_ar, bold=False, size=OPTION_FONT_SIZE)
     badge_font_prop = _font_prop_sized(is_ar, bold=True, size=BADGE_FONT_SIZE)
 
-    q_lines = _wrap_and_shape(question_text, is_ar, content_width, q_font_prop)
+    # هامش أمان إضافي عند لف نص السؤال تحديداً: قياس عرض الأسطر المختلطة (عربي + LaTeX)
+    # بيبقى أحياناً أقل شوية من العرض الفعلي وقت الرسم، فبيخلي آخر سطر يوصل لحافة
+    # الصورة تقريباً. نلف السؤال على عرض أضيق شوية (96%) عشان يفضل فيه هامش واضح دايماً.
+    question_wrap_width = content_width * 0.96
+    q_lines = _wrap_and_shape(question_text, is_ar, question_wrap_width, q_font_prop)
 
     # عرض النص المتاح داخل كل بطاقة خيار = عرض المحتوى ناقص حشو البطاقة الأفقي
     # على الجانبين وناقص عمود الشارة الدائرية + المسافة بينها وبين النص.
