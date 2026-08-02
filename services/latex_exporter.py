@@ -11,40 +11,54 @@ logger = get_logger(__name__)
 
 ARABIC_LETTERS = ["أ", "ب", "ج", "د"]
 
-# إعدادات الستايلات الثلاثة الخاصة بـ LaTeX
 LATEX_STYLES_CONFIG = {
     "simple": {
-        "accent_color": "14376E",      # كحلي كلاسيكي
+        "accent_color": "14376E",
         "header_banner": False,
         "show_student_info": False,
     },
     "modern": {
-        "accent_color": "2563EB",      # أزرق عصري حيوية
+        "accent_color": "2563EB",
         "header_banner": True,
         "show_student_info": False,
     },
     "academic": {
-        "accent_color": "0F172A",      # كحلي داكن جداً / أسود رسمية
+        "accent_color": "0F172A",
         "header_banner": False,
-        "show_student_info": True,     # سطر الاسم والتاريخ الرسمي
+        "show_student_info": True,
     }
 }
 
 
+def _normalize_math_delimiters(text: str) -> str:
+    """تحويل أقواس LaTeX المباشرة مثل \(...\) و \[...\] إلى $...$ و $$...$$ القياسية."""
+    if not text:
+        return ""
+    text = re.sub(r'\\\(', '$', text)
+    text = re.sub(r'\\\)', '$', text)
+    text = re.sub(r'\\\[', '$$', text)
+    text = re.sub(r'\\\]', '$$', text)
+    return text
+
+
 def _escape_latex_text(text: str) -> str:
     """
-    تهريب الرموز الخاصة في LaTeX خارج نطاق معادلات $...$ لحماية Tectonic من الأخطاء.
+    تهريب الرموز الخاصة في LaTeX خارج نطاق معادلات $...$ لحماية Tectonic من الأخطاء،
+    مع الحفاظ التام على معادلات LaTeX المنسقة لتظهر كرموز وقوانين رياضية حقيقية.
     """
     if not text:
         return ""
 
-    # تقسيم النص للحفاظ على صيغ المعادلات $...$ أو $$...$$ كما هي
+    # 1. توحيد صيغ المحددات إلى $...$
+    text = _normalize_math_delimiters(text)
+
+    # 2. تقسيم النص لعزل صيغ $...$ أو $$...$$
     parts = re.split(r'(\$\$.*?\$\$|\$.*?\$)', text, flags=re.DOTALL)
     escaped_parts = []
     
     for part in parts:
-        if part.startswith('$') and part.endswith('$'):
-            # الإبقاء على المعادلة الرياضية كما هي
+        if (part.startswith('$') and part.endswith('$')) or (part.startswith('$$') and part.endswith('$$')):
+            # الإبقاء على المعادلة الرياضية كما هي ليقوم LaTeX بتجميعها ورسمها رسمياً
             escaped_parts.append(part)
         else:
             # تهريب الرموز الخاصة بالنص العادي فقط
@@ -86,14 +100,10 @@ def _prepare_questions_for_latex(questions: list) -> list:
 
 
 async def build_quiz_pdf_tectonic(title: str, questions: list, style: str = "simple") -> bytes:
-    """
-    يحقن الأسئلة والستايل المختار في قالب Jinja2 ويولد ملف PDF محترف ونقي عبر Tectonic.
-    """
     file_id = uuid.uuid4().hex
     tex_path = os.path.join("downloads", f"quiz_{file_id}.tex")
     pdf_path = os.path.join("downloads", f"quiz_{file_id}.pdf")
 
-    # جلب إعدادات الستايل المختار (افتراضياً simple)
     style_cfg = LATEX_STYLES_CONFIG.get(style, LATEX_STYLES_CONFIG["simple"])
 
     try:
@@ -109,7 +119,6 @@ async def build_quiz_pdf_tectonic(title: str, questions: list, style: str = "sim
         prepared_q = _prepare_questions_for_latex(questions)
         escaped_title = _escape_latex_text(title or "كويز تفاعلي")
         
-        # تمرير الستايل والإعدادات والعنوان المهَرّب إلى القالب
         rendered_tex = template.render(
             title=escaped_title,
             questions=prepared_q,
