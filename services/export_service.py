@@ -6,7 +6,9 @@
 - الإنكليزي: اتجاه عادي من اليسار لليمين (LTR).
 - الأسئلة والاختيارات فقط داخل المتن، بدون أي تلميح/شرح.
 - جدول "الإجابات الصحيحة" (يتضمن الشرح) يوضع في آخر الملف فقط.
+- يدعم التجميع الأكاديمي عبر LaTeX (Tectonic) مع فولباك تلقائي لـ ReportLab.
 """
+import asyncio
 import io
 import os
 import re
@@ -122,9 +124,6 @@ def _style_run(run, font_name: str, size_pt: float, bold: bool = False,
         rPr.append(rFonts)
     rFonts.set(qn("w:ascii"), font_name)
     rFonts.set(qn("w:hAnsi"), font_name)
-    # خط الكتابة المعقّدة (w:cs) بيرسم أي حرف عربي جوا نفس الـ run، حتى لو باقي
-    # الفقرة بخط لا يدعم العربي. افتراضياً Arial، بس قابل للتخصيص (مثلاً Amiri
-    # لستايل "أكاديمي") حتى تنعكس هوية الخط على أي عربي مدسوس جوا نص إنكليزي.
     rFonts.set(qn("w:cs"), cs_font)
     if rtl:
         rPr.append(OxmlElement("w:rtl"))
@@ -418,7 +417,7 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
     return out.getvalue()
 
 
-# ==================== PDF ====================
+# ==================== PDF (ReportLab Fallback Engine) ====================
 
 _FONTS_REGISTERED = False
 _BIDI_AVAILABLE = True
@@ -439,8 +438,6 @@ _FONT_FILES = {
     "Arabic-Bold": "NotoNaskhArabic-Bold.ttf",
     "Latin": "NotoSans-Regular.ttf",
     "Latin-Bold": "NotoSans-Bold.ttf",
-    # اختياري: يُستخدم فقط بستايل "أكاديمي" العربي إذا موجود، وإلا بيرجع تلقائياً
-    # لخط Noto Naskh Arabic العادي (مافي داعي نوقف تصدير PDF لغيابه).
     "Arabic-Academic": "Amiri-Regular.ttf",
     "Arabic-Academic-Bold": "Amiri-Bold.ttf",
 }
@@ -465,9 +462,6 @@ def _font_available(name: str) -> bool:
 
 
 def _shape(text: str, base_ar: bool) -> str:
-    """يهيئ وييعيد ترتيب النص للعرض الصحيح (bidi) - يشتغل كل ما كان في نص عربي
-    بالسطر، بغض النظر عن كون الفقرة ككل عربي أو إنكليزي. base_ar يحدد اتجاه
-    القراءة الأساسي للسطر (يهم بترتيب الأجزاء غير-العربية المدسوسة وسطه)."""
     if not _BIDI_AVAILABLE or not _ARABIC_RE.search(text):
         return text
     try:
@@ -483,8 +477,6 @@ _SCRIPT_SPLIT_RE = re.compile(
 
 
 def _split_script_runs(shaped_text: str) -> List[Tuple[str, bool]]:
-    """يقسّم نص (بعد التهيئة/bidi) إلى أجزاء متتالية عربي/غير-عربي، بنفس ترتيب
-    الرسم من اليسار لليمين على الصفحة - كل جزء جاهز يترسم بخطّه المناسب."""
     if not shaped_text:
         return [("", False)]
     return [(tok, bool(_ARABIC_RE.match(tok))) for tok in _SCRIPT_SPLIT_RE.findall(shaped_text)]
@@ -521,8 +513,6 @@ def _wrap_line(text: str, base_ar: bool, font_en: str, font_ar: str, size: float
 def _draw_mixed_line(c, text: str, base_ar: bool, font_en: str, font_ar: str, size: float,
                       y: float, color: str, margin: float, page_w: float,
                       extra_indent: float = 0, center: bool = False) -> None:
-    """يرسم سطر واحد ممكن يحوي عربي وإنكليزي مع بعض، كل جزء بخطّه الصحيح،
-    مع محاذاة يمين/يسار/وسط محسوبة على العرض الكلي الحقيقي للسطر."""
     shaped = _shape(text, base_ar)
     runs = _split_script_runs(shaped)
     total_w = sum(pdfmetrics.stringWidth(seg, font_ar if seg_is_ar else font_en, size)
@@ -541,7 +531,6 @@ def _draw_mixed_line(c, text: str, base_ar: bool, font_en: str, font_ar: str, si
         x += pdfmetrics.stringWidth(seg, font, size)
 
 
-# إعدادات كل ستايل شكلي للـ PDF
 _PDF_STYLES = {
     STYLE_SIMPLE: dict(
         accent="#14376E", muted="#666666", header_banner=False, box=False, divider=False,
@@ -577,7 +566,6 @@ class _QuizPDFRenderer:
 
         _register_pdf_fonts()
         if self.cfg["academic_fonts"] and _font_available("Arabic-Academic"):
-            # خط Amiri الكلاسيكي متوفر - نستخدمه لستايل "أكاديمي" العربي تحديداً
             self.font_ar_regular = "Arabic-Academic"
             self.font_ar_bold = "Arabic-Academic-Bold" if _font_available("Arabic-Academic-Bold") \
                 else "Arabic-Academic"
@@ -585,28 +573,17 @@ class _QuizPDFRenderer:
             self.font_ar_regular = "Arabic" if _font_available("Arabic") else None
             self.font_ar_bold = "Arabic-Bold" if _font_available("Arabic-Bold") else None
         if self.cfg["academic_fonts"]:
-            # Times-Roman/Times-Bold من الخطوط الأساسية الـ 14 المدمجة بـ reportlab -
-            # موجودة دايماً بدون ما نحتاج ملف خط، وبتعطي طابع أكاديمي/رسمي كلاسيكي.
             self.font_en_regular = "Times-Roman"
             self.font_en_bold = "Times-Bold"
         else:
             self.font_en_regular = "Latin" if _font_available("Latin") else "Helvetica"
             self.font_en_bold = "Latin-Bold" if _font_available("Latin-Bold") else "Helvetica-Bold"
 
-        if is_ar:
-            self.font_regular = self.font_ar_regular
-            self.font_bold = self.font_ar_bold
-        else:
-            self.font_regular = self.font_en_regular
-            self.font_bold = self.font_en_bold
-
         if is_ar and (not self.font_regular or not self.font_bold):
             raise ExportError(
                 "تعذّر إنشاء PDF بالعربية لعدم توفر خط عربي على الخادم حالياً. "
                 "جرّب تصدير Word بدلاً من ذلك."
             )
-
-    # ---------- أدوات رسم أساسية ----------
 
     def _new_page(self):
         self._draw_footer()
@@ -626,8 +603,6 @@ class _QuizPDFRenderer:
     def _draw_paragraph(self, text: str, size: float, bold: bool = False,
                          color: str = "#111111", extra_indent: float = 0, gap_after: float = 6,
                          center: bool = False, is_ar: bool = None):
-        # is_ar=None يعني "استخدم اتجاه المستند العام"؛ تمرير قيمة صريحة يسمح
-        # برسم فقرة واحدة بعكس اتجاه بقية المستند لو احتجنا لهيك مستقبلاً.
         direction_ar = self.is_ar if is_ar is None else is_ar
         font_en = self.font_en_bold if bold else self.font_en_regular
         font_ar = (self.font_ar_bold if bold else self.font_ar_regular) or font_en
@@ -639,8 +614,6 @@ class _QuizPDFRenderer:
                               self.margin, self.page_w, extra_indent=extra_indent, center=center)
             self.y -= (size + 5)
         self.y -= gap_after
-
-    # ---------- الأقسام ----------
 
     def _render_header(self):
         cfg = self.cfg
@@ -693,7 +666,6 @@ class _QuizPDFRenderer:
             self.y -= 8
 
     def _render_questions_boxed(self):
-        """ستايل 'modern': كل سؤال جوا بطاقة (مستطيل بحواف دائرية) بخلفية فاتحة."""
         cfg = self.cfg
         pad = 12
         font_en, font_ar = self.font_en_regular, (self.font_ar_regular or self.font_en_regular)
@@ -708,7 +680,7 @@ class _QuizPDFRenderer:
             content_h = 2 * pad + len(q_lines) * (12.5 + 5) + 6
             opt_line_counts = []
             for oidx, opt in enumerate(options):
-                letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
+                letter = self.letters[oidx] if oidx < len(self.letters) else str(opt_idx + 1)
                 lines = _wrap_line(f"{letter}) {opt}", self.is_ar, font_en, font_ar, 11, max_w - 10)
                 opt_line_counts.append(lines)
                 content_h += len(lines) * (11 + 4) + 3
@@ -741,7 +713,6 @@ class _QuizPDFRenderer:
         col_widths = [total_w * r for r in col_ratios]
         headers = ["#", "الإجابة الصحيحة", "الشرح"] if self.is_ar else ["#", "Correct Answer", "Explanation"]
 
-        # للعربي: أول عمود منطقي يكون في أقصى اليمين
         if self.is_ar:
             col_x_right = [self.page_w - self.margin]
             for w in col_widths[:-1]:
@@ -762,7 +733,6 @@ class _QuizPDFRenderer:
 
         def draw_row(values, is_header=False, zebra=False):
             fen, far = (font_en_b, font_ar_b) if is_header else (font_en, font_ar)
-            # التفاف كل خلية أولاً لتحديد ارتفاع الصف
             wrapped_cols = []
             for val, w in zip(values, col_widths):
                 wrapped_cols.append(_wrap_line(str(val), self.is_ar, fen, far, row_font_size, w - 2 * pad))
@@ -824,11 +794,30 @@ class _QuizPDFRenderer:
         return self.buf.getvalue()
 
 
+# ==================== MAIN PDF EXPORT PUBLIC FUNCTION ====================
+
 def build_quiz_pdf(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE) -> bytes:
-    """يبني ملف PDF جميل التنسيق للكويز، مع اتجاه تلقائي حسب اللغة وستايل شكلي قابل للاختيار
-    (يتطلب خطوط assets/fonts للعربي)."""
+    """
+    يبني ملف PDF جميل التنسيق للكويز.
+    يحاول أولاً استخدام محرك Tectonic (LaTeX الأكاديمي النقي) للحصول على أفضل دقة
+    وتوفير في الصفحات، وفي حال تعثره ينقل العملية فوراً إلى ReportLab.
+    """
     if not questions:
         raise ExportError("لا توجد أسئلة لتصديرها.")
+
+    style = normalize_style(style)
+
+    # 1. المحاولة الأولى: التجميع بـ Tectonic (LaTeX)
+    try:
+        from services.latex_exporter import build_quiz_pdf_tectonic
+        try:
+            return asyncio.run(build_quiz_pdf_tectonic(title, questions, style=style))
+        except TypeError:
+            return asyncio.run(build_quiz_pdf_tectonic(title, questions))
+    except Exception as e:
+        logger.warning(f"Tectonic LaTeX compilation skipped/failed, falling back to ReportLab: {e}")
+
+    # 2. المحاولة الثانية: الفولباك المضمون بـ ReportLab
     is_ar = detect_language(questions) == "ar"
     renderer = _QuizPDFRenderer(title, questions, is_ar, style=style)
     return renderer.render()

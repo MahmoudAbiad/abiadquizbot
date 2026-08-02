@@ -1,0 +1,81 @@
+\documentclass[11pt, a4paper]{article}
+\usepackage{geometry}
+\geometry{top=1.8cm, bottom=1.8cm, left=1.8cm, right=1.8cm}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{xcolor}
+
+% تعريف لون الستايل المختار ديناميكياً
+\definecolor{accentcolor}{HTML}{<< cfg.accent_color >>}
+
+% إعدادات اللغة العربية والخط الأكاديمي
+\usepackage{polyglossia}
+\setmainlanguage{arabic}
+\setotherlanguage{english}
+\newfontfamily\arabicfont[Script=Arabic]{Amiri}
+
+% إعدادات القوائم والترقيم
+\usepackage{enumitem}
+\setlist[enumerate,1]{label=\textcolor{accentcolor}{\textbf{(\arabic*)}}, rightmargin=0pt, leftmargin=2em}
+\setlist[enumerate,2]{label=\textbf{[\alph*]}, rightmargin=1em}
+
+\pagestyle{plain}
+
+\begin{document}
+
+% 1. رأس الورقة الامتحانية حسب الستايل
+BLOCK if cfg.header_banner
+\begin{center}
+    \colorbox{accentcolor}{\parbox{\linewidth}{\centering \color{white} \Large \textbf{<< title >>}}} \\[0.2cm]
+    \small \textcolor{accentcolor}{عدد الأسئلة: << questions|length >>}
+\end{center}
+BLOCK else
+\begin{center}
+    {\Large \textcolor{accentcolor}{\textbf{<< title >>}}} \\[0.2cm]
+    \small عدد الأسئلة: << questions|length >>
+\end{center}
+ENDBLOCK
+
+BLOCK if cfg.show_student_info
+\vspace{0.2cm}
+\noindent \textbf{الاسم:} \underline{\hspace{6cm}} \hfill \textbf{التاريخ:} \underline{\hspace{3cm}}
+\vspace{0.2cm}
+ENDBLOCK
+
+\rule{\linewidth}{1pt}
+\vspace{0.3cm}
+
+% 2. قائمة الأسئلة
+\begin{enumerate}
+BLOCK for q in questions
+    \item << q.question >>
+    \begin{enumerate}
+        \item << q.options[0] >>
+        \item << q.options[1] >>
+        \item << q.options[2] >>
+        \item << q.options[3] >>
+    \end{enumerate}
+    \vspace{0.25cm}
+ENDBLOCK
+\end{enumerate}
+
+\newpage
+
+% 3. جدول الإجابات الصحيحة في الصفحة الأخيرة
+\begin{center}
+    {\Large \textcolor{accentcolor}{\textbf{🗝️ جدول الإجابات الصحيحة}}}
+\end{center}
+\rule{\linewidth}{1pt}
+\vspace{0.3cm}
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{|c|c|p{10cm}|}
+\hline
+\textbf{\#} & \textbf{الإجابة} & \textbf{الشرح} \\ \hline
+BLOCK for q in questions
+<< loop.index >> & << q.correct_letter >> & << q.explanation >> \\ \hline
+ENDBLOCK
+\end{tabular}
+\end{table}
+
+\end{document}

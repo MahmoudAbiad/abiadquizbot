@@ -2,15 +2,23 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# 1. تثبيت أدوات النظام والخطوط العربية ومترجم Tectonic
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    fontconfig \
+    fonts-sil-amiri \
+    && curl -fsSL https://drop-sh.tectonic-typesetting.github.io/installer/tectonic | sh -s -- --to /usr/local/bin \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 2. تثبيت مكتبات بايثون
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
+# 3. نسخ كود المشروع
 COPY . .
 
-# Create downloads and logs directories
-RUN mkdir -p downloads logs
+# 4. إنشاء المجلدات المطلوبة (إضافة templates)
+RUN mkdir -p downloads logs templates
 
-# Run the bot
+# التشغيل
 CMD ["python", "main.py"]
