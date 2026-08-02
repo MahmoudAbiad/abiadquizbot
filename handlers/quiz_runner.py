@@ -109,7 +109,7 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
 
-        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb)
+        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb, quiz_id=data.get('quiz_id'))
         await state.update_data(is_switching_question=False)
     except Exception as e:
         log_error(logger, f"Error in send_question: {e}", exception=e)
@@ -227,9 +227,14 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         q = data['questions'][data['current_index']]
+        hint_text = q['hint']
+        if q.get("is_math"):
+            # التلميح يُعرض داخل تنبيه Telegram عادي لا يدعم LaTeX، لذا نجرّد
+            # علامات $ فقط لعرض النص بشكل مقروء بدل رموز LaTeX خام
+            hint_text = hint_text.replace("$", "")
         # 🩹 UX: show_alert=True لأن التلميح نص يحتاج وقتاً ليُقرأ؛ الإشعار الخاطف
         # (toast) كان يختفي خلال ثانية أو ثانيتين قبل أن يتمكن الطالب من قراءته كاملاً.
-        await call.answer(f"💡 تلميح ذكي:\n{q['hint']}", show_alert=True)
+        await call.answer(f"💡 تلميح ذكي:\n{hint_text}", show_alert=True)
     except Exception as e:
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
         await call.answer("❌ خطأ في جلب التلميح", show_alert=True)

@@ -174,13 +174,13 @@ async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
 async def get_file_quizzes(file_hash: str) -> list:
     """جلب كل الكويزات التابعة للملف مرتبة تلقائياً حسب التقييم الأعلى لزملائك الطلاب"""
     try:
-        res = await supabase.table("quizzes").select("id, likes, dislikes, score, quiz_data").eq("file_hash", file_hash).order("score", desc=True).execute()
+        res = await supabase.table("quizzes").select("id, likes, dislikes, score, quiz_data, is_math_quiz").eq("file_hash", file_hash).order("score", desc=True).execute()
         return res.data or []
     except Exception as e:
         log_error(logger, f"Error getting file quizzes from central table: {e}")
         return []
 
-async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title: str, quiz_data: list, total_tokens: int) -> Optional[str]:
+async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title: str, quiz_data: list, total_tokens: int, is_math_quiz: bool = False) -> Optional[str]:
     """حفظ كويز جديد مولد كلياً بالجدول المركزي وعزل التكرار لخدمة الدفعة الدراسية"""
     try:
         res = await supabase.table("quizzes").insert({
@@ -188,7 +188,8 @@ async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title:
             "file_hash": file_hash,
             "source_title": source_title,
             "quiz_data": quiz_data,
-            "total_tokens": total_tokens
+            "total_tokens": total_tokens,
+            "is_math_quiz": is_math_quiz,
         }).execute()
         if res.data:
             return res.data[0]['id']
@@ -223,6 +224,50 @@ async def save_quiz_to_cache(file_hash: str, quiz_data: List[Dict[str, Any]], to
     except Exception as e:
         log_error(logger, f"Error routing fallback cache saving: {e}")
         return False
+
+# ==================== Math Image Quiz Storage (نمط الكويز المصوّر LaTeX) ====================
+# الباكت المخصص لتخزين صور الأسئلة الرياضية المُصاغة بـ LaTeX. يجب أن يكون
+# عاماً (public) لأن bot.send_photo يستقبل رابطاً مباشراً بدل رفع الملف نفسه
+# في كل مرة - راجع migration_math_image_quizzes.sql لإنشائه وصلاحياته.
+QUIZ_IMAGES_BUCKET = "quiz-images"
+
+async def upload_quiz_question_image(image_bytes: bytes, object_path: str) -> Optional[str]:
+    """
+    يرفع صورة سؤال رياضي مصوّر (LaTeX) إلى Supabase Storage ويرجع رابطها العام،
+    ليُستخدم مباشرة مع bot.send_photo (يقبل Telegram روابط HTTP مباشرة). عند
+    الفشل (مثال: الباكت غير موجود بعد) يعيد None ليتحول المتصل تلقائياً لإرسال
+    الصورة كملف خام بدل رابط، دون كسر تجربة الطالب.
+    """
+    try:
+        await supabase.storage.from_(QUIZ_IMAGES_BUCKET).upload(
+            path=object_path,
+            file=image_bytes,
+            file_options={"content-type": "image/png", "upsert": "true"},
+        )
+        return supabase.storage.from_(QUIZ_IMAGES_BUCKET).get_public_url(object_path)
+    except Exception as e:
+        log_warning(logger, f"Could not upload quiz question image to storage (falling back to raw bytes): {e}")
+        return None
+
+async def save_question_image_url(quiz_id: str, question_index: int, image_url: str) -> None:
+    """
+    يخزّن رابط الصورة المولّدة داخل عنصر السؤال المطابق ضمن quiz_data (JSONB)،
+    بحيث لا يُعاد رسم/رفع نفس السؤال في كل مرة يُشغَّل فيها هذا الكويز المخزّن
+    (كاش) من قبل نفس الطالب أو غيره من زملائه لاحقاً. عملية غير حرجة (fire-and-forget)
+    تُستدعى بالخلفية ولا توقف تدفق الاختبار الجاري عند فشلها.
+    """
+    if not _is_valid_uuid(quiz_id):
+        return
+    try:
+        res = await supabase.table("quizzes").select("quiz_data").eq("id", quiz_id).limit(1).execute()
+        if not res.data:
+            return
+        quiz_data = res.data[0]["quiz_data"] or []
+        if 0 <= question_index < len(quiz_data):
+            quiz_data[question_index]["image_url"] = image_url
+            await supabase.table("quizzes").update({"quiz_data": quiz_data}).eq("id", quiz_id).execute()
+    except Exception as e:
+        log_warning(logger, f"Could not cache question image URL for quiz {quiz_id}: {e}")
 
 # ==================== Shared Quiz Operations (Deep Linking) ====================
 def create_shared_quiz_id() -> str:
