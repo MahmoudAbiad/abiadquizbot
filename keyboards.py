@@ -108,8 +108,13 @@ def get_multiple_quizzes_keyboard(quizzes: list, cost: float, show_generate_btn:
         dislikes = q.get('dislikes', 0)
         # 🩹 UX: إضافة عدد الأسئلة لكل كويز جاهز، فالطالب كان يختار بين "كويز 1" و"كويز 2"
         # دون معرفة عدد أسئلة أي منهما قبل الدفع.
-        q_count = len(q.get('quiz_data') or [])
-        btn_text = f"📝 كويز {idx} الجاهز ({q_count} سؤال) | 👍 {likes} | 👎 {dislikes}"
+        quiz_data = q.get('quiz_data') or []
+        q_count = len(quiz_data)
+        # 🆕 تمييز الكويزات المصوّرة (LaTeX) بأيقونة مختلفة لأن تجربتها مختلفة
+        # (صورة لكل سؤال + Poll بحروف الإجابة فقط) عن الكويز النصي العادي
+        is_math = bool(q.get('is_math_quiz')) or (q_count > 0 and bool(quiz_data[0].get('is_math')))
+        icon = "📐" if is_math else "📝"
+        btn_text = f"{icon} كويز {idx} الجاهز ({q_count} سؤال) | 👍 {likes} | 👎 {dislikes}"
         kb.append([types.InlineKeyboardButton(text=btn_text, callback_data=f"use_multi_{q['id']}")])
     
     if show_generate_btn:

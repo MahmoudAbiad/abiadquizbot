@@ -44,6 +44,7 @@ from constants import (
     OPTION_COUNT,
     QUOTA_ERROR_KEYWORDS,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
+    SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS,
     MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
 )
 from logger import get_logger, log_error, log_info, log_warning
@@ -438,17 +439,23 @@ async def generate_quiz_smart(
     file_hash: Optional[str] = None,
     status_message: Optional[Any] = None,
     previous_questions: Optional[List[Dict[str, Any]]] = None,
+    is_math_mode: bool = False,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
     تتولى إدارة الـ Cache، توجيه الطلبات للمسار المناسب، وتنظيف مهام الرسائل التفاعلية.
+
+    is_math_mode: عندما تكون True (بعد اكتشاف محتوى رياضي عبر services.math_detector)،
+    يُستبدل موجّه التوليد بنسخة LaTeX المخصصة لـ"نمط الكويز المصوّر" بدل الموجّه العادي.
     """
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
     
     try:
+        # 🆕 اختيار الموجّه المناسب: نسخة LaTeX للأسئلة الرياضية، أو النسخة القياسية لغيرها
+        source_prompt = SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS if is_math_mode else SYSTEM_PROMPT_GENERATE_QUESTIONS
         # IMPORTANT: استبدال {option_count} أولاً لضمان وصول العدد الصحيح للخيارات لكافة النماذج
-        base_prompt_template = SYSTEM_PROMPT_GENERATE_QUESTIONS.replace("{option_count}", str(OPTION_COUNT))
+        base_prompt_template = source_prompt.replace("{option_count}", str(OPTION_COUNT))
         
         # حقن الأسئلة السابقة لمنع التكرار
         if previous_questions:

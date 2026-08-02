@@ -8,6 +8,7 @@ from constants import MAX_LIMIT_PAGES, MAX_LIMIT_QUESTIONS, MAX_STANDARD_PAGES, 
 from gemini_helper import generate_quiz_smart
 from logger import get_logger, log_error
 from services.file_service import extract_office_text_if_needed
+from services.math_detector import detect_math_content
 from supabase_helper import (
     get_file_quizzes,
     refund_user_points,
@@ -114,6 +115,18 @@ async def execute_quiz_generation_workflow(
             if "quiz_data" in qz and isinstance(qz["quiz_data"], list):
                 previous_questions.extend(qz["quiz_data"])
 
+    # 2.5 فحص سريع (نموذج Flash-Lite خفيف، عينة واحدة فقط: أول صفحة/صورة أو
+    #     عينة نصية) لتحديد هل نفعّل نمط "الكويز المصوّر LaTeX" قبل التوليد.
+    #     فشل آمن: أي خطأ هنا يُعتبر "لا يوجد محتوى رياضي" ولا يوقف التوليد.
+    try:
+        is_math_mode = await detect_math_content(
+            file_paths if is_media else None,
+            pure_text if not is_media else None,
+        )
+    except Exception as exc:
+        log_error(logger, f"Math content detection failed, continuing with standard mode: {exc}")
+        is_math_mode = False
+
     # 3. استدعى محرك AI
     quiz_data = await generate_quiz_smart(
         file_paths=file_paths if is_media else None,
@@ -123,6 +136,7 @@ async def execute_quiz_generation_workflow(
         file_hash=file_hash,
         status_message=status_message,
         previous_questions=previous_questions if previous_questions else None,
+        is_math_mode=is_math_mode,
     )
 
     if not quiz_data:
@@ -132,6 +146,12 @@ async def execute_quiz_generation_workflow(
     #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
     quiz_data = shuffle_quiz_options(quiz_data)
 
+    # 3.6 تعليم كل سؤال بنمط الكويز المصوّر LaTeX ليتحول التنفيذ لاحقاً
+    #     (services/quiz_engine.py) لمسار الصورة + Poll الحروف بدل النص العادي
+    if is_math_mode:
+        for question in quiz_data:
+            question["is_math"] = True
+
     # 4. حفظ الكاش لملفات أوفيس والنصوص
     if file_hash and quiz_data:
         await save_file_quiz_multiple(
@@ -139,7 +159,8 @@ async def execute_quiz_generation_workflow(
             creator_id=user_id,
             source_title=data.get("source_title", "كويز من مستند"),
             quiz_data=quiz_data,
-            total_tokens=0
+            total_tokens=0,
+            is_math_quiz=is_math_mode,
         )
 
     # 5. استخراج الـ UUID للكويز الجديد
