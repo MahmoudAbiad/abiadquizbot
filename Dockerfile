@@ -6,7 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     fontconfig \
-    fonts-sil-amiri \
+    fonts-amiri \
     && curl -fsSL https://drop-sh.tectonic-typesetting.github.io/installer/tectonic | sh -s -- --to /usr/local/bin \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
