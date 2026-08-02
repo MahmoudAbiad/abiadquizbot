@@ -1,7 +1,7 @@
 # services/math_renderer.py
 """
 خدمة رسم وتحويل الأسئلة الرياضية وصيغ LaTeX إلى صور شمولية عالية الدقة.
-تستخدم Matplotlib في وضع Headless (بدون واجهة رسومية) لضمان العمل على سيرفرات Railway/Linux.
+تستخدم Matplotlib في وضع Headless مع التغليف الذكي للنصوص وتثبيت الاتجاه العربي (base_dir='R').
 """
 
 import os
@@ -28,7 +28,6 @@ def _smart_wrap_text(text: str, max_chars: int = 42) -> str:
     if not text:
         return ""
     
-    # تفكيك النص إلى كلمات أو صيغ رياضية متكاملة
     tokens = re.findall(r'\$.*?\$|\S+', text)
     lines = []
     current_line = []
@@ -50,15 +49,22 @@ def _smart_wrap_text(text: str, max_chars: int = 42) -> str:
     return "\n".join(lines)
 
 
+def _fix_ar(text: str) -> str:
+    """إصلاح وتشكيل النص العربي حصراً مع ضبط الاتجاه صراحة من اليمين لليسار (base_dir='R')."""
+    if not text:
+        return ""
+    try:
+        reshaped = arabic_reshaper.reshape(text)
+        return get_display(reshaped, base_dir='R')
+    except Exception:
+        return text
+
+
 def _prepare_arabic_and_math(text: str) -> str:
-    """
-    عزل صيغ LaTeX المحصورة بين $...$ لحمايتها من الانقلاب أثناء معالجة 
-    الاتجاه العربي (BiDi) لضمان رسم المعادلات والكسور بشكل صحيح تماماً.
-    """
+    """عزل صيغ LaTeX المحصورة بين $...$ وتشكيل النص العربي مع الحفاظ على اتجاه RTL."""
     if not text:
         return ""
 
-    # 1. استخراج واستبدال كافة صيغ LaTeX بترميز مؤقت
     math_expressions = re.findall(r'(\$.*?\$)', text)
     placeholders = [f"MATHPLACEHOLDER{i}" for i in range(len(math_expressions))]
     
@@ -66,22 +72,12 @@ def _prepare_arabic_and_math(text: str) -> str:
     for placeholder, math_expr in zip(placeholders, math_expressions):
         temp_text = temp_text.replace(math_expr, placeholder)
 
-    # 2. معالجة وتشكيل النص العربي سطر بسطر للحفاظ على التنسيق متعدد الأسطر
     lines = temp_text.split('\n')
-    reshaped_lines = []
-    for line in lines:
-        try:
-            reshaped = arabic_reshaper.reshape(line)
-            bidi_line = get_display(reshaped)
-        except Exception:
-            bidi_line = line
-        reshaped_lines.append(bidi_line)
-    
-    bidi_text = '\n'.join(reshaped_lines)
+    fixed_lines = [_fix_ar(line) for line in lines]
+    bidi_text = '\n'.join(fixed_lines)
 
-    # 3. إعادة صيغ LaTeX كما هي لمواضعها دون تشويه
     for placeholder, math_expr in zip(placeholders, math_expressions):
-        bidi_placeholder = get_display(placeholder)
+        bidi_placeholder = _fix_ar(placeholder)
         if bidi_placeholder in bidi_text:
             bidi_text = bidi_text.replace(bidi_placeholder, math_expr)
         else:
@@ -103,7 +99,7 @@ def _render_sync(question_data: dict, current_idx: int, total_count: int, output
     q_text_prepared = _prepare_arabic_and_math(wrapped_q)
     q_lines_count = q_text_prepared.count('\n') + 1
 
-    # 2. فحص أطوال الخيارات: استخدام شبكة 2x2 إذا كانت قصيرة
+    # 2. فحص أطوال الخيارات: استخدام شبكة 2x2 إذا كانت قصيرة (أقل من 22 حرفاً)
     max_opt_len = max([len(str(opt)) for opt in options]) if options else 0
     is_grid_layout = (max_opt_len <= 22) and (len(options) == 4)
 
@@ -114,13 +110,12 @@ def _render_sync(question_data: dict, current_idx: int, total_count: int, output
     ax.set_facecolor('#FFFFFF')
     ax.axis('off')
 
-    # 3. رأس البطاقة: رقم السؤال
-    word_q = get_display(arabic_reshaper.reshape("السؤال"))
-    word_of = get_display(arabic_reshaper.reshape("من"))
-    header_text = f"{word_q} {current_idx} {word_of} {total_count}"
+    # 3. رأس البطاقة: (السؤال X من Y) بضبط RTL موحد
+    header_text = f"السؤال {current_idx} من {total_count}"
+    header_prepared = _fix_ar(header_text)
 
     header_y = 0.94
-    ax.text(0.95, header_y, header_text, fontsize=15, fontweight='bold', color='#2563EB',
+    ax.text(0.95, header_y, header_prepared, fontsize=15, fontweight='bold', color='#2563EB',
             ha='right', va='top', transform=ax.transAxes)
 
     # خط فاصل تحت الرأس
@@ -136,33 +131,30 @@ def _render_sync(question_data: dict, current_idx: int, total_count: int, output
     options_start_y = q_y - (q_lines_count * 0.09) - 0.06
     bbox_props = dict(boxstyle="round,pad=0.5", fc="#F8FAFC", ec="#CBD5E1", lw=1.0)
 
-    # 5. رسم الخيارات (شبكة 2x2 أو عمود متتالي 1x4)
+    # 5. رسم الخيارات (شبكة 2x2 للقصيرة أو عمود متتالي 1x4 للطويلة)
     if is_grid_layout:
-        # ترتيب الشبكة 2x2:
-        # السطر الأول: [أ] يمين | [ب] يسار
-        # السطر الثاني: [ج] يمين | [د] يسار
         positions = [
-            (0.93, options_start_y),                 # [أ]
-            (0.46, options_start_y),                 # [ب]
-            (0.93, options_start_y - 0.13),          # [ج]
-            (0.46, options_start_y - 0.13)           # [د]
+            (0.93, options_start_y),                 # [أ] يمين
+            (0.46, options_start_y),                 # [ب] يسار
+            (0.93, options_start_y - 0.13),          # [ج] يمين
+            (0.46, options_start_y - 0.13)           # [د] يسار
         ]
         for i, opt in enumerate(options[:4]):
             label_char = labels[i] if i < len(labels) else str(i + 1)
-            opt_raw = f"[{label_char}]  {opt}"
+            label_ar = _fix_ar(f"[{label_char}]")
+            opt_raw = f"{label_ar}   {opt}"
             opt_prepared = _prepare_arabic_and_math(opt_raw)
             x_pos, y_pos = positions[i]
 
             ax.text(x_pos, y_pos, opt_prepared, fontsize=13.5, color='#1E293B',
                     ha='right', va='top', transform=ax.transAxes, bbox=bbox_props)
     else:
-        # الترتيب العمودي للخيارات الطويلة
         y_step = 0.12
         for i, opt in enumerate(options[:4]):
             label_char = labels[i] if i < len(labels) else str(i + 1)
-            opt_raw = f"[{label_char}]  {opt}"
+            label_ar = _fix_ar(f"[{label_char}]")
+            opt_raw = f"{label_ar}   {opt}"
             opt_prepared = _prepare_arabic_and_math(opt_raw)
-
             y_pos = options_start_y - (i * y_step)
 
             ax.text(0.93, y_pos, opt_prepared, fontsize=13.5, color='#1E293B',
