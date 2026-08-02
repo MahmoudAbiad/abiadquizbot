@@ -1,5 +1,6 @@
 # services/latex_exporter.py
 import os
+import re
 import uuid
 import asyncio
 import jinja2
@@ -29,6 +30,41 @@ LATEX_STYLES_CONFIG = {
     }
 }
 
+
+def _escape_latex_text(text: str) -> str:
+    """
+    تهريب الرموز الخاصة في LaTeX خارج نطاق معادلات $...$ لحماية Tectonic من الأخطاء.
+    """
+    if not text:
+        return ""
+
+    # تقسيم النص للحفاظ على صيغ المعادلات $...$ أو $$...$$ كما هي
+    parts = re.split(r'(\$\$.*?\$\$|\$.*?\$)', text, flags=re.DOTALL)
+    escaped_parts = []
+    
+    for part in parts:
+        if part.startswith('$') and part.endswith('$'):
+            # الإبقاء على المعادلة الرياضية كما هي
+            escaped_parts.append(part)
+        else:
+            # تهريب الرموز الخاصة بالنص العادي فقط
+            escaped = (
+                part
+                .replace('\\', r'\textbackslash{}')
+                .replace('&', r'\&')
+                .replace('%', r'\%')
+                .replace('#', r'\#')
+                .replace('_', r'\_')
+                .replace('{', r'\{')
+                .replace('}', r'\}')
+                .replace('~', r'\textasciitilde{}')
+                .replace('^', r'\textasciicircum{}')
+            )
+            escaped_parts.append(escaped)
+
+    return "".join(escaped_parts)
+
+
 def _prepare_questions_for_latex(questions: list) -> list:
     prepared = []
     for q in questions:
@@ -41,10 +77,10 @@ def _prepare_questions_for_latex(questions: list) -> list:
         c_letter = ARABIC_LETTERS[c_id] if 0 <= c_id < len(ARABIC_LETTERS) else "أ"
         
         prepared.append({
-            "question": q.get("question", ""),
-            "options": q.get("options", []),
+            "question": _escape_latex_text(q.get("question", "")),
+            "options": [_escape_latex_text(opt) for opt in q.get("options", [])],
             "correct_letter": c_letter,
-            "explanation": q.get("explanation", "لا يوجد شرح")
+            "explanation": _escape_latex_text(q.get("explanation", "لا يوجد شرح"))
         })
     return prepared
 
@@ -71,10 +107,11 @@ async def build_quiz_pdf_tectonic(title: str, questions: list, style: str = "sim
         
         template = env.get_template('quiz_template.tex')
         prepared_q = _prepare_questions_for_latex(questions)
+        escaped_title = _escape_latex_text(title or "كويز تفاعلي")
         
-        # 🟢 تمرير الستايل والإعدادات إلى القالب
+        # تمرير الستايل والإعدادات والعنوان المهَرّب إلى القالب
         rendered_tex = template.render(
-            title=title or "كويز تفاعلي",
+            title=escaped_title,
             questions=prepared_q,
             style=style,
             cfg=style_cfg

@@ -565,21 +565,32 @@ class _QuizPDFRenderer:
         self.page_num = 1
 
         _register_pdf_fonts()
-        if self.cfg["academic_fonts"] and _font_available("Arabic-Academic"):
+
+        # 1. تحديث أسماء الخطوط المتاحة
+        if self.cfg.get("academic_fonts") and _font_available("Arabic-Academic"):
             self.font_ar_regular = "Arabic-Academic"
-            self.font_ar_bold = "Arabic-Academic-Bold" if _font_available("Arabic-Academic-Bold") \
-                else "Arabic-Academic"
+            self.font_ar_bold = "Arabic-Academic-Bold" if _font_available("Arabic-Academic-Bold") else "Arabic-Academic"
         else:
             self.font_ar_regular = "Arabic" if _font_available("Arabic") else None
             self.font_ar_bold = "Arabic-Bold" if _font_available("Arabic-Bold") else None
-        if self.cfg["academic_fonts"]:
+
+        if self.cfg.get("academic_fonts"):
             self.font_en_regular = "Times-Roman"
             self.font_en_bold = "Times-Bold"
         else:
             self.font_en_regular = "Latin" if _font_available("Latin") else "Helvetica"
             self.font_en_bold = "Latin-Bold" if _font_available("Latin-Bold") else "Helvetica-Bold"
 
-        if is_ar and (not self.font_regular or not self.font_bold):
+        # 2. تعيين الخصائص المباشرة قبل إجراء أي فحص تفادياً لـ AttributeError
+        if is_ar:
+            self.font_regular = self.font_ar_regular or "Helvetica"
+            self.font_bold = self.font_ar_bold or "Helvetica-Bold"
+        else:
+            self.font_regular = self.font_en_regular or "Helvetica"
+            self.font_bold = self.font_en_bold or "Helvetica-Bold"
+
+        # 3. التحقق من توفر الخطوط العربية
+        if is_ar and (not self.font_ar_regular or not self.font_ar_bold):
             raise ExportError(
                 "تعذّر إنشاء PDF بالعربية لعدم توفر خط عربي على الخادم حالياً. "
                 "جرّب تصدير Word بدلاً من ذلك."
