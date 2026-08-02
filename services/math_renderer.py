@@ -21,6 +21,35 @@ logger = get_logger(__name__)
 DOWNLOADS_DIR = "downloads"
 
 
+def _smart_wrap_text(text: str, max_chars: int = 42) -> str:
+    """
+    تقسيم النص الذكي إلى أسطر متناسقة مع الحفاظ على صيغ LaTeX $...$ من الانكسار.
+    """
+    if not text:
+        return ""
+    
+    # تفكيك النص إلى كلمات أو صيغ رياضية متكاملة
+    tokens = re.findall(r'\$.*?\$|\S+', text)
+    lines = []
+    current_line = []
+    current_len = 0
+
+    for token in tokens:
+        clean_len = len(token.replace('$', ''))
+        if current_len + clean_len + 1 > max_chars and current_line:
+            lines.append(" ".join(current_line))
+            current_line = [token]
+            current_len = clean_len
+        else:
+            current_line.append(token)
+            current_len += clean_len + 1
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    return "\n".join(lines)
+
+
 def _prepare_arabic_and_math(text: str) -> str:
     """
     عزل صيغ LaTeX المحصورة بين $...$ لحمايتها من الانقلاب أثناء معالجة 
@@ -37,12 +66,18 @@ def _prepare_arabic_and_math(text: str) -> str:
     for placeholder, math_expr in zip(placeholders, math_expressions):
         temp_text = temp_text.replace(math_expr, placeholder)
 
-    # 2. معالجة وتشكيل النص العربي
-    try:
-        reshaped = arabic_reshaper.reshape(temp_text)
-        bidi_text = get_display(reshaped)
-    except Exception:
-        bidi_text = temp_text
+    # 2. معالجة وتشكيل النص العربي سطر بسطر للحفاظ على التنسيق متعدد الأسطر
+    lines = temp_text.split('\n')
+    reshaped_lines = []
+    for line in lines:
+        try:
+            reshaped = arabic_reshaper.reshape(line)
+            bidi_line = get_display(reshaped)
+        except Exception:
+            bidi_line = line
+        reshaped_lines.append(bidi_line)
+    
+    bidi_text = '\n'.join(reshaped_lines)
 
     # 3. إعادة صيغ LaTeX كما هي لمواضعها دون تشويه
     for placeholder, math_expr in zip(placeholders, math_expressions):
@@ -63,44 +98,75 @@ def _render_sync(question_data: dict, current_idx: int, total_count: int, output
     options = question_data.get("options", [])
     labels = ["أ", "ب", "ج", "د"]
 
-    # إعداد شاشة الرسم (Canvas) بأبعاد مربعة ومناسبة للجوال وبدقة عالية
-    fig, ax = plt.subplots(figsize=(8, 7.5), dpi=220)
+    # 1. التغليف الذكي لنص السؤال وحساب عدد أسطره
+    wrapped_q = _smart_wrap_text(question_text, max_chars=40)
+    q_text_prepared = _prepare_arabic_and_math(wrapped_q)
+    q_lines_count = q_text_prepared.count('\n') + 1
+
+    # 2. فحص أطوال الخيارات: استخدام شبكة 2x2 إذا كانت قصيرة
+    max_opt_len = max([len(str(opt)) for opt in options]) if options else 0
+    is_grid_layout = (max_opt_len <= 22) and (len(options) == 4)
+
+    # حساب الارتفاع المريح للبطاقة بحسب عدد أسطر السؤال
+    fig_height = 5.8 + (q_lines_count * 0.45)
+    fig, ax = plt.subplots(figsize=(8.2, fig_height), dpi=220)
     fig.patch.set_facecolor('#FFFFFF')
     ax.set_facecolor('#FFFFFF')
     ax.axis('off')
 
-    # 1. رأس البطاقة: رقم السؤال (تشكيل الكلمات معزولة عن الأرقام لتفادي عكس الاتجاه)
+    # 3. رأس البطاقة: رقم السؤال
     word_q = get_display(arabic_reshaper.reshape("السؤال"))
     word_of = get_display(arabic_reshaper.reshape("من"))
     header_text = f"{word_q} {current_idx} {word_of} {total_count}"
 
-    ax.text(0.95, 0.94, header_text, fontsize=15, fontweight='bold', color='#2563EB',
+    header_y = 0.94
+    ax.text(0.95, header_y, header_text, fontsize=15, fontweight='bold', color='#2563EB',
             ha='right', va='top', transform=ax.transAxes)
 
-    # خط فاصل ناعم تحت رأس البطاقة
-    ax.plot([0.05, 0.95], [0.89, 0.89], color='#E2E8F0', linewidth=1.5, transform=ax.transAxes)
+    # خط فاصل تحت الرأس
+    line_y = header_y - 0.05
+    ax.plot([0.05, 0.95], [line_y, line_y], color='#E2E8F0', linewidth=1.5, transform=ax.transAxes)
 
-    # 2. متن السؤال الرئيسي بخط كبير وواضح
-    q_text_prepared = _prepare_arabic_and_math(question_text)
-    ax.text(0.95, 0.83, q_text_prepared, fontsize=15, color='#0F172A',
-            ha='right', va='top', transform=ax.transAxes, multialignment='right')
+    # 4. متن السؤال الرئيسي
+    q_y = line_y - 0.04
+    ax.text(0.95, q_y, q_text_prepared, fontsize=14.5, color='#0F172A',
+            ha='right', va='top', transform=ax.transAxes, multialignment='right', linespacing=1.4)
 
-    # 3. الخيارات الأربعة بخط وخطوات أوسع
-    y_start = 0.56
-    y_step = 0.135
+    # حساب موضع بداية الخيارات بناءً على عمق أسطر السؤال
+    options_start_y = q_y - (q_lines_count * 0.09) - 0.06
+    bbox_props = dict(boxstyle="round,pad=0.5", fc="#F8FAFC", ec="#CBD5E1", lw=1.0)
 
-    for i, opt in enumerate(options[:4]):
-        label_char = labels[i] if i < len(labels) else str(i + 1)
-        opt_raw = f"[{label_char}]   {opt}"
-        opt_prepared = _prepare_arabic_and_math(opt_raw)
+    # 5. رسم الخيارات (شبكة 2x2 أو عمود متتالي 1x4)
+    if is_grid_layout:
+        # ترتيب الشبكة 2x2:
+        # السطر الأول: [أ] يمين | [ب] يسار
+        # السطر الثاني: [ج] يمين | [د] يسار
+        positions = [
+            (0.93, options_start_y),                 # [أ]
+            (0.46, options_start_y),                 # [ب]
+            (0.93, options_start_y - 0.13),          # [ج]
+            (0.46, options_start_y - 0.13)           # [د]
+        ]
+        for i, opt in enumerate(options[:4]):
+            label_char = labels[i] if i < len(labels) else str(i + 1)
+            opt_raw = f"[{label_char}]  {opt}"
+            opt_prepared = _prepare_arabic_and_math(opt_raw)
+            x_pos, y_pos = positions[i]
 
-        y_pos = y_start - (i * y_step)
+            ax.text(x_pos, y_pos, opt_prepared, fontsize=13.5, color='#1E293B',
+                    ha='right', va='top', transform=ax.transAxes, bbox=bbox_props)
+    else:
+        # الترتيب العمودي للخيارات الطويلة
+        y_step = 0.12
+        for i, opt in enumerate(options[:4]):
+            label_char = labels[i] if i < len(labels) else str(i + 1)
+            opt_raw = f"[{label_char}]  {opt}"
+            opt_prepared = _prepare_arabic_and_math(opt_raw)
 
-        # مربع إطار رمزي لكل خيار
-        bbox_props = dict(boxstyle="round,pad=0.5", fc="#F8FAFC", ec="#CBD5E1", lw=1.0)
+            y_pos = options_start_y - (i * y_step)
 
-        ax.text(0.93, y_pos, opt_prepared, fontsize=14, color='#1E293B',
-                ha='right', va='top', transform=ax.transAxes, bbox=bbox_props)
+            ax.text(0.93, y_pos, opt_prepared, fontsize=13.5, color='#1E293B',
+                    ha='right', va='top', transform=ax.transAxes, bbox=bbox_props)
 
     # حفظ الصورة وتفريغ الذاكرة
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
