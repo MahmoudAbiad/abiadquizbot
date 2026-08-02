@@ -5,7 +5,7 @@ import random
 from typing import Any, Dict, Tuple, Optional, List
 
 from constants import MAX_LIMIT_PAGES, MAX_LIMIT_QUESTIONS, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS
-from gemini_helper import generate_quiz_smart
+from gemini_helper import generate_quiz_smart, detect_content_type
 from logger import get_logger, log_error
 from services.file_service import extract_office_text_if_needed
 from supabase_helper import (
@@ -85,14 +85,15 @@ async def execute_quiz_generation_workflow(
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], str]:
     """
     التدفق التنفيذي المركزي لتوليد الكويز:
-    يستخرج النص، يجلب الكويزات السابقة لمنع التكرار، يستدعي الذكاء الاصطناعي، ويحفظ في الكاش.
+    يستخرج النص، يفحص نوع المحتوى (رياضيات/نص)، يجلب الكويزات السابقة لمنع التكرار،
+    يستدعي الذكاء الاصطناعي، ويحفظ الكويز في الكاش.
     """
     is_media = data.get("input_type") == "media"
     file_hash = data.get("file_hash")
     file_paths = data.get("file_paths", []) or []
     pure_text = data.get("pure_text")
 
-    # 1. معالجة مستندات أوفيس
+    # 1. معالجة مستندات أوفيس (استخراج النص إن وجد لتقليل استهلاك الـ Vision API)
     if is_media and file_paths:
         first_path = file_paths[0]
         extracted_text, is_valid = await extract_office_text_if_needed(first_path)
@@ -104,7 +105,14 @@ async def execute_quiz_generation_workflow(
             else:
                 return None, None, "unreadable_office"
 
-    # 2. جلب الأسئلة السابقة لمنع التكرار
+    # 2. التصنيف الذكي للمحتوى (فحص ما إذا كان المحتوى يتضمن رياضيات أو قوانين)
+    content_type = await detect_content_type(
+        file_paths=file_paths if is_media else None,
+        pure_text=pure_text if not is_media else None
+    )
+    data["content_type"] = content_type
+
+    # 3. جلب الأسئلة السابقة لمنع التكرار
     previous_questions = []
     existing_uuids = set()
     if file_hash:
@@ -114,7 +122,7 @@ async def execute_quiz_generation_workflow(
             if "quiz_data" in qz and isinstance(qz["quiz_data"], list):
                 previous_questions.extend(qz["quiz_data"])
 
-    # 3. استدعى محرك AI
+    # 4. استدعاء محرك الذكاء الاصطناعي لتوليد الأسئلة
     quiz_data = await generate_quiz_smart(
         file_paths=file_paths if is_media else None,
         pure_text=pure_text if not is_media else None,
@@ -123,16 +131,17 @@ async def execute_quiz_generation_workflow(
         file_hash=file_hash,
         status_message=status_message,
         previous_questions=previous_questions if previous_questions else None,
+        is_math=(content_type == "MATH"),
     )
 
     if not quiz_data:
         return None, None, "ai_failed"
 
-    # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
-    #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
+    # 5. خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
+    #    الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
     quiz_data = shuffle_quiz_options(quiz_data)
 
-    # 4. حفظ الكاش لملفات أوفيس والنصوص
+    # 6. حفظ الكاش لملفات أوفيس والنصوص
     if file_hash and quiz_data:
         await save_file_quiz_multiple(
             file_hash=file_hash,
@@ -142,7 +151,7 @@ async def execute_quiz_generation_workflow(
             total_tokens=0
         )
 
-    # 5. استخراج الـ UUID للكويز الجديد
+    # 7. استخراج الـ UUID للكويز الجديد
     new_quiz_id = None
     if file_hash:
         await asyncio.sleep(0.5)

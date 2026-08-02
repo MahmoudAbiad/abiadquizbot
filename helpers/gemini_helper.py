@@ -501,3 +501,62 @@ async def generate_quiz_smart(
                 await animation_task
             except asyncio.CancelledError:
                 pass
+
+async def detect_content_type(
+    file_paths: Optional[List[str]] = None,
+    pure_text: Optional[str] = None
+) -> str:
+    """
+    يفحص العينة الأولى من المستند/النص باستخدام النموذج السريع لحسم هل المحتوى رياضي أم نصي.
+    يرجع "MATH" أو "TEXT".
+    """
+    if not API_KEYS:
+        return "TEXT"
+
+    prompt = (
+        "تحقق من هذا المحتوى بدقة: هل يحتوي على معادلات رياضية، قوانين فيزيائية، كسور، جذور، "
+        "مصفوفات، أو رموز رياضية تتطلب تنسيق LaTeX؟ "
+        "أجب بكلمة واحدة فقط وبشكل صريح: إما MATH أو TEXT."
+    )
+
+    try:
+        # اختيار أول مفتاح أتاحي
+        candidates = _available_key_indices() or list(range(len(API_KEYS)))
+        key_index = candidates[0]
+        client = genai.Client(api_key=API_KEYS[key_index])
+
+        contents: List[Any] = [prompt]
+
+        if pure_text:
+            # أخذ أول 1000 حرف فقط كعينة سريعة
+            contents.append(pure_text[:1000])
+        elif file_paths and len(file_paths) > 0:
+            # أخذ أول صفحة/صورة فقط
+            first_file = file_paths[0]
+            file_bytes = await asyncio.to_thread(_read_file_bytes_sync, first_file)
+            mime_type = get_safe_mime_type(first_file)
+            contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
+
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=GEMINI_FALLBACK_MODEL, # gemini-3.5-flash-lite لتوفير الوقت والتوكنز
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=10
+                )
+            ),
+            timeout=15 # زمن استجابة سريع جداً
+        )
+
+        result_text = (response.text or "").strip().upper()
+        if "MATH" in result_text:
+            log_info(logger, "Smart Routing: Detected MATH content.")
+            return "MATH"
+
+        log_info(logger, "Smart Routing: Detected TEXT content.")
+        return "TEXT"
+
+    except Exception as e:
+        log_warning(logger, f"Smart routing classification failed, defaulting to TEXT: {e}")
+        return "TEXT"

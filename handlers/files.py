@@ -281,6 +281,10 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
             "quiz_id": quiz_uuid, "cost": cost,
         }))
 
+        # 🟢 قراءة وتحديث content_type في الـ State من الكويز المخزن أو الجلسة الحالية
+        cached_content_type = selected_quiz.get("content_type") or data.get("content_type", "TEXT")
+        await state.update_data(content_type=cached_content_type)
+
         from handlers.quiz_runner import _start_loaded_quiz
         await _start_loaded_quiz(call, state, selected_quiz["quiz_data"], data.get("source_title", "كويز"), origin="cached_file", quiz_id=quiz_uuid)
         
@@ -289,7 +293,7 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
     except Exception as exc:
         log_error(logger, f"Multi-cached selection trigger failed: {exc}", exception=exc)
         await call.message.answer("❌ تعذر بدء تشغيل الاختبار المخزّن.")
-
+        
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
     """في حال رفض الكاش ورغبة الطالب بتوليد كويز جديد كلياً"""
@@ -422,7 +426,7 @@ async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMCo
 
         status_msg = await call.message.answer(MSG_PROCESSING)
         
-        # استدعاء خط التوليد من الـ Service
+        # استدعاء خط التوليد من الـ Service (والذي بدوره يحسب content_type ويضع قيمته في قاموس data)
         quiz_data, new_quiz_id, error_code = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
         
         if error_code == "unreadable_office":
@@ -435,6 +439,10 @@ async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMCo
             await state.set_state(None)
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
             return
+
+        # 🟢 تثبيت content_type الناتجة عن التوليد داخل الـ State ليقرأها quiz_runner
+        if "content_type" in data:
+            await state.update_data(content_type=data["content_type"])
 
         # إصلاح التتبع: تسجيل نجاح توليد الكويز الفعلي
         asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generated", {

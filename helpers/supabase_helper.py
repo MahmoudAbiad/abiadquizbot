@@ -7,6 +7,7 @@ import asyncio
 import os
 import datetime
 import uuid
+import json
 from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv, find_dotenv
 from supabase import create_async_client
@@ -16,6 +17,7 @@ from constants import (
     DEFAULT_FAVORITE_SECTION_TITLE, MAX_FAVORITE_SECTIONS,
 )
 from validators import validate_user_id, validate_points_amount
+from config import redis_client
 
 dotenv_path = find_dotenv()
 load_dotenv(dotenv_path)
@@ -174,13 +176,13 @@ async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
 async def get_file_quizzes(file_hash: str) -> list:
     """جلب كل الكويزات التابعة للملف مرتبة تلقائياً حسب التقييم الأعلى لزملائك الطلاب"""
     try:
-        res = await supabase.table("quizzes").select("id, likes, dislikes, score, quiz_data").eq("file_hash", file_hash).order("score", desc=True).execute()
+        res = await supabase.table("quizzes").select("id, likes, dislikes, score, quiz_data, content_type").eq("file_hash", file_hash).order("score", desc=True).execute()
         return res.data or []
     except Exception as e:
         log_error(logger, f"Error getting file quizzes from central table: {e}")
         return []
 
-async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title: str, quiz_data: list, total_tokens: int) -> Optional[str]:
+async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title: str, quiz_data: list, total_tokens: int, content_type: str = "TEXT") -> Optional[str]:
     """حفظ كويز جديد مولد كلياً بالجدول المركزي وعزل التكرار لخدمة الدفعة الدراسية"""
     try:
         res = await supabase.table("quizzes").insert({
@@ -188,6 +190,7 @@ async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title:
             "file_hash": file_hash,
             "source_title": source_title,
             "quiz_data": quiz_data,
+            "content_type": content_type,
             "total_tokens": total_tokens
         }).execute()
         if res.data:
@@ -200,25 +203,25 @@ async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title:
 async def get_cached_quiz(file_hash: str) -> Optional[Dict[str, Any]]:
     """توجيه ذكي وفولباك (Backward Compatibility) لمحاذاة كود ملف البوت القديم مع الجدول المركزي الجديد"""
     try:
-        res = await supabase.table("quizzes").select("quiz_data, total_tokens").eq("file_hash", file_hash).order("score", desc=True).limit(1).execute()
+        res = await supabase.table("quizzes").select("quiz_data, total_tokens, content_type").eq("file_hash", file_hash).order("score", desc=True).limit(1).execute()
         if res.data:
             log_info(logger, f"Cache HIT (Central Table redirection) for hash: {file_hash}")
             row = res.data[0]
             return {
                 "questions_data": row["quiz_data"],
-                "total_tokens": row["total_tokens"]
+                "total_tokens": row["total_tokens"],
+                "content_type": row.get("content_type", "TEXT")
             }
         return None
     except Exception as e:
         log_error(logger, f"Error reading fallback cache content: {e}")
         return None
 
-async def save_quiz_to_cache(file_hash: str, quiz_data: List[Dict[str, Any]], total_tokens: int) -> bool:
+async def save_quiz_to_cache(file_hash: str, quiz_data: List[Dict[str, Any]], total_tokens: int, content_type: str = "TEXT") -> bool:
     """دالة فولباك للتخزين السريع في المسار المركزي الافتراضي"""
     try:
-        # استخدام معرف الإدارة كمنشئ افتراضي في حال عدم تمريره من السيرفر القديم
         admin_id = int(os.getenv("ADMIN_ID", "0"))
-        res = await save_file_quiz_multiple(file_hash, admin_id, "كويز مخزن تلقائياً", quiz_data, total_tokens)
+        res = await save_file_quiz_multiple(file_hash, admin_id, "كويز مخزن تلقائياً", quiz_data, total_tokens, content_type=content_type)
         return res is not None
     except Exception as e:
         log_error(logger, f"Error routing fallback cache saving: {e}")
@@ -233,13 +236,9 @@ async def save_shared_quiz(share_id: str, owner_id: int, title: str, quiz_data: 
     try:
         target_id = None
 
-        # 🆕 الأولوية دائماً لمعرف الكويز الحقيقي (UUID) القادم من جلسة المستخدم الحالية،
-        # لأن المطابقة بالعنوان وحده غير موثوقة عند تكرار العناوين (مثلاً "كويز من ملف")
-        # وقد تحقن رمز المشاركة بصف كويز مختلف تماماً عن اللي المستخدم يقصده فعلاً.
         if _is_valid_uuid(quiz_id):
             target_id = quiz_id
         else:
-            # مسار احتياطي فقط لو ما توفر quiz_id صالح (مثلاً كويز نصي قديم بدون سجل مركزي بعد)
             check_res = await supabase.table("quizzes").select("id").eq("creator_id", owner_id).eq("source_title", title).order("created_at", desc=True).limit(1).execute()
             if check_res.data:
                 target_id = check_res.data[0]["id"]
@@ -248,7 +247,6 @@ async def save_shared_quiz(share_id: str, owner_id: int, title: str, quiz_data: 
             await supabase.table("quizzes").update({"share_code": share_id}).eq("id", target_id).execute()
             log_info(logger, f"Injected share code {share_id} into existing central quiz {target_id}")
         else:
-            # إذا كان كويز نصي مباشر أو لم يعثر عليه، ننشئ له سجلاً مركزياً مخصصاً برمز مشاركة فريد
             await supabase.table("quizzes").insert({
                 "creator_id": owner_id,
                 "source_title": title,
@@ -283,7 +281,6 @@ async def count_favorite_sections(user_id: int) -> int:
 async def list_favorite_sections(user_id: int) -> List[Dict[str, Any]]:
     try:
         res = await supabase.table("favorite_quiz_sections").select("id, title, created_at").eq("user_id", user_id).order("created_at", desc=False).execute()
-        # إعادة تعيين المسميات لتطابق السير القديم في البوت (id -> section_id)
         return [{"section_id": r["id"], "title": r["title"], "created_at": r["created_at"]} for r in (res.data or [])]
     except Exception as e:
         log_error(logger, f"Error listing favorite sections: {e}")
@@ -306,7 +303,6 @@ async def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str,
     try:
         target_quiz_uuid = None
         
-        # التحقق إذا كان الآيدي الممرر عبارة عن UUID صحيح وجاهز للربط في السكيما المركزية
         if quiz_id:
             try:
                 uuid.UUID(str(quiz_id))
@@ -314,7 +310,6 @@ async def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str,
             except ValueError:
                 pass
                 
-        # إذا لم يتوفر UUID (مثل الكويزات القديمة أو النصية)، نضمن حقنها بالجدول المركزي أولاً لتوليد معرف فريد لها
         if not target_quiz_uuid:
             q_res = await supabase.table("quizzes").insert({
                 "creator_id": user_id,
@@ -342,7 +337,7 @@ async def save_favorite_quiz(user_id: int, title: str, quiz_data: List[Dict[str,
 
 async def list_favorite_quizzes(user_id: int, search_query: Optional[str] = None, sort_by: str = "latest") -> List[Dict[str, Any]]:
     try:
-        res = await supabase.table("favorite_quizzes").select("favorite_id, section_id, custom_title, created_at, quizzes(id, source_title, quiz_data)").eq("user_id", user_id).execute()
+        res = await supabase.table("favorite_quizzes").select("favorite_id, section_id, custom_title, created_at, quizzes(id, source_title, quiz_data, content_type)").eq("user_id", user_id).execute()
         
         sections_res = await supabase.table("favorite_quiz_sections").select("id, title").eq("user_id", user_id).execute()
         section_map = {s["id"]: s["title"] for s in (sections_res.data or [])}
@@ -358,6 +353,7 @@ async def list_favorite_quizzes(user_id: int, search_query: Optional[str] = None
                 "section_id": row["section_id"],
                 "section_title": section_map.get(row["section_id"]) or DEFAULT_FAVORITE_SECTION_TITLE,
                 "created_at": row["created_at"],
+                "content_type": quiz_info.get("content_type", "TEXT"),
                 "quiz_data": quiz_info.get("quiz_data", [])
             }
             items.append(item)
@@ -393,6 +389,7 @@ async def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str
                 "favorite_id": row["favorite_id"],
                 "title": row["custom_title"] or quiz_info.get("source_title"),
                 "quiz_data": quiz_info.get("quiz_data"),
+                "content_type": quiz_info.get("content_type", "TEXT"),
                 "section_id": row["section_id"]
             }
         return None
@@ -409,6 +406,7 @@ async def get_favorite_quiz_by_global_id(favorite_id: str) -> Optional[Dict[str,
             return {
                 "favorite_id": row["favorite_id"],
                 "title": row["custom_title"] or quiz_info.get("source_title"),
+                "content_type": quiz_info.get("content_type", "TEXT"),
                 "quiz_data": quiz_info.get("quiz_data")
             }
         return None
@@ -427,8 +425,6 @@ async def remove_favorite_quiz(user_id: int, favorite_id: str) -> bool:
 # ==================== Rating, Feedbacks & Quality Control Operations ====================
 
 async def admin_get_feedbacks_page(limit: int = 5, offset: int = 0) -> tuple[List[Dict[str, Any]], int]:
-    """🆕 جلب صفحة من ملاحظات الطلاب مع معلومات الكويز (اسم الملف) والطالب (الاسم) المرتبطة بها،
-    مع العدد الإجمالي لدعم التصفح بصفحات."""
     try:
         count_res = await supabase.table("quiz_feedbacks").select("id", count="exact").execute()
         total = count_res.count or 0
@@ -453,7 +449,6 @@ async def admin_get_feedbacks_page(limit: int = 5, offset: int = 0) -> tuple[Lis
 
 
 async def admin_get_feedback_by_id(feedback_id: int) -> Optional[Dict[str, Any]]:
-    """🆕 جلب ملاحظة واحدة بكامل تفاصيلها (الكويز + الطالب) لعرض شاشة التفاصيل الإدارية."""
     try:
         res = await supabase.table("quiz_feedbacks").select(
             "id, comment, created_at, user_id, quiz_id, "
@@ -471,8 +466,6 @@ async def admin_get_feedback_by_id(feedback_id: int) -> Optional[Dict[str, Any]]
 
 
 async def admin_get_quiz_board_position(file_hash: Optional[str], quiz_id: str) -> tuple[int, int]:
-    """🆕 يرجع (رقم هذا الكويز، العدد الكلي) ضمن نفس لوحة/ملف الكويزات المخزّنة كاش،
-    بنفس ترتيب الأفضلية (score) الذي يراه الطلاب فعلياً."""
     try:
         if not file_hash:
             return (0, 0)
@@ -487,9 +480,8 @@ async def admin_get_quiz_board_position(file_hash: Optional[str], quiz_id: str) 
 
 
 async def admin_get_quiz_by_id(quiz_id: str) -> Optional[Dict[str, Any]]:
-    """🆕 جلب بيانات كويز واحد كاملة من الجدول المركزي (تُستخدم لتجربة الكويز من لوحة الإدارة)."""
     try:
-        res = await supabase.table("quizzes").select("id, source_title, quiz_data, file_hash").eq("id", quiz_id).limit(1).execute()
+        res = await supabase.table("quizzes").select("id, source_title, quiz_data, file_hash, content_type").eq("id", quiz_id).limit(1).execute()
         return res.data[0] if res.data else None
     except Exception as e:
         log_error(logger, f"Error fetching quiz {quiz_id}: {e}")
@@ -497,8 +489,6 @@ async def admin_get_quiz_by_id(quiz_id: str) -> Optional[Dict[str, Any]]:
 
 
 async def admin_delete_quiz(quiz_id: str) -> bool:
-    """🆕 حذف كويز بالكامل من الجدول المركزي؛ التصويتات والنقاط وعناصر المفضلة والملاحظات المرتبطة
-    به تُحذف تلقائياً معه (ON DELETE CASCADE) على مستوى قاعدة البيانات."""
     try:
         await supabase.table("quizzes").delete().eq("id", quiz_id).execute()
         return True
@@ -508,7 +498,6 @@ async def admin_delete_quiz(quiz_id: str) -> bool:
 
 
 async def submit_quiz_vote(quiz_id: str, user_id: int, vote_type: str) -> bool:
-    """إرسال وحقن تصويت الطلاب (لايك/ديسلايك) عبر الـ RPC لضمان منع التكرار وحساب السكور لحظياً"""
     try:
         res = await supabase.rpc("vote_on_quiz", {
             "p_quiz_id": quiz_id,
@@ -521,7 +510,6 @@ async def submit_quiz_vote(quiz_id: str, user_id: int, vote_type: str) -> bool:
         return False
 
 async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
-    """حفظ ملاحظات وإفادات الطلاب الأكاديمية لمراجعتها لاحقاً من قبل الإدارة"""
     try:
         await supabase.table("quiz_feedbacks").insert({
             "quiz_id": quiz_id,
@@ -534,11 +522,6 @@ async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
         return False
 
 async def _get_safe_to_delete_quiz_ids(threshold: str) -> List[str]:
-    """يرجع فقط IDs الكويزات المؤهلة للحذف الفعلي: قديمة + سيئة التقييم،
-    وبنفس الوقت ماإلها share_code (مو مشاركة)، مو محفوظة بمفضلة أي مستخدم،
-    وما حدا رجع لعبها أبداً (ما إلها أي صف بجدول quiz_scores).
-    هيك منتجنب خرق foreign key constraint (quiz_scores_quiz_id_fkey) ومنحافظ
-    على أي كويز عندو قيمة فعلية (مشاركة/مفضلة/استخدام)."""
     try:
         candidates_res = await supabase.table("quizzes") \
             .select("id") \
@@ -569,8 +552,6 @@ async def _get_safe_to_delete_quiz_ids(threshold: str) -> List[str]:
 
 
 async def auto_cleanup_bad_quizzes():
-    """تنظيف تلقائي شامل للكويزات المرفوضة من الطلاب (ديسلايكات عالية) والتي تجاوزت 48 ساعة،
-    باستثناء أي كويز عندو share_code أو محفوظ بالمفضلة أو تم استخدامه ولو مرة."""
     try:
         threshold = (datetime.datetime.utcnow() - datetime.timedelta(days=2)).isoformat()
         deletable_ids = await _get_safe_to_delete_quiz_ids(threshold)
@@ -688,20 +669,14 @@ async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
         log_error(logger, f"Error getting leaderboard: {e}", exception=e)
         return []
 
-# ==================== Usage Analytics & Tracking (Fixed & Complete) ====================
-
-import json
-from config import redis_client
+# ==================== Usage Analytics & Tracking ====================
 
 try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 except (ValueError, TypeError):
     ADMIN_ID = 0
-    
-# 1️⃣ تسجيل الأحداث (تعريف واحد موحد: حفظ مباشر في الداتابيز مع مسار احتياطي لـ Redis)
+
 async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-    """تسجيل حدث استخدام آمن (يستثني الآدمن لعدم التأثير على التحليلات)."""
-    # 🚫 تجنب تسجيل نشاط الآدمن في التحليلات
     if ADMIN_ID and user_id == ADMIN_ID:
         return
 
@@ -719,9 +694,7 @@ async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict
         except Exception as redis_err:
             log_error(logger, f"Error logging usage event for user {user_id}: {e} | Redis fallback failed: {redis_err}")
 
-# 2️⃣ تفريغ طابور Redis بأمان دون فقدان البيانات (Transactional Pop)
 async def flush_analytics_queue() -> None:
-    """تفريغ الأحداث الاحتياطية من Redis ورفعها دفعة واحدة إلى Supabase مع ضمان عدم الفقدان."""
     try:
         events = []
         raw_items = []
@@ -737,25 +710,19 @@ async def flush_analytics_queue() -> None:
                 await supabase.table("usage_events").insert(events).execute()
                 log_info(logger, f"Successfully flushed {len(events)} analytics events to Supabase.")
             except Exception as db_err:
-                # إرجاع البيانات إلى طابور Redis في حال فشل الإدراج لعدم ضياعها
                 for item in reversed(raw_items):
                     await redis_client.lpush("analytics_queue", item)
                 log_error(logger, f"Failed to insert flushed events into Supabase, re-queued items: {db_err}")
     except Exception as e:
         log_error(logger, f"Error flushing analytics queue: {e}")
 
-
-# 3️⃣ إدارة محاولات الكويز مع تفادي الـ Race Conditions
 def start_quiz_attempt(user_id: int, quiz_id: Optional[str], source_type: str, total_questions: int) -> str:
-    """توليد معرف فريد وبدء المحاولة (تستثني الآدمن)."""
     client_ref = uuid.uuid4().hex
-    # 🚫 تجنب تسجيل محاولات الآدمن بجدول المحاولات
     if ADMIN_ID and user_id == ADMIN_ID:
         return client_ref
         
     asyncio.create_task(_insert_quiz_attempt(client_ref, user_id, quiz_id, source_type, total_questions))
     return client_ref
-
 
 async def _insert_quiz_attempt(client_ref: str, user_id: int, quiz_id: Optional[str], source_type: str, total_questions: int) -> None:
     try:
@@ -772,9 +739,7 @@ async def _insert_quiz_attempt(client_ref: str, user_id: int, quiz_id: Optional[
     except Exception as e:
         log_error(logger, f"Error inserting quiz attempt tracking row ({client_ref}): {e}")
 
-
 async def complete_quiz_attempt(attempt_ref: Optional[str], score: int) -> None:
-    """إغلاق المحاولة المكتملة وحساب الوقت بدقة مع معالجة تأخير السجلات."""
     if not attempt_ref:
         return
     try:
@@ -784,7 +749,7 @@ async def complete_quiz_attempt(attempt_ref: Optional[str], score: int) -> None:
             if res.data:
                 row = res.data[0]
                 break
-            await asyncio.sleep(0.4)  # انتظار 400ms في حال وجود تأخير في الشبكة
+            await asyncio.sleep(0.4)
 
         duration = None
         if row and row.get("started_at"):
@@ -804,9 +769,7 @@ async def complete_quiz_attempt(attempt_ref: Optional[str], score: int) -> None:
     except Exception as e:
         log_error(logger, f"Error completing quiz attempt {attempt_ref}: {e}")
 
-
 async def mark_quiz_attempt_stopped(attempt_ref: Optional[str]) -> None:
-    """تسجيل توقف الطالب المبكر."""
     if not attempt_ref:
         return
     try:
@@ -817,11 +780,7 @@ async def mark_quiz_attempt_stopped(attempt_ref: Optional[str]) -> None:
     except Exception as e:
         log_error(logger, f"Error marking quiz attempt {attempt_ref} as stopped: {e}")
 
-
-# 4️⃣ دوال الاستعلامات الخاصة بـ لوحة التحكم والإدارة (Admin Analytics Queries)
-
 async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
-    """ملخص شامل لسلوك الاستخدام لـ الطلاب حصراً."""
     empty = {
         "days": days, "active_users": 0, "event_counts": {}, "total_attempts": 0,
         "completed_attempts": 0, "completion_rate": 0.0, "avg_duration_seconds": 0,
@@ -830,7 +789,6 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
     try:
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
 
-        # استعلام الأحداث مع استبعاد الآدمن
         events_query = supabase.table("usage_events").select("user_id, event_type").gte("created_at", since)
         if ADMIN_ID:
             events_query = events_query.neq("user_id", ADMIN_ID)
@@ -842,7 +800,6 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
         for e in events:
             event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
-        # استعلام المحاولات مع استبعاد الآدمن
         attempts_query = supabase.table("quiz_attempts").select(
             "is_completed, source_type, duration_seconds, score, total_questions"
         ).gte("started_at", since)
@@ -882,9 +839,7 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
         log_error(logger, f"Error building usage overview: {e}")
         return empty
 
-
 async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
-    """عدد المستخدمين النشطين يومياً (استبعاد الآدمن)."""
     try:
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
         query = supabase.table("usage_events").select("user_id, created_at").gte("created_at", since)
@@ -909,7 +864,6 @@ async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
         return []
 
 async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[str, Any]:
-    """سجل نشاط تفصيلي لطالب محدد."""
     empty = {"recent_events": [], "total_attempts": 0, "completed_attempts": 0, "avg_score_percentage": 0.0, "recent_attempts": []}
     try:
         events_res = await supabase.table("usage_events").select("event_type, metadata, created_at") \
@@ -937,9 +891,7 @@ async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[s
         log_error(logger, f"Error fetching user activity for {user_id}: {e}")
         return empty
 
-
 async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
-    """جلب سجل الأحداث الخام لـ الطلاب حصراً كملف CSV."""
     try:
         query = supabase.table("usage_events").select("user_id, event_type, metadata, created_at")
         if ADMIN_ID:
@@ -950,9 +902,7 @@ async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
         log_error(logger, f"Error exporting usage events: {e}")
         return []
 
-
 async def admin_get_today_active_users() -> List[Dict[str, Any]]:
-    """جلب قائمة الطلاب النشطين خلال الـ 24 ساعة الأخيرة حصراً (استبعاد الآدمن)."""
     try:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         twenty_four_hours_ago = (now_utc - datetime.timedelta(hours=24)).isoformat()
@@ -1007,16 +957,13 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
         log_error(logger, f"Error fetching 24h active users: {e}")
         return []
 
-
 async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
-    """جلب الكويزات التي تم توليدها خلال الـ 24 ساعة الأخيرة حصراً مع معلومات الطالب والتوقيت المحلي."""
     try:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         twenty_four_hours_ago = (now_utc - datetime.timedelta(hours=24)).isoformat()
         
-        # 1. جلب كويزات الـ 24 ساعة الأخيرة فقط (باستثناء الآدمن، أسوة ببقية دوال التحليلات)
         query = supabase.table("quizzes") \
-            .select("id, source_title, created_at, creator_id") \
+            .select("id, source_title, created_at, creator_id, content_type") \
             .gte("created_at", twenty_four_hours_ago)
         if ADMIN_ID:
             query = query.neq("creator_id", ADMIN_ID)
@@ -1028,7 +975,6 @@ async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
         if not quizzes:
             return []
 
-        # 2. جلب بيانات الطلاب المنشئين بطلب آمن (بدون الاعتماد على اسم Foreign Key صريح)
         creator_ids = list({q["creator_id"] for q in quizzes if q.get("creator_id")})
         users_map = {}
         if creator_ids:
@@ -1038,7 +984,6 @@ async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
                 .execute()
             users_map = {u["user_id"]: u for u in (users_res.data or [])}
 
-        # 3. دمج البيانات وتحويل التوقيت إلى توقيت سوريا (UTC+3)
         syria_tz = datetime.timezone(datetime.timedelta(hours=3))
         for q in quizzes:
             cid = q.get("creator_id")
@@ -1059,9 +1004,7 @@ async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
         log_error(logger, f"Error fetching today quizzes: {e}")
         return []
 
-
 async def admin_get_user_quizzes(creator_id: int, limit: int = 5, offset: int = 0) -> tuple[List[Dict[str, Any]], int]:
-    """جلب الكويزات الخاصة بطالب محدد مرتبة مع التصفح."""
     try:
         count_res = await supabase.table("quizzes") \
             .select("id", count="exact") \
@@ -1071,7 +1014,7 @@ async def admin_get_user_quizzes(creator_id: int, limit: int = 5, offset: int = 
         total = count_res.count or 0
 
         res = await supabase.table("quizzes") \
-            .select("id, source_title, created_at, likes, dislikes") \
+            .select("id, source_title, created_at, likes, dislikes, content_type") \
             .eq("creator_id", creator_id) \
             .order("created_at", desc=True) \
             .range(offset, offset + limit - 1) \
@@ -1082,10 +1025,8 @@ async def admin_get_user_quizzes(creator_id: int, limit: int = 5, offset: int = 
         log_error(logger, f"Error fetching user quizzes for {creator_id}: {e}")
         return [], 0
 
-
 # 5️⃣ دالة تنظيف البيانات القديمة
 async def auto_cleanup_old_analytics_data() -> None:
-    """حذف سجلات الأحداث القديمة جداً والسيئة."""
     try:
         thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).isoformat()
         three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).isoformat()

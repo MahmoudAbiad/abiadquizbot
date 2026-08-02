@@ -4,6 +4,9 @@ from typing import Dict, Any, Tuple, List
 from config import bot, redis_client
 from aiogram import types
 
+from services.math_renderer import render_question_image
+from utils import safe_file_cleanup
+
 def prepare_question_payload(q: Dict[str, Any], idx: int, total: int) -> Tuple[str, List[str], str, bool]:
     """
     تأخذ السؤال وتتحقق من حد أطوال التليجرام لتقرير هل تحتاج Text Fallback أم لا
@@ -23,37 +26,82 @@ def prepare_question_payload(q: Dict[str, Any], idx: int, total: int) -> Tuple[s
 
     return raw_question, clean_options, clean_explanation, needs_fallback
 
-async def send_quiz_poll(chat_id: int, user_id: int, q: Dict[str, Any], idx: int, total: int, control_kb: types.InlineKeyboardMarkup):
+async def send_quiz_poll(
+    chat_id: int,
+    user_id: int,
+    q: Dict[str, Any],
+    idx: int,
+    total: int,
+    control_kb: types.InlineKeyboardMarkup,
+    content_type: str = "TEXT"
+):
     """
-    يقوم بإرسال السؤال كـ Poll أو Text Fallback وحفظ بيانات الجلسة في Redis
+    يقوم بإرسال السؤال كـ Poll عادي أو كـ صورة + Poll أحرف (إذا كان المحتوى MATH)
+    مع حفظ بيانات الجلسة في Redis.
     """
-    raw_q, clean_opts, clean_exp, needs_fallback = prepare_question_payload(q, idx, total)
+    # ==================== المسار الأول: أسئلة الرياضيات (MATH) ====================
+    if content_type == "MATH":
+        # 1. توليد صورة السؤال والخيارات المنفذة بالـ LaTeX
+        image_path = await render_question_image(q, idx + 1, total)
 
-    if needs_fallback:
-        full_text = f"📝 **السؤال {idx + 1} من {total}:**\n{q['question']}\n\n"
-        poll_options = []
-        for i, opt in enumerate(q['options'], 1):
-            full_text += f"**{i}.** {str(opt).strip()}\n"
-            poll_options.append(f"الخيار رقم {i}")
+        # 2. إرسال الصورة إلى الشات
+        photo_file = types.FSInputFile(image_path)
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_file,
+            caption=f"📐 **السؤال {idx + 1} من {total}**"
+        )
 
-        await bot.send_message(chat_id=chat_id, text=full_text, parse_mode="Markdown")
-        clean_q = "اختر الإجابة الصحيحة بناءً على التفاصيل أعلاه 👆:"
-        clean_opts = poll_options
+        # 3. إعداد استطلاع بأحرف الخيارات فقط
+        labels = ["أ", "ب", "ج", "د"]
+        math_options = labels[:len(q.get("options", []))]
+
+        raw_exp = q.get("explanation") or "إجابة صحيحة!"
+        clean_exp = raw_exp if len(raw_exp) <= 200 else raw_exp[:197] + "..."
+
+        poll_msg = await bot.send_poll(
+            chat_id=chat_id,
+            question="اختر الإجابة الصحيحة من الصورة أعلاه 👆:",
+            options=math_options,
+            type="quiz",
+            correct_option_id=int(q['correct_option_id']),
+            explanation=clean_exp,
+            reply_markup=control_kb,
+            is_anonymous=False
+        )
+
+        # 4. تنظيف الصورة المحلية بعد إرسالها لتوفير المساحة
+        safe_file_cleanup(image_path)
+
+    # ==================== المسار الثاني: الأسئلة النصية العادية (TEXT) ====================
     else:
-        clean_q = raw_q
+        raw_q, clean_opts, clean_exp, needs_fallback = prepare_question_payload(q, idx, total)
 
-    poll_msg = await bot.send_poll(
-        chat_id=chat_id,
-        question=clean_q,
-        options=clean_opts,
-        type="quiz",
-        correct_option_id=int(q['correct_option_id']),
-        explanation=clean_exp,
-        reply_markup=control_kb,
-        is_anonymous=False
-    )
+        if needs_fallback:
+            full_text = f"📝 **السؤال {idx + 1} من {total}:**\n{q['question']}\n\n"
+            poll_options = []
+            for i, opt in enumerate(q['options'], 1):
+                full_text += f"**{i}.** {str(opt).strip()}\n"
+                poll_options.append(f"الخيار رقم {i}")
 
-    # حفظ حالة الـ Poll في Redis
+            await bot.send_message(chat_id=chat_id, text=full_text, parse_mode="Markdown")
+            clean_q = "اختر الإجابة الصحيحة بناءً على التفاصيل أعلاه 👆:"
+            clean_opts = poll_options
+        else:
+            clean_q = raw_q
+
+        poll_msg = await bot.send_poll(
+            chat_id=chat_id,
+            question=clean_q,
+            options=clean_opts,
+            type="quiz",
+            correct_option_id=int(q['correct_option_id']),
+            explanation=clean_exp,
+            reply_markup=control_kb,
+            is_anonymous=False
+        )
+
+    # حفظ حالة الـ Poll في Redis لمطابقة الإجابات
     quiz_data = {
         "chat_id": chat_id,
         "user_id": user_id,

@@ -89,6 +89,9 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         data = await state.get_data()
         questions = data['questions']
         idx = data['current_index']
+        # 🟢 قراءة نوع المحتوى (MATH أو TEXT) من الـ state
+        content_type = data.get("content_type", "TEXT")
+        
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
         user_id = msg_or_call.from_user.id
 
@@ -109,7 +112,8 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
 
-        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb)
+        # 🟢 تمرير content_type لمحرّك إرسال الأسئلة
+        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb, content_type=content_type)
         await state.update_data(is_switching_question=False)
     except Exception as e:
         log_error(logger, f"Error in send_question: {e}", exception=e)
