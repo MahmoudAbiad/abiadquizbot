@@ -1,4 +1,3 @@
-# Handlers/quiz_runner.py
 import asyncio
 import json
 from typing import Union, Optional, List, Dict, Any
@@ -15,7 +14,9 @@ from keyboards import (
     get_main_menu_keyboard,
     get_quiz_result_keyboard,
     get_quiz_exit_confirmation_keyboard,
-    get_rating_keyboard
+    get_rating_keyboard,
+    get_quiz_question_keyboard,   # 🟢 إضافة لوحة الأسئلة التفاعلية
+    get_quiz_answered_keyboard     # 🟢 إضافة لوحة السؤال المجاب عنه
 )
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import (
@@ -33,7 +34,8 @@ from supabase_helper import (
     mark_quiz_attempt_stopped,
     _is_valid_uuid
 )
-from services.quiz_engine import send_quiz_poll
+from services.math_renderer import render_question_image
+from utils import safe_file_cleanup
 
 logger = get_logger(__name__)
 router = Router()
@@ -45,11 +47,6 @@ ACTIVE_QUIZ_STATES = (
     QuizState.waiting_for_quiz_feedback
 )
 
-# 🩹 نفس حالات الكويز النشط + None: تُستخدم حصراً لهاندلرات ويزارد "حفظ في المفضلة"
-# لأن state يُصفَّر إلى None عند اكتمال الكويز (_handle_quiz_completion) قبل أن
-# يصل المستخدم لصفحة النتيجة، وزر "⭐ حفظ في المفضلة" يظهر هناك تحديداً.
-# لا تُستخدم لهاندلرات الكويز النشط الأخرى (next_question, get_hint, quiz_stop...)
-# التي يجب أن تبقى مقيدة بحالة كويز فعلياً جارٍ.
 SAVE_WIZARD_STATES = ACTIVE_QUIZ_STATES + (None,)
 
 async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
@@ -74,7 +71,7 @@ async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQue
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
         is_saved_in_session=False, is_switching_question=False,
         attempt_id=attempt_id, stopped_early=False,
-        share_id=None
+        share_id=None, current_question_answered=False
     )
     await state.set_state(QuizState.answering_quiz)
     if isinstance(msg_or_call, types.CallbackQuery):
@@ -89,7 +86,6 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         data = await state.get_data()
         questions = data['questions']
         idx = data['current_index']
-        # 🟢 قراءة نوع المحتوى (MATH أو TEXT) من الـ state
         content_type = data.get("content_type", "TEXT")
         
         chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
@@ -100,20 +96,38 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
             await _handle_quiz_completion(chat_id, user_id, state, data)
             return
 
-        # 2. تجهيز وإرسال السؤال الحالي
+        # 2. تجهيز وإرسال السؤال الحالي بالأزرار التفاعلية
         q = questions[idx]
-        control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
-            [
-                types.InlineKeyboardButton(text="⏹ إنهاء", callback_data="quiz_stop"),
-                types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
-                types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
-            ],
-            [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
-        ])
+        options = q.get("options", [])
+        question_kb = get_quiz_question_keyboard(options)
 
-        # 🟢 تمرير content_type لمحرّك إرسال الأسئلة
-        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb, content_type=content_type)
+        # إعادة ضبط حالة إجابة السؤال الحالي
+        await state.update_data(current_question_answered=False)
+
+        if content_type == "MATH":
+            # توليد وإرسال بطاقة الرياضيات كصورة مع كابشن وأزرار الخيارات
+            image_path = await render_question_image(q, idx + 1, len(questions))
+            photo_file = types.FSInputFile(image_path)
+            caption = f"📐 **السؤال {idx + 1} من {len(questions)}:**\n{q.get('question', '')}"
+            
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_file,
+                caption=caption,
+                reply_markup=question_kb,
+                parse_mode="Markdown"
+            )
+            safe_file_cleanup(image_path)
+        else:
+            # إرسال السؤال النصي العادي
+            text = f"📝 **السؤال {idx + 1} من {len(questions)}:**\n{q.get('question', '')}"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=question_kb,
+                parse_mode="Markdown"
+            )
+
         await state.update_data(is_switching_question=False)
     except Exception as e:
         log_error(logger, f"Error in send_question: {e}", exception=e)
@@ -133,10 +147,6 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
 async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext, data: dict):
     score, total = data['score'], data['total_count']
     quiz_id = data.get('quiz_id')
-    # ⚠️ current_index يكون دائماً >= total هنا (send_question لا تستدعي هذه الدالة
-    # إلا في هذه الحالة تحديداً)، لذلك لا يصلح كمعيار للتفريق بين "أكمل الطالب كل
-    # الأسئلة" و"أوقف الاختبار مبكراً". نعتمد بدلاً منه على العلم الصريح stopped_early
-    # الذي تضبطه stop_quiz_confirmed عند الإيقاف اليدوي.
     stopped_early = bool(data.get('stopped_early'))
     percentage = (score / total * 100) if total > 0 else 0
     previous_score_text = ""
@@ -160,7 +170,6 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
         f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
     )
 
-    # التحقق من صحة المعرف لإظهار لوحة التقييم بشكل آمن
     if quiz_id and _is_valid_uuid(quiz_id):
         keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, is_score_public=is_public)
         result_text += "\n\n⭐ <b>كيف تقيم هذا الكويز؟</b> تقييمك المباشر يساعد الدفعة على فرز الكويزات الممتازة وتصفية الرديئة تلقائياً!"
@@ -169,7 +178,6 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
 
     await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
 
-    # التمييز الدقيق في التتبع بين الكويز المكتمل والتوقف المبكر
     if stopped_early:
         asyncio.create_task(mark_quiz_attempt_stopped(data.get("attempt_id")))
         asyncio.create_task(log_usage_event(user_id, "quiz_stopped", {
@@ -185,26 +193,81 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
 
 # ==================== معالجات حركة الكويز والتحكم ====================
 
-@router.poll_answer()
-async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
+@router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data.startswith("ans_"))
+async def handle_quiz_answer(call: types.CallbackQuery, state: FSMContext):
+    """
+    معالجة اختيار الطالب للإجابة:
+    تعديل نص الرسالة أو الكابشن المرفق بالصورة لإظهار الإجابة المختارة والتوضيح دون حذف الرسالة.
+    """
     try:
-        poll_id = poll_answer.poll_id
-        data_json = await redis_client.get(f"poll:{poll_id}")
-        if not data_json or not poll_answer.option_ids:
+        data = await state.get_data()
+        
+        # منع تكرار الضغط على نفس السؤال
+        if data.get("current_question_answered"):
+            await call.answer("⚠️ لقد أجبت على هذا السؤال بالفعل!", show_alert=True)
             return
 
-        quiz_info = json.loads(data_json)
-        correct_opt = int(quiz_info["correct_option_id"])
-        
-        if poll_answer.user.id != quiz_info["user_id"]:
+        selected_opt = int(call.data.split("_")[1])
+        questions = data.get("questions", [])
+        idx = data.get("current_index", 0)
+
+        if idx >= len(questions):
+            await call.answer()
             return
+
+        current_q = questions[idx]
+        correct_opt = int(current_q.get("correct_option_id", 0))
+        options = current_q.get("options", [])
+        explanation = current_q.get("explanation") or "إجابة صحيحة!"
+
+        user_ans_text = options[selected_opt] if selected_opt < len(options) else ""
+        correct_ans_text = options[correct_opt] if correct_opt < len(options) else ""
+
+        is_correct = (selected_opt == correct_opt)
         
-        selected_opt = int(poll_answer.option_ids[0])
-        if selected_opt == correct_opt:
-            current_data = await state.get_data()
-            await state.update_data(score=current_data.get('score', 0) + 1)
+        # تحديث النتيجة وحالة إجابة السؤال
+        if is_correct:
+            await state.update_data(score=data.get("score", 0) + 1)
+        await state.update_data(current_question_answered=True)
+
+        # صياغة النص والتوضيح المعدل
+        if is_correct:
+            status_text = f"✅ **إجابة صحيحة!**\n🎯 **إجابتك:** {user_ans_text}"
+        else:
+            status_text = (
+                f"❌ **إجابة خاطئة!**\n"
+                f"🔴 **اخترت:** {user_ans_text}\n"
+                f"🟢 **الإجابة الصحيحة:** {correct_ans_text}"
+            )
+
+        updated_content = (
+            f"{status_text}\n\n"
+            f"📝 **السؤال {idx + 1} من {len(questions)}:**\n"
+            f"{current_q.get('question', '')}\n\n"
+            f"💡 **الشرح والتوضيح:**\n{explanation}"
+        )
+
+        # جلب الأزرار المحدثة مع شارات 🟢 و 🔴
+        answered_kb = get_quiz_answered_keyboard(options, correct_opt, selected_opt)
+
+        # تعديل الرسالة مباشرة (إما كابشن للصور أو نص عادي)
+        if call.message.photo:
+            await call.message.edit_caption(
+                caption=updated_content,
+                reply_markup=answered_kb,
+                parse_mode="Markdown"
+            )
+        else:
+            await call.message.edit_text(
+                text=updated_content,
+                reply_markup=answered_kb,
+                parse_mode="Markdown"
+            )
+
+        await call.answer()
     except Exception as e:
-        log_error(logger, f"Error in handle_poll_answer: {e}", exception=e)
+        log_error(logger, f"Error in handle_quiz_answer: {e}", exception=e)
+        await call.answer("❌ حدث خطأ أثناء تسجيل الإجابة.", show_alert=True)
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "next_question")
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
@@ -215,10 +278,8 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
             return
             
         await state.update_data(is_switching_question=True, current_index=data['current_index'] + 1)
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
+        
+        # 💡 إبقاء الرسالة المعدلة السابقة في الشات وإرسال السؤال الجديد تحتها مباشرة
         await send_question(call, state)
     except Exception as e:
         log_error(logger, f"Error in handle_next: {e}", exception=e)
@@ -231,8 +292,6 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         q = data['questions'][data['current_index']]
-        # 🩹 UX: show_alert=True لأن التلميح نص يحتاج وقتاً ليُقرأ؛ الإشعار الخاطف
-        # (toast) كان يختفي خلال ثانية أو ثانيتين قبل أن يتمكن الطالب من قراءته كاملاً.
         await call.answer(f"💡 تلميح ذكي:\n{q['hint']}", show_alert=True)
     except Exception as e:
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
@@ -268,9 +327,6 @@ async def stop_quiz_confirmed(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         questions = data.get("questions", [])
-        # 🩹 نضع علامة صريحة على التوقف المبكر بدل الاعتماد على مساواة current_index
-        # بـ len(questions) (كان هذا يجعل _handle_quiz_completion يحتسبها دائماً
-        # "مكتملة" لأن send_question لا يستدعيها إلا عندما current_index >= total أصلاً).
         await state.update_data(current_index=len(questions), stopped_early=True)
         try:
             await call.message.delete()
@@ -303,9 +359,6 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
             return
         
         await state.set_state(QuizState.answering_quiz)
-        # 🩹 إعادة التشغيل يجب أن تُسجَّل كمحاولة جديدة تماماً في قاعدة البيانات، وإلا
-        # فإن complete_quiz_attempt اللاحقة ستستخدم نفس attempt_id القديم وتكتب فوق
-        # بيانات المحاولة الأولى (النتيجة والمدة) بدل تسجيل محاولة مستقلة.
         user_id = call.from_user.id
         new_attempt_id = start_quiz_attempt(user_id, data.get("quiz_id") or None, data.get("quiz_origin", "shared"), len(questions))
         asyncio.create_task(log_usage_event(user_id, "quiz_started", {
@@ -313,7 +366,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         }))
         await state.update_data(
             current_index=0, score=0, quiz_completed=False, is_switching_question=False,
-            stopped_early=False, attempt_id=new_attempt_id
+            stopped_early=False, attempt_id=new_attempt_id, current_question_answered=False
         )
         try:
             await call.message.delete()
