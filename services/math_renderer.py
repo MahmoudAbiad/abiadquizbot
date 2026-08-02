@@ -46,7 +46,6 @@ def _prepare_arabic_and_math(text: str) -> str:
 
     # 3. إعادة صيغ LaTeX كما هي لمواضعها دون تشويه
     for placeholder, math_expr in zip(placeholders, math_expressions):
-        # البحث عن المعرف المؤقت في النص المعكوس وإعادة كود LaTeX الأصلي
         bidi_placeholder = get_display(placeholder)
         if bidi_placeholder in bidi_text:
             bidi_text = bidi_text.replace(bidi_placeholder, math_expr)
@@ -64,29 +63,31 @@ def _render_sync(question_data: dict, current_idx: int, total_count: int, output
     options = question_data.get("options", [])
     labels = ["أ", "ب", "ج", "د"]
 
-    # إعداد شاشة الرسم (Canvas) باللون الأبيض الأكاديمي
-    fig, ax = plt.subplots(figsize=(9, 5.5), dpi=200)
+    # إعداد شاشة الرسم (Canvas) بأبعاد مربعة ومناسبة للجوال وبدقة عالية
+    fig, ax = plt.subplots(figsize=(8, 7.5), dpi=220)
     fig.patch.set_facecolor('#FFFFFF')
     ax.set_facecolor('#FFFFFF')
     ax.axis('off')
 
-    # 1. رأس البطاقة: رقم السؤال
-    header_raw = f"السؤال {current_idx} من {total_count}"
-    header_text = _prepare_arabic_and_math(header_raw)
-    ax.text(0.95, 0.92, header_text, fontsize=13, fontweight='bold', color='#2563EB',
+    # 1. رأس البطاقة: رقم السؤال (تشكيل الكلمات معزولة عن الأرقام لتفادي عكس الاتجاه)
+    word_q = get_display(arabic_reshaper.reshape("السؤال"))
+    word_of = get_display(arabic_reshaper.reshape("من"))
+    header_text = f"{word_q} {current_idx} {word_of} {total_count}"
+
+    ax.text(0.95, 0.94, header_text, fontsize=15, fontweight='bold', color='#2563EB',
             ha='right', va='top', transform=ax.transAxes)
 
     # خط فاصل ناعم تحت رأس البطاقة
-    ax.plot([0.05, 0.95], [0.86, 0.86], color='#E2E8F0', linewidth=1.2, transform=ax.transAxes)
+    ax.plot([0.05, 0.95], [0.89, 0.89], color='#E2E8F0', linewidth=1.5, transform=ax.transAxes)
 
-    # 2. متن السؤال الرئيسي
+    # 2. متن السؤال الرئيسي بخط كبير وواضح
     q_text_prepared = _prepare_arabic_and_math(question_text)
-    ax.text(0.95, 0.78, q_text_prepared, fontsize=12, color='#0F172A',
+    ax.text(0.95, 0.83, q_text_prepared, fontsize=15, color='#0F172A',
             ha='right', va='top', transform=ax.transAxes, multialignment='right')
 
-    # 3. الخيارات الأربعة
-    y_start = 0.52
-    y_step = 0.12
+    # 3. الخيارات الأربعة بخط وخطوات أوسع
+    y_start = 0.56
+    y_step = 0.135
 
     for i, opt in enumerate(options[:4]):
         label_char = labels[i] if i < len(labels) else str(i + 1)
@@ -96,14 +97,14 @@ def _render_sync(question_data: dict, current_idx: int, total_count: int, output
         y_pos = y_start - (i * y_step)
 
         # مربع إطار رمزي لكل خيار
-        bbox_props = dict(boxstyle="round,pad=0.4", fc="#F8FAFC", ec="#CBD5E1", lw=0.8)
+        bbox_props = dict(boxstyle="round,pad=0.5", fc="#F8FAFC", ec="#CBD5E1", lw=1.0)
 
-        ax.text(0.93, y_pos, opt_prepared, fontsize=11, color='#1E293B',
+        ax.text(0.93, y_pos, opt_prepared, fontsize=14, color='#1E293B',
                 ha='right', va='top', transform=ax.transAxes, bbox=bbox_props)
 
     # حفظ الصورة وتفريغ الذاكرة
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-    plt.savefig(output_path, bbox_inches='tight', facecolor=fig.get_facecolor(), edgecolor='none', pad_inches=0.3)
+    plt.savefig(output_path, bbox_inches='tight', facecolor=fig.get_facecolor(), edgecolor='none', pad_inches=0.25)
     plt.close(fig)
 
     return output_path
