@@ -65,12 +65,12 @@ def _smart_wrap_text(text: str, max_chars: int = 42) -> str:
 
 
 def _fix_ar(text: str) -> str:
-    """إصلاح وتشكيل النص العربي مع فرض اتجاه القراءة من اليمين لليسار (base_dir='R')."""
+    """إصلاح وتشكيل النص العربي تلقائياً دون استخدام base_dir='R' لمنع تشويه وتفكيك الأحرف."""
     if not text:
         return ""
     try:
         reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped, base_dir='R')
+        return get_display(reshaped)
     except Exception:
         return text
 
@@ -82,29 +82,28 @@ def _prepare_arabic_and_math(text: str) -> str:
 
     text = _normalize_latex(text)
 
-    # 1. استخراج صيغ LaTeX واستبدالها بنصوص مؤقتة نظيفة
+    # 1. استخراج صيغ LaTeX واستبدالها ببدائل نصوص قصيرة ثابتة
     math_expressions = re.findall(r'(\$.*?\$)', text)
     if not math_expressions:
         return _fix_ar(text)
 
-    placeholders = [f"MATHPLACEHOLDER{i}" for i in range(len(math_expressions))]
+    placeholders = [f"XMP{i}X" for i in range(len(math_expressions))]
 
     temp_text = text
     for placeholder, math_expr in zip(placeholders, math_expressions):
         temp_text = temp_text.replace(math_expr, placeholder, 1)
 
-    # 2. تشكيل النص العربي مع الحفاظ على اتجاه RTL الصريح
-    lines = temp_text.split('\n')
-    fixed_lines = [_fix_ar(line) for line in lines]
-    bidi_text = '\n'.join(fixed_lines)
+    # 2. تشكيل النص العربي مع الحفاظ على أماكن البدائل
+    reshaped_text = arabic_reshaper.reshape(temp_text)
+    bidi_text = get_display(reshaped_text)
 
-    # 3. إعادة صيغ LaTeX إلى أماكنها الصحيحة
+    # 3. إعادة صيغ LaTeX لمواضعها الصحيحة
     for placeholder, math_expr in zip(placeholders, math_expressions):
-        bidi_placeholder = _fix_ar(placeholder)
-        if bidi_placeholder in bidi_text:
-            bidi_text = bidi_text.replace(bidi_placeholder, math_expr, 1)
-        elif placeholder in bidi_text:
+        if placeholder in bidi_text:
             bidi_text = bidi_text.replace(placeholder, math_expr, 1)
+        else:
+            rev_placeholder = placeholder[::-1]
+            bidi_text = bidi_text.replace(rev_placeholder, math_expr, 1)
 
     return bidi_text
 
@@ -185,12 +184,11 @@ def _render_sync(question_data: dict, current_idx: int, total_count: int, output
         return output_path
 
     finally:
-        # ضمان تفريغ الذاكرة فوراً لمنع استهلاك الـ RAM على السيرفر
         plt.close(fig)
 
 
 async def render_question_image(question_data: dict, current_idx: int, total_count: int) -> str:
-    """دالة Async غير معطلة، تشغل الرسم في Thread منفصل لعدم تجميد خادم البوت."""
+    """دالة Async غير معطلة للسيرفر."""
     output_filename = f"math_q_{uuid.uuid4().hex}.png"
     output_path = os.path.join(DOWNLOADS_DIR, output_filename)
     return await asyncio.to_thread(_render_sync, question_data, current_idx, total_count, output_path)
