@@ -1,194 +1,155 @@
 # services/math_renderer.py
 """
 خدمة رسم وتحويل الأسئلة الرياضية وصيغ LaTeX إلى صور شمولية عالية الدقة.
-تستخدم Matplotlib في وضع Headless مع التغليف الذكي للنصوص وضبط اتجاه العربي التلقائي السليم.
+تعتمد على Tectonic (مجمع LaTeX الحقيقي) وتحويل النتيجة إلى PNG عبر PyMuPDF (fitz)
+لضمان سلامة الاتجاه العربي وصيغ الرياضيات بنسبة 100%.
 """
 
 import os
 import re
 import uuid
 import asyncio
-import matplotlib
-
-# تفعيل وضع Server/Headless لمنع استدعاء واجهات النظام الرسومية
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-
-# ضبط خط المعادلات الرياضية ليكون واضحاً وأكاديمياً
-plt.rcParams['mathtext.fontset'] = 'stix'
-plt.rcParams['font.family'] = 'sans-serif'
-
-import arabic_reshaper
-from bidi.algorithm import get_display
+import fitz  # PyMuPDF مثبتة بالفعل في المشروع
+from utils import safe_file_cleanup
 from logger import get_logger
 
 logger = get_logger(__name__)
 DOWNLOADS_DIR = "downloads"
 
+ARABIC_LETTERS = ["أ", "ب", "ج", "د"]
 
-def _normalize_latex(text: str) -> str:
-    """تحويل أقواس LaTeX المباشرة مثل \(...\) و \[...\] إلى $...$ القياسية ليفهمها Matplotlib."""
+
+def _normalize_math_delimiters(text: str) -> str:
+    """تحويل محددات LaTeX المباشرة إلى $...$ القياسية."""
     if not text:
         return ""
-    text = re.sub(r'\\\(|\\\)', '$', text)
-    text = re.sub(r'\\\[|\\\]', '$', text)
+    text = re.sub(r'\\\(', '$', text)
+    text = re.sub(r'\\\)', '$', text)
+    text = re.sub(r'\\\[', '$$', text)
+    text = re.sub(r'\\\]', '$$', text)
     return text
 
 
-def _smart_wrap_text(text: str, max_chars: int = 42) -> str:
-    """تقسيم النص الذكي إلى أسطر متناسقة مع الحفاظ على صيغ LaTeX $...$ من الانكسار."""
+def _escape_latex_text(text: str) -> str:
+    """تهريب الرموز الخاصة في LaTeX خارج نطاق $...$ لحماية التجميع من الأخطاء."""
     if not text:
         return ""
 
-    text = _normalize_latex(text)
-    tokens = re.findall(r'\$.*?\$|\S+', text)
-    lines = []
-    current_line = []
-    current_len = 0
+    text = _normalize_math_delimiters(text)
+    parts = re.split(r'(\$\$.*?\$\$|\$.*?\$)', text, flags=re.DOTALL)
+    escaped_parts = []
 
-    for token in tokens:
-        clean_token = token.replace('$', '') if token.startswith('$') else token
-        token_len = len(clean_token)
-
-        if current_len + token_len + 1 > max_chars and current_line:
-            lines.append(" ".join(current_line))
-            current_line = [token]
-            current_len = token_len
+    for part in parts:
+        if (part.startswith('$') and part.endswith('$')) or (part.startswith('$$') and part.endswith('$$')):
+            # تغليف أي نص عربي داخل صيغة الرياضيات بـ \text{} لضمان عدم تعطل الخط
+            arabic_pattern = r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+'
+            sanitized_math = re.sub(arabic_pattern, lambda m: f"\\text{{{m.group(0)}}}", part)
+            escaped_parts.append(sanitized_math)
         else:
-            current_line.append(token)
-            current_len += token_len + 1
+            escaped = (
+                part
+                .replace('\\', r'\textbackslash{}')
+                .replace('&', r'\&')
+                .replace('%', r'\%')
+                .replace('#', r'\#')
+                .replace('_', r'\_')
+                .replace('{', r'\{')
+                .replace('}', r'\}')
+                .replace('~', r'\textasciitilde{}')
+                .replace('^', r'\textasciicircum{}')
+            )
+            escaped_parts.append(escaped)
 
-    if current_line:
-        lines.append(" ".join(current_line))
-
-    return "\n".join(lines)
-
-
-def _fix_ar(text: str) -> str:
-    """إصلاح وتشكيل النص العربي تلقائياً دون استخدام base_dir='R' لمنع تشويه وتفكيك الأحرف."""
-    if not text:
-        return ""
-    try:
-        reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped)
-    except Exception:
-        return text
+    return "".join(escaped_parts)
 
 
-def _prepare_arabic_and_math(text: str) -> str:
-    """عزل صيغ LaTeX المحصورة بين $...$ وتشكيل النص العربي المحيط بها دون إفساد اتجاه أي منهما."""
-    if not text:
-        return ""
-
-    text = _normalize_latex(text)
-
-    # 1. استخراج صيغ LaTeX واستبدالها ببدائل نصوص قصيرة ثابتة
-    math_expressions = re.findall(r'(\$.*?\$)', text)
-    if not math_expressions:
-        return _fix_ar(text)
-
-    placeholders = [f"XMP{i}X" for i in range(len(math_expressions))]
-
-    temp_text = text
-    for placeholder, math_expr in zip(placeholders, math_expressions):
-        temp_text = temp_text.replace(math_expr, placeholder, 1)
-
-    # 2. تشكيل النص العربي مع الحفاظ على أماكن البدائل
-    reshaped_text = arabic_reshaper.reshape(temp_text)
-    bidi_text = get_display(reshaped_text)
-
-    # 3. إعادة صيغ LaTeX لمواضعها الصحيحة
-    for placeholder, math_expr in zip(placeholders, math_expressions):
-        if placeholder in bidi_text:
-            bidi_text = bidi_text.replace(placeholder, math_expr, 1)
-        else:
-            rev_placeholder = placeholder[::-1]
-            bidi_text = bidi_text.replace(rev_placeholder, math_expr, 1)
-
-    return bidi_text
-
-
-def _render_sync(question_data: dict, current_idx: int, total_count: int, output_path: str) -> str:
-    """الوظيفة التنفيذية المباشرة لرسم البطاقة الأكاديمية للسؤال والخيارات."""
-    question_text = question_data.get("question", "")
+def _build_card_tex_code(question_data: dict, current_idx: int, total_count: int) -> str:
+    """بناء كود LaTeX مخصص لبطاقة السؤال بأبعاد متناسقة للصور."""
+    question_text = _escape_latex_text(question_data.get("question", ""))
     options = question_data.get("options", [])
-    labels = ["أ", "ب", "ج", "د"]
+    
+    options_tex = ""
+    for i, opt in enumerate(options[:4]):
+        letter = ARABIC_LETTERS[i] if i < len(ARABIC_LETTERS) else str(i + 1)
+        clean_opt = _escape_latex_text(str(opt))
+        options_tex += f"\\item[{[{letter}]}] {clean_opt}\n"
 
-    # 1. تغليف نص السؤال وحساب عدد الأسطر
-    wrapped_q = _smart_wrap_text(question_text, max_chars=40)
-    q_text_prepared = _prepare_arabic_and_math(wrapped_q)
-    q_lines_count = q_text_prepared.count('\n') + 1
+    header_str = f"السؤال {current_idx} من {total_count}"
 
-    # 2. فحص أطوال الخيارات لتحديد التصميم (شبكة 2x2 أم قائمة عمودية)
-    max_opt_len = max([len(str(opt)) for opt in options]) if options else 0
-    is_grid_layout = (max_opt_len <= 22) and (len(options) == 4)
+    return f"""\\documentclass[12pt, a4paper]{{article}}
+\\usepackage[top=1cm, bottom=1cm, left=1.2cm, right=1.2cm, paperwidth=16cm, paperheight=12cm]{{geometry}}
+\\usepackage{{amsmath, amssymb}}
+\\usepackage{{xcolor}}
+\\usepackage{{enumitem}}
 
-    fig_height = 5.8 + (q_lines_count * 0.45)
-    fig, ax = plt.subplots(figsize=(8.2, fig_height), dpi=220)
+\\definecolor{{primary}}{{HTML}}{{2563EB}}
 
-    try:
-        fig.patch.set_facecolor('#FFFFFF')
-        ax.set_facecolor('#FFFFFF')
-        ax.axis('off')
+\\usepackage{{polyglossia}}
+\\setmainlanguage{{arabic}}
+\\setotherlanguage{{english}}
+\\newfontfamily\\arabicfont[Script=Arabic]{{Amiri}}
 
-        # 3. رأس البطاقة: (السؤال X من Y)
-        header_text = f"السؤال {current_idx} من {total_count}"
-        header_prepared = _fix_ar(header_text)
+\\pagestyle{{empty}}
 
-        header_y = 0.94
-        ax.text(0.95, header_y, header_prepared, fontsize=15, fontweight='bold', color='#2563EB',
-                ha='right', va='top', transform=ax.transAxes)
+\\begin{{document}}
 
-        line_y = header_y - 0.05
-        ax.plot([0.05, 0.95], [line_y, line_y], color='#E2E8F0', linewidth=1.5, transform=ax.transAxes)
+\\noindent
+{{\\color{{primary}}\\Large\\textbf{{{header_str}}}}}
+\\vspace{{0.2cm}}
+\\hrule height 1.5pt
+\\vspace{{0.5cm}}
 
-        # 4. نص السؤال الرئيسي
-        q_y = line_y - 0.04
-        ax.text(0.95, q_y, q_text_prepared, fontsize=14.5, color='#0F172A',
-                ha='right', va='top', transform=ax.transAxes, multialignment='right', linespacing=1.4)
+\\noindent
+{{\\large {question_text}}}
 
-        options_start_y = q_y - (q_lines_count * 0.09) - 0.06
-        bbox_props = dict(boxstyle="round,pad=0.5", fc="#F8FAFC", ec="#CBD5E1", lw=1.0)
+\\vspace{{0.6cm}}
 
-        # 5. رسم الخيارات
-        if is_grid_layout:
-            positions = [
-                (0.93, options_start_y),                 # [أ]
-                (0.46, options_start_y),                 # [ب]
-                (0.93, options_start_y - 0.13),          # [ج]
-                (0.46, options_start_y - 0.13)           # [د]
-            ]
-            for i, opt in enumerate(options[:4]):
-                label_char = labels[i] if i < len(labels) else str(i + 1)
-                label_ar = _fix_ar(f"[{label_char}]")
-                opt_raw = f"{label_ar}   {opt}"
-                opt_prepared = _prepare_arabic_and_math(opt_raw)
-                x_pos, y_pos = positions[i]
+\\begin{{enumerate}}[label=\\textbf{{[\\arabic*]}}, leftmargin=*, itemsep=0.35cm]
+{options_tex}
+\\end{{enumerate}}
 
-                ax.text(x_pos, y_pos, opt_prepared, fontsize=13.5, color='#1E293B',
-                        ha='right', va='top', transform=ax.transAxes, bbox=bbox_props)
-        else:
-            y_step = 0.12
-            for i, opt in enumerate(options[:4]):
-                label_char = labels[i] if i < len(labels) else str(i + 1)
-                label_ar = _fix_ar(f"[{label_char}]")
-                opt_raw = f"{label_ar}   {opt}"
-                opt_prepared = _prepare_arabic_and_math(opt_raw)
-                y_pos = options_start_y - (i * y_step)
-
-                ax.text(0.93, y_pos, opt_prepared, fontsize=13.5, color='#1E293B',
-                        ha='right', va='top', transform=ax.transAxes, bbox=bbox_props)
-
-        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-        plt.savefig(output_path, bbox_inches='tight', facecolor=fig.get_facecolor(), edgecolor='none', pad_inches=0.25)
-        return output_path
-
-    finally:
-        plt.close(fig)
+\\end{{document}}
+"""
 
 
 async def render_question_image(question_data: dict, current_idx: int, total_count: int) -> str:
-    """دالة Async غير معطلة للسيرفر."""
-    output_filename = f"math_q_{uuid.uuid4().hex}.png"
-    output_path = os.path.join(DOWNLOADS_DIR, output_filename)
-    return await asyncio.to_thread(_render_sync, question_data, current_idx, total_count, output_path)
+    """
+    توليد بطاقة السؤال عبر Tectonic وتحويلها مباشرة إلى صورة PNG عالية الجودة عبر PyMuPDF.
+    """
+    file_id = uuid.uuid4().hex
+    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    
+    tex_path = os.path.join(DOWNLOADS_DIR, f"card_{file_id}.tex")
+    pdf_path = os.path.join(DOWNLOADS_DIR, f"card_{file_id}.pdf")
+    png_path = os.path.join(DOWNLOADS_DIR, f"math_q_{file_id}.png")
+
+    try:
+        # 1. كتابة ملف الـ TeX المؤقت
+        tex_code = _build_card_tex_code(question_data, current_idx, total_count)
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write(tex_code)
+
+        # 2. تجميع الملف عبر Tectonic
+        process = await asyncio.create_subprocess_exec(
+            "tectonic", tex_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await process.communicate()
+
+        # 3. تحويل الصفحة الأولى من الـ PDF الناتج إلى صورة PNG
+        if process.returncode == 0 and os.path.exists(pdf_path):
+            doc = fitz.open(pdf_path)
+            page = doc[0]
+            # dpi=200 تعطي صورة عالية الوضوح وسريعة المعالجة
+            pix = page.get_pixmap(dpi=200)
+            pix.save(png_path)
+            doc.close()
+            return png_path
+        else:
+            logger.error("Tectonic card rendering failed.")
+            raise RuntimeError("فشل إنشاء صورة البطاقة عبر Tectonic")
+
+    finally:
+        safe_file_cleanup(tex_path)
+        safe_file_cleanup(pdf_path)
