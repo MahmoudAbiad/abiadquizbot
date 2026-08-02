@@ -112,17 +112,44 @@ def _tokenize_mixed(text: str) -> List[str]:
     return tokens
 
 
-def _wrap_tokens(tokens: List[str], max_chars: int) -> List[str]:
+def _font_prop_sized(is_ar: bool, bold: bool, size: float) -> fm.FontProperties:
+    """نسخة من _font_prop لكن بحجم خط محدد - مطلوبة لقياس العرض الفعلي بالبكسل
+    (القياس بيختلف كتير حسب الحجم، فمينفعش نستخدم FontProperties افتراضي)."""
+    prop = _font_prop(is_ar, bold).copy()
+    prop.set_size(size)
+    return prop
+
+
+def _measure_px(text: str, font_prop: fm.FontProperties) -> float:
+    """يقيس العرض الفعلي بالبكسل لأي مقطع (نص عادي أو معادلة $...$) باستخدام نفس
+    محرك mathtext وحجم/نوع الخط اللي هيُستخدم فعلياً في الرسم النهائي - أدق بكتير
+    من عدّ عدد الحروف، خصوصاً إن طول مصدر LaTeX مش له علاقة بعرضه المرسوم فعلياً."""
+    if not text:
+        return 0.0
+    try:
+        return _MATH_PARSER.parse(text, dpi=DPI, prop=font_prop).width
+    except Exception:
+        # سطر LaTeX غير صالح لسه ما اتلفش على $ - نرجّع تقدير تقريبي بدل ما نفشل
+        return len(text) * font_prop.get_size() * 0.62
+
+
+def _wrap_tokens(tokens: List[str], max_width_px: float, is_ar: bool, font_prop: fm.FontProperties) -> List[str]:
+    """يلف الكلمات على أسطر بالاعتماد على العرض الفعلي بالبكسل (مش عدد الحروف)،
+    مع تشكيل أي كلمة عربية قبل قياسها عشان القياس يطابق شكلها الحقيقي وقت الرسم."""
+    space_w = _measure_px(" ", font_prop)
     lines: List[str] = []
     current: List[str] = []
-    current_len = 0
+    current_w = 0.0
     for tok in tokens:
-        tok_len = len(tok) + 1
-        if current and current_len + tok_len > max_chars:
+        tok_for_measure = _shape_line(tok) if is_ar else tok
+        tok_w = _measure_px(tok_for_measure, font_prop)
+        added_w = tok_w + (space_w if current else 0.0)
+        if current and current_w + added_w > max_width_px:
             lines.append(" ".join(current))
-            current, current_len = [], 0
+            current, current_w = [], 0.0
+            added_w = tok_w
         current.append(tok)
-        current_len += tok_len
+        current_w += added_w
     if current:
         lines.append(" ".join(current))
     return lines or [""]
@@ -130,18 +157,36 @@ def _wrap_tokens(tokens: List[str], max_chars: int) -> List[str]:
 
 def _shape_line(line: str) -> str:
     """يهيّئ ويعيد ترتيب سطر عربي للعرض الصحيح (Reshape + Bidi) - نفس الأسلوب المُثبت
-    مسبقاً في services/export_service.py، مع ترك أي مقطع رياضي $...$ سليماً (bidi تتعامل
-    معه تلقائياً كوحدة LTR واحدة ضمن السطر لأنه لا يحوي أحرفاً عربية)."""
+    مسبقاً في services/export_service.py.
+
+    ملاحظة مهمة: تطبيق get_display() على السطر كاملاً وهو يحوي مقطعاً رياضياً $...$
+    يكسر المعادلة - لأن خوارزمية bidi بتعمل mirroring للأقواس ()/{} وإعادة ترتيب
+    لمحتوى الرن اللاتيني جوه سياق عربي (اتحقّق منه فعلياً: "$(x+y)^2$" بيتحول
+    لـ"x+y)^2$)$"). المفروض نحمي المقطع الرياضي بعلامات Unicode directional
+    isolate (FSI/PDI)، لكن نسخة python-bidi المُثبّتة (0.4.2) لا تدعمها أصلاً.
+    الحل البديل: نفصل السطر يدوياً لمقاطع (نص عربي / معادلة) بترتيبها المنطقي،
+    نُشكّل ونعيد ترتيب كل مقطع عربي بمفرده (bidi على نص عربي خالص دايماً سليم)،
+    ونترك أي مقطع رياضي كما هو حرفياً بدون أي لمسة، ثم نعكس ترتيب المقاطع نفسها
+    (مش محتواها) عشان يطابق اتجاه القراءة RTL - فتطلع المعادلة في مكانها الصحيح
+    جوه الجملة ومحتواها سليم 100% زي ما ولّده النموذج."""
     if not _BIDI_AVAILABLE or not _ARABIC_RE.search(line):
         return line
     try:
-        return get_display(arabic_reshaper.reshape(line))
+        text_segments = _MATH_SPAN_RE.split(line)
+        math_segments = _MATH_SPAN_RE.findall(line)
+        parts: List[str] = []
+        for i, seg in enumerate(text_segments):
+            if seg:
+                parts.append(get_display(arabic_reshaper.reshape(seg)) if _ARABIC_RE.search(seg) else seg)
+            if i < len(math_segments):
+                parts.append(math_segments[i])
+        return "".join(reversed(parts))
     except Exception:
         return line
 
 
-def _wrap_and_shape(text: str, is_ar: bool, max_chars: int) -> List[str]:
-    lines = _wrap_tokens(_tokenize_mixed(text), max_chars)
+def _wrap_and_shape(text: str, is_ar: bool, max_width_px: float, font_prop: fm.FontProperties) -> List[str]:
+    lines = _wrap_tokens(_tokenize_mixed(text), max_width_px, is_ar, font_prop)
     if is_ar:
         return [_shape_line(line) for line in lines]
     return lines
@@ -173,12 +218,16 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     options = [str(o).strip() for o in (question.get("options") or [])]
     letters = letters_for(is_ar, len(options))
 
-    q_lines = _wrap_and_shape(question_text, is_ar, max_chars=40)
+    max_width_px = FIG_WIDTH_PX - 2 * MARGIN_PX
+    q_font_prop = _font_prop_sized(is_ar, bold=True, size=QUESTION_FONT_SIZE)
+    opt_font_prop = _font_prop_sized(is_ar, bold=False, size=OPTION_FONT_SIZE)
+
+    q_lines = _wrap_and_shape(question_text, is_ar, max_width_px, q_font_prop)
 
     option_blocks: List[List[str]] = []
     for letter, opt in zip(letters, options):
         combined = f"({letter} {opt}" if is_ar else f"{letter}) {opt}"
-        option_blocks.append(_wrap_and_shape(combined, is_ar, max_chars=38))
+        option_blocks.append(_wrap_and_shape(combined, is_ar, max_width_px, opt_font_prop))
 
     total_lines = len(q_lines) + sum(len(block) for block in option_blocks)
     height_px = (
@@ -199,6 +248,7 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     ax.add_patch(plt.Rectangle((0, height_px - HEADER_HEIGHT_PX), FIG_WIDTH_PX, HEADER_HEIGHT_PX,
                                 facecolor="#4C6FFF", edgecolor="none"))
     header_text = f"السؤال {idx + 1} من {total}" if is_ar else f"Question {idx + 1} of {total}"
+    header_text = _shape_line(header_text)
     ax.text(FIG_WIDTH_PX / 2, height_px - HEADER_HEIGHT_PX / 2, _sanitize_line_for_mathtext(header_text),
             ha="center", va="center", fontsize=22, color="white",
             fontproperties=_font_prop(is_ar, bold=True))
