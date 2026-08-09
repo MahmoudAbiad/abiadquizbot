@@ -932,11 +932,25 @@ async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
     """عدد المستخدمين النشطين يومياً (استبعاد الآدمن)."""
     try:
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
-        query = supabase.table("usage_events").select("user_id, created_at").gte("created_at", since)
-        if ADMIN_ID:
-            query = query.neq("user_id", ADMIN_ID)
-        res = await query.execute()
-        rows = res.data or []
+
+        # ⚠️ Supabase/PostgREST بترجع 1000 صف كحد أقصى بالاستعلام الواحد.
+        # لازم نجيب كل الصفوف على دفعات (pagination) وإلا الأيام الأحدث
+        # ممكن ما توصل أصلاً إذا عدد الأحداث بالفترة تجاوز الحد الأقصى.
+        rows: List[Dict[str, Any]] = []
+        page_size = 1000
+        offset = 0
+        while True:
+            query = supabase.table("usage_events").select("user_id, created_at") \
+                .gte("created_at", since).order("created_at", desc=False) \
+                .range(offset, offset + page_size - 1)
+            if ADMIN_ID:
+                query = query.neq("user_id", ADMIN_ID)
+            res = await query.execute()
+            batch = res.data or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
 
         by_day: Dict[str, set] = {}
         syria_tz = datetime.timezone(datetime.timedelta(hours=3))
