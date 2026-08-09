@@ -40,6 +40,11 @@ logger = get_logger(__name__)
 
 API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") if key.strip()]
 
+# AI-NOTE (memory-leak fix): هاد الفحص بيتنفّذ قبل كل عملية توليد كويز (على كل الملفات
+# والنصوص)، فكان إنشاء genai.Client() جديد بكل key بكل استدعاء (بدون إغلاقه) من أكبر
+# مصادر تسريب الذاكرة الفعلية لأنه على المسار الساخن. نفس الحل: عملاء ثابتين لمرة وحدة.
+_GEMINI_CLIENTS: List[genai.Client] = [genai.Client(api_key=key) for key in API_KEYS]
+
 # ملفات الصور المدعومة للفحص المباشر (بدون تحويل)
 _IMAGE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
@@ -64,9 +69,8 @@ async def _classify(contents: list) -> bool:
     """يرسل المحتوى (نص أو صورة) لنموذج الفحص السريع ويعيد True فقط لو أجاب بوضوح yes/نعم."""
     if not API_KEYS:
         return False
-    for key in API_KEYS:
+    for client in _GEMINI_CLIENTS:
         try:
-            client = genai.Client(api_key=key)
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
                     model=MATH_DETECTION_MODEL,
