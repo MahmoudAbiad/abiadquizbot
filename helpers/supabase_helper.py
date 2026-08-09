@@ -1068,15 +1068,17 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
 
 
 async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
-    """جلب الكويزات التي تم توليدها خلال الـ 24 ساعة الأخيرة حصراً مع معلومات الطالب والتوقيت المحلي."""
+    """جلب الكويزات التي تم توليدها اليوم فعلياً (اليوم التقويمي بتوقيت سوريا: من منتصف الليل حتى الآن)."""
     try:
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        twenty_four_hours_ago = (now_utc - datetime.timedelta(hours=24)).isoformat()
-        
-        # 1. جلب كويزات الـ 24 ساعة الأخيرة فقط (باستثناء الآدمن، أسوة ببقية دوال التحليلات)
+        syria_tz = datetime.timezone(datetime.timedelta(hours=3))
+        now_syria = datetime.datetime.now(syria_tz)
+        start_of_today_syria = now_syria.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_today_utc = start_of_today_syria.astimezone(datetime.timezone.utc).isoformat()
+
+        # 1. جلب كويزات اليوم الحالي فقط بتوقيت سوريا (باستثناء الآدمن، أسوة ببقية دوال التحليلات)
         query = supabase.table("quizzes") \
             .select("id, source_title, created_at, creator_id") \
-            .gte("created_at", twenty_four_hours_ago)
+            .gte("created_at", start_of_today_utc)
         if ADMIN_ID:
             query = query.neq("creator_id", ADMIN_ID)
         res = await query \
