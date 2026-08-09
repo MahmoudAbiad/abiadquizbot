@@ -2,10 +2,12 @@ import asyncio
 import io
 import csv
 import json
+from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest
 
+from constants import SYRIA_TZ
 from supabase_helper import (
     admin_get_usage_overview,
     admin_get_daily_active_users,
@@ -20,6 +22,17 @@ from .dashboard import IsAdminFilter
 
 logger = get_logger(__name__)
 router = Router()
+
+
+def format_syria_time(iso_str: str) -> str:
+    """تحويل توقيت قاعدة البيانات (UTC) إلى توقيت سوريا (UTC+3)."""
+    if not iso_str:
+        return "غير معروف"
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        return dt.astimezone(SYRIA_TZ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(iso_str)[:16].replace("T", " ")
 
 # 🔒 حماية أمنية للراوتر
 router.message.filter(IsAdminFilter())
@@ -150,7 +163,7 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
         for idx, q in enumerate(page_quizzes, start=start_idx + 1):
             quiz_id = q["id"]
             title = q.get("source_title") or "كويز بدون عنوان"
-            time_str = q.get("time_str") or str(q.get("created_at", ""))[:16].replace("T", " ")
+            time_str = q.get("time_str") or format_syria_time(q.get("created_at", ""))
             
             student = q.get("users") or {}
             user_id = q.get("creator_id") or student.get("user_id", "غير معروف")
@@ -276,7 +289,7 @@ async def show_user_activity(call: types.CallbackQuery):
         activity = await admin_get_user_activity(target_id)
 
         events_lines = "\n".join(
-            f"┣ {EVENT_LABELS.get(e['event_type'], e['event_type'])} — <code>{str(e['created_at'])[:16].replace('T', ' ')}</code>"
+            f"┣ {EVENT_LABELS.get(e['event_type'], e['event_type'])} — <code>{format_syria_time(e['created_at'])}</code>"
             for e in activity["recent_events"][:10]
         ) or "┣ لا يوجد نشاط مسجل بعد."
 
