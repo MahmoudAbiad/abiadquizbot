@@ -1,6 +1,6 @@
 from datetime import timedelta
 import os
-from datetime import timezone, timedelta
+from datetime import timezone, timedelta, datetime
 # ==================== File,Photo, Text Size Limits ====================
 MAX_DOC_SIZE = 20 * 1024 * 1024  # 20MB
 MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
@@ -187,3 +187,52 @@ OFFICIAL_CHANNEL_URL = "https://t.me/abiadquizmaker"
 
 SYRIA_TZ = timezone(timedelta(hours=3))
 USER_QUIZZES_PAGE_SIZE = 5
+
+
+# ==================== تحويل التوقيت إلى توقيت سوريا (موحّد ومقاوم للأخطاء) ====================
+def to_syria_datetime(value):
+    """
+    تحويل أي قيمة تاريخ/وقت راجعة من قاعدة البيانات (UTC) إلى توقيت سوريا (UTC+3).
+    يتعامل مع أكتر من صيغة محتملة راجعة من Supabase/Postgres:
+      - نص فيه 'Z' بالنهاية
+      - نص فيه مسافة بدل 'T'
+      - نص بدون أي معلومة تاريخ (naive) — بيُعتبر UTC افتراضياً
+      - قيمة datetime جاهزة (مش نص) إذا رجعت هيك من العميل
+    بيرجع None إذا القيمة فاضية أو تعذّر تحليلها فعلياً (وبهالحالة بيسجّل الخطأ
+    بالـ log بدل ما يخفيه، حتى نقدر نكتشف أي صيغة غير متوقعة مستقبلاً).
+    """
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            s = str(value).strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            if "T" not in s and " " in s:
+                s = s.replace(" ", "T", 1)
+            dt = datetime.fromisoformat(s)
+
+        if dt.tzinfo is None:
+            # القيمة المخزّنة بقاعدة البيانات دائماً UTC، فإذا ما وصلنا معلومة
+            # منطقة زمنية معها، منفترضها UTC صراحةً بدل ما نترك بايثون يفترض
+            # التوقيت المحلي للسيرفر (يلي ممكن يعطي نتيجة غلط).
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(SYRIA_TZ)
+    except Exception as e:
+        try:
+            from logger import get_logger, log_error
+            log_error(get_logger(__name__), f"to_syria_datetime: failed to parse '{value}': {e}")
+        except Exception:
+            pass
+        return None
+
+
+def format_syria_time(value, fmt: str = "%Y-%m-%d %I:%M %p") -> str:
+    """تنسيق قيمة تاريخ/وقت بتوقيت سوريا بصيغة عربية (صباحاً/مساءً). بترجع 'غير معروف' لو تعذر التحويل."""
+    dt = to_syria_datetime(value)
+    if dt is None:
+        return "غير معروف"
+    return dt.strftime(fmt).replace("AM", "ص").replace("PM", "م")

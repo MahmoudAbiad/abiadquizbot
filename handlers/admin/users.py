@@ -5,7 +5,7 @@ import csv
 import json
 from typing import Optional, Dict
 from datetime import datetime, timezone, timedelta
-from constants import SYRIA_TZ, USER_QUIZZES_PAGE_SIZE
+from constants import SYRIA_TZ, USER_QUIZZES_PAGE_SIZE, format_syria_time as _format_syria_time
 from supabase_helper import admin_get_user_quizzes
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
@@ -485,14 +485,7 @@ async def export_all_users(call: types.CallbackQuery):
 
 def format_syria_time(iso_str: str) -> str:
     """تحويل توقيت قاعدة البيانات إلى توقيت سوريا (12 ساعة بتنسيق صباحاً/مساءً)."""
-    if not iso_str:
-        return "غير معروف"
-    try:
-        dt = datetime.fromisoformat(str(iso_str).replace('Z', '+00:00'))
-        dt_syria = dt.astimezone(SYRIA_TZ)
-        return dt_syria.strftime("%Y-%m-%d %I:%M %p").replace("AM", "ص").replace("PM", "م")
-    except Exception:
-        return str(iso_str)[:16].replace("T", " ")
+    return _format_syria_time(iso_str)
 
 
 @router.callback_query(F.data.startswith("admin_user_quizzes_"))
