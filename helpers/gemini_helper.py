@@ -62,6 +62,15 @@ API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") i
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 blocked_keys: Dict[int, datetime.datetime] = {}
 
+# AI-NOTE (memory-leak fix): سابقاً كان يتم إنشاء genai.Client()/AsyncGroq() جديد بكل
+# استدعاء توليد (أحياناً عدة مرات بنفس الطلب عبر مسارات fallback/Super PDF)، وهاد العميل
+# بيحمل جوّاه connection pool خاص فيه (httpx) ما بينسكر أبداً - وهاد كان سبب تسريب الذاكرة
+# التدريجي اللي أدى لـ Memory Exceeded على Render. الحل: عميل واحد ثابت (Singleton) لكل
+# مفتاح Gemini ولـ Groq، يتم إنشاؤه مرة وحدة عند تحميل الموديول ويُعاد استخدامه دائماً -
+# نفس نمط `bot`/`redis_client` بملف config.py.
+_GEMINI_CLIENTS: List[genai.Client] = [genai.Client(api_key=key) for key in API_KEYS]
+_GROQ_CLIENT: Optional[AsyncGroq] = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
 # AI-NOTE: كلمات مفتاحية لتحديد أخطاء الضغط والازدحام في سيرفرات Gemini
 OVERLOAD_ERROR_KEYWORDS = ["overloaded", "unavailable", "503", "internal error", "500"]
 OVERLOAD_RETRY_ATTEMPTS = 2
@@ -224,7 +233,7 @@ def _read_file_bytes_sync(path: str) -> bytes:
 # ==============================================================================
 async def _generate_with_key(paths: Sequence[str], prompt: str, key_index: int, model: str = GEMINI_PRIMARY_MODEL) -> tuple[List[Dict[str, Any]], int]:
     """توليد الأسئلة باستخدام مفتاح محدد مع معالجة إعادة المحاولة الذكية عند الازدحام."""
-    client = genai.Client(api_key=API_KEYS[key_index])
+    client = _GEMINI_CLIENTS[key_index]  # عميل ثابت مُعاد استخدامه (بدل إنشاء عميل جديد بكل نداء)
     uploaded = []
     try:
         contents: List[Any] = [prompt]
@@ -345,11 +354,11 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
 
 async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
     """المسار السريع لتوليد الكويز من النص الصريح فقط عبر Groq API."""
-    if not GROQ_API_KEY:
+    if not GROQ_API_KEY or not _GROQ_CLIENT:
         log_warning(logger, "GROQ_API_KEY is not configured; skipping straight to Gemini for text generation")
         return None
     try:
-        client = AsyncGroq(api_key=GROQ_API_KEY)
+        client = _GROQ_CLIENT  # عميل ثابت مُعاد استخدامه (بدل إنشاء عميل جديد بكل نداء)
         
         json_schema_instruction = f"""
 IMPORTANT: Respond in valid JSON structure matching this exact format:
@@ -395,7 +404,7 @@ async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Option
 
     async def _attempt(model: str) -> Optional[List[Dict[str, Any]]]:
         for key_index in key_order:
-            client = genai.Client(api_key=API_KEYS[key_index])
+            client = _GEMINI_CLIENTS[key_index]  # عميل ثابت مُعاد استخدامه (بدل إنشاء عميل جديد بكل نداء)
             for attempt in range(OVERLOAD_RETRY_ATTEMPTS + 1):
                 try:
                     response = await asyncio.wait_for(
