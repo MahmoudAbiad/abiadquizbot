@@ -14,6 +14,7 @@ from logger import get_logger, log_error, log_warning, log_info
 from constants import (
     WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS,
     DEFAULT_FAVORITE_SECTION_TITLE, MAX_FAVORITE_SECTIONS,
+    SYRIA_TZ, to_syria_datetime, format_syria_time,
 )
 from validators import validate_user_id, validate_points_amount
 
@@ -953,10 +954,11 @@ async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
             offset += page_size
 
         by_day: Dict[str, set] = {}
-        syria_tz = datetime.timezone(datetime.timedelta(hours=3))
         for r in rows:
-            raw_dt = datetime.datetime.fromisoformat(str(r["created_at"]).replace("Z", "+00:00"))
-            day = raw_dt.astimezone(syria_tz).strftime("%Y-%m-%d")
+            syria_dt = to_syria_datetime(r.get("created_at"))
+            if syria_dt is None:
+                continue
+            day = syria_dt.strftime("%Y-%m-%d")
             by_day.setdefault(day, set()).add(r["user_id"])
 
         return sorted(
@@ -1041,16 +1043,12 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
             .execute()
 
         users_map = {u["user_id"]: u for u in (users_res.data or [])}
-        syria_tz = datetime.timezone(datetime.timedelta(hours=3))
         active_list = []
 
         for uid, ev in latest_event_per_user.items():
             u_info = users_map.get(uid, {})
-            raw_dt = datetime.datetime.fromisoformat(str(ev["created_at"]).replace("Z", "+00:00"))
-            syria_dt = raw_dt.astimezone(syria_tz)
-            
-            formatted_time = syria_dt.strftime("%I:%M %p").replace("AM", "ص").replace("PM", "م")
-            formatted_date = syria_dt.strftime("%Y-%m-%d")
+            syria_dt = to_syria_datetime(ev.get("created_at"))
+            time_str = syria_dt.strftime("%I:%M %p (%Y-%m-%d)").replace("AM", "ص").replace("PM", "م") if syria_dt else "غير معروف"
 
             active_list.append({
                 "user_id": uid,
@@ -1058,7 +1056,7 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
                 "last_name": u_info.get("last_name", ""),
                 "username": u_info.get("username", "Unknown"),
                 "last_event": ev["event_type"],
-                "time_str": f"{formatted_time} ({formatted_date})"
+                "time_str": time_str
             })
 
         return active_list
@@ -1099,21 +1097,11 @@ async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
                 .execute()
             users_map = {u["user_id"]: u for u in (users_res.data or [])}
 
-        # 3. دمج البيانات وتحويل التوقيت إلى توقيت سوريا (UTC+3)
-        syria_tz = datetime.timezone(datetime.timedelta(hours=3))
+        # 3. دمج البيانات وتحويل التوقيت إلى توقيت سوريا (UTC+3) — بشكل موحّد ومقاوم للأخطاء
         for q in quizzes:
             cid = q.get("creator_id")
             q["users"] = users_map.get(cid, {})
-            
-            if q.get("created_at"):
-                try:
-                    raw_dt = datetime.datetime.fromisoformat(str(q["created_at"]).replace("Z", "+00:00"))
-                    syria_dt = raw_dt.astimezone(syria_tz)
-                    q["time_str"] = syria_dt.strftime("%I:%M %p (%Y-%m-%d)").replace("AM", "ص").replace("PM", "م")
-                except Exception:
-                    q["time_str"] = str(q["created_at"])[:16].replace("T", " ")
-            else:
-                q["time_str"] = "غير معروف"
+            q["time_str"] = format_syria_time(q.get("created_at"), fmt="%I:%M %p (%Y-%m-%d)")
 
         return quizzes
     except Exception as e:

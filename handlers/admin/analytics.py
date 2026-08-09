@@ -2,12 +2,11 @@ import asyncio
 import io
 import csv
 import json
-from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest
 
-from constants import SYRIA_TZ
+from constants import format_syria_time
 from supabase_helper import (
     admin_get_usage_overview,
     admin_get_daily_active_users,
@@ -23,20 +22,10 @@ from .dashboard import IsAdminFilter
 logger = get_logger(__name__)
 router = Router()
 
-
-def format_syria_time(iso_str: str) -> str:
-    """تحويل توقيت قاعدة البيانات (UTC) إلى توقيت سوريا (UTC+3)."""
-    if not iso_str:
-        return "غير معروف"
-    try:
-        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
-        return dt.astimezone(SYRIA_TZ).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return str(iso_str)[:16].replace("T", " ")
-
 # 🔒 حماية أمنية للراوتر
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
+
 
 QUIZZES_PAGE_SIZE = 4      # عدد الكويزات المعروضة في الصفحة الواحدة
 TODAY_USERS_PAGE_SIZE = 5  # عدد الطلاب النشطين المعروضين في الصفحة الواحدة
