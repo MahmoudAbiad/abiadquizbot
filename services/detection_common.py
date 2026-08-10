@@ -84,14 +84,22 @@ async def classify_yes_no(contents: list, *, caller: str = "detection") -> bool:
     """
     يرسل المحتوى (نص أو صورة) لنموذج الفحص السريع ويعيد True فقط لو أجاب بوضوح yes/نعم.
 
-    🩹 BUGFIX: كان `max_output_tokens=5` مضبوطاً مع `thinking_config` مفعّلاً بنفس الوقت.
-    بموديلات Gemini الحديثة، توكنات "التفكير" الداخلي (thinking tokens) تُحسب من نفس
-    ميزانية max_output_tokens - فحتى مع thinking_level="low"، الموديل كان يصرف الـ 5
-    توكنات كاملة على التفكير الداخلي ولا يتبقى له مجال ليكتب "yes"/"no" الفعلية. النتيجة:
-    `response.text` يرجع فارغاً بصمت (بدون Exception) وبيُفسَّر خطأً كـ "no" دائماً تقريباً،
-    أي الفحص كان يفشل بهدوء في أغلب الحالات دون أي أثر بالـ logs.
-    الحل: تعطيل التفكير كلياً (thinking_budget=0) بدل تخفيفه فقط - المهمة هنا تصنيف
-    ثنائي بسيط لا يحتاج أي تفكير أصلاً - مع رفع السقف كهامش أمان إضافي.
+    🩹 BUGFIX (محاولة أولى - ثبت خطؤها بالإنتاج): كان `max_output_tokens=5` مضبوطاً مع
+    `thinking_config` مفعّلاً بنفس الوقت. بموديلات Gemini الحديثة، توكنات "التفكير" الداخلي
+    (thinking tokens) تُحسب من نفس ميزانية max_output_tokens - فحتى مع thinking_level="low"،
+    الموديل كان يصرف الـ 5 توكنات كاملة على التفكير الداخلي ولا يتبقى له مجال ليكتب "yes"/"no"
+    الفعلية. النتيجة: `response.text` يرجع فارغاً بصمت (بدون Exception) وبيُفسَّر خطأً كـ "no"
+    دائماً تقريباً - أي الفحص كان يفشل بهدوء في أغلب الحالات دون أي أثر بالـ logs.
+
+    ⚠️ محاولة الإصلاح الأولى استخدمت `thinking_config=ThinkingConfig(thinking_budget=0)` بدل
+    `thinking_level`، لكن هذا الموديل تحديداً (MATH_DETECTION_MODEL) لا يدعم حقل thinking_budget
+    إطلاقاً - أي استخدام له يُرجع `400 INVALID_ARGUMENT` فوراً من الـ API (كما ظهر بلوجات
+    الإنتاج)، أي كان بيفشل تماماً بدل ما يرجع فاضي بصمت مثل قبل. الموديل يدعم فقط
+    `thinking_level` (enum منفصل عن thinking_budget وليس بديلاً متوافقاً معه بكل الموديلات).
+
+    الحل الفعلي: الإبقاء على `thinking_level="low"` (الحقل المُثبَت أنه مدعوم فعلياً لهذا
+    الموديل) مع رفع `max_output_tokens` بشكل كافٍ (لا 5 ولا حتى 20) بحيث يبقى مجال كتابة
+    للجواب الفعلي بعد ما يُستهلك جزء من الميزانية على التفكير الداخلي، مهما كان صغيراً.
     """
     if not API_KEYS:
         return False
@@ -102,8 +110,8 @@ async def classify_yes_no(contents: list, *, caller: str = "detection") -> bool:
                     model=MATH_DETECTION_MODEL,
                     contents=contents,
                     config=types.GenerateContentConfig(
-                        max_output_tokens=20,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        max_output_tokens=200,
+                        thinking_config=types.ThinkingConfig(thinking_level="low"),
                     ),
                 ),
                 timeout=MATH_DETECTION_TIMEOUT,
