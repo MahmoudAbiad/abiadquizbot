@@ -1,5 +1,8 @@
 from aiogram import types
-from constants import OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL, BTN_CANCEL_REQUEST
+from constants import (
+    OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL, BTN_CANCEL_REQUEST,
+    BTN_TRANSLATE_YES, BTN_TRANSLATE_NO,
+)
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
 
@@ -89,6 +92,15 @@ def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineK
     suggestions = suggestions or [5, 10, 15, 20]
     row = [types.InlineKeyboardButton(text=f"{n}", callback_data=f"qcount_{n}") for n in suggestions]
     kb = [row, [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_translation_choice_keyboard() -> types.InlineKeyboardMarkup:
+    """🆕 لوحة اختيار نمط الأسئلة عند اكتشاف محتوى إنجليزي: مترجمة للعربية أو إنجليزية فقط."""
+    kb = [
+        [types.InlineKeyboardButton(text=BTN_TRANSLATE_YES, callback_data="translate_choice_yes")],
+        [types.InlineKeyboardButton(text=BTN_TRANSLATE_NO, callback_data="translate_choice_no")],
+        [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
+    ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_cancel_upload_keyboard() -> types.InlineKeyboardMarkup:

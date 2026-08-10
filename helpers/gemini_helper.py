@@ -45,6 +45,8 @@ from constants import (
     QUOTA_ERROR_KEYWORDS,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
     SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS,
+    SYSTEM_PROMPT_GENERATE_ENGLISH_PLAIN_QUESTIONS,
+    SYSTEM_PROMPT_GENERATE_ENGLISH_TRANSLATED_QUESTIONS,
     MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
 )
 from logger import get_logger, log_error, log_info, log_warning
@@ -352,24 +354,40 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
             safe_file_cleanup(chunk_path)
 
 
-async def _generate_text_quiz(pure_text: str, prompt: str) -> Optional[List[Dict[str, Any]]]:
-    """المسار السريع لتوليد الكويز من النص الصريح فقط عبر Groq API."""
+async def _generate_text_quiz(pure_text: str, prompt: str, english_mode: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    """المسار السريع لتوليد الكويز من النص الصريح فقط عبر Groq API.
+
+    english_mode: عندما لا تكون None، تُستبدل القيم العربية التوضيحية داخل مثال بنية الـ JSON
+    بقيم إنجليزية محايدة - لأن ترك مثال عربي هنا كان يدفع النموذج للانحياز نحو الإخراج
+    العربي حتى لو طلب الموجّه الرئيسي (prompt) إخراجاً إنجليزياً صراحة.
+    """
     if not GROQ_API_KEY or not _GROQ_CLIENT:
         log_warning(logger, "GROQ_API_KEY is not configured; skipping straight to Gemini for text generation")
         return None
     try:
         client = _GROQ_CLIENT  # عميل ثابت مُعاد استخدامه (بدل إنشاء عميل جديد بكل نداء)
-        
+
+        if english_mode:
+            example_question = "Question text (Question text (الترجمة) if translated)"
+            example_options = '["Option 1", "Option 2", "Option 3", "Option 4"]'
+            example_hint = "Hint text"
+            example_explanation = "Explanation text"
+        else:
+            example_question = "نص السؤال"
+            example_options = '["خيار 1", "خيار 2", "خيار 3", "خيار 4"]'
+            example_hint = "تلميح للمساعدة"
+            example_explanation = "شرح الإجابة الصحيحة"
+
         json_schema_instruction = f"""
 IMPORTANT: Respond in valid JSON structure matching this exact format:
 {{
   "questions": [
     {{
-      "question": "نص السؤال",
-      "options": ["خيار 1", "خيار 2", "خيار 3", "خيار 4"],
+      "question": "{example_question}",
+      "options": {example_options},
       "correct_option_id": 0,
-      "hint": "تلميح للمساعدة",
-      "explanation": "شرح الإجابة الصحيحة"
+      "hint": "{example_hint}",
+      "explanation": "{example_explanation}"
     }}
   ]
 }}
@@ -449,6 +467,7 @@ async def generate_quiz_smart(
     status_message: Optional[Any] = None,
     previous_questions: Optional[List[Dict[str, Any]]] = None,
     is_math_mode: bool = False,
+    english_mode: Optional[str] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
@@ -456,13 +475,24 @@ async def generate_quiz_smart(
 
     is_math_mode: عندما تكون True (بعد اكتشاف محتوى رياضي عبر services.math_detector)،
     يُستبدل موجّه التوليد بنسخة LaTeX المخصصة لـ"نمط الكويز المصوّر" بدل الموجّه العادي.
+
+    english_mode: 🆕 عندما يكون "translated" أو "plain" (بعد اكتشاف محتوى إنجليزي واختيار
+    الطالب عبر handlers/files.py)، يُستبدل موجّه التوليد بالنسخة الإنجليزية المناسبة. يُتجاهل
+    كلياً إذا كان is_math_mode=True (الأولوية دائماً لنمط الكويز المصوّر الرياضي).
     """
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
     
     try:
-        # 🆕 اختيار الموجّه المناسب: نسخة LaTeX للأسئلة الرياضية، أو النسخة القياسية لغيرها
-        source_prompt = SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS if is_math_mode else SYSTEM_PROMPT_GENERATE_QUESTIONS
+        # 🆕 اختيار الموجّه المناسب حسب الأولوية: رياضي (LaTeX) > إنجليزي (مترجم/عادي) > قياسي
+        if is_math_mode:
+            source_prompt = SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS
+        elif english_mode == "translated":
+            source_prompt = SYSTEM_PROMPT_GENERATE_ENGLISH_TRANSLATED_QUESTIONS
+        elif english_mode == "plain":
+            source_prompt = SYSTEM_PROMPT_GENERATE_ENGLISH_PLAIN_QUESTIONS
+        else:
+            source_prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS
         # IMPORTANT: استبدال {option_count} أولاً لضمان وصول العدد الصحيح للخيارات لكافة النماذج
         base_prompt_template = source_prompt.replace("{option_count}", str(OPTION_COUNT))
         
@@ -475,7 +505,7 @@ async def generate_quiz_smart(
         
         # 1. مسار النصوص الصريحة
         if pure_text:
-            questions = await _generate_text_quiz(pure_text, prompt)
+            questions = await _generate_text_quiz(pure_text, prompt, english_mode=english_mode if not is_math_mode else None)
             if not questions:
                 questions = await _generate_text_quiz_with_gemini(pure_text, prompt)
             return questions
