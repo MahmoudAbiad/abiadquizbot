@@ -33,7 +33,7 @@ from validators import validate_file_size, validate_question_count
 
 # استيراد الخدمات الجديدة
 from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
-from services.math_detector import detect_english_content
+from services.english_detector import detect_english_content
 from services.quiz_service import (
     determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow
 )
