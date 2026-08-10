@@ -97,9 +97,18 @@ async def classify_yes_no(contents: list, *, caller: str = "detection") -> bool:
     الإنتاج)، أي كان بيفشل تماماً بدل ما يرجع فاضي بصمت مثل قبل. الموديل يدعم فقط
     `thinking_level` (enum منفصل عن thinking_budget وليس بديلاً متوافقاً معه بكل الموديلات).
 
-    الحل الفعلي: الإبقاء على `thinking_level="low"` (الحقل المُثبَت أنه مدعوم فعلياً لهذا
-    الموديل) مع رفع `max_output_tokens` بشكل كافٍ (لا 5 ولا حتى 20) بحيث يبقى مجال كتابة
-    للجواب الفعلي بعد ما يُستهلك جزء من الميزانية على التفكير الداخلي، مهما كان صغيراً.
+    🩹 BUGFIX (محاولة ثالثة - ثبت خطؤها بالإنتاج أيضاً): رفع `max_output_tokens` إلى 200 مع
+    الإبقاء على `thinking_config=ThinkingConfig(thinking_level="low")` بنفس الوقت كان لا يزال
+    يُرجع `400 INVALID_ARGUMENT` من الـ API مع هذا الموديل تحديداً (MATH_DETECTION_MODEL)، كما
+    ظهر بلوجات الإنتاج - أي تحديد `max_output_tokens` صراحةً (بأي قيمة صغيرة نسبياً) مع تفعيل
+    `thinking_config` سوا هو ما يكسر الطلب، وليس القيمة 200 بالتحديد.
+
+    الدليل: نفس الموديل ونفس `thinking_config=ThinkingConfig(thinking_level="low")` مستخدمين
+    أيضاً بـ helpers/gemini_helper.py (المسار الاحتياطي لتوليد الأسئلة من نص) لكن *بدون* تحديد
+    `max_output_tokens` إطلاقاً - وهذا الاستدعاء لم يُخفق أي مرة بكل اللوجات.
+
+    الحل الفعلي: حذف `max_output_tokens` كلياً وترك الموديل يستخدم حده الافتراضي (تماماً كالمسار
+    الآخر المثبت أنه يعمل)، مع الإبقاء فقط على `thinking_level="low"`.
     """
     if not API_KEYS:
         return False
@@ -110,7 +119,6 @@ async def classify_yes_no(contents: list, *, caller: str = "detection") -> bool:
                     model=MATH_DETECTION_MODEL,
                     contents=contents,
                     config=types.GenerateContentConfig(
-                        max_output_tokens=200,
                         thinking_config=types.ThinkingConfig(thinking_level="low"),
                     ),
                 ),
