@@ -930,36 +930,39 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
 
 
 async def admin_get_daily_active_users(days: int = 14) -> List[Dict[str, Any]]:
-    """عدد المستخدمين النشطين يومياً (استبعاد الآدمن)."""
-    try:
-        since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
+    """عدد المستخدمين النشطين يومياً (استبعاد الآدمن).
 
-        # ⚠️ Supabase/PostgREST بترجع 1000 صف كحد أقصى بالاستعلام الواحد.
-        # لازم نجيب كل الصفوف على دفعات (pagination) وإلا الأيام الأحدث
-        # ممكن ما توصل أصلاً إذا عدد الأحداث بالفترة تجاوز الحد الأقصى.
-        rows: List[Dict[str, Any]] = []
-        page_size = 1000
-        offset = 0
-        while True:
-            query = supabase.table("usage_events").select("user_id, created_at") \
-                .gte("created_at", since).order("created_at", desc=False) \
-                .range(offset, offset + page_size - 1)
-            if ADMIN_ID:
-                query = query.neq("user_id", ADMIN_ID)
-            res = await query.execute()
-            batch = res.data or []
-            rows.extend(batch)
-            if len(batch) < page_size:
-                break
-            offset += page_size
+    ⚡ بيستعلم مباشرة من الـ View الجاهز `daily_active_users` (توقيت سوريا مطبّق مسبقاً
+    داخل الـ View نفسه على مستوى قاعدة البيانات)، بدل جلب كل صفوف usage_events الخام على
+    دفعات (pagination) وإعادة حساب اليوم/التجميع يدوياً في بايثون كما كان سابقاً. الـ View
+    بيرجع صف واحد لكل (يوم، مستخدم نشط) بعد الدمج، فحجم البيانات المنقولة أصغر بكثير ولا
+    داعي لأي pagination عملياً ضمن نطاق الأيام المطلوب.
+
+    تعريف الـ View المتوقّع بقاعدة البيانات (Postgres):
+        CREATE OR REPLACE VIEW daily_active_users AS
+        SELECT
+            ((created_at AT TIME ZONE 'UTC') + INTERVAL '3 hours')::date AS day,
+            user_id
+        FROM usage_events
+        GROUP BY day, user_id;
+    """
+    try:
+        since_day = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+        ).strftime("%Y-%m-%d")
+
+        query = supabase.table("daily_active_users").select("day, user_id").gte("day", since_day)
+        if ADMIN_ID:
+            query = query.neq("user_id", ADMIN_ID)
+        res = await query.execute()
+        rows = res.data or []
 
         by_day: Dict[str, set] = {}
         for r in rows:
-            syria_dt = to_syria_datetime(r.get("created_at"))
-            if syria_dt is None:
+            day = r.get("day")
+            if not day:
                 continue
-            day = syria_dt.strftime("%Y-%m-%d")
-            by_day.setdefault(day, set()).add(r["user_id"])
+            by_day.setdefault(str(day), set()).add(r["user_id"])
 
         return sorted(
             [{"day": d, "active_users": len(u)} for d, u in by_day.items()],
