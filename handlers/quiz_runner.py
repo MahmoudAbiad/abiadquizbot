@@ -18,6 +18,7 @@ from keyboards import (
     get_rating_keyboard
 )
 from logger import get_logger, log_error, log_info, log_warning
+from services.math_text import format_hint
 from supabase_helper import (
     list_favorite_quizzes,
     update_user_stats,
@@ -229,12 +230,26 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
         q = data['questions'][data['current_index']]
         hint_text = q['hint']
         if q.get("is_math"):
-            # التلميح يُعرض داخل تنبيه Telegram عادي لا يدعم LaTeX، لذا نجرّد
-            # علامات $ فقط لعرض النص بشكل مقروء بدل رموز LaTeX خام
-            hint_text = hint_text.replace("$", "")
+            # نحوّل صيغ LaTeX-lite لرموز نصية عادية (√ ² ± × ...) بدون أي رسم —
+            # صفر حمل إضافي على السيرفر، وقراءة فورية على أي كيبورد/هاتف.
+            hint_text, as_alert = format_hint(hint_text)
+        else:
+            as_alert = len(hint_text) <= 180 and "\n" not in hint_text
+
         # 🩹 UX: show_alert=True لأن التلميح نص يحتاج وقتاً ليُقرأ؛ الإشعار الخاطف
         # (toast) كان يختفي خلال ثانية أو ثانيتين قبل أن يتمكن الطالب من قراءته كاملاً.
-        await call.answer(f"💡 تلميح ذكي:\n{hint_text}", show_alert=True)
+        if as_alert:
+            await call.answer(f"💡 تلميح ذكي:\n{hint_text}", show_alert=True)
+        else:
+            # تلميح طويل أو متعدد الأسطر (غالباً فيه محاذاة، زي مصفوفة نصية) —
+            # الـ alert بيقصّه ومش Monospace، فبنرسله كرسالة عادية بخط ثابت
+            # يحافظ على المحاذاة، ونقفل مؤشر التحميل بصمت.
+            await call.answer()
+            await bot.send_message(
+                call.message.chat.id,
+                f"💡 <b>تلميح ذكي:</b>\n<code>{hint_text}</code>",
+                parse_mode="HTML",
+            )
     except Exception as e:
         log_error(logger, f"Error in handle_hint: {e}", exception=e)
         await call.answer("❌ خطأ في جلب التلميح", show_alert=True)
