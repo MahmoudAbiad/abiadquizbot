@@ -101,11 +101,17 @@ async def execute_quiz_generation_workflow(
         pure_text = data.get("pure_text")
 
         # 1. معالجة مستندات أوفيس
+        # 🆕 إذا كان النص قد استُخرج مسبقاً في handlers/files.py (أثناء الفحص اللغوي المبكر
+        # قبل شاشة عدد الأسئلة)، نعيد استخدامه مباشرة بدل استخراجه من جديد من نفس الملف.
+        cached_office_text = data.get("cached_office_text")
         if is_media and file_paths:
             first_path = file_paths[0]
-            extracted_text, is_valid = await extract_office_text_if_needed(first_path)
             ext = os.path.splitext(first_path)[1].lower()
             if ext in [".docx", ".doc", ".pptx", ".ppt", ".txt"]:
+                if cached_office_text:
+                    extracted_text, is_valid = cached_office_text, True
+                else:
+                    extracted_text, is_valid = await extract_office_text_if_needed(first_path)
                 if is_valid and extracted_text:
                     pure_text = extracted_text
                     is_media = False
@@ -134,6 +140,12 @@ async def execute_quiz_generation_workflow(
             log_error(logger, f"Math content detection failed, continuing with standard mode: {exc}")
             is_math_mode = False
 
+        # 2.6 نمط الترجمة (اختيار الطالب "مترجمة/بدون ترجمة" عند اكتشاف محتوى إنجليزي فور
+        #     الاستقبال في handlers/files.py، محفوظ مسبقاً بحالة الـ FSM). يُتجاهل إذا كان
+        #     المحتوى رياضياً (is_math_mode) لأن نمط الكويز المصوّر LaTeX له موجّه خاص به
+        #     منفصل تماماً ولا يدعم الترجمة المزدوجة داخل نفس الحقل.
+        english_mode = None if is_math_mode else data.get("english_mode")
+
         # 3. استدعى محرك AI
         quiz_data = await generate_quiz_smart(
             file_paths=file_paths if is_media else None,
@@ -144,6 +156,7 @@ async def execute_quiz_generation_workflow(
             status_message=status_message,
             previous_questions=previous_questions if previous_questions else None,
             is_math_mode=is_math_mode,
+            english_mode=english_mode,
         )
 
         if not quiz_data:

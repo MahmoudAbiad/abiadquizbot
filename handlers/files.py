@@ -15,11 +15,15 @@ from constants import (
     MAX_ALBUM_IMAGES, MAX_SUPER_PAGES, MAX_TEXT_INPUT_SIZE, MSG_NOTHING_TO_CANCEL,
     MSG_PREVIOUS_REQUEST_REPLACED, MSG_PROCESSING, MSG_REQUEST_CANCELLED,
     MSG_SUPER_PROCESSING_ALERT, SUCCESS_MEDIA_RECEIVED, PAGES_PER_QUIZ_RATIO,
-    MAX_FILE_QUIZZES_LIMIT, MIN_QUIZZES_PER_FILE, MSG_MAX_QUIZZES_REACHED
+    MAX_FILE_QUIZZES_LIMIT, MIN_QUIZZES_PER_FILE, MSG_MAX_QUIZZES_REACHED,
+    MSG_ENGLISH_CONTENT_DETECTED
 )
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
-from keyboards import get_generation_confirm_keyboard, get_multiple_quizzes_keyboard, get_question_count_quick_keyboard
+from keyboards import (
+    get_generation_confirm_keyboard, get_multiple_quizzes_keyboard, get_question_count_quick_keyboard,
+    get_translation_choice_keyboard
+)
 from logger import get_logger, log_error
 from supabase_helper import (
     check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped
@@ -28,7 +32,8 @@ from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanu
 from validators import validate_file_size, validate_question_count
 
 # استيراد الخدمات الجديدة
-from services.file_service import compute_combined_hash, download_photos_service
+from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
+from services.math_detector import detect_english_content
 from services.quiz_service import (
     determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow
 )
@@ -42,7 +47,8 @@ processing_users: set[int] = set()
 PENDING_REQUEST_STATES = (
     QuizState.waiting_for_count, 
     QuizState.waiting_for_cache_decision, 
-    QuizState.waiting_for_generation_confirm
+    QuizState.waiting_for_generation_confirm,
+    QuizState.waiting_for_translation_choice,
 )
 
 def _cancel_keyboard() -> types.InlineKeyboardMarkup:
@@ -119,6 +125,56 @@ async def process_album_background(message: types.Message, state: FSMContext):
         log_error(logger, f"Album background processing failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
+async def _ask_question_count(reply_target: types.Message, state: FSMContext, count_prompt_text: str, edit: bool = False) -> None:
+    """
+    🆕 نقطة موحّدة لعرض شاشة "كم سؤالاً تريد؟" - تُستدعى من ثلاث نقاط دخول مختلفة
+    (استقبال وسائط جديدة، استقبال نص مباشر، أو رفض الكاش واختيار توليد كويز جديد).
+    قبل عرضها، تُجري فحصاً سريعاً وخفيفاً (نفس آلية فحص الرياضيات) لتحديد هل المحتوى
+    مكتوب أساساً بالإنجليزية؛ إن كان كذلك تُعرض شاشة اختيار "مترجمة/بدون ترجمة" أولاً
+    (تتطلب تفاعل الطالب عبر كيبورد قبل عرض شاشة عدد الأسئلة)، وإلا يُكمل التدفق كالمعتاد
+    مع نص الرسالة (count_prompt_text) الخاص بنقطة الدخول المستدعية.
+    """
+    data = await state.get_data()
+    is_media = data.get("input_type") == "media"
+    file_paths = data.get("file_paths", []) or []
+    pure_text = data.get("pure_text")
+
+    # 🆕 مستندات الأوفيس (.docx/.pptx/.txt) بحاجة استخراج نص أولاً قبل أي فحص لغوي، لأن
+    # detect_english_content يفحص فقط PDF/صور مباشرة أو نصاً صريحاً - وليس ملفات أوفيس خام.
+    # نستخرج النص هنا مبكراً (عملية محلية خفيفة، بلا أي استدعاء AI) ونخزّنه بحالة الـ FSM
+    # ليُعاد استخدامه لاحقاً في services/quiz_service.py بدل إعادة استخراجه من الصفر.
+    detection_text, detection_paths = pure_text, (file_paths if is_media else None)
+    if is_media and file_paths:
+        ext = os.path.splitext(file_paths[0])[1].lower()
+        if ext in [".docx", ".doc", ".pptx", ".ppt", ".txt"]:
+            extracted_text, is_valid = await extract_office_text_if_needed(file_paths[0])
+            if is_valid and extracted_text:
+                await state.update_data(cached_office_text=extracted_text)
+                detection_text, detection_paths = extracted_text, None
+            else:
+                detection_text, detection_paths = None, None  # سيُعاد اكتشاف الخطأ لاحقاً كالمعتاد أثناء التوليد
+
+    try:
+        is_english = await detect_english_content(detection_paths, detection_text)
+    except Exception as exc:
+        log_error(logger, f"English content detection failed, continuing with standard mode: {exc}")
+        is_english = False
+
+    if is_english:
+        await state.set_state(QuizState.waiting_for_translation_choice)
+        if edit:
+            await reply_target.edit_text(MSG_ENGLISH_CONTENT_DETECTED, parse_mode="HTML", reply_markup=get_translation_choice_keyboard())
+        else:
+            await reply_target.answer(MSG_ENGLISH_CONTENT_DETECTED, parse_mode="HTML", reply_markup=get_translation_choice_keyboard())
+        return
+
+    await state.update_data(english_mode=None)
+    await state.set_state(QuizState.waiting_for_count)
+    if edit:
+        await reply_target.edit_text(count_prompt_text, reply_markup=get_question_count_quick_keyboard())
+    else:
+        await reply_target.answer(count_prompt_text, reply_markup=get_question_count_quick_keyboard())
+
 async def _finalize_media_processing(message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int, is_album: bool, file_hash: str):
     try:
         content_type = "album" if is_album else ("photo" if len(file_paths) == 1 and file_paths[0].lower().endswith((".jpg", ".jpeg", ".png")) else "document")
@@ -147,8 +203,7 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
             return
 
         await state.update_data(**common_state)
-        await state.set_state(QuizState.waiting_for_count)
-        await message.answer(SUCCESS_MEDIA_RECEIVED, reply_markup=get_question_count_quick_keyboard())
+        await _ask_question_count(message, state, SUCCESS_MEDIA_RECEIVED)
     except Exception as exc:
         for path in file_paths: safe_file_cleanup(path)
         log_error(logger, f"Finalize media failed: {exc}", exception=exc)
@@ -242,11 +297,44 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     }))
 
     await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
-    await state.set_state(QuizState.waiting_for_count)
-    await message.answer(
-        "✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
-        reply_markup=get_question_count_quick_keyboard()
+    await _ask_question_count(
+        message, state,
+        "✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة."
     )
+
+# ==================== 🆕 معالجات اختيار "مترجمة/بدون ترجمة" للمحتوى الإنجليزي ====================
+
+async def _apply_translation_choice(reply_target: types.Message, state: FSMContext, english_mode: str, edit: bool) -> None:
+    """يحفظ اختيار الطالب (مترجمة/بدون ترجمة) في الحالة، ثم ينتقل مباشرة لشاشة عدد الأسئلة."""
+    await state.update_data(english_mode=english_mode)
+    await state.set_state(QuizState.waiting_for_count)
+    text = "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة."
+    if edit:
+        await reply_target.edit_text(text, reply_markup=get_question_count_quick_keyboard())
+    else:
+        await reply_target.answer(text, reply_markup=get_question_count_quick_keyboard())
+
+@router.callback_query(QuizState.waiting_for_translation_choice, F.data == "translate_choice_yes")
+async def handle_translate_choice_yes(call: types.CallbackQuery, state: FSMContext) -> None:
+    """الطالب اختار الأسئلة مترجمة (إنجليزي + عربي)"""
+    try:
+        await _apply_translation_choice(call.message, state, "translated", edit=True)
+    except Exception as exc:
+        log_error(logger, f"Translation choice (yes) failed: {exc}", exception=exc)
+        await call.message.answer("❌ تعذر تنفيذ الاختيار، حاول مجدداً.", reply_markup=get_translation_choice_keyboard())
+    finally:
+        await call.answer()
+
+@router.callback_query(QuizState.waiting_for_translation_choice, F.data == "translate_choice_no")
+async def handle_translate_choice_no(call: types.CallbackQuery, state: FSMContext) -> None:
+    """الطالب اختار الأسئلة إنجليزية فقط بدون ترجمة"""
+    try:
+        await _apply_translation_choice(call.message, state, "plain", edit=True)
+    except Exception as exc:
+        log_error(logger, f"Translation choice (no) failed: {exc}", exception=exc)
+        await call.message.answer("❌ تعذر تنفيذ الاختيار، حاول مجدداً.", reply_markup=get_translation_choice_keyboard())
+    finally:
+        await call.answer()
 
 # ==================== معالجات قرار الكاش والأزرار المتعددة ====================
 
@@ -293,10 +381,10 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
     """في حال رفض الكاش ورغبة الطالب بتوليد كويز جديد كلياً"""
-    await state.set_state(QuizState.waiting_for_count)
-    await call.message.edit_text(
+    await _ask_question_count(
+        call.message, state,
         "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
-        reply_markup=get_question_count_quick_keyboard()
+        edit=True
     )
     await call.answer()
 

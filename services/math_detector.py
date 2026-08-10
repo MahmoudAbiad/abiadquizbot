@@ -34,6 +34,8 @@ from constants import (
     MATH_DETECTION_TIMEOUT,
     SYSTEM_PROMPT_DETECT_MATH_TEXT,
     SYSTEM_PROMPT_DETECT_MATH_VISUAL,
+    SYSTEM_PROMPT_DETECT_ENGLISH_TEXT,
+    SYSTEM_PROMPT_DETECT_ENGLISH_VISUAL,
 )
 from logger import get_logger, log_warning
 
@@ -161,4 +163,61 @@ async def detect_math_content(file_paths: Optional[List[str]], pure_text: Option
             return await detect_math_in_file(file_paths[0])
     except Exception as exc:
         log_warning(logger, f"Unexpected error during math content detection, defaulting to standard mode: {exc}")
+    return False
+
+
+# 🆕 ==================== English Content Detection (اقتراح ترجمة الأسئلة) ====================
+# نفس آلية/عيّنة فحص الرياضيات أعلاه بالضبط (نموذج خفيف، عينة واحدة فقط)، لكن بغرض مختلف:
+# هذا الفحص يُستدعى من handlers/files.py مباشرة بعد استقبال المحتوى (قبل شاشة عدد الأسئلة)
+# لأن قراره - عرض خيار "مترجمة/بدون ترجمة" - يتطلب تفاعل الطالب عبر كيبورد، على عكس فحص
+# الرياضيات الذي يبقى صامتاً ويُنفّذ لاحقاً أثناء التوليد الفعلي.
+
+async def detect_english_in_text(pure_text: str) -> bool:
+    """فحص عينة من نص مباشر (أو نص مُستخرج من مستند أوفيس) بحثاً عن محتوى إنجليزي أساسي."""
+    if not pure_text or not pure_text.strip():
+        return False
+    sample = _build_text_sample(pure_text)
+    prompt = f"{SYSTEM_PROMPT_DETECT_ENGLISH_TEXT}{sample}"
+    return await _classify([prompt])
+
+
+async def detect_english_in_file(file_path: str) -> bool:
+    """فحص أول صفحة (PDF) أو الصورة نفسها (صورة مباشرة) بحثاً عن محتوى إنجليزي أساسي."""
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".pdf":
+        image_bytes = await asyncio.to_thread(_first_page_png_bytes_sync, file_path)
+        if not image_bytes:
+            return False
+        mime_type = "image/png"
+    elif ext in _IMAGE_EXTENSIONS:
+        try:
+            with open(file_path, "rb") as f:
+                image_bytes = f.read()
+        except Exception as exc:
+            log_warning(logger, f"Could not read image for English detection: {exc}")
+            return False
+        mime_type = _IMAGE_EXTENSIONS[ext]
+    else:
+        # مستندات أوفيس (.docx/.pptx/.txt) تُفحص كنص بعد الاستخراج، وليس هنا مباشرة
+        return False
+
+    part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+    return await _classify([SYSTEM_PROMPT_DETECT_ENGLISH_VISUAL, part])
+
+
+async def detect_english_content(file_paths: Optional[List[str]], pure_text: Optional[str]) -> bool:
+    """
+    نقطة الدخول الموحّدة التي تستدعيها handlers/files.py فور استقبال المحتوى (ملف/صورة/نص)
+    وقبل عرض شاشة عدد الأسئلة: تفحص فقط أول عنصر (أول صفحة/صورة، أو عينة نصية) لتقرير
+    عرض خيار "أسئلة مترجمة أم إنجليزية فقط" على الطالب. أي خطأ غير متوقع يُعتبر تلقائياً
+    "المحتوى ليس إنجليزياً" (فشل آمن) بدل تعطيل تدفق الاستقبال بأكمله.
+    """
+    try:
+        if pure_text:
+            return await detect_english_in_text(pure_text)
+        if file_paths:
+            return await detect_english_in_file(file_paths[0])
+    except Exception as exc:
+        log_warning(logger, f"Unexpected error during English content detection, defaulting to standard mode: {exc}")
     return False
