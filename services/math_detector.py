@@ -20,6 +20,7 @@ MODULE: Math Content Detector (نمط الكويز المصوّر - Image Quiz M
 """
 
 import asyncio
+import gc
 import os
 from typing import List, Optional
 
@@ -102,6 +103,11 @@ def _first_page_png_bytes_sync(file_path: str) -> Optional[bytes]:
             return pixmap.tobytes("png")
         finally:
             doc.close()
+            # AI-NOTE (memory-leak fix): PyMuPDF بيحتفظ بمراجع دورية (cyclic refs) داخلية
+            # لبعض الكائنات (Document/Page/Pixmap) ما بينضفّها الـ refcounting العادي فوراً
+            # حتى بعد doc.close(). بما إن هاد المسار بينفّذ على كل ملف PDF يوصل للبوت،
+            # gc.collect() فوري بعد الإغلاق بيمنع تراكم هاد الكائنات بالذاكرة مع الوقت.
+            gc.collect()
     except Exception as exc:
         log_warning(logger, f"Could not rasterize first PDF page for math detection: {exc}")
         return None

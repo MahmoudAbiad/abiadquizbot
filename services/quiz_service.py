@@ -18,6 +18,12 @@ from supabase_helper import (
 
 logger = get_logger(__name__)
 
+# AI-NOTE (memory/CPU guard): كل استدعاء لهذا التدفق قد يشمل استخراج نص من مستند أوفيس،
+# تحويل صفحة PDF لصورة (PyMuPDF)، واستدعاءات Gemini الثقيلة. بدون سقف تزامن، عدة طلبات
+# ملفات كبيرة بنفس اللحظة ممكن تستهلك الذاكرة/CPU بشكل تراكمي وتُبطئ كل الطلبات المتزامنة.
+# Semaphore(2) يحصر معالجة الملفات الثقيلة بحد أقصى عمليتين متزامنتين فقط.
+_HEAVY_PROCESSING_SEMAPHORE = asyncio.Semaphore(2)
+
 def determine_execution_mode(items: int, questions: int, cached: bool = False) -> str:
     """تحديد وضع التنفيذ (عادي، متقدم، أو كاش)"""
     if cached: return "Cached"
@@ -88,89 +94,90 @@ async def execute_quiz_generation_workflow(
     التدفق التنفيذي المركزي لتوليد الكويز:
     يستخرج النص، يجلب الكويزات السابقة لمنع التكرار، يستدعي الذكاء الاصطناعي، ويحفظ في الكاش.
     """
-    is_media = data.get("input_type") == "media"
-    file_hash = data.get("file_hash")
-    file_paths = data.get("file_paths", []) or []
-    pure_text = data.get("pure_text")
+    async with _HEAVY_PROCESSING_SEMAPHORE:
+        is_media = data.get("input_type") == "media"
+        file_hash = data.get("file_hash")
+        file_paths = data.get("file_paths", []) or []
+        pure_text = data.get("pure_text")
 
-    # 1. معالجة مستندات أوفيس
-    if is_media and file_paths:
-        first_path = file_paths[0]
-        extracted_text, is_valid = await extract_office_text_if_needed(first_path)
-        ext = os.path.splitext(first_path)[1].lower()
-        if ext in [".docx", ".doc", ".pptx", ".ppt", ".txt"]:
-            if is_valid and extracted_text:
-                pure_text = extracted_text
-                is_media = False
-            else:
-                return None, None, "unreadable_office"
+        # 1. معالجة مستندات أوفيس
+        if is_media and file_paths:
+            first_path = file_paths[0]
+            extracted_text, is_valid = await extract_office_text_if_needed(first_path)
+            ext = os.path.splitext(first_path)[1].lower()
+            if ext in [".docx", ".doc", ".pptx", ".ppt", ".txt"]:
+                if is_valid and extracted_text:
+                    pure_text = extracted_text
+                    is_media = False
+                else:
+                    return None, None, "unreadable_office"
 
-    # 2. جلب الأسئلة السابقة لمنع التكرار
-    previous_questions = []
-    existing_uuids = set()
-    if file_hash:
-        old_quizzes = await get_file_quizzes(file_hash)
-        for qz in old_quizzes:
-            existing_uuids.add(str(qz["id"]))
-            if "quiz_data" in qz and isinstance(qz["quiz_data"], list):
-                previous_questions.extend(qz["quiz_data"])
+        # 2. جلب الأسئلة السابقة لمنع التكرار
+        previous_questions = []
+        existing_uuids = set()
+        if file_hash:
+            old_quizzes = await get_file_quizzes(file_hash)
+            for qz in old_quizzes:
+                existing_uuids.add(str(qz["id"]))
+                if "quiz_data" in qz and isinstance(qz["quiz_data"], list):
+                    previous_questions.extend(qz["quiz_data"])
 
-    # 2.5 فحص سريع (نموذج Flash-Lite خفيف، عينة واحدة فقط: أول صفحة/صورة أو
-    #     عينة نصية) لتحديد هل نفعّل نمط "الكويز المصوّر LaTeX" قبل التوليد.
-    #     فشل آمن: أي خطأ هنا يُعتبر "لا يوجد محتوى رياضي" ولا يوقف التوليد.
-    try:
-        is_math_mode = await detect_math_content(
-            file_paths if is_media else None,
-            pure_text if not is_media else None,
-        )
-    except Exception as exc:
-        log_error(logger, f"Math content detection failed, continuing with standard mode: {exc}")
-        is_math_mode = False
+        # 2.5 فحص سريع (نموذج Flash-Lite خفيف، عينة واحدة فقط: أول صفحة/صورة أو
+        #     عينة نصية) لتحديد هل نفعّل نمط "الكويز المصوّر LaTeX" قبل التوليد.
+        #     فشل آمن: أي خطأ هنا يُعتبر "لا يوجد محتوى رياضي" ولا يوقف التوليد.
+        try:
+            is_math_mode = await detect_math_content(
+                file_paths if is_media else None,
+                pure_text if not is_media else None,
+            )
+        except Exception as exc:
+            log_error(logger, f"Math content detection failed, continuing with standard mode: {exc}")
+            is_math_mode = False
 
-    # 3. استدعى محرك AI
-    quiz_data = await generate_quiz_smart(
-        file_paths=file_paths if is_media else None,
-        pure_text=pure_text if not is_media else None,
-        count=count,
-        skip_cache=True,
-        file_hash=file_hash,
-        status_message=status_message,
-        previous_questions=previous_questions if previous_questions else None,
-        is_math_mode=is_math_mode,
-    )
-
-    if not quiz_data:
-        return None, None, "ai_failed"
-
-    # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
-    #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
-    quiz_data = shuffle_quiz_options(quiz_data)
-
-    # 3.6 تعليم كل سؤال بنمط الكويز المصوّر LaTeX ليتحول التنفيذ لاحقاً
-    #     (services/quiz_engine.py) لمسار الصورة + Poll الحروف بدل النص العادي
-    if is_math_mode:
-        for question in quiz_data:
-            question["is_math"] = True
-
-    # 4. حفظ الكاش لملفات أوفيس والنصوص
-    if file_hash and quiz_data:
-        await save_file_quiz_multiple(
+        # 3. استدعى محرك AI
+        quiz_data = await generate_quiz_smart(
+            file_paths=file_paths if is_media else None,
+            pure_text=pure_text if not is_media else None,
+            count=count,
+            skip_cache=True,
             file_hash=file_hash,
-            creator_id=user_id,
-            source_title=data.get("source_title", "كويز من مستند"),
-            quiz_data=quiz_data,
-            total_tokens=0,
-            is_math_quiz=is_math_mode,
+            status_message=status_message,
+            previous_questions=previous_questions if previous_questions else None,
+            is_math_mode=is_math_mode,
         )
 
-    # 5. استخراج الـ UUID للكويز الجديد
-    new_quiz_id = None
-    if file_hash:
-        await asyncio.sleep(0.5)
-        updated_quizzes = await get_file_quizzes(file_hash)
-        for uq in updated_quizzes:
-            if str(uq["id"]) not in existing_uuids:
-                new_quiz_id = str(uq["id"])
-                break
+        if not quiz_data:
+            return None, None, "ai_failed"
 
-    return quiz_data, new_quiz_id, ""
+        # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
+        #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
+        quiz_data = shuffle_quiz_options(quiz_data)
+
+        # 3.6 تعليم كل سؤال بنمط الكويز المصوّر LaTeX ليتحول التنفيذ لاحقاً
+        #     (services/quiz_engine.py) لمسار الصورة + Poll الحروف بدل النص العادي
+        if is_math_mode:
+            for question in quiz_data:
+                question["is_math"] = True
+
+        # 4. حفظ الكاش لملفات أوفيس والنصوص
+        if file_hash and quiz_data:
+            await save_file_quiz_multiple(
+                file_hash=file_hash,
+                creator_id=user_id,
+                source_title=data.get("source_title", "كويز من مستند"),
+                quiz_data=quiz_data,
+                total_tokens=0,
+                is_math_quiz=is_math_mode,
+            )
+
+        # 5. استخراج الـ UUID للكويز الجديد
+        new_quiz_id = None
+        if file_hash:
+            await asyncio.sleep(0.5)
+            updated_quizzes = await get_file_quizzes(file_hash)
+            for uq in updated_quizzes:
+                if str(uq["id"]) not in existing_uuids:
+                    new_quiz_id = str(uq["id"])
+                    break
+
+        return quiz_data, new_quiz_id, ""
