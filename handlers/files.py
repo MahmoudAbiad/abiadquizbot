@@ -16,13 +16,14 @@ from constants import (
     MSG_PREVIOUS_REQUEST_REPLACED, MSG_PROCESSING, MSG_REQUEST_CANCELLED,
     MSG_SUPER_PROCESSING_ALERT, SUCCESS_MEDIA_RECEIVED, PAGES_PER_QUIZ_RATIO,
     MAX_FILE_QUIZZES_LIMIT, MIN_QUIZZES_PER_FILE, MSG_MAX_QUIZZES_REACHED,
-    MSG_ENGLISH_CONTENT_DETECTED
+    MSG_ENGLISH_CONTENT_DETECTED, SUBJECT_ENGLISH, SUBJECT_OTHER,
+    QUESTION_TYPE_GENERAL, DIFFICULTY_MEDIUM, MSG_QUIZ_OPTIONS_PROMPT,
 )
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from keyboards import (
     get_generation_confirm_keyboard, get_multiple_quizzes_keyboard, get_question_count_quick_keyboard,
-    get_translation_choice_keyboard
+    get_translation_choice_keyboard, get_quiz_options_keyboard
 )
 from logger import get_logger, log_error
 from supabase_helper import (
@@ -33,9 +34,10 @@ from validators import validate_file_size, validate_question_count
 
 # استيراد الخدمات الجديدة
 from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
-from services.english_detector import detect_english_content
+from services.subject_classifier import classify_subject
 from services.quiz_service import (
-    determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow
+    determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow,
+    combo_quiz_count,
 )
 
 logger = get_logger(__name__)
@@ -125,22 +127,60 @@ async def process_album_background(message: types.Message, state: FSMContext):
         log_error(logger, f"Album background processing failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
+async def _show_question_count_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
+    """
+    🆕 الخطوة الأخيرة المشتركة: عرض شاشة "كم سؤالاً تريد؟" باستخدام count_prompt_text
+    المخزَّن مسبقاً بالحالة (وُضع هناك من _ask_question_count عند نقطة الدخول الأصلية).
+    تُستدعى من نهاية شاشة خيارات نوع/صعوبة الأسئلة (handlers/quiz_options.py) بدل تكرار
+    نفس منطق set_state/edit_text في مكانين مختلفين.
+    """
+    data = await state.get_data()
+    count_prompt_text = data.get(
+        "count_prompt_text",
+        "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
+    )
+    await state.set_state(QuizState.waiting_for_count)
+    if edit:
+        await reply_target.edit_text(count_prompt_text, reply_markup=get_question_count_quick_keyboard())
+    else:
+        await reply_target.answer(count_prompt_text, reply_markup=get_question_count_quick_keyboard())
+
+
+async def _show_quiz_options_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
+    """
+    🆕 يعرض شاشة اختيار نوع الأسئلة + الصعوبة (رسالة واحدة تُحدَّث بالمكان لاحقاً مع كل
+    ضغطة زر عبر handlers/quiz_options.py). تُستدعى بعد التصنيف مباشرة للمواد غير
+    الإنجليزية، أو بعد اختيار الترجمة لمحتوى إنجليزي (subject == "english").
+    """
+    data = await state.get_data()
+    await state.set_state(QuizState.waiting_for_quiz_options)
+    keyboard = get_quiz_options_keyboard(
+        subject_type=data.get("subject_type", SUBJECT_OTHER),
+        suggested_types=data.get("suggested_question_types", []),
+        selected_type=data.get("question_type", QUESTION_TYPE_GENERAL),
+        selected_difficulty=data.get("difficulty", DIFFICULTY_MEDIUM),
+    )
+    if edit:
+        await reply_target.edit_text(MSG_QUIZ_OPTIONS_PROMPT, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await reply_target.answer(MSG_QUIZ_OPTIONS_PROMPT, parse_mode="HTML", reply_markup=keyboard)
+
+
 async def _ask_question_count(reply_target: types.Message, state: FSMContext, count_prompt_text: str, edit: bool = False) -> None:
     """
-    🆕 نقطة موحّدة لعرض شاشة "كم سؤالاً تريد؟" - تُستدعى من ثلاث نقاط دخول مختلفة
-    (استقبال وسائط جديدة، استقبال نص مباشر، أو رفض الكاش واختيار توليد كويز جديد).
-    قبل عرضها، تُجري فحصاً سريعاً وخفيفاً (نفس آلية فحص الرياضيات) لتحديد هل المحتوى
-    مكتوب أساساً بالإنجليزية؛ إن كان كذلك تُعرض شاشة اختيار "مترجمة/بدون ترجمة" أولاً
-    (تتطلب تفاعل الطالب عبر كيبورد قبل عرض شاشة عدد الأسئلة)، وإلا يُكمل التدفق كالمعتاد
-    مع نص الرسالة (count_prompt_text) الخاص بنقطة الدخول المستدعية.
+    🆕 نقطة موحّدة تبدأ سلسلة الشاشات التالية للاستقبال (استقبال وسائط جديدة، استقبال نص
+    مباشر، أو رفض الكاش واختيار توليد كويز جديد): تصنيف موحّد → [ترجمة إن كان إنجليزي] →
+    شاشة نوع/صعوبة الأسئلة → شاشة عدد الأسئلة. count_prompt_text يُخزَّن بالحالة ليُستخدم
+    بالخطوة الأخيرة (_show_question_count_screen) بعد كل الشاشات الوسيطة.
     """
+    await state.update_data(count_prompt_text=count_prompt_text)
     data = await state.get_data()
     is_media = data.get("input_type") == "media"
     file_paths = data.get("file_paths", []) or []
     pure_text = data.get("pure_text")
 
     # 🆕 مستندات الأوفيس (.docx/.pptx/.txt) بحاجة استخراج نص أولاً قبل أي فحص لغوي، لأن
-    # detect_english_content يفحص فقط PDF/صور مباشرة أو نصاً صريحاً - وليس ملفات أوفيس خام.
+    # classify_subject يفحص فقط PDF/صور مباشرة أو نصاً صريحاً - وليس ملفات أوفيس خام.
     # نستخرج النص هنا مبكراً (عملية محلية خفيفة، بلا أي استدعاء AI) ونخزّنه بحالة الـ FSM
     # ليُعاد استخدامه لاحقاً في services/quiz_service.py بدل إعادة استخراجه من الصفر.
     detection_text, detection_paths = pure_text, (file_paths if is_media else None)
@@ -154,13 +194,29 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
             else:
                 detection_text, detection_paths = None, None  # سيُعاد اكتشاف الخطأ لاحقاً كالمعتاد أثناء التوليد
 
+    # 🆕 استدعاء واحد فقط موحّد (services/subject_classifier.py) يحل محل الاستدعاءين
+    # المنفصلين السابقين (فحص إنجليزي هنا + فحص رياضيات لاحقاً بـ quiz_service.py).
+    # النتيجة تُخزَّن بحالة الـ FSM وتُعاد قراءتها لاحقاً وقت التوليد الفعلي بدل إعادة
+    # الفحص من جديد على نفس المحتوى (راجع execute_quiz_generation_workflow).
     try:
-        is_english = await detect_english_content(detection_paths, detection_text)
+        classification = await classify_subject(detection_paths, detection_text)
     except Exception as exc:
-        log_error(logger, f"English content detection failed, continuing with standard mode: {exc}")
-        is_english = False
+        log_error(logger, f"Subject classification failed, continuing with standard mode: {exc}")
+        from services.subject_classifier import SubjectClassification
+        classification = SubjectClassification(subject=SUBJECT_OTHER, suggested_types=[])
 
-    if is_english:
+    # 🆕 نخزّن نتيجة التصنيف + قيماً افتراضية لنوع/صعوبة الأسئلة (تُستبدل لاحقاً باختيار
+    # الطالب الفعلي عبر شاشة الخيارات handlers/quiz_options.py؛ الافتراضي "عام/متوسط"
+    # يبقى صالحاً لو ضغط الطالب "متابعة" مباشرة بدون أي تخصيص).
+    await state.update_data(
+        subject_type=classification.subject,
+        suggested_question_types=classification.suggested_types,
+        question_type=QUESTION_TYPE_GENERAL,
+        custom_question_type_text=None,
+        difficulty=DIFFICULTY_MEDIUM,
+    )
+
+    if classification.subject == SUBJECT_ENGLISH:
         await state.set_state(QuizState.waiting_for_translation_choice)
         if edit:
             await reply_target.edit_text(MSG_ENGLISH_CONTENT_DETECTED, parse_mode="HTML", reply_markup=get_translation_choice_keyboard())
@@ -169,11 +225,72 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
         return
 
     await state.update_data(english_mode=None)
-    await state.set_state(QuizState.waiting_for_count)
+    await _show_quiz_options_screen(reply_target, state, edit=edit)
+
+async def _render_cache_decision_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
+    """
+    🆕 يعرض/يحدّث شاشة "قرار الكاش" (الكويزات المخزّنة + أزرار الفلترة) اعتماداً على
+    available_quizzes وقيم الفلتر الحالية (cache_filter_type/cache_filter_difficulty)
+    المخزّنة بحالة الـ FSM. تُستدعى مرة أولى من _finalize_media_processing (edit=False)،
+    وبعدها من معالجات الفلترة أدناه مع كل ضغطة فلتر (edit=True، بنفس الرسالة).
+    """
+    data = await state.get_data()
+    all_quizzes = data.get("available_quizzes", [])
+    filter_type = data.get("cache_filter_type", "all")
+    filter_difficulty = data.get("cache_filter_difficulty", "all")
+
+    filtered_quizzes = [
+        q for q in all_quizzes
+        if (filter_type == "all" or (q.get("question_type") or "general") == filter_type)
+        and (filter_difficulty == "all" or (q.get("difficulty") or "medium") == filter_difficulty)
+    ]
+
+    max_allowed = data.get("max_allowed_quizzes", MAX_FILE_QUIZZES_LIMIT)
+    existing_combo_count = combo_quiz_count(
+        all_quizzes, data.get("subject_type", "other"),
+        data.get("question_type", "general"), data.get("difficulty", "medium"),
+    )
+    show_generate_btn = existing_combo_count < max_allowed
+    cost = data.get("cache_cost", 0)
+
+    keyboard = get_multiple_quizzes_keyboard(
+        all_quizzes, filtered_quizzes, cost, show_generate_btn=show_generate_btn,
+        filter_type=filter_type, filter_difficulty=filter_difficulty,
+    )
+    msg_text = f"💡 <b>ملاحظة ذكية: تم العثور على ({len(all_quizzes)}) كويز جاهز مخزن لهذا الملف مسبقاً!</b>\n\n"
+    if filter_type != "all" or filter_difficulty != "all":
+        msg_text += f"🔍 يُعرض حالياً: ({len(filtered_quizzes)}) كويز مطابق للفلتر المختار.\n\n"
+    msg_text += f"🛑 <b>تم استنفاد الحد الأقصى ({max_allowed}) كويزات لهذا النوع من الأسئلة.</b>" if not show_generate_btn else f"يمكنك اختيار كويز جاهز بخصم 90% ({cost:.2f} نقطة)، أو توليد كويز جديد:"
+
     if edit:
-        await reply_target.edit_text(count_prompt_text, reply_markup=get_question_count_quick_keyboard())
+        await reply_target.edit_text(msg_text, parse_mode="HTML", reply_markup=keyboard)
     else:
-        await reply_target.answer(count_prompt_text, reply_markup=get_question_count_quick_keyboard())
+        await reply_target.answer(msg_text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(QuizState.waiting_for_cache_decision, F.data.startswith("cachefilter_type_"))
+async def handle_cache_filter_type(call: types.CallbackQuery, state: FSMContext) -> None:
+    """🆕 فلترة الكويزات المعروضة بالكاش حسب نوع الأسئلة (محلياً، بدون أي استعلام إضافي)."""
+    value = call.data.replace("cachefilter_type_", "", 1)
+    await state.update_data(cache_filter_type=value)
+    try:
+        await _render_cache_decision_screen(call.message, state, edit=True)
+    except Exception:
+        pass  # "message is not modified" لو نفس الفلتر ضُغط مرتين متتاليتين - آمن التجاهل
+    await call.answer()
+
+
+@router.callback_query(QuizState.waiting_for_cache_decision, F.data.startswith("cachefilter_diff_"))
+async def handle_cache_filter_difficulty(call: types.CallbackQuery, state: FSMContext) -> None:
+    """🆕 فلترة الكويزات المعروضة بالكاش حسب الصعوبة (محلياً، بدون أي استعلام إضافي)."""
+    value = call.data.replace("cachefilter_diff_", "", 1)
+    await state.update_data(cache_filter_difficulty=value)
+    try:
+        await _render_cache_decision_screen(call.message, state, edit=True)
+    except Exception:
+        pass
+    await call.answer()
+
 
 async def _finalize_media_processing(message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int, is_album: bool, file_hash: str):
     try:
@@ -189,17 +306,25 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
         }
         
         if cached_quizzes:
+            # 🆕 تُعرض كل الكويزات المخزّنة دائماً (بغض النظر عن نوعها/صعوبتها)، لكن زر
+            # "توليد جديد" يُحجب فقط لو التركيبة الافتراضية الحالية (عام/متوسط، بانتظار
+            # شاشة الاختيار المخصصة) وصلت لسقفها المستقل هي تحديداً - وليس بسبب امتلاء
+            # الكاش الإجمالي بتركيبات أخرى مختلفة عنها.
             max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
-            show_generate_btn = len(cached_quizzes) < max_allowed
+            data_now = await state.get_data()
+            existing_combo_count = combo_quiz_count(
+                cached_quizzes, data_now.get("subject_type", "other"),
+                data_now.get("question_type", "general"), data_now.get("difficulty", "medium"),
+            )
+            show_generate_btn = existing_combo_count < max_allowed
             cost = calculate_cached_points_cost(items, len(cached_quizzes[0]["quiz_data"]), is_album)
             
-            await state.update_data(**common_state, available_quizzes=cached_quizzes, cache_cost=cost, max_allowed_quizzes=max_allowed)
+            await state.update_data(
+                **common_state, available_quizzes=cached_quizzes, cache_cost=cost, max_allowed_quizzes=max_allowed,
+                cache_filter_type="all", cache_filter_difficulty="all",
+            )
             await state.set_state(QuizState.waiting_for_cache_decision)
-            
-            keyboard = get_multiple_quizzes_keyboard(cached_quizzes, cost, show_generate_btn=show_generate_btn)
-            msg_text = f"💡 <b>ملاحظة ذكية: تم العثور على ({len(cached_quizzes)}) كويز جاهز مخزن لهذا الملف مسبقاً!</b>\n\n"
-            msg_text += f"🛑 <b>تم استنفاد الحد الأقصى ({max_allowed}) كويزات.</b>" if not show_generate_btn else f"يمكنك اختيار كويز جاهز بخصم 90% ({cost:.2f} نقطة)، أو توليد كويز جديد (المتاح: {len(cached_quizzes)} من {max_allowed}):"
-            await message.answer(msg_text, parse_mode="HTML", reply_markup=keyboard)
+            await _render_cache_decision_screen(message, state, edit=False)
             return
 
         await state.update_data(**common_state)
@@ -305,14 +430,10 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
 # ==================== 🆕 معالجات اختيار "مترجمة/بدون ترجمة" للمحتوى الإنجليزي ====================
 
 async def _apply_translation_choice(reply_target: types.Message, state: FSMContext, english_mode: str, edit: bool) -> None:
-    """يحفظ اختيار الطالب (مترجمة/بدون ترجمة) في الحالة، ثم ينتقل مباشرة لشاشة عدد الأسئلة."""
+    """يحفظ اختيار الطالب (مترجمة/بدون ترجمة) بالحالة، ثم ينتقل لشاشة نوع/صعوبة الأسئلة
+    (قوائم "قواعد/قراءة/اختبار عام" الخاصة بمادة الإنجليزي - راجع QUESTION_TYPE_OPTIONS)."""
     await state.update_data(english_mode=english_mode)
-    await state.set_state(QuizState.waiting_for_count)
-    text = "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة."
-    if edit:
-        await reply_target.edit_text(text, reply_markup=get_question_count_quick_keyboard())
-    else:
-        await reply_target.answer(text, reply_markup=get_question_count_quick_keyboard())
+    await _show_quiz_options_screen(reply_target, state, edit=edit)
 
 @router.callback_query(QuizState.waiting_for_translation_choice, F.data == "translate_choice_yes")
 async def handle_translate_choice_yes(call: types.CallbackQuery, state: FSMContext) -> None:
@@ -404,9 +525,15 @@ async def _process_question_count(reply_target: types.Message, state: FSMContext
     file_hash = data.get("file_hash")
 
     if file_hash:
+        # 🆕 السقف يُحسب الآن لكل تركيبة (نوع مادة × نوع أسئلة × صعوبة) على حدة بدل
+        # سقف مشترك لكل الكويزات المخزنة للملف بغض النظر عن نوعها - راجع combo_quiz_count.
         current_quizzes = await get_file_quizzes(file_hash)
         max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
-        if len(current_quizzes) >= max_allowed:
+        existing_combo_count = combo_quiz_count(
+            current_quizzes, data.get("subject_type", "other"),
+            data.get("question_type", "general"), data.get("difficulty", "medium"),
+        )
+        if existing_combo_count >= max_allowed:
             await reply_target.answer(MSG_MAX_QUIZZES_REACHED, parse_mode="HTML")
             await state.clear()
             return

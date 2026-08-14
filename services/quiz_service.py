@@ -4,11 +4,14 @@ import os
 import random
 from typing import Any, Dict, Tuple, Optional, List
 
-from constants import MAX_LIMIT_PAGES, MAX_LIMIT_QUESTIONS, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS
+from constants import (
+    MAX_LIMIT_PAGES, MAX_LIMIT_QUESTIONS, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS,
+    SUBJECT_MATH, SUBJECT_OTHER, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
+    QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM, QUESTION_TYPE_OPTIONS,
+)
 from gemini_helper import generate_quiz_smart
 from logger import get_logger, log_error
 from services.file_service import extract_office_text_if_needed
-from services.math_detector import detect_math_content
 from supabase_helper import (
     get_file_quizzes,
     refund_user_points,
@@ -38,16 +41,26 @@ MODE_LABELS_AR = {
     "Cached": "🗃️ من الكاش",
 }
 
-def build_transparency_text(items: int, questions: int, mode: str, cost: float) -> str:
-    """رسالة الشفافية المالية لعرض تفاصيل الخصم"""
+def build_transparency_text(
+    items: int, questions: int, mode: str, cost: float,
+    difficulty: Optional[str] = None, question_type_label: Optional[str] = None,
+) -> str:
+    """رسالة الشفافية المالية لعرض تفاصيل الخصم.
+    🆕 difficulty/question_type_label اختياريان (لعرض تفاصيل الاختيار عند تفعيل شاشة
+    نوع/صعوبة الأسئلة لاحقاً) - لا يؤثران على الاستدعاءات الحالية التي لا تمررهما."""
     mode_label = MODE_LABELS_AR.get(mode, mode)
-    return (
-        "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n\n"
-        f"• العناصر/الصفحات: <code>{items}</code>\n"
-        f"• الأسئلة المطلوبة: <code>{questions}</code>\n"
-        f"• وضع المعالجة: <code>{mode_label}</code>\n"
-        f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>"
-    )
+    lines = [
+        "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n",
+        f"• العناصر/الصفحات: <code>{items}</code>",
+        f"• الأسئلة المطلوبة: <code>{questions}</code>",
+    ]
+    if question_type_label:
+        lines.append(f"• نوع الأسئلة: <code>{question_type_label}</code>")
+    if difficulty:
+        lines.append(f"• الصعوبة: <code>{DIFFICULTY_LABELS_AR.get(difficulty, difficulty)}</code>")
+    lines.append(f"• وضع المعالجة: <code>{mode_label}</code>")
+    lines.append(f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>")
+    return "\n".join(lines)
 
 def _shuffle_question_options(question: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -83,6 +96,71 @@ async def refund_user_on_failure(user_id: int, data: Dict[str, Any]) -> None:
     cost = float(data.get("debited_cost") or 0)
     if cost > 0:
         await refund_user_points(user_id, cost)
+
+
+def build_question_type_label(
+    subject_type: str, question_type: str, custom_text: Optional[str] = None,
+    suggested_types: Optional[List[str]] = None,
+) -> str:
+    """
+    🆕 يبني نص التسمية العربية القصيرة المخزّنة بعمود quizzes.question_type_label -
+    تُعرض للطالب بجانب كل كويز مخزّن بالكاش (راجع migration_quiz_options.sql).
+    يدعم أيضاً أنواع "other_<index>" (اقتراحات AI الديناميكية للمواد غير المصنّفة -
+    راجع keyboards.get_quiz_options_keyboard) بقراءة النص الفعلي من suggested_types.
+    """
+    if question_type == QUESTION_TYPE_CUSTOM and custom_text:
+        return custom_text.strip()[:80]
+    if question_type.startswith("other_") and suggested_types:
+        try:
+            idx = int(question_type.split("_", 1)[1])
+            if 0 <= idx < len(suggested_types):
+                return suggested_types[idx]
+        except (ValueError, IndexError):
+            pass
+    for value, label in QUESTION_TYPE_OPTIONS.get(subject_type, []):
+        if value == question_type:
+            return label
+    return "🎯 عام (بدون تخصيص)"
+
+
+def resolve_generation_question_type_text(
+    question_type: str, custom_question_type_text: Optional[str], suggested_types: Optional[List[str]] = None,
+) -> Optional[str]:
+    """
+    🆕 يحوّل اختيار "other_<index>" (اقتراح AI ديناميكي) إلى نص حر مكافئ لتفضيل
+    مخصص، لأن helpers/gemini_helper.py لا يعرف قيم "other_i" (غير ثابتة مسبقاً
+    بـ constants.QUESTION_TYPE_PROMPT_INSTRUCTIONS) - يُمرَّر الناتج كـ
+    custom_question_type_text لـ generate_quiz_smart بدل تركه يسقط للتعليمة
+    العامة المحايدة (فقدان اختيار الطالب الفعلي).
+    """
+    if custom_question_type_text:
+        return custom_question_type_text
+    if question_type.startswith("other_") and suggested_types:
+        try:
+            idx = int(question_type.split("_", 1)[1])
+            if 0 <= idx < len(suggested_types):
+                return suggested_types[idx]
+        except (ValueError, IndexError):
+            pass
+    return None
+
+
+def combo_quiz_count(
+    cached_quizzes: List[Dict[str, Any]], subject_type: str, question_type: str, difficulty: str
+) -> int:
+    """
+    🆕 يحسب عدد الكويزات المخزّنة لنفس تركيبة (نوع مادة × نوع أسئلة × صعوبة) تحديداً،
+    بدل عدّ كل الكويزات المخزّنة للملف بغض النظر عن نوعها كما كان سابقاً. هذا يسمح
+    بسقف مستقل لكل تركيبة (MAX_FILE_QUIZZES_LIMIT لكل تركيبة على حدة) بدل سقف
+    مشترك واحد يُستهلك بسرعة من أي تركيبة. البيانات محمّلة أصلاً بالذاكرة من
+    get_file_quizzes (نداء واحد لقاعدة البيانات)، فهذا الفلتر محلي بدون أي تكلفة إضافية.
+    """
+    return sum(
+        1 for q in cached_quizzes
+        if q.get("subject_type", SUBJECT_OTHER) == subject_type
+        and q.get("question_type", QUESTION_TYPE_GENERAL) == question_type
+        and q.get("difficulty", DIFFICULTY_MEDIUM) == difficulty
+    )
 
 async def execute_quiz_generation_workflow(
     user_id: int,
@@ -128,23 +206,29 @@ async def execute_quiz_generation_workflow(
                 if "quiz_data" in qz and isinstance(qz["quiz_data"], list):
                     previous_questions.extend(qz["quiz_data"])
 
-        # 2.5 فحص سريع (نموذج Flash-Lite خفيف، عينة واحدة فقط: أول صفحة/صورة أو
-        #     عينة نصية) لتحديد هل نفعّل نمط "الكويز المصوّر LaTeX" قبل التوليد.
-        #     فشل آمن: أي خطأ هنا يُعتبر "لا يوجد محتوى رياضي" ولا يوقف التوليد.
-        try:
-            is_math_mode = await detect_math_content(
-                file_paths if is_media else None,
-                pure_text if not is_media else None,
-            )
-        except Exception as exc:
-            log_error(logger, f"Math content detection failed, continuing with standard mode: {exc}")
-            is_math_mode = False
+        # 2.5 🆕 نتيجة التصنيف الموحّد (services/subject_classifier.py) - نُفِّذت مرة واحدة
+        #     فقط مبكراً بـ handlers/files.py وخُزِّنت بحالة الـ FSM، فبدل إعادة فحص
+        #     المحتوى من جديد هنا (كما كان math_detector يفعل سابقاً على مساره الخاص)،
+        #     نقرأ النتيجة الجاهزة مباشرة. فشل آمن: تخلّف subject_type يُعامل كـ "other".
+        subject_type = data.get("subject_type", SUBJECT_OTHER)
+        is_math_mode = subject_type == SUBJECT_MATH
 
         # 2.6 نمط الترجمة (اختيار الطالب "مترجمة/بدون ترجمة" عند اكتشاف محتوى إنجليزي فور
         #     الاستقبال في handlers/files.py، محفوظ مسبقاً بحالة الـ FSM). يُتجاهل إذا كان
         #     المحتوى رياضياً (is_math_mode) لأن نمط الكويز المصوّر LaTeX له موجّه خاص به
         #     منفصل تماماً ولا يدعم الترجمة المزدوجة داخل نفس الحقل.
         english_mode = None if is_math_mode else data.get("english_mode")
+
+        # 2.7 🆕 نوع الأسئلة والصعوبة المختاران من الطالب عبر شاشة الخيارات
+        #     (handlers/quiz_options.py). قيمة question_type قد تكون: قيمة ثابتة من
+        #     القائمة الجاهزة، "general" (افتراضي)، "custom" (نص حر)، أو "other_<index>"
+        #     (اقتراح AI ديناميكي لمادة غير مصنّفة - يُحوَّل هنا لنص فعلي).
+        question_type = data.get("question_type", QUESTION_TYPE_GENERAL)
+        suggested_types = data.get("suggested_question_types", [])
+        custom_question_type_text = resolve_generation_question_type_text(
+            question_type, data.get("custom_question_type_text"), suggested_types
+        )
+        difficulty = data.get("difficulty", DIFFICULTY_MEDIUM)
 
         # 3. استدعى محرك AI
         quiz_data = await generate_quiz_smart(
@@ -157,6 +241,9 @@ async def execute_quiz_generation_workflow(
             previous_questions=previous_questions if previous_questions else None,
             is_math_mode=is_math_mode,
             english_mode=english_mode,
+            difficulty=difficulty,
+            question_type=question_type,
+            custom_question_type_text=custom_question_type_text,
         )
 
         if not quiz_data:
@@ -173,6 +260,9 @@ async def execute_quiz_generation_workflow(
                 question["is_math"] = True
 
         # 4. حفظ الكاش لملفات أوفيس والنصوص
+        # 🆕 نخزّن الآن تركيبة (subject_type, question_type, difficulty) كاملة مع كل
+        # كويز - راجع migration_quiz_options.sql - ليُعرض بتفاصيله الصحيحة لاحقاً
+        # ويُحسب بشكل صحيح ضمن سقف تركيبته المستقلة (combo_quiz_count أعلاه).
         if file_hash and quiz_data:
             await save_file_quiz_multiple(
                 file_hash=file_hash,
@@ -181,6 +271,10 @@ async def execute_quiz_generation_workflow(
                 quiz_data=quiz_data,
                 total_tokens=0,
                 is_math_quiz=is_math_mode,
+                subject_type=subject_type,
+                question_type=question_type,
+                question_type_label=build_question_type_label(subject_type, question_type, custom_question_type_text, suggested_types),
+                difficulty=difficulty,
             )
 
         # 5. استخراج الـ UUID للكويز الجديد
