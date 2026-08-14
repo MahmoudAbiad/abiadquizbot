@@ -120,7 +120,7 @@ MSG_PREVIOUS_REQUEST_REPLACED = "ℹ️ تم إلغاء طلبك السابق ت
 
 # ==================== AI Model Configuration ====================
 
-GEMINI_PRIMARY_MODEL = "gemini-3.6-flash"  
+GEMINI_PRIMARY_MODEL = "gemini-3.7-flash"  
 GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
 # 🆕 نموذج سريع وخفيف مخصص حصراً لفحص "هل يحتوي المحتوى معادلات/قوانين رياضية؟"
