@@ -104,18 +104,15 @@ def get_question_count_keyboard(
 ) -> types.InlineKeyboardMarkup:
     """
     🆕 شاشة عدد الأسئلة المدمجة - خطوة واحدة بدل خطوتين منفصلتين (اختيار عدد ← ثم شاشة
-    تأكيد وتكلفة مستقلة). كل زر خيار مسعّر مسبقاً (السعر محسوب فعلياً وليس تقديرياً)،
-    وزر "🚀 ابدأ التوليد" بأسفل نفس الشاشة يعرض التكلفة النهائية للعدد المختار حالياً
-    ويبدأ التوليد مباشرة - هذا هو "الزر الموجود بنهاية القائمة" المتفق عليه بالخطة الأصلية.
+    تأكيد وتكلفة مستقلة). السعر لا يظهر على الأزرار (تفادي الازدحام البصري) - مصدر
+    وحيد للسعر هو سطر "تكلفة العملية" بنص الرسالة فوق الكيبورد (build_transparency_text
+    بـ handlers/files.py._render_question_count_screen)، ويتحدّث تلقائياً مع كل تغيير
+    بالعدد المختار لأن الرسالة كلها تُعاد بناؤها بكل تعديل (edit_message_text).
     """
-    from helpers.points_calculator import calculate_quiz_points_cost  # تفادي استيراد دائري
-
-    suggestions = suggestions or [5, 10, 15, 20]
     kb = []
     row = []
-    for n in suggestions:
-        cost = calculate_quiz_points_cost(items, n, is_album)
-        label = f"{n} سؤال ({cost:.2f}💎)"
+    for n in (suggestions or [5, 10, 15, 20]):
+        label = f"{n} سؤال"
         text = f"✅ {label}" if selected_count == n else label
         row.append(types.InlineKeyboardButton(text=text, callback_data=f"qcount_pick_{n}"))
         if len(row) == 2:
@@ -125,11 +122,7 @@ def get_question_count_keyboard(
         kb.append(row)
 
     kb.append([types.InlineKeyboardButton(text="✏️ عدد مخصص (اكتبه مباشرة)", callback_data="qcount_custom")])
-
-    final_cost = calculate_quiz_points_cost(items, selected_count, is_album)
-    kb.append([types.InlineKeyboardButton(
-        text=f"🚀 ابدأ التوليد ({selected_count} سؤال - {final_cost:.2f} نقطة)", callback_data="qcount_start"
-    )])
+    kb.append([types.InlineKeyboardButton(text="🚀 ابدأ التوليد", callback_data="qcount_start")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
