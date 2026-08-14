@@ -4,7 +4,7 @@ from constants import (
     BTN_TRANSLATE_YES, BTN_TRANSLATE_NO,
     QUESTION_TYPE_OPTIONS, QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM,
     DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_LABELS_AR,
-    BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_QUIZ_OPTIONS_CONTINUE,
+    BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_BACK_TO_TYPE_SCREEN,
     SUBJECT_MATH, SUBJECT_ENGLISH,
 )
 from logger import get_logger
@@ -98,26 +98,18 @@ def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineK
     kb = [row, [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_quiz_options_keyboard(
-    subject_type: str, suggested_types: list, selected_type: str, selected_difficulty: str
-) -> types.InlineKeyboardMarkup:
+def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_type: str) -> types.InlineKeyboardMarkup:
     """
-    🆕 شاشة اختيار نوع الأسئلة + الصعوبة - رسالة واحدة تُحدَّث بالمكان (edit_text) مع كل
-    ضغطة، بدل رسائل متتالية. أزرار toggle: العنصر المختار حالياً يظهر بعلامة ✅.
-
-    - subject_type == "math": مسائل/قوانين/نظري (من constants.QUESTION_TYPE_OPTIONS)
-    - subject_type == "english": قواعد/قراءة/اختبار عام
-    - غير ذلك ("other"): اقتراحات AI الديناميكية (suggested_types)، بحد أقصى 4
-    - "عام" و"تفضيل خاص" متاحان دائماً بغض النظر عن المادة (مع إخفاء "عام" للإنجليزي لمنع التكرار)
+    🆕 المرحلة الأولى من شاشة الخيارات (نوع الأسئلة فقط - بدون صعوبة بنفس الشاشة لتقليل
+    الازدحام البصري). اختيار أي نوع (أو "عام") ينقل تلقائياً لمرحلة الصعوبة - لا حاجة
+    لزر "متابعة" منفصل.
     """
     kb = []
 
-    # صف/صفوف أزرار نوع الأسئلة (زرّان بكل صف لضمان وضوح النص العربي)
     if subject_type in (SUBJECT_MATH, SUBJECT_ENGLISH):
         type_options = list(QUESTION_TYPE_OPTIONS.get(subject_type, []))
     else:
-        # 🆕 اقتراحات AI الديناميكية للمواد غير المصنّفة - كل اقتراح يأخذ قيمة مفتاح
-        # مبنية من فهرسه (other_0, other_1...) لأن نصه حر وغير معروف مسبقاً كثابت
+        # 🆕 اقتراحات AI الديناميكية للمواد غير المصنّفة
         type_options = [(f"other_{i}", label) for i, label in enumerate(suggested_types[:4])]
 
     row = []
@@ -130,24 +122,29 @@ def get_quiz_options_keyboard(
     if row:
         kb.append(row)
 
-    # إخفاء الزر العام إذا كانت المادة لغة إنجليزية لمنع التكرار مع "🎯 اختبار عام"
-    if subject_type != SUBJECT_ENGLISH:
-        general_text = f"✅ {BTN_QUESTION_TYPE_GENERAL}" if selected_type == QUESTION_TYPE_GENERAL else BTN_QUESTION_TYPE_GENERAL
-        kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
-
+    general_text = f"✅ {BTN_QUESTION_TYPE_GENERAL}" if selected_type == QUESTION_TYPE_GENERAL else BTN_QUESTION_TYPE_GENERAL
     custom_text = f"✅ {BTN_QUESTION_TYPE_CUSTOM}" if selected_type == QUESTION_TYPE_CUSTOM else BTN_QUESTION_TYPE_CUSTOM
+    kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
     kb.append([types.InlineKeyboardButton(text=custom_text, callback_data="qtype_custom")])
+    kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-    # صف الصعوبة (ثلاثة أزرار بصف واحد)
+
+def get_quiz_difficulty_keyboard(selected_difficulty: str) -> types.InlineKeyboardMarkup:
+    """
+    🆕 المرحلة الثانية والأخيرة (الصعوبة فقط). اختيار أي مستوى يُكمل التدفق مباشرة
+    لشاشة عدد الأسئلة - لا حاجة لزر "متابعة" منفصل هنا أيضاً.
+    """
     diff_row = []
     for value in (DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED):
         label = DIFFICULTY_LABELS_AR[value]
         text = f"✅ {label}" if selected_difficulty == value else label
         diff_row.append(types.InlineKeyboardButton(text=text, callback_data=f"qdiff_{value}"))
-    kb.append(diff_row)
-
-    kb.append([types.InlineKeyboardButton(text=BTN_QUIZ_OPTIONS_CONTINUE, callback_data="quiz_options_continue")])
-    kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
+    kb = [
+        diff_row,
+        [types.InlineKeyboardButton(text=BTN_BACK_TO_TYPE_SCREEN, callback_data="qback_to_type")],
+        [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
+    ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 

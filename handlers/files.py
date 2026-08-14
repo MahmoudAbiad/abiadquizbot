@@ -17,13 +17,13 @@ from constants import (
     MSG_SUPER_PROCESSING_ALERT, SUCCESS_MEDIA_RECEIVED, PAGES_PER_QUIZ_RATIO,
     MAX_FILE_QUIZZES_LIMIT, MIN_QUIZZES_PER_FILE, MSG_MAX_QUIZZES_REACHED,
     MSG_ENGLISH_CONTENT_DETECTED, SUBJECT_ENGLISH, SUBJECT_OTHER,
-    QUESTION_TYPE_GENERAL, DIFFICULTY_MEDIUM, MSG_QUIZ_OPTIONS_PROMPT,
+    QUESTION_TYPE_GENERAL, DIFFICULTY_MEDIUM, MSG_QUIZ_TYPE_PROMPT,
 )
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from keyboards import (
     get_generation_confirm_keyboard, get_multiple_quizzes_keyboard, get_question_count_quick_keyboard,
-    get_translation_choice_keyboard, get_quiz_options_keyboard
+    get_translation_choice_keyboard, get_quiz_type_keyboard
 )
 from logger import get_logger, log_error
 from supabase_helper import (
@@ -148,22 +148,21 @@ async def _show_question_count_screen(reply_target: types.Message, state: FSMCon
 
 async def _show_quiz_options_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
     """
-    🆕 يعرض شاشة اختيار نوع الأسئلة + الصعوبة (رسالة واحدة تُحدَّث بالمكان لاحقاً مع كل
-    ضغطة زر عبر handlers/quiz_options.py). تُستدعى بعد التصنيف مباشرة للمواد غير
-    الإنجليزية، أو بعد اختيار الترجمة لمحتوى إنجليزي (subject == "english").
+    🆕 يعرض المرحلة الأولى (نوع الأسئلة) من شاشة الخيارات - مرحلتان متتاليتان بنفس
+    الرسالة (نوع ثم صعوبة، راجع handlers/quiz_options.py للتفاصيل الكاملة). تُستدعى
+    بعد التصنيف مباشرة للمواد غير الإنجليزية، أو بعد اختيار الترجمة لمحتوى إنجليزي.
     """
-    data = await state.get_data()
     await state.set_state(QuizState.waiting_for_quiz_options)
-    keyboard = get_quiz_options_keyboard(
+    data = await state.get_data()
+    keyboard = get_quiz_type_keyboard(
         subject_type=data.get("subject_type", SUBJECT_OTHER),
         suggested_types=data.get("suggested_question_types", []),
         selected_type=data.get("question_type", QUESTION_TYPE_GENERAL),
-        selected_difficulty=data.get("difficulty", DIFFICULTY_MEDIUM),
     )
     if edit:
-        await reply_target.edit_text(MSG_QUIZ_OPTIONS_PROMPT, parse_mode="HTML", reply_markup=keyboard)
+        await reply_target.edit_text(MSG_QUIZ_TYPE_PROMPT, parse_mode="HTML", reply_markup=keyboard)
     else:
-        await reply_target.answer(MSG_QUIZ_OPTIONS_PROMPT, parse_mode="HTML", reply_markup=keyboard)
+        await reply_target.answer(MSG_QUIZ_TYPE_PROMPT, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def _ask_question_count(reply_target: types.Message, state: FSMContext, count_prompt_text: str, edit: bool = False) -> None:
@@ -208,13 +207,10 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     # 🆕 نخزّن نتيجة التصنيف + قيماً افتراضية لنوع/صعوبة الأسئلة (تُستبدل لاحقاً باختيار
     # الطالب الفعلي عبر شاشة الخيارات handlers/quiz_options.py؛ الافتراضي "عام/متوسط"
     # يبقى صالحاً لو ضغط الطالب "متابعة" مباشرة بدون أي تخصيص).
-    # تحديد النوع الافتراضي: إذا كان إنجليزي نجعله general_test تلقائياً لمنع التكرار
-    default_question_type = "general_test" if classification.subject == SUBJECT_ENGLISH else QUESTION_TYPE_GENERAL
-
     await state.update_data(
         subject_type=classification.subject,
         suggested_question_types=classification.suggested_types,
-        question_type=default_question_type,
+        question_type=QUESTION_TYPE_GENERAL,
         custom_question_type_text=None,
         difficulty=DIFFICULTY_MEDIUM,
     )

@@ -106,7 +106,7 @@ def build_question_type_label(
     🆕 يبني نص التسمية العربية القصيرة المخزّنة بعمود quizzes.question_type_label -
     تُعرض للطالب بجانب كل كويز مخزّن بالكاش (راجع migration_quiz_options.sql).
     يدعم أيضاً أنواع "other_<index>" (اقتراحات AI الديناميكية للمواد غير المصنّفة -
-    راجع keyboards.get_quiz_options_keyboard) بقراءة النص الفعلي من suggested_types.
+    راجع keyboards.get_quiz_type_keyboard) بقراءة النص الفعلي من suggested_types.
     """
     if question_type == QUESTION_TYPE_CUSTOM and custom_text:
         return custom_text.strip()[:80]
