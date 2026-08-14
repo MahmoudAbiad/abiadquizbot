@@ -168,8 +168,15 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
             await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=keyboard, parse_mode="HTML")
             await state.update_data(count_screen_chat_id=chat_id, count_screen_message_id=message_id)
             return
-        except Exception:
-            pass  # الرسالة الأصلية حُذفت أو تعذّر تعديلها (نادر) - نكمل بإرسال رسالة جديدة أدناه
+        except Exception as exc:
+            # 🩹 إصلاح ثغرة: تيليجرام يرفض التعديل بخطأ "message is not modified" لو
+            # الطالب ضغط نفس الخيار المحدد مرتين متتاليتين (المحتوى الجديد مطابق حرفياً
+            # للقديم) - هذا ليس فشلاً حقيقياً، فنتجاهله بأمان (لا حاجة لأي تحديث أصلاً).
+            # فقط أخطاء التعديل الحقيقية (رسالة محذوفة، صلاحيات...) تستدعي إرسال رسالة
+            # جديدة بديلة أدناه.
+            if "message is not modified" in str(exc).lower():
+                await state.update_data(count_screen_chat_id=chat_id, count_screen_message_id=message_id)
+                return
 
     msg = await target_for_send.answer(text, reply_markup=keyboard, parse_mode="HTML")
     await state.update_data(count_screen_chat_id=msg.chat.id, count_screen_message_id=msg.message_id)
