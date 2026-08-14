@@ -91,16 +91,13 @@ QUESTION_TYPE_PROMPT_INSTRUCTIONS = {
     "general_test": "قدّم مزيجاً متنوعاً من قواعد ومفردات وفهم مقروء، كاختبار عام شامل للمادة.",
 }
 
-# ==================== 🆕 شاشة اختيار نوع الأسئلة + الصعوبة (رسالة واحدة) ====================
-BTN_QUESTION_TYPE_GENERAL = "🎯 عام (بدون تخصيص)"
-BTN_QUESTION_TYPE_CUSTOM = "✏️ تفضيل خاص (اكتبه بنفسك)"
-BTN_QUIZ_OPTIONS_CONTINUE = "✅ متابعة"
+# ==================== 🆕 شاشة اختيار نوع الأسئلة + الصعوبة (مرحلتان متتاليتان بنفس الرسالة) ====================
+BTN_QUESTION_TYPE_GENERAL = "🎯 عام (تخطّي)"
+BTN_QUESTION_TYPE_CUSTOM = "✏️ تفضيل خاص"
+BTN_BACK_TO_TYPE_SCREEN = "🔙 رجوع"
 
-MSG_QUIZ_OPTIONS_PROMPT = (
-    "🎛️ <b>خصّص أسئلتك (اختياري):</b>\n\n"
-    "اختر نوع الأسئلة ومستوى الصعوبة، أو اضغط \"متابعة\" مباشرة لاستخدام الإعدادات "
-    "العامة الافتراضية."
-)
+MSG_QUIZ_TYPE_PROMPT = "🎛️ <b>اختر نوع الأسئلة</b> (أو تخطَّ للإعداد العام):"
+MSG_QUIZ_DIFFICULTY_PROMPT = "✅ النوع: <b>{type_label}</b>\n\n🎚️ الآن اختر مستوى الصعوبة:"
 MSG_CUSTOM_QUESTION_TYPE_PROMPT = (
     "✏️ اكتب الآن نوع الأسئلة اللي بدك ياه بالضبط (مثال: أسئلة عن الفصل الثالث فقط، "
     "أسئلة على شكل مقارنات، إلخ):"
@@ -120,7 +117,7 @@ MSG_PREVIOUS_REQUEST_REPLACED = "ℹ️ تم إلغاء طلبك السابق ت
 
 # ==================== AI Model Configuration ====================
 
-GEMINI_PRIMARY_MODEL = "gemini-3.7-flash"  
+GEMINI_PRIMARY_MODEL = "gemini-3.6-flash"  
 GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
 # 🆕 نموذج سريع وخفيف مخصص حصراً لفحص "هل يحتوي المحتوى معادلات/قوانين رياضية؟"
