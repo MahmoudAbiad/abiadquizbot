@@ -32,6 +32,8 @@ class QuizState(StatesGroup):
     waiting_for_quiz_feedback = State()     # 🆕 استقبال ملاحظات وشكاوى الطلاب بنهاية الاختبار
     waiting_for_generation_confirm = State()
     waiting_for_translation_choice = State()  # 🆕 اختيار "مترجمة/بدون ترجمة" عند اكتشاف محتوى إنجليزي
+    waiting_for_quiz_options = State()        # 🆕 شاشة اختيار نوع الأسئلة + الصعوبة (رسالة واحدة، تحديثات متتالية)
+    waiting_for_custom_question_type = State()  # 🆕 استقبال تفضيل نوع الأسئلة النصي الحر من الطالب
     
 # ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:

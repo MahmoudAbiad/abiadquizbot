@@ -173,16 +173,28 @@ async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
 # ==================== Central Quiz & Cache Operations ====================
 
 async def get_file_quizzes(file_hash: str) -> list:
-    """جلب كل الكويزات التابعة للملف مرتبة تلقائياً حسب التقييم الأعلى لزملائك الطلاب"""
+    """جلب كل الكويزات التابعة للملف مرتبة تلقائياً حسب التقييم الأعلى لزملائك الطلاب.
+    🆕 يشمل الآن subject_type/question_type/question_type_label/difficulty لعرض
+    تفاصيل كل كويز مخزّن (نوع + صعوبة) وللسماح بالفلترة والتحقق من سقف كل تركيبة
+    على حدة بدل سقف مشترك واحد للملف بأكمله."""
     try:
-        res = await supabase.table("quizzes").select("id, likes, dislikes, score, quiz_data, is_math_quiz").eq("file_hash", file_hash).order("score", desc=True).execute()
+        res = await supabase.table("quizzes").select(
+            "id, likes, dislikes, score, quiz_data, is_math_quiz, "
+            "subject_type, question_type, question_type_label, difficulty"
+        ).eq("file_hash", file_hash).order("score", desc=True).execute()
         return res.data or []
     except Exception as e:
         log_error(logger, f"Error getting file quizzes from central table: {e}")
         return []
 
-async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title: str, quiz_data: list, total_tokens: int, is_math_quiz: bool = False) -> Optional[str]:
-    """حفظ كويز جديد مولد كلياً بالجدول المركزي وعزل التكرار لخدمة الدفعة الدراسية"""
+async def save_file_quiz_multiple(
+    file_hash: str, creator_id: int, source_title: str, quiz_data: list, total_tokens: int,
+    is_math_quiz: bool = False, subject_type: str = "other", question_type: str = "general",
+    question_type_label: Optional[str] = None, difficulty: str = "medium",
+) -> Optional[str]:
+    """حفظ كويز جديد مولد كلياً بالجدول المركزي وعزل التكرار لخدمة الدفعة الدراسية.
+    🆕 يخزّن الآن تركيبة (subject_type, question_type, difficulty) مع كل كويز -
+    راجع migration_quiz_options.sql - لدعم عرض التفاصيل والفلترة وسقف مستقل لكل تركيبة."""
     try:
         res = await supabase.table("quizzes").insert({
             "creator_id": creator_id,
@@ -191,6 +203,10 @@ async def save_file_quiz_multiple(file_hash: str, creator_id: int, source_title:
             "quiz_data": quiz_data,
             "total_tokens": total_tokens,
             "is_math_quiz": is_math_quiz,
+            "subject_type": subject_type,
+            "question_type": question_type,
+            "question_type_label": question_type_label,
+            "difficulty": difficulty,
         }).execute()
         if res.data:
             return res.data[0]['id']

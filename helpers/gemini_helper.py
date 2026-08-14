@@ -36,12 +36,16 @@ from pydantic import BaseModel, Field
 
 from constants import (
     AI_REQUEST_TIMEOUT,
+    DIFFICULTY_MEDIUM,
+    DIFFICULTY_PROMPT_INSTRUCTIONS,
     GEMINI_FALLBACK_MODEL,
     GEMINI_PRIMARY_MODEL,
     KEY_BLOCK_QUOTA_EXHAUSTED,
     KEY_BLOCK_TEMPORARY_ERROR,
     MAX_LIMIT_PAGES,
     OPTION_COUNT,
+    QUESTION_TYPE_INSTRUCTION_GENERAL,
+    QUESTION_TYPE_PROMPT_INSTRUCTIONS,
     QUOTA_ERROR_KEYWORDS,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
     SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS,
@@ -455,6 +459,24 @@ async def _generate_text_quiz_with_gemini(pure_text: str, prompt: str) -> Option
     log_warning(logger, f"All keys failed text generation on primary model ({GEMINI_PRIMARY_MODEL}); trying fallback ({GEMINI_FALLBACK_MODEL})")
     return await _attempt(GEMINI_FALLBACK_MODEL)
 
+def _resolve_difficulty_instruction(difficulty: Optional[str]) -> str:
+    """يحوّل قيمة الصعوبة المخزّنة إلى نص التعليمة المحقونة بالبرومبت، مع افتراض
+    'متوسط' الآمن لأي قيمة غير معروفة أو غير محددة."""
+    return DIFFICULTY_PROMPT_INSTRUCTIONS.get(difficulty or DIFFICULTY_MEDIUM, DIFFICULTY_PROMPT_INSTRUCTIONS[DIFFICULTY_MEDIUM])
+
+
+def _resolve_question_type_instruction(question_type: Optional[str], custom_question_type_text: Optional[str]) -> str:
+    """يحوّل نوع الأسئلة المختار إلى نص التعليمة المحقونة بالبرومبت:
+    - نوع مخصص (custom): يُحقن نص الطالب الحر كما هو (بعد تنظيف بسيط).
+    - نوع ثابت من القوائم الجاهزة أو من اقتراحات AI: يُستخدم النص الجاهز المطابق إن وجد.
+    - غير محدد أو 'general': تعليمة محايدة (تغطية متوازنة لكل الأنواع)."""
+    if custom_question_type_text and custom_question_type_text.strip():
+        return f"ركّز حصراً على نوع الأسئلة التالي كما حدده الطالب بالضبط: {custom_question_type_text.strip()}"
+    if question_type and question_type in QUESTION_TYPE_PROMPT_INSTRUCTIONS:
+        return QUESTION_TYPE_PROMPT_INSTRUCTIONS[question_type]
+    return QUESTION_TYPE_INSTRUCTION_GENERAL
+
+
 # ==============================================================================
 # MAIN PUBLIC API ENTRYPOINT
 # ==============================================================================
@@ -468,17 +490,25 @@ async def generate_quiz_smart(
     previous_questions: Optional[List[Dict[str, Any]]] = None,
     is_math_mode: bool = False,
     english_mode: Optional[str] = None,
+    difficulty: Optional[str] = None,
+    question_type: Optional[str] = None,
+    custom_question_type_text: Optional[str] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
     تتولى إدارة الـ Cache، توجيه الطلبات للمسار المناسب، وتنظيف مهام الرسائل التفاعلية.
 
-    is_math_mode: عندما تكون True (بعد اكتشاف محتوى رياضي عبر services.math_detector)،
+    is_math_mode: عندما تكون True (بعد التصنيف الموحّد عبر services.subject_classifier)،
     يُستبدل موجّه التوليد بنسخة LaTeX المخصصة لـ"نمط الكويز المصوّر" بدل الموجّه العادي.
 
-    english_mode: 🆕 عندما يكون "translated" أو "plain" (بعد اكتشاف محتوى إنجليزي واختيار
+    english_mode: عندما يكون "translated" أو "plain" (بعد اكتشاف محتوى إنجليزي واختيار
     الطالب عبر handlers/files.py)، يُستبدل موجّه التوليد بالنسخة الإنجليزية المناسبة. يُتجاهل
     كلياً إذا كان is_math_mode=True (الأولوية دائماً لنمط الكويز المصوّر الرياضي).
+
+    🆕 difficulty / question_type / custom_question_type_text: تُحقن كنصوص تعليمات إضافية
+    ({difficulty_instruction} و{question_type_instruction}) بكل الموجّهات الأربعة على حد
+    سواء، بغض النظر عن المسار (رياضي/إنجليزي/عادي) - راجع _resolve_difficulty_instruction
+    و_resolve_question_type_instruction أعلاه لمنطق التحويل.
     """
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
@@ -495,6 +525,14 @@ async def generate_quiz_smart(
             source_prompt = SYSTEM_PROMPT_GENERATE_QUESTIONS
         # IMPORTANT: استبدال {option_count} أولاً لضمان وصول العدد الصحيح للخيارات لكافة النماذج
         base_prompt_template = source_prompt.replace("{option_count}", str(OPTION_COUNT))
+
+        # 🆕 حقن تعليمات الصعوبة ونوع الأسئلة - موجودتان بالأربع موجّهات على حد سواء
+        base_prompt_template = base_prompt_template.replace(
+            "{difficulty_instruction}", _resolve_difficulty_instruction(difficulty)
+        ).replace(
+            "{question_type_instruction}",
+            _resolve_question_type_instruction(question_type, custom_question_type_text),
+        )
         
         # حقن الأسئلة السابقة لمنع التكرار
         if previous_questions:

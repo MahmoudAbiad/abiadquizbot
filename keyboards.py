@@ -2,6 +2,10 @@ from aiogram import types
 from constants import (
     OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL, BTN_CANCEL_REQUEST,
     BTN_TRANSLATE_YES, BTN_TRANSLATE_NO,
+    QUESTION_TYPE_OPTIONS, QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM,
+    DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_LABELS_AR,
+    BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_QUIZ_OPTIONS_CONTINUE,
+    SUBJECT_MATH, SUBJECT_ENGLISH,
 )
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
@@ -94,6 +98,56 @@ def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineK
     kb = [row, [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+def get_quiz_options_keyboard(
+    subject_type: str, suggested_types: list, selected_type: str, selected_difficulty: str
+) -> types.InlineKeyboardMarkup:
+    """
+    🆕 شاشة اختيار نوع الأسئلة + الصعوبة - رسالة واحدة تُحدَّث بالمكان (edit_text) مع كل
+    ضغطة، بدل رسائل متتالية. أزرار toggle: العنصر المختار حالياً يظهر بعلامة ✅.
+
+    - subject_type == "math": مسائل/قوانين/نظري (من constants.QUESTION_TYPE_OPTIONS)
+    - subject_type == "english": قواعد/قراءة/اختبار عام
+    - غير ذلك ("other"): اقتراحات AI الديناميكية (suggested_types)، بحد أقصى 4
+    - "عام" و"تفضيل خاص" متاحان دائماً بغض النظر عن المادة
+    """
+    kb = []
+
+    # صف/صفوف أزرار نوع الأسئلة (زرّان بكل صف لضمان وضوح النص العربي)
+    if subject_type in (SUBJECT_MATH, SUBJECT_ENGLISH):
+        type_options = list(QUESTION_TYPE_OPTIONS.get(subject_type, []))
+    else:
+        # 🆕 اقتراحات AI الديناميكية للمواد غير المصنّفة - كل اقتراح يأخذ قيمة مفتاح
+        # مبنية من فهرسه (other_0, other_1...) لأن نصه حر وغير معروف مسبقاً كثابت
+        type_options = [(f"other_{i}", label) for i, label in enumerate(suggested_types[:4])]
+
+    row = []
+    for value, label in type_options:
+        text = f"✅ {label}" if selected_type == value else label
+        row.append(types.InlineKeyboardButton(text=text, callback_data=f"qtype_{value}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+
+    general_text = f"✅ {BTN_QUESTION_TYPE_GENERAL}" if selected_type == QUESTION_TYPE_GENERAL else BTN_QUESTION_TYPE_GENERAL
+    custom_text = f"✅ {BTN_QUESTION_TYPE_CUSTOM}" if selected_type == QUESTION_TYPE_CUSTOM else BTN_QUESTION_TYPE_CUSTOM
+    kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
+    kb.append([types.InlineKeyboardButton(text=custom_text, callback_data="qtype_custom")])
+
+    # صف الصعوبة (ثلاثة أزرار بصف واحد)
+    diff_row = []
+    for value in (DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED):
+        label = DIFFICULTY_LABELS_AR[value]
+        text = f"✅ {label}" if selected_difficulty == value else label
+        diff_row.append(types.InlineKeyboardButton(text=text, callback_data=f"qdiff_{value}"))
+    kb.append(diff_row)
+
+    kb.append([types.InlineKeyboardButton(text=BTN_QUIZ_OPTIONS_CONTINUE, callback_data="quiz_options_continue")])
+    kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 def get_translation_choice_keyboard() -> types.InlineKeyboardMarkup:
     """🆕 لوحة اختيار نمط الأسئلة عند اكتشاف محتوى إنجليزي: مترجمة للعربية أو إنجليزية فقط."""
     kb = [
@@ -112,10 +166,53 @@ def get_cancel_upload_keyboard() -> types.InlineKeyboardMarkup:
 
 # ==================== لوحات إدارة المخازن المتعددة والتقييمات ====================
 
-def get_multiple_quizzes_keyboard(quizzes: list, cost: float, show_generate_btn: bool = True) -> types.InlineKeyboardMarkup:
-    """توليد أزرار ذكية لعرض كافة الكويزات المتوفرة للملف الواحد مع إحصائيات تقييم مجتمع الطلاب"""
+def get_multiple_quizzes_keyboard(
+    all_quizzes: list, filtered_quizzes: list, cost: float, show_generate_btn: bool = True,
+    filter_type: str = "all", filter_difficulty: str = "all",
+) -> types.InlineKeyboardMarkup:
+    """
+    توليد أزرار ذكية لعرض الكويزات المتوفرة للملف الواحد مع إحصائيات تقييم مجتمع الطلاب.
+
+    🆕 all_quizzes: كل الكويزات المخزّنة (تُستخدم فقط لاستخراج القيم المتاحة للفلترة).
+    🆕 filtered_quizzes: الكويزات بعد تطبيق الفلتر الحالي (هي فقط اللي تُعرض كأزرار تشغيل).
+    🆕 صفوف الفلترة (نوع/صعوبة) تُعرض فقط لو فيه أكثر من قيمة واحدة فعلياً موجودة بين
+    الكويزات المخزّنة - لتفادي ازدحام الأزرار لما تكون كلها بنفس التركيبة.
+    """
     kb = []
-    for idx, q in enumerate(quizzes, 1):
+
+    # 🆕 صف فلترة النوع - أكثر 3 أنواع تكراراً بين الكويزات المخزّنة (تفادي ازدحام الصف)
+    seen_types, distinct_types = set(), []
+    for q in all_quizzes:
+        qt = q.get("question_type") or "general"
+        if qt not in seen_types:
+            seen_types.add(qt)
+            distinct_types.append((qt, q.get("question_type_label") or "🎯 عام"))
+    if len(distinct_types) > 1:
+        row = [types.InlineKeyboardButton(
+            text=("✅ الكل" if filter_type == "all" else "الكل"), callback_data="cachefilter_type_all"
+        )]
+        for qt, label in distinct_types[:3]:
+            short_label = label if len(label) <= 18 else (label[:16] + "…")
+            text = f"✅ {short_label}" if filter_type == qt else short_label
+            row.append(types.InlineKeyboardButton(text=text, callback_data=f"cachefilter_type_{qt}"))
+        kb.append(row)
+
+    # 🆕 صف فلترة الصعوبة
+    distinct_difficulties = sorted({q.get("difficulty") or "medium" for q in all_quizzes})
+    if len(distinct_difficulties) > 1:
+        row = [types.InlineKeyboardButton(
+            text=("✅ الكل" if filter_difficulty == "all" else "الكل"), callback_data="cachefilter_diff_all"
+        )]
+        for d in distinct_difficulties:
+            label = DIFFICULTY_LABELS_AR.get(d, d)
+            text = f"✅ {label}" if filter_difficulty == d else label
+            row.append(types.InlineKeyboardButton(text=text, callback_data=f"cachefilter_diff_{d}"))
+        kb.append(row)
+
+    if not filtered_quizzes:
+        kb.append([types.InlineKeyboardButton(text="🔍 لا يوجد كويزات مطابقة لهذا الفلتر", callback_data="ignored")])
+
+    for idx, q in enumerate(filtered_quizzes, 1):
         likes = q.get('likes', 0)
         dislikes = q.get('dislikes', 0)
         # 🩹 UX: إضافة عدد الأسئلة لكل كويز جاهز، فالطالب كان يختار بين "كويز 1" و"كويز 2"
@@ -126,7 +223,10 @@ def get_multiple_quizzes_keyboard(quizzes: list, cost: float, show_generate_btn:
         # (صورة لكل سؤال + Poll بحروف الإجابة فقط) عن الكويز النصي العادي
         is_math = bool(q.get('is_math_quiz')) or (q_count > 0 and bool(quiz_data[0].get('is_math')))
         icon = "📐" if is_math else "📝"
-        btn_text = f"{icon} كويز {idx} الجاهز ({q_count} سؤال) | 👍 {likes} | 👎 {dislikes}"
+        # 🆕 تفاصيل النوع + الصعوبة بجانب كل كويز مخزّن (بدل عرضها كوحدة متجانسة كسابقاً)
+        type_label = q.get("question_type_label") or "🎯 عام"
+        diff_label = DIFFICULTY_LABELS_AR.get(q.get("difficulty") or "medium", "🟡 متوسط")
+        btn_text = f"{icon} {type_label} | {diff_label} | {q_count} سؤال | 👍{likes} 👎{dislikes}"
         kb.append([types.InlineKeyboardButton(text=btn_text, callback_data=f"use_multi_{q['id']}")])
     
     if show_generate_btn:

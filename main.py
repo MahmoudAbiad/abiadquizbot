@@ -18,6 +18,7 @@ from handlers import (
     start_router, 
     admin_router, 
     files_router, 
+    quiz_options_router,
     quiz_runner_router, 
     favorites_router, 
     sharing_router,
@@ -54,6 +55,7 @@ def main():
         admin_router,
         sharing_router,
         files_router,
+        quiz_options_router,  # 🆕 شاشة اختيار نوع/صعوبة الأسئلة (يجب أن يُسجَّل بعد files_router)
         quiz_runner_router,  # 👈 الـ Router الجديد لإدارة حركة الكويز
         favorites_router,
         leaderboard_router,
