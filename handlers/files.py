@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from aiogram import F, Router, types
 from aiogram.filters import Command, StateFilter
@@ -22,7 +22,7 @@ from constants import (
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from keyboards import (
-    get_generation_confirm_keyboard, get_multiple_quizzes_keyboard, get_question_count_quick_keyboard,
+    get_multiple_quizzes_keyboard, get_question_count_keyboard,
     get_translation_choice_keyboard, get_quiz_type_keyboard
 )
 from logger import get_logger, log_error
@@ -37,7 +37,7 @@ from services.file_service import compute_combined_hash, download_photos_service
 from services.subject_classifier import classify_subject
 from services.quiz_service import (
     determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow,
-    combo_quiz_count,
+    combo_quiz_count, build_question_type_label,
 )
 
 logger = get_logger(__name__)
@@ -49,8 +49,9 @@ processing_users: set[int] = set()
 PENDING_REQUEST_STATES = (
     QuizState.waiting_for_count, 
     QuizState.waiting_for_cache_decision, 
-    QuizState.waiting_for_generation_confirm,
     QuizState.waiting_for_translation_choice,
+    QuizState.waiting_for_quiz_options,       # 🆕
+    QuizState.waiting_for_custom_question_type,  # 🆕
 )
 
 def _cancel_keyboard() -> types.InlineKeyboardMarkup:
@@ -127,23 +128,65 @@ async def process_album_background(message: types.Message, state: FSMContext):
         log_error(logger, f"Album background processing failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
-async def _show_question_count_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
+DEFAULT_COUNT_SUGGESTIONS = [5, 10, 15, 20]
+
+
+async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[int], state: FSMContext, target_for_send: Optional[types.Message] = None) -> None:
     """
-    🆕 الخطوة الأخيرة المشتركة: عرض شاشة "كم سؤالاً تريد؟" باستخدام count_prompt_text
-    المخزَّن مسبقاً بالحالة (وُضع هناك من _ask_question_count عند نقطة الدخول الأصلية).
-    تُستدعى من نهاية شاشة خيارات نوع/صعوبة الأسئلة (handlers/quiz_options.py) بدل تكرار
-    نفس منطق set_state/edit_text في مكانين مختلفين.
+    🆕 يبني نص وكيبورد شاشة عدد الأسئلة المدمجة (اختيار العدد + التكلفة + زر البدء
+    بنفس الشاشة) ويعرضها. لو message_id متوفر يُعدَّل نفس الرسالة (bot.edit_message_text)
+    بغض النظر عن مصدر الحدث (ضغطة زر أو رسالة نصية بعدد مخصص) - هذا ما يسمح بدمج
+    مسار "الكتابة اليدوية لعدد مخصص" بنفس شاشة الأزرار السريعة بدل رسالة منفصلة.
+    لو مافي message_id بعد (أول عرض)، تُرسَل رسالة جديدة عبر target_for_send وتُخزَّن
+    معرّفاتها بالحالة ليُعاد استخدامها بكل التحديثات اللاحقة.
     """
     data = await state.get_data()
+    items = int(data.get("items_count") or 1)
+    is_album = bool(data.get("is_album"))
+    selected_count = int(data.get("selected_question_count") or DEFAULT_COUNT_SUGGESTIONS[1])
     count_prompt_text = data.get(
         "count_prompt_text",
-        "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
+        "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟",
     )
+
+    mode = determine_execution_mode(items, selected_count)
+    cost = calculate_quiz_points_cost(items, selected_count, is_album)
+    difficulty = data.get("difficulty", DIFFICULTY_MEDIUM)
+    question_type_label = build_question_type_label(
+        data.get("subject_type", "other"), data.get("question_type", QUESTION_TYPE_GENERAL),
+        data.get("custom_question_type_text"), data.get("suggested_question_types", []),
+    )
+
+    text = f"{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
+    if mode == "Super-Processing":
+        text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
+
+    keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
+
+    if message_id:
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=keyboard, parse_mode="HTML")
+            await state.update_data(count_screen_chat_id=chat_id, count_screen_message_id=message_id)
+            return
+        except Exception:
+            pass  # الرسالة الأصلية حُذفت أو تعذّر تعديلها (نادر) - نكمل بإرسال رسالة جديدة أدناه
+
+    msg = await target_for_send.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.update_data(count_screen_chat_id=msg.chat.id, count_screen_message_id=msg.message_id)
+
+
+async def _show_question_count_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
+    """
+    🆕 الخطوة الأخيرة المشتركة: عرض شاشة عدد الأسئلة المدمجة (اختيار + تكلفة + بدء
+    التوليد بضغطة واحدة أخيرة، بدل شاشتين منفصلتين كما كان سابقاً). count_prompt_text
+    مخزَّن مسبقاً بالحالة (وُضع هناك من _ask_question_count عند نقطة الدخول الأصلية).
+    """
+    await state.update_data(selected_question_count=DEFAULT_COUNT_SUGGESTIONS[1], count_screen_message_id=None)
     await state.set_state(QuizState.waiting_for_count)
     if edit:
-        await reply_target.edit_text(count_prompt_text, reply_markup=get_question_count_quick_keyboard())
+        await _render_question_count_screen(reply_target.bot, reply_target.chat.id, reply_target.message_id, state, target_for_send=reply_target)
     else:
-        await reply_target.answer(count_prompt_text, reply_markup=get_question_count_quick_keyboard())
+        await _render_question_count_screen(reply_target.bot, reply_target.chat.id, None, state, target_for_send=reply_target)
 
 
 async def _show_quiz_options_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
@@ -508,92 +551,165 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
     )
     await call.answer()
 
-# ==================== معالجات تحديد الأسئلة والتأكيد ====================
+# ==================== معالجات شاشة عدد الأسئلة المدمجة (اختيار + تكلفة + بدء) ====================
 
-async def _process_question_count(reply_target: types.Message, state: FSMContext, user, count: int) -> None:
-    """المنطق المشترك للتحقق من عدد الأسئلة وحساب التكلفة وعرض شاشة التأكيد،
-    يُستدعى سواء أرسل الطالب رقماً كتابة أو ضغط أحد أزرار الاختيار السريع."""
-    valid, error = validate_question_count(count)
-    if not valid:
-        await reply_target.answer(f"❌ {error}", reply_markup=get_question_count_quick_keyboard())
-        return
-
-    data = await state.get_data()
-    items = int(data.get("items_count") or 1)
-    is_album = bool(data.get("is_album"))
-    file_hash = data.get("file_hash")
-
-    if file_hash:
-        # 🆕 السقف يُحسب الآن لكل تركيبة (نوع مادة × نوع أسئلة × صعوبة) على حدة بدل
-        # سقف مشترك لكل الكويزات المخزنة للملف بغض النظر عن نوعها - راجع combo_quiz_count.
-        current_quizzes = await get_file_quizzes(file_hash)
-        max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
-        existing_combo_count = combo_quiz_count(
-            current_quizzes, data.get("subject_type", "other"),
-            data.get("question_type", "general"), data.get("difficulty", "medium"),
-        )
-        if existing_combo_count >= max_allowed:
-            await reply_target.answer(MSG_MAX_QUIZZES_REACHED, parse_mode="HTML")
-            await state.clear()
-            return
-
-    cost = calculate_quiz_points_cost(items, count, is_album)
-    mode = determine_execution_mode(items, count)
-
-    user_info = await _current_user(reply_target, user)
-
-    if float(user_info["points"]) < cost:
-        await _insufficient_balance(reply_target, user_info, cost)
-        return
-
-    # إصلاح التتبع: تسجيل حدث طلب التوليد
-    asyncio.create_task(log_usage_event(user.id, "quiz_generation_requested", {
-        "requested_count": count, "items_count": items, "cost": cost, "mode": mode
-    }))
-
-    await state.update_data(calculated_cost=cost, requested_count=count, execution_mode=mode)
-    await state.set_state(QuizState.waiting_for_generation_confirm)
-
-    confirm_kb = get_generation_confirm_keyboard()
-
-    confirm_text = (
-        f"{build_transparency_text(items, count, mode, cost)}\n\n"
-        f"❓ <b>هل تؤكد بدء التوليد وخصم {cost:.2f} نقطة من رصيدك؟</b>"
-    )
-    if mode == "Super-Processing":
-        confirm_text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
-
-    await reply_target.answer(confirm_text, reply_markup=confirm_kb, parse_mode="HTML")
-
-@router.message(QuizState.waiting_for_count, F.text.isdigit())
-async def process_count(message: types.Message, state: FSMContext) -> None:
-    """معالج إدخال عدد الأسئلة المطلوبة كتابةً والتحقق من التكلفة وإظهار رسالة التأكيد"""
-    await _process_question_count(message, state, message.from_user, int(message.text))
-
-@router.callback_query(QuizState.waiting_for_count, F.data.startswith("qcount_"))
-async def process_count_quick_select(call: types.CallbackQuery, state: FSMContext) -> None:
-    """معالج الضغط على أحد أزرار الاختيار السريع لعدد الأسئلة (5/10/15/20)"""
+@router.callback_query(QuizState.waiting_for_count, F.data.startswith("qcount_pick_"))
+async def handle_count_pick(call: types.CallbackQuery, state: FSMContext) -> None:
+    """اختيار عدد من الأزرار السريعة (toggle) - يحدّث نفس الشاشة (سعر + زر البدء) فوراً."""
     try:
-        count = int(call.data.replace("qcount_", ""))
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
-        await _process_question_count(call.message, state, call.from_user, count)
+        count = int(call.data.replace("qcount_pick_", "", 1))
+        valid, error = validate_question_count(count)
+        if not valid:
+            await call.answer(f"❌ {error}", show_alert=True)
+            return
+        await state.update_data(selected_question_count=count)
+        data = await state.get_data()
+        await _render_question_count_screen(
+            call.bot, data.get("count_screen_chat_id", call.message.chat.id),
+            data.get("count_screen_message_id", call.message.message_id), state, target_for_send=call.message,
+        )
     except Exception as exc:
-        log_error(logger, f"Quick count selection failed: {exc}", exception=exc)
-        await call.message.answer("❌ تعذر تنفيذ الاختيار، أرسل الرقم يدوياً من فضلك.", reply_markup=get_question_count_quick_keyboard())
+        log_error(logger, f"Count pick failed: {exc}", exception=exc)
     finally:
         await call.answer()
+
+
+@router.callback_query(QuizState.waiting_for_count, F.data == "qcount_custom")
+async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContext) -> None:
+    """يطلب من الطالب كتابة عدد مخصص - نفس الرسالة تتحول لطلب إدخال نصي (edit)."""
+    try:
+        await call.message.edit_text(
+            "✏️ اكتب الآن عدد الأسئلة المطلوب (رقم فقط):",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
+            ]),
+        )
+    except Exception as exc:
+        log_error(logger, f"Custom count prompt failed: {exc}", exception=exc)
+    finally:
+        await call.answer()
+
+
+@router.message(QuizState.waiting_for_count, F.text.isdigit())
+async def process_count_custom_text(message: types.Message, state: FSMContext) -> None:
+    """
+    🆕 استقبال العدد المكتوب يدوياً - يُحدَّث نفس شاشة الأزرار الأصلية (عبر
+    count_screen_chat_id/message_id المخزّنة بالحالة) بدل إرسال شاشة تأكيد منفصلة،
+    فيبقى التدفق كله شاشة واحدة متجدّدة حتى لو غيّر الطالب طريقة الإدخال بمنتصف الطريق.
+    """
+    count = int(message.text)
+    valid, error = validate_question_count(count)
+    if not valid:
+        await message.answer(f"❌ {error}")
+        return
+    await state.update_data(selected_question_count=count)
+    data = await state.get_data()
+    try:
+        await message.delete()  # تنظيف الشات من رقم الطالب المكتوب - آمن التجاهل لو فشل
+    except Exception:
+        pass
+    await _render_question_count_screen(
+        message.bot, data.get("count_screen_chat_id", message.chat.id),
+        data.get("count_screen_message_id"), state, target_for_send=message,
+    )
+
 
 @router.message(QuizState.waiting_for_count)
 async def process_count_invalid(message: types.Message) -> None:
     """معالج إدخال قيمة غير رقمية لعدد الأسئلة"""
     await message.answer(
-        "⚠️ <b>الرجاء إرسال رقم صحيح لعدد الأسئلة!</b>\n\nيمكنك اختيار أحد الأزرار أدناه، أو استخدام زر التراجع لإلغاء العملية الحالية بشكل نظيف وعادل.",
-        reply_markup=get_question_count_quick_keyboard(),
+        "⚠️ <b>الرجاء إرسال رقم صحيح لعدد الأسئلة!</b>\n\nيمكنك استخدام زر التراجع لإلغاء العملية الحالية بشكل نظيف وعادل.",
         parse_mode="HTML"
     )
+
+
+@router.callback_query(QuizState.waiting_for_count, F.data == "qcount_start")
+async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> None:
+    """
+    🆕 زر "ابدأ التوليد" بنهاية شاشة عدد الأسئلة - يدمج (كانا سابقاً خطوتين منفصلتين):
+    1) التحقق من السقف/الرصيد وحساب التكلفة (كان _process_question_count سابقاً)
+    2) الخصم الفعلي وتنفيذ التوليد (كان handle_confirm_quiz_generation سابقاً)
+    كل ذلك بضغطة واحدة أخيرة على نفس الشاشة التي عرضت السعر مسبقاً - يطابق الخطة
+    الأصلية: "خيارات مسعّرة مسبقاً ... وزر (ابدأ التوليد) بنهاية القائمة".
+    """
+    await call.answer()
+    try:
+        data = await state.get_data()
+        count = int(data.get("selected_question_count") or 0)
+        valid, error = validate_question_count(count)
+        if not valid:
+            await call.message.answer(f"❌ {error}")
+            return
+
+        items = int(data.get("items_count") or 1)
+        is_album = bool(data.get("is_album"))
+        file_hash = data.get("file_hash")
+
+        if file_hash:
+            # 🆕 نفس فحص سقف التركيبة، مُعاد هنا كخط دفاع أخير مباشرة قبل الخصم (قد يكون
+            # طالب آخر ولّد كويزاً بنفس التركيبة بين عرض الشاشة والضغط على "ابدأ التوليد").
+            current_quizzes = await get_file_quizzes(file_hash)
+            max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
+            existing_combo_count = combo_quiz_count(
+                current_quizzes, data.get("subject_type", "other"),
+                data.get("question_type", "general"), data.get("difficulty", "medium"),
+            )
+            if existing_combo_count >= max_allowed:
+                await call.message.answer(MSG_MAX_QUIZZES_REACHED, parse_mode="HTML")
+                await state.clear()
+                return
+
+        cost = calculate_quiz_points_cost(items, count, is_album)
+        mode = determine_execution_mode(items, count)
+        user_info = await _current_user(call.message, call.from_user)
+
+        if float(user_info["points"]) < cost or await update_user_stats(call.from_user.id, cost, count) is None:
+            await _insufficient_balance(call.message, user_info, cost)
+            return
+
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generation_requested", {
+            "requested_count": count, "items_count": items, "cost": cost, "mode": mode
+        }))
+
+        await state.update_data(debited_cost=cost, calculated_cost=cost, requested_count=count, execution_mode=mode)
+        data["debited_cost"] = cost  # 🩹 إصلاح خلل موجود مسبقاً: استرجاع النقاط كان يقرأ نسخة قديمة من الحالة بدون هذا الحقل، فيحسب دائماً صفراً
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+
+        status_msg = await call.message.answer(MSG_PROCESSING)
+
+        quiz_data, new_quiz_id, error_code = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
+
+        if error_code == "unreadable_office":
+            await refund_user_on_failure(call.from_user.id, data)
+            await state.set_state(None)
+            await status_msg.edit_text("⚠️ <b>تعذر استخراج نص مفيد من المستند!</b> يرجى التأكد من أنه يحتوي على نصوص وليس صوراً. تم إرجاع نقاطك.", parse_mode="HTML")
+            return
+        elif error_code == "ai_failed" or not quiz_data:
+            await refund_user_on_failure(call.from_user.id, data)
+            await state.set_state(None)
+            await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
+            return
+
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generated", {
+            "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost
+        }))
+
+        from handlers.quiz_runner import _start_loaded_quiz
+        await _start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
+        await status_msg.delete()
+
+    except Exception as exc:
+        log_error(logger, f"Quiz generation start failed: {exc}", exception=exc)
+        await refund_user_on_failure(call.from_user.id, await state.get_data())
+        await state.set_state(None)
+        await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً.")
+    finally:
+        for path in (await state.get_data()).get("file_paths", []):
+            safe_file_cleanup(path)
+
 
 @router.callback_query(F.data == "cancel_upload_request")
 async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
@@ -617,55 +733,5 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
     except Exception as exc:
         log_error(logger, f"Cancel request failed: {exc}", exception=exc)
         await call.answer("❌ تعذر إلغاء الطلب، حاول مجدداً.", show_alert=True)
-
-@router.callback_query(QuizState.waiting_for_generation_confirm, F.data == "confirm_quiz_generation")
-async def handle_confirm_quiz_generation(call: types.CallbackQuery, state: FSMContext) -> None:
-    await call.answer()
-    try:
-        data = await state.get_data()
-        cost, count = float(data.get("calculated_cost") or 0), int(data.get("requested_count") or 0)
-        user_info = await _current_user(call.message, call.from_user)
-        
-        if float(user_info["points"]) < cost or await update_user_stats(call.from_user.id, cost, count) is None:
-            await _insufficient_balance(call.message, user_info, cost)
-            return
-
-        await state.update_data(debited_cost=cost)
-        try: await call.message.delete()
-        except Exception: pass
-
-        status_msg = await call.message.answer(MSG_PROCESSING)
-        
-        # استدعاء خط التوليد من الـ Service
-        quiz_data, new_quiz_id, error_code = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
-        
-        if error_code == "unreadable_office":
-            await refund_user_on_failure(call.from_user.id, data)
-            await state.set_state(None)
-            await status_msg.edit_text("⚠️ <b>تعذر استخراج نص مفيد من المستند!</b> يرجى التأكد من أنه يحتوي على نصوص وليس صوراً. تم إرجاع نقاطك.", parse_mode="HTML")
-            return
-        elif error_code == "ai_failed" or not quiz_data:
-            await refund_user_on_failure(call.from_user.id, data)
-            await state.set_state(None)
-            await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
-            return
-
-        # إصلاح التتبع: تسجيل نجاح توليد الكويز الفعلي
-        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generated", {
-            "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost
-        }))
-
-        from handlers.quiz_runner import _start_loaded_quiz
-        await _start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
-        await status_msg.delete()
-
-    except Exception as exc:
-        log_error(logger, f"Confirm quiz generation failed: {exc}", exception=exc)
-        await refund_user_on_failure(call.from_user.id, await state.get_data())
-        await state.set_state(None)
-        await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً.")
-    finally:
-        for path in (await state.get_data()).get("file_paths", []):
-            safe_file_cleanup(path)
 
 files_router = router

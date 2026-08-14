@@ -91,11 +91,46 @@ def get_quiz_exit_confirmation_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineKeyboardMarkup:
-    """🩹 UX: أزرار سريعة لعدد الأسئلة الشائعة، بدل إجبار الطالب على كتابة رقم من دون أي
-    مرجع (خصوصاً أن السقف الأقصى قد يصل إلى 120 سؤالاً). تبقى كتابة رقم مخصص متاحة دائماً."""
+    """نسخة احتياطية بسيطة (بدون أسعار) - تُستخدم فقط كـ reply_markup لرسائل الخطأ
+    (مثال: 'أدخل رقماً صحيحاً') حيث لا داعي لإعادة حساب التكلفة الكاملة."""
     suggestions = suggestions or [5, 10, 15, 20]
-    row = [types.InlineKeyboardButton(text=f"{n}", callback_data=f"qcount_{n}") for n in suggestions]
+    row = [types.InlineKeyboardButton(text=f"{n}", callback_data=f"qcount_pick_{n}") for n in suggestions]
     kb = [row, [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_question_count_keyboard(
+    items: int, is_album: bool, selected_count: int, suggestions: list = None
+) -> types.InlineKeyboardMarkup:
+    """
+    🆕 شاشة عدد الأسئلة المدمجة - خطوة واحدة بدل خطوتين منفصلتين (اختيار عدد ← ثم شاشة
+    تأكيد وتكلفة مستقلة). كل زر خيار مسعّر مسبقاً (السعر محسوب فعلياً وليس تقديرياً)،
+    وزر "🚀 ابدأ التوليد" بأسفل نفس الشاشة يعرض التكلفة النهائية للعدد المختار حالياً
+    ويبدأ التوليد مباشرة - هذا هو "الزر الموجود بنهاية القائمة" المتفق عليه بالخطة الأصلية.
+    """
+    from helpers.points_calculator import calculate_quiz_points_cost  # تفادي استيراد دائري
+
+    suggestions = suggestions or [5, 10, 15, 20]
+    kb = []
+    row = []
+    for n in suggestions:
+        cost = calculate_quiz_points_cost(items, n, is_album)
+        label = f"{n} سؤال ({cost:.2f}💎)"
+        text = f"✅ {label}" if selected_count == n else label
+        row.append(types.InlineKeyboardButton(text=text, callback_data=f"qcount_pick_{n}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+
+    kb.append([types.InlineKeyboardButton(text="✏️ عدد مخصص (اكتبه مباشرة)", callback_data="qcount_custom")])
+
+    final_cost = calculate_quiz_points_cost(items, selected_count, is_album)
+    kb.append([types.InlineKeyboardButton(
+        text=f"🚀 ابدأ التوليد ({selected_count} سؤال - {final_cost:.2f} نقطة)", callback_data="qcount_start"
+    )])
+    kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_type: str) -> types.InlineKeyboardMarkup:
@@ -124,7 +159,12 @@ def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_ty
 
     general_text = f"✅ {BTN_QUESTION_TYPE_GENERAL}" if selected_type == QUESTION_TYPE_GENERAL else BTN_QUESTION_TYPE_GENERAL
     custom_text = f"✅ {BTN_QUESTION_TYPE_CUSTOM}" if selected_type == QUESTION_TYPE_CUSTOM else BTN_QUESTION_TYPE_CUSTOM
-    kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
+    # 🆕 زر "عام" العمومي يُخفى لمادة الإنجليزي تحديداً لأن "🎯 اختبار عام" (general_test)
+    # من القائمة الجاهزة أعلاه يؤدي نفس الغرض بالضبط - عرض الاثنين معاً كان يبدو
+    # كخيارين متطابقين مربكين بصرياً. باقي المواد (رياضيات/أخرى) لا تملك خياراً مكافئاً
+    # بنفس المعنى ضمن قوائمها، فيبقى الزر العمومي ضرورياً لها.
+    if subject_type != SUBJECT_ENGLISH:
+        kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
     kb.append([types.InlineKeyboardButton(text=custom_text, callback_data="qtype_custom")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -431,16 +471,6 @@ def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarku
 def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
-    ]
-    return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
-def get_generation_confirm_keyboard() -> types.InlineKeyboardMarkup:
-    """لوحة تأكيد التوليد والخصم مع زر التراجع"""
-    kb = [
-        [
-            types.InlineKeyboardButton(text="✅ تأكيد وخصم النقاط", callback_data="confirm_quiz_generation"),
-            types.InlineKeyboardButton(text="❌ إلغاء وتراجع", callback_data="cancel_upload_request")
-        ]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
