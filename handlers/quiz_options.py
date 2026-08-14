@@ -52,19 +52,7 @@ async def _refresh_options_screen(call: types.CallbackQuery, state: FSMContext) 
         pass
 
 
-@router.callback_query(QuizState.waiting_for_quiz_options, F.data.startswith("qtype_"))
-async def handle_question_type_selection(call: types.CallbackQuery, state: FSMContext) -> None:
-    """اختيار نوع الأسئلة: قيمة ثابتة من القائمة الجاهزة، أو 'general' الافتراضي.
-    ملاحظة: زر 'custom' له معالج منفصل أدناه (يفتح خطوة إدخال نصي)."""
-    value = call.data.replace("qtype_", "", 1)
-    if value == "custom":
-        await call.answer()
-        return  # يُعالَج بواسطة handle_question_type_custom أدناه
-    await state.update_data(question_type=value, custom_question_type_text=None)
-    await _refresh_options_screen(call, state)
-    await call.answer()
-
-
+# 👈 1. معالج التفضيل الخاص أولاً حتى لا يبتلعه المعالج العام أدناه
 @router.callback_query(QuizState.waiting_for_quiz_options, F.data == "qtype_custom")
 async def handle_question_type_custom(call: types.CallbackQuery, state: FSMContext) -> None:
     """يفتح خطوة إدخال نصي حر لتفضيل نوع الأسئلة الخاص بالطالب."""
@@ -81,6 +69,16 @@ async def handle_question_type_custom(call: types.CallbackQuery, state: FSMConte
         log_error(logger, f"Failed to open custom question-type prompt: {exc}", exception=exc)
     finally:
         await call.answer()
+
+
+# 👈 2. معالج باقي أزرار نوع الأسئلة مع استثناء qtype_custom صراحةً
+@router.callback_query(QuizState.waiting_for_quiz_options, F.data.startswith("qtype_"), F.data != "qtype_custom")
+async def handle_question_type_selection(call: types.CallbackQuery, state: FSMContext) -> None:
+    """اختيار نوع الأسئلة: قيمة ثابتة من القائمة الجاهزة، أو 'general' الافتراضي."""
+    value = call.data.replace("qtype_", "", 1)
+    await state.update_data(question_type=value, custom_question_type_text=None)
+    await _refresh_options_screen(call, state)
+    await call.answer()
 
 
 @router.callback_query(QuizState.waiting_for_custom_question_type, F.data == "qtype_back_to_options")
