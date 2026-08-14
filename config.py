@@ -30,7 +30,8 @@ class QuizState(StatesGroup):
     waiting_for_custom_name = State()       # استقبال الاسم المخصص
     waiting_for_new_section_title = State() # استقبال اسم القسم الجديد
     waiting_for_quiz_feedback = State()     # 🆕 استقبال ملاحظات وشكاوى الطلاب بنهاية الاختبار
-    waiting_for_generation_confirm = State()
+    # 🆕 waiting_for_generation_confirm أُزيلت: شاشة التأكيد صارت مدمجة داخل waiting_for_count
+    # نفسها (خطوة واحدة بدل خطوتين - راجع handlers/files.py get_question_count_keyboard).
     waiting_for_translation_choice = State()  # 🆕 اختيار "مترجمة/بدون ترجمة" عند اكتشاف محتوى إنجليزي
     waiting_for_quiz_options = State()        # 🆕 شاشة اختيار نوع الأسئلة + الصعوبة (رسالة واحدة، تحديثات متتالية)
     waiting_for_custom_question_type = State()  # 🆕 استقبال تفضيل نوع الأسئلة النصي الحر من الطالب
