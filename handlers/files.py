@@ -208,10 +208,13 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     # 🆕 نخزّن نتيجة التصنيف + قيماً افتراضية لنوع/صعوبة الأسئلة (تُستبدل لاحقاً باختيار
     # الطالب الفعلي عبر شاشة الخيارات handlers/quiz_options.py؛ الافتراضي "عام/متوسط"
     # يبقى صالحاً لو ضغط الطالب "متابعة" مباشرة بدون أي تخصيص).
+    # تحديد النوع الافتراضي: إذا كان إنجليزي نجعله general_test تلقائياً لمنع التكرار
+    default_question_type = "general_test" if classification.subject == SUBJECT_ENGLISH else QUESTION_TYPE_GENERAL
+
     await state.update_data(
         subject_type=classification.subject,
         suggested_question_types=classification.suggested_types,
-        question_type=QUESTION_TYPE_GENERAL,
+        question_type=default_question_type,
         custom_question_type_text=None,
         difficulty=DIFFICULTY_MEDIUM,
     )

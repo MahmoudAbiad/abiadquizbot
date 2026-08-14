@@ -108,7 +108,7 @@ def get_quiz_options_keyboard(
     - subject_type == "math": مسائل/قوانين/نظري (من constants.QUESTION_TYPE_OPTIONS)
     - subject_type == "english": قواعد/قراءة/اختبار عام
     - غير ذلك ("other"): اقتراحات AI الديناميكية (suggested_types)، بحد أقصى 4
-    - "عام" و"تفضيل خاص" متاحان دائماً بغض النظر عن المادة
+    - "عام" و"تفضيل خاص" متاحان دائماً بغض النظر عن المادة (مع إخفاء "عام" للإنجليزي لمنع التكرار)
     """
     kb = []
 
@@ -130,9 +130,12 @@ def get_quiz_options_keyboard(
     if row:
         kb.append(row)
 
-    general_text = f"✅ {BTN_QUESTION_TYPE_GENERAL}" if selected_type == QUESTION_TYPE_GENERAL else BTN_QUESTION_TYPE_GENERAL
+    # إخفاء الزر العام إذا كانت المادة لغة إنجليزية لمنع التكرار مع "🎯 اختبار عام"
+    if subject_type != SUBJECT_ENGLISH:
+        general_text = f"✅ {BTN_QUESTION_TYPE_GENERAL}" if selected_type == QUESTION_TYPE_GENERAL else BTN_QUESTION_TYPE_GENERAL
+        kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
+
     custom_text = f"✅ {BTN_QUESTION_TYPE_CUSTOM}" if selected_type == QUESTION_TYPE_CUSTOM else BTN_QUESTION_TYPE_CUSTOM
-    kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
     kb.append([types.InlineKeyboardButton(text=custom_text, callback_data="qtype_custom")])
 
     # صف الصعوبة (ثلاثة أزرار بصف واحد)
