@@ -9,13 +9,13 @@
 
 | الملف | التعديل |
 |---|---|
-| `supabase_helper.py` | إضافة قسم "Usage Analytics & Tracking" بالكامل في آخر الملف (دوال التسجيل + دوال التجميع للأدمن) |
-| `start.py` | تسجيل حدث `bot_start` عند كل `/start`، وحدث `shared_link_opened` عند الروابط العميقة |
-| `files.py` | تسجيل رفع المحتوى (`content_uploaded`)، طلب التوليد (`quiz_generation_requested`)، التوليد الفعلي (`quiz_generated`)، واستخدام الكاش (`cached_quiz_used`) |
-| `execution.py` | **الجزء الأهم**: إنشاء سجل `quiz_attempts` عند بدء كل كويز، وإغلاقه عند الإكمال أو الإيقاف المبكر، بالإضافة لتسجيل المشاركة/الحفظ/التقييم/الملاحظات |
-| `sharing.py` | تسجيل إنشاء وفتح روابط المشاركة |
-| `leaderboard.py` | تسجيل نشر النتيجة وعرض لوحة الشرف |
-| `admin.py` | قسم "📈 تحليلات الاستخدام" الكامل بلوحة الأدمن + عرض نشاط طالب محدد + تصدير CSV لسجل الأحداث |
+| `helpers/supabase_helper.py` | إضافة قسم "Usage Analytics & Tracking" بالكامل في آخر الملف (دوال التسجيل + دوال التجميع للأدمن) |
+| `handlers/start.py` | تسجيل حدث `bot_start` عند كل `/start`، وحدث `shared_link_opened` عند الروابط العميقة |
+| `handlers/files.py` | تسجيل رفع المحتوى (`content_uploaded`)، طلب التوليد (`quiz_generation_requested`)، التوليد الفعلي (`quiz_generated`)، واستخدام الكاش (`cached_quiz_used`) |
+| `handlers/quiz_runner.py` | **الجزء الأهم**: إنشاء سجل `quiz_attempts` عند بدء كل كويز، وإغلاقه عند الإكمال أو الإيقاف المبكر، بالإضافة لتسجيل المشاركة/الحفظ/التقييم/الملاحظات |
+| `handlers/sharing.py` | تسجيل إنشاء وفتح روابط المشاركة |
+| `handlers/leaderboard.py` | تسجيل نشر النتيجة/إخفائها وعرض لوحة الشرف |
+| `handlers/admin/analytics.py` (ضمن مجلد `handlers/admin/`) | قسم "📈 تحليلات الاستخدام" الكامل بلوحة الأدمن + عرض نشاط طالب محدد + تصدير CSV لسجل الأحداث |
 | `keyboards.py` | مزامنة نفس الأزرار الجديدة في النسخة المكررة من لوحات الأدمن |
 
 ## 3) ما الذي يتتبعه النظام؟
