@@ -68,7 +68,7 @@ def get_quiz_result_keyboard(quiz_id: str = None) -> types.InlineKeyboardMarkup:
         ],
         [
             types.InlineKeyboardButton(text="⭐ حفظ بالمفضلة", callback_data="quiz_favorite"),
-            types.InlineKeyboardButton(text="📁 تحميل الملف", callback_data="export_menu"),
+            types.InlineKeyboardButton(text="📁pdf تحميل الكويز", callback_data="export_menu"),
         ],
     ]
 
