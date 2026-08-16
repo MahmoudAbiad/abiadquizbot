@@ -136,17 +136,23 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
     stopped_early = bool(data.get('stopped_early'))
     percentage = (score / total * 100) if total > 0 else 0
     previous_score_text = ""
-    is_public = False
+    is_new_attempt = False
 
     if quiz_id and str(quiz_id).strip():
         score_data = await get_or_update_high_score(user_id, quiz_id, score, total)
-        is_public = score_data["is_public"]
-        if score_data["previous_score"] is not None:
+        # 🆕 previous_score يكون None فقط أول مرة يخلّص فيها الطالب هالكويز -
+        # هاي اللحظة يلي منسأله فيها صراحة إذا بده ينشر نتيجته أو لأ.
+        is_new_attempt = score_data["previous_score"] is None
+        if not is_new_attempt:
             prev_score, highest = score_data["previous_score"], score_data["highest_score"]
             previous_score_text = f"\n🕒 نتيجتك السابقة: <b>{prev_score}</b>"
             if score > prev_score:
                 previous_score_text += "\n🎉 <b>رقم قياسي جديد لك!</b>"
             previous_score_text += f"\n🏆 أعلى نتيجة مسجلة لك: <b>{highest}</b> من <b>{total}</b>\n"
+
+    publish_question = ""
+    if is_new_attempt:
+        publish_question = "\n📢 <b>هل ترغب بنشر نتيجتك في لوحة الشرف؟</b>"
 
     result_text = (
         f"🏁 <b>اكتمل الاختبار بنجاح!</b>\n\n"
@@ -154,14 +160,15 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
         f"📊 النسبة المئوية: <b>{percentage:.1f}%</b>\n"
         f"{previous_score_text}\n"
         f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
+        f"{publish_question}"
     )
 
     # التحقق من صحة المعرف لإظهار لوحة التقييم بشكل آمن
     if quiz_id and _is_valid_uuid(quiz_id):
-        keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, is_score_public=is_public)
+        keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, show_publish_prompt=is_new_attempt)
         result_text += "\n\n⭐ <b>كيف تقيم هذا الكويز؟</b> تقييمك المباشر يساعد الدفعة على فرز الكويزات الممتازة وتصفية الرديئة تلقائياً!"
     else:
-        keyboard = get_quiz_result_keyboard(quiz_id=quiz_id, is_score_public=is_public)
+        keyboard = get_quiz_result_keyboard(quiz_id=quiz_id, show_publish_prompt=False)
 
     await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
 
