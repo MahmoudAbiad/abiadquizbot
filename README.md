@@ -1,85 +1,111 @@
-# 🚀 Quiz Maker Bot - Webhook Version
+# 🚀 Quiz Maker Bot - abiadquizbot
 
-> **Telegram Bot مدعوم بـ AI لتوليد الكويزات الذكية من PDF والصور**
+> **Telegram Bot مدعوم بـ AI لتوليد الكويزات الذكية من PDF والصور والنصوص**
 
 ## ✨ المميزات:
 
-- 🤖 **توليد أسئلة ذكية** بمساعدة Google Gemini AI
-- 📄 **معالجة PDF و الصور** مع OCR تلقائي
-- ⚡ **تشغيل سريع** عبر Webhook
-- ☁️ **استضافة سحابية** على Azure/Heroku/Docker
-- 💾 **قاعدة بيانات** مع Supabase
-- 👥 **إدارة مستخدمين** مع نظام النقاط والإحالات
-- 📊 **إحصائيات شاملة** للمسؤولين
+- 🤖 **توليد أسئلة ذكية** بمساعدة Google Gemini AI (مع Groq كمزوّد احتياطي لتوليد الأسئلة من النص)
+- 📄 **معالجة PDF والصور والألبومات** مع استخراج نص تلقائي
+- 📐 **كويزات رياضية بصيغة صورة** (LaTeX) عند اكتشاف محتوى رياضي تلقائياً
+- 🎯 **تخصيص نوع الأسئلة والصعوبة** حسب المادة (رياضيات/إنجليزي/عام)
+- 💾 **كاش ذكي للكويزات** مع فلترة حسب النوع/الصعوبة وسقف مستقل لكل تركيبة
+- ⭐ **مفضلة منظمة بأقسام** لحفظ الكويزات
+- 🔗 **مشاركة الكويزات** عبر روابط مباشرة
+- 🏆 **لوحة شرف** لكل كويز (نشر/إخفاء النتيجة اختياري من الطالب)
+- 📁 **تصدير Word/PDF** بأكثر من ستايل تنسيق
+- ⚡ **تشغيل عبر Webhook (FastAPI)** أو Polling محلياً
+- 💰 **نظام نقاط وإحالات**
+- 📊 **لوحة أدمن**: إدارة مستخدمين، ملاحظات، تحليلات استخدام شاملة
+
+---
+
+## 🏗️ الهيكل الفعلي للمشروع:
+
+```
+abiadquizbot/
+├── main.py                      # نقطة الدخول (Webhook أو Polling حسب WEBHOOK_URL)
+├── webhook_server.py            # خادم FastAPI لوضع الـ Webhook
+├── config.py                    # إعداد البوت، Redis، حالات FSM
+├── constants.py                 # الثوابت والبرومبتات ورسائل الواجهة
+├── keyboards.py                 # كل لوحات الأزرار (Inline Keyboards)
+├── validators.py                # التحقق من صحة المدخلات
+├── middlewares.py                # الحماية من التكرار (Throttling)
+├── logger.py                    # نظام التسجيل
+├── utils.py                     # أدوات مساعدة عامة
+├── requirements.txt
+├── Dockerfile / Procfile / app.json   # ملفات النشر (Docker / Heroku)
+├── migration_*.sql              # ملفات SQL لتحديث قاعدة بيانات Supabase
+├── assets/fonts/, Amiri/         # خطوط تصدير PDF (راجع assets/fonts/README.md)
+│
+├── handlers/                    # كل معالجات أوامر وأزرار البوت
+│   ├── start.py                 # /start، الروابط العميقة (deep links)
+│   ├── tutorial.py              # الدليل التفاعلي السريع
+│   ├── files.py                 # استقبال الملفات/الصور/النصوص + الكاش + بدء التوليد
+│   ├── quiz_options.py          # اختيار نوع ومستوى صعوبة الأسئلة
+│   ├── quiz_runner.py           # تشغيل الكويز سؤالاً سؤالاً + شاشة النتيجة
+│   ├── leaderboard.py           # عرض لوحة الشرف + تبديل نشر/إخفاء النتيجة
+│   ├── favorites.py             # القائمة المفضلة المنظمة بأقسام
+│   ├── sharing.py               # إنشاء وفتح روابط مشاركة الكويز
+│   ├── export.py                # تصدير الكويز إلى Word/PDF
+│   └── admin/                   # لوحة الأدمن (مجلد فرعي)
+│       ├── dashboard.py, users.py, feedbacks.py, analytics.py
+│
+├── services/                    # منطق العمل الأساسي (بلا تفاعل مباشر مع تيليجرام)
+│   ├── quiz_service.py          # حساب سقف الكاش، تسمية نوع الأسئلة
+│   ├── quiz_engine.py           # إرسال أسئلة الكويز (Poll عادي أو صورة+Poll رياضي)
+│   ├── subject_classifier.py    # تصنيف المادة (رياضيات/إنجليزي/عام) عبر Gemini
+│   ├── math_detector.py, english_detector.py   # ⚠️ DEPRECATED، غير مستوردة من أي مكان
+│   ├── detection_common.py
+│   ├── file_service.py          # استخراج نص من PDF/صور
+│   ├── image_quiz_renderer.py   # رسم أسئلة LaTeX كصورة (Matplotlib)
+│   └── export_service.py        # توليد ملفات Word/PDF
+│
+└── helpers/
+    ├── gemini_helper.py         # تكامل Google Gemini (+ Groq كبديل للنص)
+    ├── supabase_helper.py       # كل التعامل مع قاعدة بيانات Supabase
+    └── points_calculator.py     # حساب تكلفة توليد الكويز بالنقاط
+```
 
 ---
 
 ## 🎯 البدء السريع:
 
-### الخطوة 1: الإعدادات
-```bash
-# 1. انسخ ملف البيئة
-cp .env.example .env
+### الخطوة 1: متغيرات البيئة
+أنشئ ملف `.env` بجذر المشروع وعبّي القيم التالية (كلها مقروءة فعلياً من الكود):
 
-# 2. املأ المعلومات المطلوبة (انظر SETUP_CHECKLIST.md)
-nano .env
+```bash
+BOT_TOKEN=your_telegram_bot_token
+ADMIN_ID=your_telegram_user_id
+
+GEMINI_API_KEYS=KEY1,KEY2,KEY3      # مفتاح واحد أو أكثر مفصولين بفاصلة (تناوب تلقائي)
+GROQ_API_KEY=your_groq_key          # اختياري - بديل لتوليد الأسئلة من النص فقط
+
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your_supabase_key
+
+REDIS_URL=redis://localhost:6379    # اختياري، الافتراضي أعلاه لو لم يُحدَّد
+
+SENTRY_DSN=your_sentry_dsn          # اختياري لتتبع الأخطاء
+
+# للنشر بوضع Webhook فقط (اتركها فاضية للتشغيل المحلي بوضع Polling):
+WEBHOOK_URL=https://your-domain.com
+PORT=8080
 ```
 
 ### الخطوة 2: التثبيت
 ```bash
-# تثبيت المكتبات
 pip install -r requirements.txt
 ```
 
-### الخطوة 3: التشغيل المحلي
-```bash
-# بدون Webhook (وضع Polling)
-python main.py
-```
+### الخطوة 3: قاعدة البيانات (Supabase)
+شغّل ملفات الـ migration بترتيب `SQL Editor` على مشروع Supabase عندك:
+- `migration_quiz_options.sql`
+- `migration_usage_analytics.sql` (راجع تفاصيلها بـ `ANALYTICS_README.md`)
+- `migration_math_image_quizzes.sql`
 
-### الخطوة 4: النشر على Azure
-```bash
-# انظر AZURE_DEPLOYMENT.md للتفاصيل الكاملة
-```
-
----
-
-## 📋 الملفات المطلوبة:
-
-**تم إنشاؤها:**
-- ✅ `main.py` - نقطة البداية
-- ✅ `webhook_server.py` - خادم FastAPI
-- ✅ `config.py` - إعدادات البوت
-- ✅ `constants.py` - الثوابت
-- ✅ `logger.py` - نظام التسجيل
-- ✅ `requirements.txt` - المكتبات
-
-**انسخها من النسخة الأصلية:**
-- 📄 `handlers/start.py`
-- 📄 `handlers/quiz.py`
-- 📄 `handlers/admin.py`
-- 📄 `validators.py`
-- 📄 `keyboards.py`
-- 📄 `utils.py`
-- 📄 `supabase_helper.py`
-- 📄 `gemini_helper.py`
-
----
-
-## 🔑 المعلومات المطلوبة:
-
-انظر `SETUP_CHECKLIST.md` لتفاصيل مكتملة عن:
-- Telegram Bot Token
-- Google Gemini API Keys
-- Supabase Configuration
-- Azure Account Setup
-- Admin ID
-
----
-
-## 🗃️ جداول Supabase الإضافية
-
-لإتاحة ميزات **مشاركة الكويز** و**القائمة المفضلة المنظمة**، أنشئ الجداول التالية في Supabase:
+هذه الملفات آمنة للتشغيل على قاعدة بيانات فيها بيانات موجودة أصلاً (تستخدم `ADD COLUMN IF NOT EXISTS`
+ونحوها، ولا تحذف أو تعدّل أي بيانات قائمة). بالإضافة لجداول تحتاج إنشاء يدوي إذا بدك ميزات
+المشاركة والمفضلة المنظمة:
 
 ```sql
 create table if not exists shared_quizzes (
@@ -107,110 +133,58 @@ create table if not exists favorite_quizzes (
 );
 ```
 
-ملاحظات مهمة:
+ملاحظات:
+- جدول `favorite_quiz_sections` مخصص للأقسام فقط، و`favorite_quizzes` للكويزات المحفوظة ويرتبط بالقسم عبر `section_id`.
+- يمكن حفظ الكويز داخل قسم أو بدونه، مع حد أقصى 20 قسماً لكل مستخدم.
+- إذا لم تُنشأ هذه الجداول، يستمر البوت بالعمل للتوليد والاختبار العادي، لكن أزرار المشاركة والمفضلة لن تحفظ البيانات بشكل دائم.
 
-- جدول `favorite_quiz_sections` مخصص للأقسام فقط.
-- جدول `favorite_quizzes` مخصص للكويزات المحفوظة فقط، ويرتبط بالقسم عبر `section_id`.
-- في النشر الحالي، يتم استخدام `created_at` كمُعرّف عملي للكويز المحفوظ إذا لم يكن هناك `favorite_id`.
-- حقل `title` داخل `favorite_quizzes` أصبح اسم الكويز المخصص الذي يختاره المستخدم قبل الحفظ.
-- حقل `source_title` يحفظ اسم المصدر الأصلي لسهولة التتبع.
-- يمكن حفظ الكويز داخل قسم أو بدون قسم، مع حد أقصى 20 قسمًا لكل مستخدم.
-- يوجد تصفح مستقل للكويزات المحفوظة وتصفح مستقل للأقسام.
-- من داخل المفضلة يمكن البحث والفرز حسب الأحدث أو حسب القسم.
+### الخطوة 4: خطوط تصدير PDF
+راجع `assets/fonts/README.md` لتفاصيل الخطوط المطلوبة (موجودة أصلاً بهذا المستودع).
 
-إذا لم تُنشأ هذه الجداول أو الحقول الجديدة، سيستمر البوت في العمل للأوامر والاختبار العادي، لكن أزرار المشاركة والمفضلة المنظمة لن تحفظ البيانات بشكل دائم.
-
----
-
-## 📚 الوثائق:
-
-- **[AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md)** - شرح النشر على Azure
-- **[SETUP_CHECKLIST.md](SETUP_CHECKLIST.md)** - قائمة التحقق الكاملة
-- **[.env.example](.env.example)** - قالب متغيرات البيئة
-
----
-
-## 🏗️ الهيكل:
-
-```
-my_quiz_bot_webhook/
-├── main.py              # نقطة الدخول
-├── config.py            # إعدادات البوت
-├── webhook_server.py    # خادم Webhook
-├── constants.py         # الثوابت
-├── logger.py            # التسجيل
-├── requirements.txt     # المكتبات
-├── .env                 # متغيرات البيئة (لا تشارك!)
-├── .env.example         # قالب
-├── .gitignore           # ملفات Git المتجاهلة
-├── Dockerfile           # للحاويات
-├── Procfile             # لـ Heroku
-├── app.json             # إعدادات التطبيق
-├── AZURE_DEPLOYMENT.md  # شرح Azure
-├── SETUP_CHECKLIST.md   # قائمة التحقق
-├── handlers/
-│   ├── start.py         # أوامر البدء
-│   ├── quiz.py          # منطق الكويز
-│   └── admin.py         # أوامر الإدارة
-├── downloads/           # ملفات محملة
-└── logs/                # السجلات
-```
-
----
-
-## 🚀 النشر:
-
-### على Azure:
+### الخطوة 5: التشغيل المحلي
 ```bash
-az webapp create --resource-group rg --plan plan --name app-name --runtime PYTHON|3.11
-# ... ثم متابعة الخطوات في AZURE_DEPLOYMENT.md
+python main.py
 ```
+بدون تعيين `WEBHOOK_URL` بالـ `.env`، يشتغل البوت تلقائياً بوضع **Polling** (مناسب للتطوير المحلي).
 
-### على Docker:
+---
+
+## 🚀 النشر
+
+### Docker
 ```bash
-docker build -t quiz-bot .
-docker run -e BOT_TOKEN=xxx -e WEBHOOK_URL=yyy quiz-bot
+docker build -t abiadquizbot .
+docker run --env-file .env abiadquizbot
 ```
 
-### على Heroku:
+### Heroku / أي منصة تدعم Procfile
 ```bash
 git push heroku main
 ```
+(`Procfile` يشغّل `python main.py`، و`app.json` يحدد بيئة Python 3.11)
+
+### Azure
+راجع `AZURE_DEPLOYMENT.md` للتفاصيل الكاملة خطوة بخطوة (إنشاء App Service، ضبط متغيرات البيئة، ربط GitHub، تحديث الـ Webhook على تيليجرام).
+
+بشكل عام، أي نشر سحابي يعطيك عنوان URL ثابت: عيّنه بمتغير `WEBHOOK_URL` ليشتغل البوت تلقائياً بوضع **Webhook** عبر FastAPI (`webhook_server.py`) بدل الـ Polling.
 
 ---
 
-## 🛠️ التطوير المحلي:
+## 📚 وثائق إضافية
 
-```bash
-# تفعيل البيئة الافتراضية
-python -m venv venv
-source venv/bin/activate  # أو venv\Scripts\activate على Windows
-
-# تثبيت الحزم
-pip install -r requirements.txt
-
-# التشغيل
-python main.py
-```
+- **[AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md)** — شرح مفصّل للنشر على Azure
+- **[ANALYTICS_README.md](ANALYTICS_README.md)** — نظام تتبع استخدام الطلاب ولوحة تحليلات الأدمن
+- **[PROGRESS.md](PROGRESS.md)** — سجل تطوير مفصّل لميزات اختيار نوع/صعوبة الأسئلة والكاش (مرجع لأي AI أو مطوّر يكمل الشغل)
+- **[CHANGES_AR.md](CHANGES_AR.md)** — سجل مراجعات وإصلاحات سابقة (Groq/Gemini، الألبوم، استرجاع النقاط، لوحة الشرف...)
+- **[assets/fonts/README.md](assets/fonts/README.md)** — الخطوط المطلوبة لتصدير PDF بالعربي
 
 ---
 
-## 📝 الملاحظات:
+## 📝 ملاحظات
 
-- تحقق من `SETUP_CHECKLIST.md` أولاً
-- اختبر محلياً قبل الرفع
-- لا تشارك `.env` على GitHub
-- استخدم 3 مفاتيح Gemini على الأقل
-- فعّل Webhook بعد النشر
-
----
-
-## 📞 الدعم:
-
-إذا واجهت مشاكل:
-1. افحص السجلات في `logs/`
-2. تحقق من متغيرات `.env`
-3. جرّب الاختبار المحلي أولاً
+- لا تشارك ملف `.env` علناً (يحتوي مفاتيح حساسة).
+- استخدم أكثر من مفتاح Gemini إذا كان عدد الطلاب كبيراً (تناوب تلقائي عند استنفاد الحصة).
+- السجلات (logs) تُطبع عبر `logger.py`، ويمكن ربطها بـ Sentry عبر `SENTRY_DSN`.
 
 ---
 
