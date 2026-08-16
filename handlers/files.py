@@ -294,22 +294,22 @@ async def _render_cache_decision_screen(reply_target: types.Message, state: FSMC
         and (filter_difficulty == "all" or (q.get("difficulty") or "medium") == filter_difficulty)
     ]
 
-    max_allowed = data.get("max_allowed_quizzes", MAX_FILE_QUIZZES_LIMIT)
-    existing_combo_count = combo_quiz_count(
-        all_quizzes, data.get("subject_type", "other"),
-        data.get("question_type", "general"), data.get("difficulty", "medium"),
-    )
-    show_generate_btn = existing_combo_count < max_allowed
-    cost = data.get("cache_cost", 0)
+    # 🩹 إصلاح خلل حقيقي: التصنيف (subject_type/question_type/difficulty) لسا ما صار
+    # بهالمرحلة (يصير فقط لو ضغط الطالب "توليد جديد" - قرار متعمّد لتفادي سؤاله عن
+    # التخصيص قبل ما يشوف الكاش). فحص سقف تركيبة محددة هون كان عم يفحص دايماً قيماً
+    # افتراضية ثابتة ("other/general/medium") مالها علاقة بمادة الملف الحقيقية - نتيجة
+    # عشوائية وغير صحيحة. الفحص الصحيح الوحيد يصير لاحقاً (handle_count_start) بعد ما
+    # التصنيف الفعلي يصير معروفاً، فهون نسمح دايماً بزر "توليد جديد" بدون حجب مبكر خاطئ.
+    show_generate_btn = True
 
     keyboard = get_multiple_quizzes_keyboard(
-        all_quizzes, filtered_quizzes, cost, show_generate_btn=show_generate_btn,
-        filter_type=filter_type, filter_difficulty=filter_difficulty,
+        all_quizzes, filtered_quizzes, data.get("items_count", 1), bool(data.get("is_album")),
+        show_generate_btn=show_generate_btn, filter_type=filter_type, filter_difficulty=filter_difficulty,
     )
     msg_text = f"💡 <b>ملاحظة ذكية: تم العثور على ({len(all_quizzes)}) كويز جاهز مخزن لهذا الملف مسبقاً!</b>\n\n"
     if filter_type != "all" or filter_difficulty != "all":
         msg_text += f"🔍 يُعرض حالياً: ({len(filtered_quizzes)}) كويز مطابق للفلتر المختار.\n\n"
-    msg_text += f"🛑 <b>تم استنفاد الحد الأقصى ({max_allowed}) كويزات لهذا النوع من الأسئلة.</b>" if not show_generate_btn else f"يمكنك اختيار كويز جاهز بخصم 90% ({cost:.2f} نقطة)، أو توليد كويز جديد:"
+    msg_text += "اختر كويزاً جاهزاً بخصم 90% (السعر موضّح على كل زر)، أو ولّد كويزاً جديداً:"
 
     if edit:
         await reply_target.edit_text(msg_text, parse_mode="HTML", reply_markup=keyboard)
@@ -355,21 +355,17 @@ async def _finalize_media_processing(message: types.Message, state: FSMContext, 
         }
         
         if cached_quizzes:
-            # 🆕 تُعرض كل الكويزات المخزّنة دائماً (بغض النظر عن نوعها/صعوبتها)، لكن زر
-            # "توليد جديد" يُحجب فقط لو التركيبة الافتراضية الحالية (عام/متوسط، بانتظار
-            # شاشة الاختيار المخصصة) وصلت لسقفها المستقل هي تحديداً - وليس بسبب امتلاء
-            # الكاش الإجمالي بتركيبات أخرى مختلفة عنها.
-            max_allowed = max(MIN_QUIZZES_PER_FILE, min(MAX_FILE_QUIZZES_LIMIT, items // PAGES_PER_QUIZ_RATIO))
-            data_now = await state.get_data()
-            existing_combo_count = combo_quiz_count(
-                cached_quizzes, data_now.get("subject_type", "other"),
-                data_now.get("question_type", "general"), data_now.get("difficulty", "medium"),
-            )
-            show_generate_btn = existing_combo_count < max_allowed
-            cost = calculate_cached_points_cost(items, len(cached_quizzes[0]["quiz_data"]), is_album)
-            
+            # 🩹 إصلاح خلل حقيقي: التصنيف لسا ما صار بهالمرحلة (يصير فقط بعد ضغط "توليد
+            # جديد")، فحساب سقف تركيبة محددة هون كان غلطاً (يفحص قيماً افتراضية ثابتة
+            # مالها علاقة بمادة الملف الحقيقية). الفحص الصحيح الوحيد يصير لاحقاً
+            # (handle_count_start) بعد ما التصنيف الفعلي يصير معروفاً - راجع
+            # _render_cache_decision_screen لنفس الإصلاح والشرح الكامل.
+            # 🩹 إصلاح خلل حقيقي إضافي: السعر ما عاد يُحسب مرة وحدة من أول كويز بالقائمة
+            # ويُطبَّق على الجميع (كان يحجب طلاب برصيد كافٍ لكويز أرخص فعلياً بالقائمة) -
+            # كل كويز ياخد سعره الحقيقي حسب عدد أسئلته، محسوب مباشرة بـ
+            # get_multiple_quizzes_keyboard وبـ handle_multi_cache_selection.
             await state.update_data(
-                **common_state, available_quizzes=cached_quizzes, cache_cost=cost, max_allowed_quizzes=max_allowed,
+                **common_state, available_quizzes=cached_quizzes,
                 cache_filter_type="all", cache_filter_difficulty="all",
             )
             await state.set_state(QuizState.waiting_for_cache_decision)
@@ -515,7 +511,6 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
     try:
         quiz_uuid = call.data.replace("use_multi_", "")
         data = await state.get_data()
-        cost = float(data.get("cache_cost", 0))
         
         user_info = await _current_user(call.message, call.from_user)
         await _renewal_notice(call.message, user_info)
@@ -525,7 +520,14 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
         if not selected_quiz:
             await call.message.answer("❌ عذراً، لم نتمكن من جلب الكويز المختار.")
             return
-            
+
+        # 🩹 إصلاح خلل حقيقي: السعر يُحسب هون من عدد أسئلة *هذا الكويز المختار تحديداً*
+        # (بدل قيمة "cache_cost" واحدة محسوبة سابقاً من أول كويز بالقائمة وتُطبَّق على
+        # الجميع - كانت تسبب حجب طلاب برصيد كافٍ فعلياً لكويز أرخص من هذا الملف).
+        cost = calculate_cached_points_cost(
+            int(data.get("items_count", 1)), len(selected_quiz["quiz_data"]), bool(data.get("is_album"))
+        )
+
         if float(user_info["points"]) < cost:
             await _insufficient_balance(call.message, user_info, cost)
             return
