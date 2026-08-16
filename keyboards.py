@@ -58,21 +58,46 @@ def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> 
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_quiz_result_keyboard(quiz_id: str = None, is_score_public: bool = False) -> types.InlineKeyboardMarkup:
+def get_quiz_result_keyboard(quiz_id: str = None, show_publish_prompt: bool = False) -> types.InlineKeyboardMarkup:
+    # 🆕 إعادة تنظيم بصري: تجميع الإجراءات المترابطة بصف واحد (2 بجنب بعض)
+    # بدل صف مستقل لكل زر - يقلل عدد الصفوف من 9 إلى 6 ويخلي الشاشة أخف.
     kb = [
-        [types.InlineKeyboardButton(text="🔄 إعادة الاختبار", callback_data="quiz_replay")],
-        [types.InlineKeyboardButton(text="🔗 مشاركة هذا الكويز", callback_data="quiz_share")],
-        [types.InlineKeyboardButton(text="⭐ حفظ في المفضلة", callback_data="quiz_favorite")],
-        [types.InlineKeyboardButton(text="📁 تحميل الكويز (Word/PDF)", callback_data="export_menu")]
+        [
+            types.InlineKeyboardButton(text="🔄 إعادة المحاولة", callback_data="quiz_replay"),
+            types.InlineKeyboardButton(text="🔗 مشاركة الكويز", callback_data="quiz_share"),
+        ],
+        [
+            types.InlineKeyboardButton(text="⭐ حفظ بالمفضلة", callback_data="quiz_favorite"),
+            types.InlineKeyboardButton(text="📁 تحميل الملف", callback_data="export_menu"),
+        ],
     ]
-    
+
     if quiz_id:
-        if not is_score_public:
-            kb.append([types.InlineKeyboardButton(text="📢 مشاركة نتيجتي في لوحة الشرف", callback_data=f"publish_score_{quiz_id}")])
-        kb.append([types.InlineKeyboardButton(text="🏆 عرض لوحة الشرف (Top 5)", callback_data=f"leaderboard_{quiz_id}")])
-        
+        if show_publish_prompt:
+            # 🆕 أول مرة يخلّص فيها الطالب هالكويز: سؤال صريح (نعم/لا) بدل زر
+            # اختياري مدفون بين أزرار تانية - القرار نفسه هون، وإدارة الرؤية
+            # لاحقاً (إخفاء/إظهار) صارت تحت لوحة الشرف نفسها (راجع get_leaderboard_keyboard).
+            kb.append([
+                types.InlineKeyboardButton(text="✅ نعم، انشرها", callback_data=f"publish_score_{quiz_id}_end"),
+                types.InlineKeyboardButton(text="🙅 لا، خليها خاصة", callback_data=f"decline_score_{quiz_id}_end"),
+            ])
+        else:
+            kb.append([types.InlineKeyboardButton(text="🏆 عرض لوحة الشرف", callback_data=f"leaderboard_{quiz_id}")])
+
     kb.append([types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="quiz_home")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_leaderboard_keyboard(quiz_id: str, is_public: bool = None) -> types.InlineKeyboardMarkup:
+    """🆕 زر إدارة رؤية النتيجة تحت لوحة الشرف نفسها (بدل شاشة نتيجة الكويز) -
+    ما بيظهر إلا لطالب أخد هالكويز فعلياً وعنده قرار مسجّل (is_public ليس None)."""
+    if is_public is None:
+        return None
+    toggle_btn = (
+        types.InlineKeyboardButton(text="🙈 إخفاء نتيجتي من لوحة الشرف", callback_data=f"hide_score_{quiz_id}_lb")
+        if is_public else
+        types.InlineKeyboardButton(text="📢 انشر نتيجتي في لوحة الشرف", callback_data=f"publish_score_{quiz_id}_lb")
+    )
+    return types.InlineKeyboardMarkup(inline_keyboard=[[toggle_btn]])
 
 def get_quiz_start_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
@@ -278,15 +303,17 @@ def get_multiple_quizzes_keyboard(
     kb.append([types.InlineKeyboardButton(text="❌ إلغاء الطلب والتراجع", callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None, is_score_public: bool = False) -> types.InlineKeyboardMarkup:
-    """لوحة نتيجة الاختبار الكاملة + صف تقييم الكويز المركزي مضاف فوقها"""
-    base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id, is_score_public=is_score_public)
+def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None, show_publish_prompt: bool = False) -> types.InlineKeyboardMarkup:
+    """لوحة نتيجة الاختبار الكاملة + صف تقييم الكويز المركزي مضاف فوقها.
+    🆕 صف التقييم مدمج (لايك/دِسلايك جنب بعض) وزر الملاحظة تحته مباشرة،
+    فتصير 6 صفوف إجمالاً بدل 9 - أخف بصرياً وأسهل مسحاً بالعين."""
+    base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id, show_publish_prompt=show_publish_prompt)
     kb = list(base_kb.inline_keyboard)
     kb.insert(0, [
-        types.InlineKeyboardButton(text="👍 راق لي الأسئلة", callback_data=f"rate_like_{file_quiz_id}"),
-        types.InlineKeyboardButton(text="👎 سيئ / يحتوي تكرار", callback_data=f"rate_dislike_{file_quiz_id}")
+        types.InlineKeyboardButton(text="👍 عجبتني الأسئلة", callback_data=f"rate_like_{file_quiz_id}"),
+        types.InlineKeyboardButton(text="👎 فيها خلل", callback_data=f"rate_dislike_{file_quiz_id}")
     ])
-    kb.insert(1, [types.InlineKeyboardButton(text="✍️ إرسال ملاحظة أو شكوى أكاديمية", callback_data=f"rate_feedback_{file_quiz_id}")])
+    kb.insert(1, [types.InlineKeyboardButton(text="✍️ ملاحظة أو شكوى", callback_data=f"rate_feedback_{file_quiz_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 # ==================== لوحات إدارة المفضلة والأقسام ====================

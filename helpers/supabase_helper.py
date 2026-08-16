@@ -704,6 +704,9 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
             else:
                 new_highest = previous_score
         else:
+            # 🆕 أول محاولة على هالكويز: النتيجة تنحفظ خاصة افتراضياً، وشاشة النتيجة
+            # (handlers/quiz_runner.py) بتسأل الطالب صراحة نعم/لا قبل ما تصير عامة.
+            is_public = False
             await supabase.table("quiz_scores").insert({
                 "quiz_id": quiz_id,
                 "user_id": user_id,
@@ -731,6 +734,34 @@ async def publish_score_to_leaderboard(user_id: int, quiz_id: str) -> bool:
     except Exception as e:
         log_error(logger, f"Error publishing score: {e}", exception=e)
         return False
+
+async def hide_score_from_leaderboard(user_id: int, quiz_id: str) -> bool:
+    """🆕 إخفاء نتيجة الطالب من لوحة الشرف (النتائج تُنشر فقط بعد موافقة صريحة،
+    فهاي الدالة تسمح للطالب بالتراجع لاحقاً من زر الإخفاء تحت لوحة الشرف)."""
+    if not _is_valid_uuid(quiz_id):
+        log_warning(logger, f"Skipping leaderboard hide: invalid quiz_id '{quiz_id}' (not a real UUID)")
+        return False
+    try:
+        await supabase.table("quiz_scores").update({"is_public": False}).eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
+        return True
+    except Exception as e:
+        log_error(logger, f"Error hiding score: {e}", exception=e)
+        return False
+
+async def get_my_leaderboard_status(user_id: int, quiz_id: str) -> Optional[bool]:
+    """🆕 حالة نشر نتيجة الطالب الحالية لهالكويز - تُستخدم لعرض زر
+    الإخفاء/الإظهار الصحيح تحت لوحة الشرف. ترجع None إذا الطالب ما أخد
+    هالكويز أصلاً (ما في صف بجدول quiz_scores)."""
+    if not _is_valid_uuid(quiz_id):
+        return None
+    try:
+        res = await supabase.table("quiz_scores").select("is_public").eq("quiz_id", quiz_id).eq("user_id", user_id).execute()
+        if res.data:
+            return bool(res.data[0]["is_public"])
+        return None
+    except Exception as e:
+        log_error(logger, f"Error getting leaderboard status: {e}", exception=e)
+        return None
 
 async def get_top_5_leaderboard(quiz_id: str) -> List[Dict[str, Any]]:
     if not _is_valid_uuid(quiz_id):
