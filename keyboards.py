@@ -200,7 +200,7 @@ def get_cancel_upload_keyboard() -> types.InlineKeyboardMarkup:
 # ==================== لوحات إدارة المخازن المتعددة والتقييمات ====================
 
 def get_multiple_quizzes_keyboard(
-    all_quizzes: list, filtered_quizzes: list, cost: float, show_generate_btn: bool = True,
+    all_quizzes: list, filtered_quizzes: list, items: int, is_album: bool, show_generate_btn: bool = True,
     filter_type: str = "all", filter_difficulty: str = "all",
 ) -> types.InlineKeyboardMarkup:
     """
@@ -210,7 +210,13 @@ def get_multiple_quizzes_keyboard(
     🆕 filtered_quizzes: الكويزات بعد تطبيق الفلتر الحالي (هي فقط اللي تُعرض كأزرار تشغيل).
     🆕 صفوف الفلترة (نوع/صعوبة) تُعرض فقط لو فيه أكثر من قيمة واحدة فعلياً موجودة بين
     الكويزات المخزّنة - لتفادي ازدحام الأزرار لما تكون كلها بنفس التركيبة.
+
+    🩹 items/is_album: يُحسب سعر كل كويز مخزّن **حسب عدد أسئلته الفعلي الخاص فيه** (بدل
+    سعر واحد ثابت مأخوذ من أول كويز بالقائمة وتطبيقه على الجميع - كان يسبب حجب طلاب
+    برصيد كافٍ لكويز أرخص فعلياً بالقائمة، لمجرد إن كويزاً آخر أغلى صادف إنه الأول).
     """
+    from helpers.points_calculator import calculate_cached_points_cost  # تفادي استيراد دائري
+
     kb = []
 
     # 🆕 صف فلترة النوع - أكثر 3 أنواع تكراراً بين الكويزات المخزّنة (تفادي ازدحام الصف)
@@ -259,7 +265,9 @@ def get_multiple_quizzes_keyboard(
         # 🆕 تفاصيل النوع + الصعوبة بجانب كل كويز مخزّن (بدل عرضها كوحدة متجانسة كسابقاً)
         type_label = q.get("question_type_label") or "🎯 عام"
         diff_label = DIFFICULTY_LABELS_AR.get(q.get("difficulty") or "medium", "🟡 متوسط")
-        btn_text = f"{icon} {type_label} | {diff_label} | {q_count} سؤال | 👍{likes} 👎{dislikes}"
+        # 🩹 سعر هذا الكويز تحديداً (وليس سعراً عاماً موحّداً) بناءً على عدد أسئلته الفعلي
+        quiz_cost = calculate_cached_points_cost(items, q_count, is_album)
+        btn_text = f"{icon} {type_label} | {diff_label} | {q_count} سؤال ({quiz_cost:.2f}💎) | 👍{likes} 👎{dislikes}"
         kb.append([types.InlineKeyboardButton(text=btn_text, callback_data=f"use_multi_{q['id']}")])
     
     if show_generate_btn:
