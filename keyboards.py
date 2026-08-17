@@ -3,7 +3,7 @@ from constants import (
     OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL, BTN_CANCEL_REQUEST,
     BTN_TRANSLATE_YES, BTN_TRANSLATE_NO,
     QUESTION_TYPE_OPTIONS, QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM,
-    DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_LABELS_AR,
+    DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE, DIFFICULTY_LABELS_AR,
     BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_BACK_TO_TYPE_SCREEN,
     SUBJECT_MATH, SUBJECT_ENGLISH,
 )
@@ -147,7 +147,7 @@ def get_question_count_keyboard(
 def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_type: str) -> types.InlineKeyboardMarkup:
     """
     🆕 المرحلة الأولى من شاشة الخيارات (نوع الأسئلة فقط - بدون صعوبة بنفس الشاشة لتقليل
-    الازدحام البصري). اختيار أي نوع (أو "عام") ينقل تلقائياً لمرحلة الصعوبة - لا حاجة
+    الازدحام البصري). اختيار أي نوع (أو "متنوع") ينقل تلقائياً لمرحلة الصعوبة - لا حاجة
     لزر "متابعة" منفصل.
     """
     kb = []
@@ -191,8 +191,15 @@ def get_quiz_difficulty_keyboard(selected_difficulty: str) -> types.InlineKeyboa
         label = DIFFICULTY_LABELS_AR[value]
         text = f"✅ {label}" if selected_difficulty == value else label
         diff_row.append(types.InlineKeyboardButton(text=text, callback_data=f"qdiff_{value}"))
+    # 🆕 "متدرج" بصف خاص لوحده (بدل ازدحامه مع الأزرار الثلاثة الأخرى بصف واحد) لأن
+    # نصه أطول (يشمل توضيح "سهل ← صعب") فقد يبدو مضغوطاً بجانب الثلاثة الباقين.
+    progressive_label = DIFFICULTY_LABELS_AR[DIFFICULTY_PROGRESSIVE]
+    progressive_text = (
+        f"✅ {progressive_label}" if selected_difficulty == DIFFICULTY_PROGRESSIVE else progressive_label
+    )
     kb = [
         diff_row,
+        [types.InlineKeyboardButton(text=progressive_text, callback_data=f"qdiff_{DIFFICULTY_PROGRESSIVE}")],
         [types.InlineKeyboardButton(text=BTN_BACK_TO_TYPE_SCREEN, callback_data="qback_to_type")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
@@ -243,7 +250,7 @@ def get_multiple_quizzes_keyboard(
         qt = q.get("question_type") or "general"
         if qt not in seen_types:
             seen_types.add(qt)
-            distinct_types.append((qt, q.get("question_type_label") or "🎯 عام"))
+            distinct_types.append((qt, q.get("question_type_label") or "🔀 متنوع"))
     if len(distinct_types) > 1:
         row = [types.InlineKeyboardButton(
             text=("✅ الكل" if filter_type == "all" else "الكل"), callback_data="cachefilter_type_all"
@@ -281,7 +288,7 @@ def get_multiple_quizzes_keyboard(
         is_math = bool(q.get('is_math_quiz')) or (q_count > 0 and bool(quiz_data[0].get('is_math')))
         icon = "📐" if is_math else "📝"
         # 🆕 تفاصيل النوع + الصعوبة بجانب كل كويز مخزّن (بدل عرضها كوحدة متجانسة كسابقاً)
-        type_label = q.get("question_type_label") or "🎯 عام"
+        type_label = q.get("question_type_label") or "🔀 متنوع"
         diff_label = DIFFICULTY_LABELS_AR.get(q.get("difficulty") or "medium", "🟡 متوسط")
         # 🩹 سعر هذا الكويز تحديداً (وليس سعراً عاماً موحّداً) بناءً على عدد أسئلته الفعلي
         quiz_cost = calculate_cached_points_cost(items, q_count, is_album)
