@@ -120,7 +120,7 @@ def build_question_type_label(
     for value, label in QUESTION_TYPE_OPTIONS.get(subject_type, []):
         if value == question_type:
             return label
-    return "🎯 عام (بدون تخصيص)"
+    return "🔀 متنوع (بدون تخصيص)"
 
 
 def resolve_generation_question_type_text(

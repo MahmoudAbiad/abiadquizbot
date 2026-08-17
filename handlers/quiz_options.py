@@ -26,7 +26,7 @@ from aiogram.fsm.context import FSMContext
 
 from config import QuizState
 from constants import (
-    BTN_CANCEL_REQUEST, DIFFICULTY_ADVANCED, DIFFICULTY_EASY, DIFFICULTY_MEDIUM,
+    BTN_CANCEL_REQUEST, DIFFICULTY_ADVANCED, DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_PROGRESSIVE,
     DIFFICULTY_LABELS_AR, ERROR_CUSTOM_QUESTION_TYPE_TOO_LONG, MAX_CUSTOM_QUESTION_TYPE_LENGTH,
     MSG_CUSTOM_QUESTION_TYPE_PROMPT, MSG_QUIZ_DIFFICULTY_PROMPT, MSG_QUIZ_TYPE_PROMPT,
     QUESTION_TYPE_CUSTOM, QUESTION_TYPE_GENERAL, SUBJECT_OTHER,
@@ -53,13 +53,13 @@ def _type_display_label(data: dict) -> str:
             pass
         return "مخصص"
     if question_type == QUESTION_TYPE_GENERAL:
-        return "🎯 عام"
+        return "🔀 متنوع"
     from constants import QUESTION_TYPE_OPTIONS
     for subj_options in QUESTION_TYPE_OPTIONS.values():
         for value, label in subj_options:
             if value == question_type:
                 return label
-    return "🎯 عام"
+    return "🔀 متنوع"
 
 
 async def _render_type_screen(target: types.Message, state: FSMContext, edit: bool) -> None:
@@ -149,7 +149,7 @@ async def handle_custom_question_type_text(message: types.Message, state: FSMCon
 async def handle_difficulty_screen(call: types.CallbackQuery, state: FSMContext) -> None:
     """اختيار الصعوبة = الخطوة الأخيرة، تنتقل مباشرة لشاشة عدد الأسئلة."""
     value = call.data.replace("qdiff_", "", 1)
-    if value not in (DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED):
+    if value not in (DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE):
         await call.answer()
         return
     await state.update_data(difficulty=value)
