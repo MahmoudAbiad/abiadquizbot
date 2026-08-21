@@ -1,4 +1,4 @@
-"""Centralised, deterministic pricing for quiz generation."""
+"""Centralised, deterministic pricing for quiz generation and audio transcription."""
 
 from constants import (
     DISCOUNT_RATE_FOR_CACHED,
@@ -7,6 +7,11 @@ from constants import (
     MAX_STANDARD_PAGES,
     MAX_STANDARD_QUESTIONS,
 )
+
+# 🆕 Audio transcription pricing tier: first AUDIO_STANDARD_MINUTES minutes are billed at
+# the standard 1.0 point/minute rate, any minute beyond that is billed at the overage rate.
+AUDIO_STANDARD_MINUTES = 10
+AUDIO_OVERAGE_RATE = 1.5
 
 
 def _tier_cost(quantity: int, standard_limit: int) -> float:
@@ -43,3 +48,19 @@ def calculate_cached_points_cost(
         * DISCOUNT_RATE_FOR_CACHED,
         2,
     )
+
+
+def calculate_audio_transcription_cost(duration_minutes: int) -> float:
+    """Calculate the price for audio transcription based on rounded-up minutes.
+
+    Pricing tier:
+    - 1.0 point / minute for the first AUDIO_STANDARD_MINUTES (10) minutes.
+    - 1.5 points / minute for every minute beyond that.
+
+    IMPORTANT: `duration_minutes` must already be pre-rounded UPWARDS by the caller from
+    the raw audio duration in seconds, e.g.:
+        minutes = max(1, (duration_seconds + 59) // 60)
+    This function does not perform that rounding itself - it only prices whole minutes.
+    """
+    minutes = max(0, int(duration_minutes))
+    return round(_tier_cost(minutes, AUDIO_STANDARD_MINUTES), 2)

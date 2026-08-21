@@ -222,6 +222,32 @@ def get_cancel_upload_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+# ==================== 🆕 لوحات معالجة المحاضرات الصوتية ====================
+
+def get_audio_action_keyboard() -> types.InlineKeyboardMarkup:
+    """🆕 لوحة الإجراءات المتاحة بعد تفريغ محاضرة صوتية (voice/audio) بنجاح إلى نص -
+    تُعرض مباشرة عند دخول القسم QuizState.waiting_for_audio_action (راجع handlers/audio.py)."""
+    kb = [
+        [types.InlineKeyboardButton(text="📄 تحميل Word / PDF", callback_data="audio_act_export")],
+        [types.InlineKeyboardButton(text="✨ تلخيص وصياغة أكاديمية", callback_data="audio_act_summarize")],
+        [types.InlineKeyboardButton(text="🎯 إنشاء كويز من المحاضرة", callback_data="audio_act_quiz")],
+        [types.InlineKeyboardButton(text="📋 إرسال النص المفرغ", callback_data="audio_act_send_text")],
+        [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_document_export_keyboard() -> types.InlineKeyboardMarkup:
+    """🆕 لوحة اختيار صيغة الملف (Word أو PDF) عند تصدير النص المفرغ/الملخص الأكاديمي
+    للمحاضرة الصوتية - أبسط من get_export_format_keyboard (بدون اختيار ستايل تنسيق
+    مسبق، لأن المحتوى هنا نص متصل وليس كويز أسئلة)."""
+    kb = [
+        [
+            types.InlineKeyboardButton(text="📄 Word (docx)", callback_data="audio_export_docx"),
+            types.InlineKeyboardButton(text="📕 PDF", callback_data="audio_export_pdf"),
+        ]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 # ==================== لوحات إدارة المخازن المتعددة والتقييمات ====================
 
 def get_multiple_quizzes_keyboard(

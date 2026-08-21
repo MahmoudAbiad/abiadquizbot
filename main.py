@@ -24,7 +24,8 @@ from handlers import (
     sharing_router,
     leaderboard_router,
     export_router,
-    tutorial_router
+    tutorial_router,
+    audio_router
 )
 from middlewares import ThrottlingMiddleware
 
@@ -54,6 +55,8 @@ def main():
         tutorial_router,  # 👈 الدليل التفاعلي الجديد (يجب أن يُسجَّل قبل files_router)
         admin_router,
         sharing_router,
+        audio_router,  # 🆕 معالج المحاضرات الصوتية (يجب أن يُسجَّل قبل files_router لالتقاط
+        # زر إلغاء الطلب الخاص بشاشة waiting_for_audio_action قبل المعالج العام بـ files_router)
         files_router,
         quiz_options_router,  # 🆕 شاشة اختيار نوع/صعوبة الأسئلة (يجب أن يُسجَّل بعد files_router)
         quiz_runner_router,  # 👈 الـ Router الجديد لإدارة حركة الكويز

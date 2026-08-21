@@ -87,6 +87,59 @@ def detect_language(questions: List[Dict[str, Any]]) -> str:
     return "ar" if (arabic_count / len(letters)) > 0.3 else "en"
 
 
+def detect_text_language(text: str) -> str:
+    """يكتشف لغة نص حر (تفريغ محاضرة/ملخص...، وليس أسئلة كويز): 'ar' أو 'en' اعتماداً
+    على نسبة الأحرف العربية بعيّنة من بداية النص (بعد تجاهل أي نص بين قوسين، مثل
+    ترجمات أو توضيحات مدسوسة داخل النص الأساسي)."""
+    sample = _strip_parens(text[:4000])
+    letters = _LETTER_RE.findall(sample)
+    if not letters:
+        return "en"
+    arabic_count = sum(1 for ch in letters if _ARABIC_RE.match(ch))
+    return "ar" if (arabic_count / len(letters)) > 0.3 else "en"
+
+
+_MD_BULLET_RE = re.compile(r"^\s*[-*•]\s+(.*)$")
+_MD_H1_RE = re.compile(r"^#\s+(.*)$")
+_MD_H2_RE = re.compile(r"^#{2,3}\s+(.*)$")
+
+
+def _parse_markdown_blocks(text: str) -> List[Tuple[str, str]]:
+    """يحلّل نص Markdown بسيط (عناوين # / ## أو ### ونقاط - أو * أو •) إلى قائمة
+    (نوع, محتوى) جاهزة للعرض بملفات Word/PDF. تُدمج الأسطر المتتالية غير الفارغة
+    التي لا تطابق أي نمط عنوان/نقطة بنفس الفقرة، حتى أول سطر فارغ أو عنصر جديد -
+    هيك ما تنكسر فقرة واحدة طويلة إلى أسطر منفصلة بالمستند النهائي."""
+    blocks: List[Tuple[str, str]] = []
+    para_buffer: List[str] = []
+
+    def _flush() -> None:
+        if para_buffer:
+            blocks.append(("para", " ".join(para_buffer).strip()))
+            para_buffer.clear()
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            _flush()
+            continue
+        h2_match = _MD_H2_RE.match(line) if line.startswith("##") else None
+        h1_match = _MD_H1_RE.match(line) if (not h2_match and line.startswith("#")) else None
+        bullet_match = _MD_BULLET_RE.match(line)
+        if h1_match:
+            _flush()
+            blocks.append(("h1", h1_match.group(1).strip()))
+        elif h2_match:
+            _flush()
+            blocks.append(("h2", h2_match.group(1).strip()))
+        elif bullet_match:
+            _flush()
+            blocks.append(("bullet", bullet_match.group(1).strip()))
+        else:
+            para_buffer.append(line)
+    _flush()
+    return blocks
+
+
 def build_export_filename(title: str, ext: str) -> str:
     """اسم ملف آمن (بدون رموز قد تكسر بعض الأنظمة) مع الحفاظ على العربية."""
     safe = re.sub(r'[\\/:*?"<>|]+', " ", title or "quiz").strip()
@@ -412,6 +465,101 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
         if cfg["table_zebra"] and idx % 2 == 0:
             for cell in row_cells:
                 _shade_cell(cell, cfg["table_zebra"])
+
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
+def build_document_docx(title: str, text: str, style: str = DEFAULT_STYLE) -> bytes:
+    """يبني ملف Word منسّق لنص حر كامل (تفريغ محاضرة، ملخص، أي نص تعليمي عام) بعنوان
+    وفقرات، مع اكتشاف تلقائي للغة (عربي/إنكليزي)، دعم RTL كامل للعربي (اتجاه الصفحة/
+    الفقرات وخط الكتابة المعقّدة w:cs)، وطباعة عربية/إنكليزية سليمة - بنفس الستايلات
+    الشكلية (simple/modern/academic) المتوفرة بتصدير الكويز. يدعم Markdown بسيط: عناوين
+    (# / ## / ###) تُعرض كعناوين مُنسّقة، ونقاط (- أو * أو •) تُعرض كقائمة نقطية، وباقي
+    الأسطر تُدمج كفقرات نصّية عادية."""
+    if not text or not text.strip():
+        raise ExportError("لا يوجد نص لتصديره.")
+
+    style = normalize_style(style)
+    cfg = _DOCX_STYLES[style]
+
+    is_ar = detect_text_language(text) == "ar"
+    body_font = cfg["ar_font"] if is_ar else cfg["en_font"]
+    cs_font = cfg["ar_font"]
+    accent_hex = _rgb_to_hex(cfg["accent"])
+
+    doc = Document()
+
+    # اتجاه الصفحة بالكامل RTL للعربي
+    if is_ar:
+        for sec in doc.sections:
+            sec._sectPr.append(OxmlElement("w:bidi"))
+
+    # ==================== العنوان ====================
+    title_p = doc.add_paragraph()
+    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if is_ar:
+        _set_paragraph_rtl(title_p, align_right=False)
+        title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title_p.add_run(title or ("مستند" if is_ar else "Document"))
+    title_color = (255, 255, 255) if cfg["header_banner"] else cfg["accent"]
+    _style_run(title_run, body_font, 20, bold=True, color=title_color, rtl=is_ar, cs_font=cs_font)
+    if cfg["header_banner"]:
+        _shade_paragraph(title_p, accent_hex)
+        title_p.paragraph_format.space_before = Pt(6)
+        title_p.paragraph_format.space_after = Pt(6)
+
+    if style == STYLE_ACADEMIC:
+        # سطر معلومات شبيه بغلاف مستند أكاديمي رسمي: الاسم / التاريخ
+        info_p = doc.add_paragraph()
+        info_text = "الاسم: ________________________     التاريخ: ______________" if is_ar \
+            else "Name: ________________________     Date: ______________"
+        info_run = info_p.add_run(info_text)
+        _style_run(info_run, body_font, 11, color=(30, 30, 30), rtl=is_ar, cs_font=cs_font)
+        if is_ar:
+            _set_paragraph_rtl(info_p, align_right=True)
+        info_p.paragraph_format.space_before = Pt(10)
+        _set_paragraph_border_bottom(info_p, "333333", size=10)
+        info_p.paragraph_format.space_after = Pt(14)
+    else:
+        doc.add_paragraph()
+
+    # ==================== الفقرات (Markdown مبسّط) ====================
+    for block_type, content in _parse_markdown_blocks(text):
+        if not content.strip():
+            continue
+        p = doc.add_paragraph()
+        if is_ar:
+            _set_paragraph_rtl(p, align_right=True)
+        else:
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+        if block_type == "h1":
+            run = p.add_run(content)
+            _style_run(run, body_font, 16, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            p.paragraph_format.space_before = Pt(14)
+            p.paragraph_format.space_after = Pt(6)
+            if cfg["divider"]:
+                _set_paragraph_border_bottom(p, "AAAAAA", size=6)
+        elif block_type == "h2":
+            run = p.add_run(content)
+            _style_run(run, body_font, 13.5, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            p.paragraph_format.space_before = Pt(10)
+            p.paragraph_format.space_after = Pt(4)
+        elif block_type == "bullet":
+            run = p.add_run(f"• {content}")
+            _style_run(run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
+            if is_ar:
+                p.paragraph_format.right_indent = Cm(0.8)
+            else:
+                p.paragraph_format.left_indent = Cm(0.8)
+            p.paragraph_format.space_after = Pt(3)
+        else:
+            run = p.add_run(content)
+            _style_run(run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
+            p.paragraph_format.space_after = Pt(8)
+            p.paragraph_format.line_spacing = 1.3
 
     out = io.BytesIO()
     doc.save(out)
@@ -831,4 +979,155 @@ def build_quiz_pdf(title: str, questions: List[Dict[str, Any]], style: str = DEF
         raise ExportError("لا توجد أسئلة لتصديرها.")
     is_ar = detect_language(questions) == "ar"
     renderer = _QuizPDFRenderer(title, questions, is_ar, style=style)
+    return renderer.render()
+
+
+class _DocumentPDFRenderer:
+    """يبني PDF لنص حر (تفريغ محاضرة، ملخص، أي نص تعليمي عام) بترقيم صفحات وتشكيل
+    bidi صحيح للعربي، باستخدام نفس منطق تسجيل الخطوط (Noto/Amiri) وتقسيم النص إلى
+    أجزاء عربي/إنكليزي المستخدم بمُصدِّر الكويز - مكرَّر هون عمداً بدل الوراثة من
+    _QuizPDFRenderer حتى يبقى مسار الكويز الحالي دون أي تعديل."""
+
+    def __init__(self, title: str, text: str, is_ar: bool, style: str = DEFAULT_STYLE):
+        self.title = title or ("مستند" if is_ar else "Document")
+        self.blocks = _parse_markdown_blocks(text)
+        self.is_ar = is_ar
+        self.style = normalize_style(style)
+        self.cfg = _PDF_STYLES[self.style]
+
+        self.page_w, self.page_h = A4
+        self.margin = 48
+        self.buf = io.BytesIO()
+        self.c = canvas.Canvas(self.buf, pagesize=A4)
+        self.y = self.page_h - self.margin
+        self.page_num = 1
+
+        _register_pdf_fonts()
+        if self.cfg["academic_fonts"] and _font_available("Arabic-Academic"):
+            # خط Amiri الكلاسيكي متوفر - نستخدمه لستايل "أكاديمي" العربي تحديداً
+            self.font_ar_regular = "Arabic-Academic"
+            self.font_ar_bold = "Arabic-Academic-Bold" if _font_available("Arabic-Academic-Bold") \
+                else "Arabic-Academic"
+        else:
+            self.font_ar_regular = "Arabic" if _font_available("Arabic") else None
+            self.font_ar_bold = "Arabic-Bold" if _font_available("Arabic-Bold") else None
+        if self.cfg["academic_fonts"]:
+            # Times-Roman/Times-Bold من الخطوط الأساسية الـ 14 المدمجة بـ reportlab -
+            # موجودة دايماً بدون ما نحتاج ملف خط، وبتعطي طابع أكاديمي/رسمي كلاسيكي.
+            self.font_en_regular = "Times-Roman"
+            self.font_en_bold = "Times-Bold"
+        else:
+            self.font_en_regular = "Latin" if _font_available("Latin") else "Helvetica"
+            self.font_en_bold = "Latin-Bold" if _font_available("Latin-Bold") else "Helvetica-Bold"
+
+        if is_ar:
+            self.font_regular = self.font_ar_regular
+            self.font_bold = self.font_ar_bold
+        else:
+            self.font_regular = self.font_en_regular
+            self.font_bold = self.font_en_bold
+
+        if is_ar and (not self.font_regular or not self.font_bold):
+            raise ExportError(
+                "تعذّر إنشاء PDF بالعربية لعدم توفر خط عربي على الخادم حالياً. "
+                "جرّب تصدير Word بدلاً من ذلك."
+            )
+
+    # ---------- أدوات رسم أساسية (نفس منطق _QuizPDFRenderer) ----------
+
+    def _new_page(self):
+        self._draw_footer()
+        self.c.showPage()
+        self.page_num += 1
+        self.y = self.page_h - self.margin
+
+    def _draw_footer(self):
+        self.c.setFont(self.font_regular, 9)
+        self.c.setFillColor(HexColor("#888888"))
+        self.c.drawCentredString(self.page_w / 2, 25, str(self.page_num))
+
+    def _ensure_space(self, needed: float):
+        if self.y - needed < self.margin + 25:
+            self._new_page()
+
+    def _draw_paragraph(self, text: str, size: float, bold: bool = False,
+                         color: str = "#111111", extra_indent: float = 0, gap_after: float = 6,
+                         center: bool = False):
+        font_en = self.font_en_bold if bold else self.font_en_regular
+        font_ar = (self.font_ar_bold if bold else self.font_ar_regular) or font_en
+        max_width = self.page_w - 2 * self.margin - extra_indent
+        lines = _wrap_line(text, self.is_ar, font_en, font_ar, size, max_width)
+        for line in lines:
+            self._ensure_space(size + 5)
+            _draw_mixed_line(self.c, line, self.is_ar, font_en, font_ar, size, self.y, color,
+                              self.margin, self.page_w, extra_indent=extra_indent, center=center)
+            self.y -= (size + 5)
+        self.y -= gap_after
+
+    # ---------- الأقسام ----------
+
+    def _render_header(self):
+        cfg = self.cfg
+        if cfg["header_banner"]:
+            band_h = 46
+            self._ensure_space(band_h + 20)
+            self.c.setFillColor(HexColor(cfg["accent"]))
+            self.c.rect(self.margin, self.y - band_h, self.page_w - 2 * self.margin, band_h, fill=1, stroke=0)
+            self.y -= (band_h / 2 - 7)
+            _draw_mixed_line(self.c, self.title, self.is_ar, self.font_en_bold,
+                              self.font_ar_bold or self.font_en_bold, 17, self.y, "#FFFFFF",
+                              self.margin, self.page_w, center=True)
+            self.y -= (band_h / 2 + 7) + 14
+        else:
+            self._draw_paragraph(self.title, 19, bold=True, color=cfg["accent"], gap_after=14, center=True)
+
+        if self.style == STYLE_ACADEMIC:
+            info = "الاسم: ________________________     التاريخ: ______________" if self.is_ar \
+                else "Name: ________________________     Date: ______________"
+            self._draw_paragraph(info, 11, color="#1E1E1E", gap_after=2)
+            self.c.setStrokeColor(HexColor("#333333"))
+            self.c.setLineWidth(1)
+            self.c.line(self.margin, self.y + 8, self.page_w - self.margin, self.y + 8)
+            self.y -= 12
+
+    def _render_body(self):
+        cfg = self.cfg
+        for block_type, content in self.blocks:
+            if not content.strip():
+                continue
+            if block_type == "h1":
+                self._ensure_space(30)
+                self._draw_paragraph(content, 15, bold=True, color=cfg["accent"], gap_after=8)
+                if cfg["divider"]:
+                    self.c.setStrokeColor(HexColor("#AAAAAA"))
+                    self.c.setLineWidth(0.75)
+                    self.c.line(self.margin, self.y + 4, self.page_w - self.margin, self.y + 4)
+                    self.y -= 4
+            elif block_type == "h2":
+                self._ensure_space(24)
+                self._draw_paragraph(content, 13, bold=True, color=cfg["accent"], gap_after=6)
+            elif block_type == "bullet":
+                self._draw_paragraph(f"• {content}", 11, color="#111111",
+                                      extra_indent=16, gap_after=4)
+            else:
+                self._draw_paragraph(content, 11, color="#111111", gap_after=8)
+
+    def render(self) -> bytes:
+        self._render_header()
+        self._render_body()
+        self._draw_footer()
+        self.c.save()
+        self.buf.seek(0)
+        return self.buf.getvalue()
+
+
+def build_document_pdf(title: str, text: str, style: str = DEFAULT_STYLE) -> bytes:
+    """يبني ملف PDF منسّق لنص حر كامل (تفريغ محاضرة، ملخص...) بخطوط Noto Naskh Arabic/
+    Amiri للعربي وNoto Sans/Times للإنكليزي، تشكيل bidi صحيح لأي نص عربي مدسوس وسط
+    نص إنكليزي أو العكس، وترقيم صفحات تلقائي - بنفس الستايلات الشكلية المتوفرة
+    بتصدير الكويز (simple / modern / academic)."""
+    if not text or not text.strip():
+        raise ExportError("لا يوجد نص لتصديره.")
+    is_ar = detect_text_language(text) == "ar"
+    renderer = _DocumentPDFRenderer(title, text, is_ar, style=style)
     return renderer.render()
