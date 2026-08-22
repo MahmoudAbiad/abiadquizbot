@@ -208,7 +208,10 @@ async def audio_upload_init(payload: AudioUploadInitRequest):
     if not upload_target or not upload_target.get("path"):
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
-    tus_endpoint = f"{SUPABASE_URL}/storage/v1/upload/resumable"
+    # 🆕 إصلاح: مسار الرفع المرن (TUS) لازم ينتهي بـ /sign حتى يفعّل السيرفر مسار
+    # التحقق عبر x-signature (التوكن الموقّع) بدل التحقق العادي بـ JWT - بدون هالـ
+    # لاحقة، الـ x-signature header يُتجاهل تماماً ويفشل الطلب فوراً بـ 400.
+    tus_endpoint = f"{SUPABASE_URL}/storage/v1/upload/resumable/sign"
 
     return {
         "upload_endpoint": tus_endpoint,
