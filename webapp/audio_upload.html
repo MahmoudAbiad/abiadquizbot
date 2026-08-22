@@ -167,6 +167,10 @@ async function handleFile(file) {
       chunkSize: 6 * 1024 * 1024, // 6MB لكل جزء - توازن جيد لاتصالات بطيئة/غير مستقرة
       headers: {
         "x-upsert": "true",
+        // 🆕 إصلاح: توكن الرفع الموقّع (من create_signed_upload_url) لازم يترسل
+        // بهاد الـ header تحديداً حسب بروتوكول Supabase Resumable Uploads، وإلا
+        // بيفشل الرفع بعد أول جزء (chunk) بالضبط - وهو ما كان يحصل قبل هذا الإصلاح.
+        "x-signature": initData.token,
       },
       metadata: {
         bucketName: initData.bucket,
