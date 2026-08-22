@@ -8,10 +8,11 @@ services/audio_service.py، ثم يعرض على الطالب أربعة إجر�
 import asyncio
 import os
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
+from mutagen import File as MutagenFile
 
 from config import QuizState, bot
 from constants import ADMIN_CONTACT
@@ -71,18 +72,51 @@ def _extract_extension(message: types.Message) -> str:
     return ext if ext else ".mp3"
 
 
+def _probe_actual_duration_seconds_sync(file_path: str) -> Optional[int]:
+    """يقرأ المدة الفعلية للملف الصوتي بعد تحميله محلياً (من ترويسة الملف نفسها،
+    وليس من الـ metadata التي أرسلها تطبيق تيليجرام للعميل مع الرسالة). مهم لأن
+    `message.audio.duration` (خلافاً لـ `message.voice.duration` الذي يقيسه تيليجرام
+    وقت التسجيل) قيمة يُرسلها العميل مع الملف وقد لا تطابق الملف الفعلي (بالخطأ أو
+    عمداً)، بينما التكلفة الحقيقية عند Gemini مرتبطة بطول الصوت الفعلي لا المُعلَن.
+    يُرجع None إن تعذّرت القراءة (صيغة غير مدعومة من mutagen، ملف تالف...) - عندها
+    نرجع للاعتماد على مدة تيليجرام المُعلَنة كحل احتياطي."""
+    try:
+        audio = MutagenFile(file_path)
+        if audio is not None and audio.info is not None and audio.info.length:
+            return int(audio.info.length + 0.999)  # تقريب لأعلى لأقرب ثانية
+    except Exception:  # أي فشل هون (صيغة غير مدعومة، ملف تالف...) غير حرج، نرجع None فقط
+        pass
+    return None
+
+
 # ==================== استقبال ومعالجة الرسالة الصوتية ====================
 
 @router.message(F.voice | F.audio)
 async def handle_audio_message(message: types.Message, state: FSMContext) -> None:
-    """يستقبل محاضرة صوتية، يتحقق من الحجم والرصيد، يخصم النقاط مقدماً، يفرّغ النص،
-    ويعرض على الطالب لوحة الإجراءات المتاحة على النص الناتج."""
+    """يستقبل محاضرة صوتية، يتحقق من الحجم، يحمّلها، يتحقق من مدتها الفعلية والرصيد،
+    يخصم النقاط، يفرّغ النص، ويعرض على الطالب لوحة الإجراءات المتاحة على النص الناتج.
+
+    🆕 قفل معالجة (`QuizState.processing_audio`): يُضبط فور التأكد من الحجم، قبل أي
+    عملية تحميل/شبكة، لمنع معالجة مضاعفة (وخصم نقاط مرتين، وضياع نص أول محاضرة من
+    الـ state لصالح ثانية) لو وصل مقطع صوتي جديد من نفس الطالب قبل اكتمال معالجة
+    السابق. يُفكّ القفل صراحة بكل مسارات الخروج المبكر (رصيد غير كافٍ، فشل تفريغ...)
+    وضمنياً بمسار النجاح (الانتقال لـ waiting_for_audio_action).
+
+    🆕 حساب المدة على الملف الفعلي بعد تحميله (`_probe_actual_duration_seconds_sync`)
+    بدل الاعتماد حصراً على `message.audio.duration` (قيمة يُرسلها تطبيق العميل ضمن
+    الرسالة نفسها لرسائل audio - قابلة للتعارض مع محتوى الملف الحقيقي، خلافاً لرسائل
+    voice التي يقيس تيليجرام مدتها بنفسه وقت التسجيل). التسعير يُحتسب دائماً من القيمة
+    الأكبر بين المُعلنة والفعلية تفادياً لأي دفع أقل من التكلفة الحقيقية."""
     current_state = await state.get_state()
     if current_state == QuizState.answering_quiz:
         await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه عبر الضغط على (⏹️ إيقاف) أولاً قبل رفع محاضرة صوتية جديدة.")
         return
+    if current_state == QuizState.processing_audio:
+        await message.answer("⏳ لديك محاضرة صوتية أخرى قيد التحميل/التفريغ حالياً؛ يرجى انتظار انتهائها قبل إرسال مقطع جديد.")
+        return
     if current_state is not None:
-        # أي طلب معلّق آخر (تصنيف نص/ملف سابق لم يُكمل) يُلغى بأمان عند وصول محاضرة صوتية جديدة
+        # أي طلب معلّق آخر (تصنيف نص/ملف سابق لم يُكمل، أو شاشة إجراءات محاضرة سابقة
+        # جاهزة لم يُقرَّر مصيرها بعد) يُلغى بأمان عند وصول محاضرة صوتية جديدة
         await state.set_state(None)
 
     media = message.voice or message.audio
@@ -91,31 +125,61 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
         await message.answer("❌ حجم الملف الصوتي أكبر من الحد المسموح به (20 ميجابايت). يرجى إرسال ملف أصغر.")
         return
 
-    duration_seconds = message.voice.duration if message.voice else message.audio.duration
-    duration_minutes = max(1, (duration_seconds + 59) // 60)
-    cost = calculate_audio_transcription_cost(duration_minutes)
+    # 🆕 نضبط القفل فوراً هون - قبل أي await لعملية شبكة/تحميل - لتضييق نافذة السباق
+    # الزمنية قدر الإمكان إذا وصل مقطع صوتي ثانٍ من نفس الطالب بنفس اللحظة تقريباً.
+    await state.set_state(QuizState.processing_audio)
 
-    user_info = await _current_user(message)
-    balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
-    if balance < cost:
-        await _insufficient_balance(message, user_info, cost)
-        return
-
-    if await update_user_stats(message.from_user.id, cost) is None:
-        await _insufficient_balance(message, await _current_user(message), cost)
-        return
+    reported_duration_seconds = message.voice.duration if message.voice else (message.audio.duration or 0)
 
     ensure_directory_exists(DOWNLOADS_DIR)
     extension = _extract_extension(message)
     destination = os.path.join(DOWNLOADS_DIR, f"audio_{message.from_user.id}_{uuid.uuid4().hex}{extension}")
 
     status_msg = await message.answer(
-        "🎙️ <b>جارٍ تحميل المحاضرة الصوتية وتفريغها نصياً...</b>\nقد تستغرق العملية بضع دقائق حسب طول المحاضرة.",
+        "🎙️ <b>جارٍ تحميل المحاضرة الصوتية...</b>\nقد تستغرق العملية بضع دقائق حسب طول المحاضرة.",
         parse_mode="HTML",
     )
 
+    cost = 0.0
+    charged = False
     try:
         await bot.download(media, destination=destination)
+
+        actual_duration_seconds = await asyncio.to_thread(_probe_actual_duration_seconds_sync, destination)
+        duration_seconds = max(reported_duration_seconds, actual_duration_seconds or 0) or reported_duration_seconds
+        duration_minutes = max(1, (duration_seconds + 59) // 60)
+        cost = calculate_audio_transcription_cost(duration_minutes)
+
+        user_info = await _current_user(message)
+        balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
+        if balance < cost:
+            await state.set_state(None)  # فكّ القفل - لم يُخصَم أي شيء بعد
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await _insufficient_balance(message, user_info, cost)
+            return
+
+        if await update_user_stats(message.from_user.id, cost) is None:
+            # 🆕 حالة سباق رصيد نادرة جداً (خصم متزامن آخر أفرغ الرصيد بين لحظة الفحص
+            # ولحظة الخصم الذري). لا داعي لاستعلام DB إضافي (`_current_user` مجدداً)
+            # فقط لعرض رقم رصيد دقيق هون - الرسالة الأصلية `_insufficient_balance`
+            # بتحتاج بيانات طازجة عشان ما تعرض تناقض (رصيد كافٍ ظاهرياً + رسالة
+            # "غير كافٍ")، فبدل هيك نعرض رسالة تعارض عامة وبنطلب إعادة المحاولة مباشرة.
+            await state.set_state(None)  # فكّ القفل - فشل الخصم فعلياً
+            race_text = "⚠️ <b>حصل تعارض بسيط برصيدك أثناء المعالجة</b> (عملية أخرى متزامنة على حسابك). يرجى إعادة إرسال المحاضرة الصوتية مجدداً."
+            try:
+                await status_msg.edit_text(race_text, parse_mode="HTML")
+            except Exception:
+                await message.answer(race_text, parse_mode="HTML")
+            return
+        charged = True
+
+        await status_msg.edit_text(
+            "🎙️ <b>جارٍ تفريغ المحاضرة نصياً...</b>\nقد تستغرق العملية بضع دقائق حسب طول المحاضرة.",
+            parse_mode="HTML",
+        )
 
         try:
             mime_type = media.mime_type or ("audio/ogg" if message.voice else "audio/mp3")
@@ -126,6 +190,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
 
         if not pure_text or not pure_text.strip():
             await refund_user_points(message.from_user.id, cost)
+            await state.set_state(None)  # فكّ القفل
             await status_msg.edit_text(
                 "⚠️ <b>تعذر تفريغ المحاضرة الصوتية!</b> يرجى التأكد من وضوح الصوت والمحاولة مجدداً. تم إرجاع نقاطك.",
                 parse_mode="HTML",
@@ -142,7 +207,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
             items_count=1,
             is_album=False,
         )
-        await state.set_state(QuizState.waiting_for_audio_action)
+        await state.set_state(QuizState.waiting_for_audio_action)  # ينهي القفل ضمنياً
 
         await status_msg.edit_text(
             f"✅ <b>تم تفريغ المحاضرة بنجاح!</b> (⏱️ {duration_minutes} دقيقة)\n\nماذا تريد أن تفعل بالنص المستخرج؟",
@@ -151,11 +216,13 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
         )
     except Exception as exc:
         log_error(logger, f"Audio handling failed: {exc}", exception=exc)
-        await refund_user_points(message.from_user.id, cost)
+        if charged:
+            await refund_user_points(message.from_user.id, cost)
+        await state.set_state(None)  # فكّ القفل بكل الأحوال
         try:
-            await status_msg.edit_text("❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية. تم إرجاع نقاطك.")
+            await status_msg.edit_text("❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية. تم إرجاع نقاطك." if charged else "❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية.")
         except Exception:
-            await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية. تم إرجاع نقاطك.")
+            await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية. تم إرجاع نقاطك." if charged else "❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية.")
     finally:
         safe_file_cleanup(destination)
 
