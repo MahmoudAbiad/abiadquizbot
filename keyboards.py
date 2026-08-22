@@ -6,6 +6,7 @@ from constants import (
     DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE, DIFFICULTY_LABELS_AR,
     BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_BACK_TO_TYPE_SCREEN,
     SUBJECT_MATH, SUBJECT_ENGLISH,
+    WEBAPP_PUBLIC_BASE_URL,
 )
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
@@ -27,6 +28,16 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
             ],
             [types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
+        # 🆕 زر رفع محاضرة صوتية كبيرة (حتى 250MB) عبر Mini App - يُخفى تلقائياً لو
+        # WEBAPP_PUBLIC_BASE_URL فاضي (مثلاً بوضع polling محلي بدون WEBHOOK_URL)
+        # حتى ما نعرض زر مكسور بيفتح رابط فاضي.
+        if WEBAPP_PUBLIC_BASE_URL:
+            kb.append([
+                types.InlineKeyboardButton(
+                    text="🎙️ تفريغ ملف صوتي كبير (حتى 250MB)",
+                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/audio_upload.html"),
+                )
+            ])
         return types.InlineKeyboardMarkup(inline_keyboard=kb)
     except Exception as e:
         logger.error(f"Error generating main menu keyboard: {e}")

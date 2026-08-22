@@ -492,3 +492,27 @@ def format_syria_time(value, fmt: str = "%Y-%m-%d %I:%M %p") -> str:
     if dt is None:
         return "غير معروف"
     return dt.strftime(fmt).replace("AM", "ص").replace("PM", "م")
+
+# ==============================================================================
+# 🆕 Audio Web Upload (Telegram Mini App) - رفع محاضرات صوتية حتى 250MB
+# ==============================================================================
+# مسار منفصل تماماً عن MAX_AUDIO_FILE_SIZE (20MB بـ handlers/audio.py) - هذا خاص
+# برفع الملفات عبر صفحة الويب (Mini App) التي تتجاوز حد الـ 20MB لتحميل تيليجرام.
+MAX_AUDIO_WEB_UPLOAD_SIZE = 250 * 1024 * 1024  # 250MB
+
+# اسم الـ bucket المؤقت بـ Supabase Storage - يجب أن يكون خاصاً (private) وليس عاماً
+AUDIO_UPLOAD_BUCKET = "audio-temp"
+
+# مدة صلاحية جلسة الرفع بالكامل (من فتح صفحة الويب لحد إتمام الرفع فعلياً) بالثواني.
+# ملاحظة: signed upload URL من Supabase عندها صلاحية ثابتة عند ساعتين (غير قابلة
+# للتعديل من الـ SDK) - هذا الرقم هون هو سقف إضافي من طرفنا نحن (session قابل للتحقق
+# عبر initData نفسها، فعلياً الـ initData من تيليجرام صالحة لساعة واحدة بشكل قياسي).
+AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS = 3600
+
+# تقدير أولي (بالثواني لكل دقيقة صوت) لعرض "الوقت المتوقع للتفريغ" داخل البوت.
+# 🆕 عدّل هذا الرقم لاحقاً بناءً على سجلات فعلية (log_info بالزمن الفعلي المُستغرَق
+# بـ services/audio_service.py لكل مكالمة transcribe_audio_lecture، وخذ متوسطها).
+ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE = 12
+
+# الدومين الأساسي لصفحة الرفع - نفس دومين الـ Webhook المستخدم أصلاً على Heroku
+WEBAPP_PUBLIC_BASE_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")

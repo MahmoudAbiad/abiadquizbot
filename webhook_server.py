@@ -6,14 +6,25 @@ Handles HTTP server setup safely with modern lifespan context and proper Pydanti
 import os
 import asyncio  
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from aiogram.types import Update
 from config import bot, dp, set_bot_commands 
 from logger import get_logger
-from constants import WEBHOOK_PATH, WEBHOOK_PORT, TELEGRAM_WEBHOOK_SECRET
+from constants import (
+    WEBHOOK_PATH, WEBHOOK_PORT, TELEGRAM_WEBHOOK_SECRET,
+    MAX_AUDIO_WEB_UPLOAD_SIZE, AUDIO_UPLOAD_BUCKET, AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+)
+from telegram_webapp_auth import verify_telegram_init_data
 
 # 🆕 استيراد دوال الدُفعات والتنظيف الدوري الاسم الصحيح المُعدّل في supabase_helper
-from supabase_helper import flush_analytics_queue, auto_cleanup_old_analytics_data
+# SUPABASE_URL مستوردة هون بنفس أسلوب المشروع (بدون بادئة helpers.) لبناء رابط TUS
+from supabase_helper import (
+    flush_analytics_queue, auto_cleanup_old_analytics_data,
+    create_audio_upload_target, cleanup_stale_audio_uploads, SUPABASE_URL,
+)
+from handlers.audio import process_web_uploaded_audio
 
 logger = get_logger(__name__)
 
@@ -52,6 +63,11 @@ async def scheduled_cleanup_loop():
         try:
             # تم تعديل اسم الدالة للاستدعاء الصحيح من supabase_helper
             await auto_cleanup_old_analytics_data()
+            # 🆕 شبكة أمان: حذف أي ملفات صوتية مؤقتة تبقّت بـ Supabase Storage
+            # لأكثر من ساعة (معالجة انقطعت استثنائياً قبل الوصول لـ finally)
+            deleted = await cleanup_stale_audio_uploads(older_than_seconds=3600)
+            if deleted:
+                logger.info(f"Cleaned up {deleted} stale audio-temp file(s) from Supabase Storage.")
         except Exception as e:
             logger.error(f"Error inside the background scheduled cleanup task: {e}")
         await asyncio.sleep(43200)  # فحص وتنظيف كل 12 ساعة (43200 ثانية)
@@ -118,6 +134,9 @@ async def lifespan(app: FastAPI):
 # إنشاء تطبيق FastAPI وتمرير الـ lifespan له
 app = FastAPI(title="Quiz Maker Bot", version="2.0", lifespan=lifespan)
 
+# 🆕 تقديم صفحة رفع الملفات الصوتية (Mini App) كملفات ستاتيك من نفس الدومين
+app.mount("/webapp", StaticFiles(directory="webapp"), name="webapp")
+
 # ==================== Endpoints ====================
 
 @app.api_route("/", methods=["GET", "HEAD"])
@@ -148,6 +167,90 @@ async def webhook(request: Request):
 
     # الرد فوراً بـ OK لتلغرام لإنهاء طلب الـ HTTP بلمح البصر
     return {"ok": True}
+
+# ==================== Audio Web Upload (Telegram Mini App) ====================
+
+class AudioUploadInitRequest(BaseModel):
+    init_data: str
+    file_size: int
+    file_name: str = ""
+
+
+class AudioUploadCompleteRequest(BaseModel):
+    init_data: str
+    object_path: str
+    file_name: str = ""
+
+
+@app.post("/api/audio-upload/init")
+async def audio_upload_init(payload: AudioUploadInitRequest):
+    """
+    يتحقق من initData ومن حجم الملف المُعلَن، ثم يولّد جلسة رفع TUS موقّعة على
+    Supabase Storage. الرفع الفعلي بعدها يصير مباشرة من متصفح المستخدم لـ Supabase
+    (مو عبر Heroku) - حد الـ 30 ثانية لـ Heroku router مو مشكلة هون.
+    """
+    ok, user = verify_telegram_init_data(
+        payload.init_data,
+        bot.token,
+        max_age_seconds=AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة، افتح صفحة الرفع من البوت من جديد.")
+
+    # 🆕 دفاع ثانٍ من طرف السيرفر - لا نثق بفحص الحجم من طرف المتصفح وحده
+    if payload.file_size <= 0 or payload.file_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="حجم الملف يتجاوز الحد المسموح (250 ميغابايت).")
+
+    user_id = user.get("id")
+    ext = os.path.splitext(payload.file_name)[1] if payload.file_name else ""
+
+    upload_target = await create_audio_upload_target(user_id, ext)
+    if not upload_target or not upload_target.get("path"):
+        raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
+
+    tus_endpoint = f"{SUPABASE_URL}/storage/v1/upload/resumable"
+
+    return {
+        "upload_endpoint": tus_endpoint,
+        "token": upload_target.get("token"),
+        "object_path": upload_target.get("path"),
+        "bucket": AUDIO_UPLOAD_BUCKET,
+    }
+
+
+@app.post("/api/audio-upload/complete")
+async def audio_upload_complete(payload: AudioUploadCompleteRequest):
+    """
+    يُستدعى من صفحة الويب فور اكتمال الرفع فعلياً على Supabase. يتحقق من initData
+    مجدداً (نفس المستخدم)، ثم يُطلق معالجة الصوت بالخلفية فوراً (لا ننتظرها هون -
+    الرد لازم يرجع بسرعة حتى تقفل صفحة الويب وترجع المستخدم للمحادثة، والمعالجة
+    الفعلية بتظهر كرسائل متتالية من البوت نفسه).
+    """
+    ok, user = verify_telegram_init_data(
+        payload.init_data,
+        bot.token,
+        max_age_seconds=AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة.")
+
+    user_id = user.get("id")
+
+    # 🆕 تحقق أمني: المسار لازم يبدأ بمعرف نفس المستخدم (منع استخدام object_path لمستخدم آخر)
+    if not payload.object_path.startswith(f"{user_id}/"):
+        raise HTTPException(status_code=403, detail="غير مسموح.")
+
+    asyncio.create_task(
+        process_web_uploaded_audio(
+            user_id=user_id,
+            chat_id=user_id,  # محادثة خاصة - chat_id يساوي user_id بالبوتات الفردية
+            object_path=payload.object_path,
+            declared_file_name=payload.file_name,
+        )
+    )
+
+    return {"ok": True}
+
 
 # ==================== Run Server Function ====================
 

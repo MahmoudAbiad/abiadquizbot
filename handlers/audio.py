@@ -7,21 +7,27 @@ services/audio_service.py، ثم يعرض على الطالب أربعة إجر�
 
 import asyncio
 import os
+import time
 import uuid
 from typing import Any, Dict, Optional
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from mutagen import File as MutagenFile
 
-from config import QuizState, bot
-from constants import ADMIN_CONTACT
+from config import QuizState, bot, dp
+from constants import ADMIN_CONTACT, ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE
+from helpers.gemini_helper import get_safe_mime_type
 from helpers.points_calculator import calculate_audio_transcription_cost
 from keyboards import get_audio_action_keyboard, get_document_export_keyboard
-from logger import get_logger, log_error
+from logger import get_logger, log_error, log_info
 from services.audio_service import summarize_lecture_text, transcribe_audio_lecture
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
-from supabase_helper import check_or_add_user, refund_user_points, update_user_stats
+from supabase_helper import (
+    check_or_add_user, refund_user_points, update_user_stats,
+    download_audio_temp_to_file, delete_audio_temp,
+)
 from utils import ensure_directory_exists, safe_file_cleanup
 
 logger = get_logger(__name__)
@@ -403,6 +409,189 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
     except Exception as exc:
         log_error(logger, f"Audio to quiz transfer failed: {exc}", exception=exc)
         await call.message.answer("❌ تعذر بدء توليد الكويز من هذه المحاضرة، حاول مجدداً.")
+
+
+# ==================== رفع محاضرة صوتية عبر صفحة الويب (Mini App) ====================
+
+def _build_state_for_chat(chat_id: int, user_id: int) -> FSMContext:
+    """
+    يبني FSMContext يدوياً لمستخدم/محادثة معيّنة خارج سياق رسالة تيليجرام عادية
+    (هون: من endpoint استقبال ويب). يستخدم نفس RedisStorage المُهيّأ أصلاً بـ
+    config.py (dp.storage)، فالحالة متوافقة 100% مع بقية تدفقات البوت العادية -
+    يعني بعد ما تخلص هاي الدالة، أي زر يضغطه الطالب (تلخيص/تصدير/كويز) من نفس
+    لوحة get_audio_action_keyboard الحالية بيشتغل عادي بدون أي تعديل عليه.
+    """
+    key = StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id)
+    return FSMContext(storage=dp.storage, key=key)
+
+
+async def process_web_uploaded_audio(
+    user_id: int,
+    chat_id: int,
+    object_path: str,
+    declared_file_name: str = "",
+) -> None:
+    """
+    🆕 نظير handle_audio_message لكن لملف رُفع عبر صفحة الويب (Mini App) بدل رسالة
+    صوتية مباشرة على تيليجرام. يُستدعى كـ background task من webhook_server.py فور
+    تأكيد اكتمال الرفع على Supabase.
+
+    الفروقات عن handle_audio_message:
+    - لا يوجد حد MAX_AUDIO_FILE_SIZE (20MB) هون - الحد المطبَّق مسبقاً هو
+      MAX_AUDIO_WEB_UPLOAD_SIZE (250MB) بمرحلة /api/audio-upload/init.
+    - لا يوجد "مدة معلَنة" من تيليجرام لملف مرفوع عبر الويب - الاعتماد الكامل على
+      القياس الفعلي بعد التحميل المحلي (_probe_actual_duration_seconds_sync).
+      ⚠️ قرار معلّق: لو تعذّر القياس (mutagen فشل)، الكود حالياً يفترض دقيقة واحدة
+      فقط كحد أدنى (نفس سلوك duration_minutes = max(1, ...) بالتدفق العادي) - هاد
+      ممكن يعني دفع أقل من التكلفة الحقيقية لمحاضرة طويلة بصيغة غير مدعومة. راجع
+      PROJECT_STATUS.md قبل الإنتاج لتقرر إذا بدك رفض الملف بدل هيك بهالحالة تحديداً.
+    - الملف يُحذف من Supabase Storage حتماً بنهاية الدالة (finally)، بالإضافة
+      لحذف النسخة المحلية (safe_file_cleanup) - نفس مبدأ "لا تخزين دائم" المطلوب.
+    """
+    state = _build_state_for_chat(chat_id, user_id)
+
+    current_state = await state.get_state()
+    if current_state == QuizState.answering_quiz:
+        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع محاضرة صوتية جديدة.")
+        await delete_audio_temp(object_path)
+        return
+    if current_state == QuizState.processing_audio:
+        await bot.send_message(chat_id, "⏳ لديك محاضرة صوتية أخرى قيد المعالجة حالياً؛ يرجى انتظار انتهائها.")
+        await delete_audio_temp(object_path)
+        return
+    if current_state is not None:
+        await state.set_state(None)
+
+    await state.set_state(QuizState.processing_audio)
+
+    ensure_directory_exists(DOWNLOADS_DIR)
+    extension = os.path.splitext(declared_file_name)[1] or os.path.splitext(object_path)[1] or ".mp3"
+    destination = os.path.join(DOWNLOADS_DIR, f"audio_web_{user_id}_{uuid.uuid4().hex}{extension}")
+
+    status_msg = await bot.send_message(
+        chat_id,
+        "🎙️ <b>تم استلام الملف، جارٍ تجهيزه للمعالجة...</b>",
+        parse_mode="HTML",
+    )
+
+    cost = 0.0
+    charged = False
+    try:
+        # 1) تنزيل الملف من التخزين المؤقت بـ Supabase للقرص المحلي
+        downloaded = await download_audio_temp_to_file(object_path, destination)
+        if not downloaded:
+            await state.set_state(None)
+            await status_msg.edit_text("❌ تعذر تحميل الملف المرفوع، يرجى إعادة المحاولة من البوت.")
+            return
+
+        await status_msg.edit_text(
+            "🎙️ <b>جارٍ تفريغ المحاضرة نصياً...</b>\nقد تستغرق العملية بضع دقائق حسب طول المحاضرة.",
+            parse_mode="HTML",
+        )
+
+        actual_duration_seconds = await asyncio.to_thread(_probe_actual_duration_seconds_sync, destination)
+        if actual_duration_seconds is None:
+            log_error(logger, f"Could not probe duration for web-uploaded audio '{destination}' - defaulting to 1 minute charge.")
+        duration_seconds = actual_duration_seconds or 0
+        duration_minutes = max(1, (duration_seconds + 59) // 60)
+        cost = calculate_audio_transcription_cost(duration_minutes)
+
+        # 🆕 عرض الوقت المتوقع للتفريغ (تقدير تقريبي - راجع ملاحظة المعايرة بـ constants.py)
+        estimated_seconds = duration_minutes * ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE
+        estimated_label = (
+            f"~{max(1, estimated_seconds // 60)} دقيقة" if estimated_seconds >= 60
+            else f"~{estimated_seconds} ثانية"
+        )
+        await status_msg.edit_text(
+            f"⏱️ <b>مدة المحاضرة:</b> {duration_minutes} دقيقة\n"
+            f"⏳ <b>الوقت المتوقع لإنهاء التفريغ:</b> {estimated_label} تقريباً\n\n"
+            f"جارٍ التفريغ الآن...",
+            parse_mode="HTML",
+        )
+
+        fake_user = type("U", (), {
+            "id": user_id, "username": None, "first_name": "Unknown", "last_name": "Unknown",
+        })()
+        user_info = await _current_user(None, user=fake_user)
+        balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
+        if balance < cost:
+            await state.set_state(None)
+            await status_msg.delete()
+            # 🆕 إعادة استخدام _insufficient_balance تتطلب كائن message حقيقي - هون نبني رسالة مبسطة بديلة
+            await bot.send_message(
+                chat_id,
+                f"❌ رصيدك الحالي لا يكفي لتفريغ هذه المحاضرة.\n"
+                f"💰 الإجمالي الحالي: <code>{balance:.2f}</code> / المطلوب: <code>{cost:.2f}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        if await update_user_stats(user_id, cost) is None:
+            await state.set_state(None)
+            await status_msg.edit_text(
+                "⚠️ <b>حصل تعارض بسيط برصيدك أثناء المعالجة.</b> يرجى إعادة رفع الملف من جديد.",
+                parse_mode="HTML",
+            )
+            return
+        charged = True
+
+        # 2) استنتاج نوع MIME من محتوى الملف الفعلي (لا يوجد mime_type جاهز من
+        # تيليجرام هون خلافاً لرسائل audio/voice العادية) - نفس الدالة المستخدمة
+        # أصلاً بـ services/audio_service.py وhelpers/gemini_helper.py
+        mime_type = get_safe_mime_type(destination)
+
+        transcription_started_at = time.monotonic()
+        try:
+            pure_text = await transcribe_audio_lecture(destination, mime_type)
+        except Exception as exc:
+            log_error(logger, f"Web-uploaded audio transcription failed: {exc}", exception=exc)
+            pure_text = None
+        finally:
+            # 🆕 سجل الزمن الفعلي مقابل مدة المحاضرة - استخدم هاي القيم لاحقاً لمعايرة
+            # ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE بدل الرقم التقريبي الحالي (12)
+            elapsed = time.monotonic() - transcription_started_at
+            per_minute = elapsed / duration_minutes if duration_minutes else elapsed
+            log_info(logger, f"Transcription timing: {duration_minutes}min audio took {elapsed:.1f}s ({per_minute:.1f}s/min)")
+
+        if not pure_text or not pure_text.strip():
+            await refund_user_points(user_id, cost)
+            await state.set_state(None)
+            await status_msg.edit_text(
+                "⚠️ <b>تعذر تفريغ المحاضرة الصوتية!</b> يرجى التأكد من وضوح الصوت والمحاولة مجدداً. تم إرجاع نقاطك.",
+                parse_mode="HTML",
+            )
+            return
+
+        source_title = declared_file_name or f"محاضرة صوتية ({duration_minutes} دقيقة)"
+        await state.update_data(
+            pure_text=pure_text,
+            source_title=source_title,
+            duration_minutes=duration_minutes,
+            audio_debited_cost=cost,
+            input_type="text",
+            items_count=1,
+            is_album=False,
+        )
+        await state.set_state(QuizState.waiting_for_audio_action)
+
+        await status_msg.edit_text(
+            f"✅ <b>تم تفريغ المحاضرة بنجاح!</b> (⏱️ {duration_minutes} دقيقة)\n\nماذا تريد أن تفعل بالنص المستخرج؟",
+            parse_mode="HTML",
+            reply_markup=get_audio_action_keyboard(),
+        )
+    except Exception as exc:
+        log_error(logger, f"Web-uploaded audio handling failed: {exc}", exception=exc)
+        if charged:
+            await refund_user_points(user_id, cost)
+        await state.set_state(None)
+        try:
+            await status_msg.edit_text("❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية." + (" تم إرجاع نقاطك." if charged else ""))
+        except Exception:
+            await bot.send_message(chat_id, "❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية." + (" تم إرجاع نقاطك." if charged else ""))
+    finally:
+        # 🆕 حذف مضمون بكل الأحوال - محلياً + من Supabase Storage (لا تخزين دائم مطلقاً)
+        safe_file_cleanup(destination)
+        await delete_audio_temp(object_path)
 
 
 audio_router = router
