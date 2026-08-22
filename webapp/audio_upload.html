@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>رفع محاضرة صوتية</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tus-js-client@4/dist/tus.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Tahoma, sans-serif;
+    background: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #111111);
+    margin: 0;
+    padding: 20px 16px;
+  }
+  h1 { font-size: 18px; margin-bottom: 6px; }
+  .hint {
+    font-size: 13px;
+    color: var(--tg-theme-hint-color, #888888);
+    margin-bottom: 18px;
+    line-height: 1.6;
+  }
+  .warning-box {
+    background: #fff4e5;
+    border: 1px solid #ffcc80;
+    color: #8a5a00;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    margin-bottom: 18px;
+  }
+  .drop-zone {
+    border: 2px dashed var(--tg-theme-hint-color, #bbbbbb);
+    border-radius: 14px;
+    padding: 30px 16px;
+    text-align: center;
+    cursor: pointer;
+  }
+  .drop-zone.dragover { border-color: var(--tg-theme-button-color, #2ea6ff); }
+  input[type=file] { display: none; }
+  .file-name { margin-top: 12px; font-size: 13px; word-break: break-all; }
+  .progress-wrap {
+    margin-top: 20px;
+    display: none;
+  }
+  .progress-bar-bg {
+    width: 100%;
+    background: #e6e6e6;
+    border-radius: 8px;
+    height: 14px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--tg-theme-button-color, #2ea6ff);
+    transition: width 0.2s ease;
+  }
+  .progress-text {
+    margin-top: 8px;
+    font-size: 13px;
+    text-align: center;
+    color: var(--tg-theme-hint-color, #888888);
+  }
+  .status-text {
+    margin-top: 16px;
+    font-size: 14px;
+    text-align: center;
+    min-height: 20px;
+  }
+  .error-text { color: #d32f2f; }
+</style>
+</head>
+<body>
+
+<h1>🎙️ رفع محاضرة صوتية</h1>
+<div class="hint">اختر الملف الصوتي وسيبدأ الرفع مباشرة. بعد اكتمال الرفع رح ترجع تلقائياً للمحادثة، والبوت رح يكمل معك التفريغ من هناك.</div>
+
+<div class="warning-box">⚠️ الحد الأقصى لحجم الملف: <b>250 ميغابايت</b>. الملفات الأكبر مش مدعومة حالياً.</div>
+
+<div class="drop-zone" id="dropZone">
+  <div id="dropZoneText">📁 اضغط هون لاختيار الملف الصوتي</div>
+  <div class="file-name" id="fileName"></div>
+</div>
+<input type="file" id="fileInput" accept="audio/*">
+
+<div class="progress-wrap" id="progressWrap">
+  <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+  <div class="progress-text" id="progressText">0%</div>
+</div>
+
+<div class="status-text" id="statusText"></div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.ready();
+tg.expand();
+
+const MAX_SIZE_BYTES = 250 * 1024 * 1024;
+const INIT_ENDPOINT = "/api/audio-upload/init";
+const COMPLETE_ENDPOINT = "/api/audio-upload/complete";
+const TUS_ENDPOINT = "/storage/v1/upload/resumable"; // يُستكمل بدومين مشروع Supabase عبر uploadUrlBase القادم من init
+
+const dropZone = document.getElementById("dropZone");
+const dropZoneText = document.getElementById("dropZoneText");
+const fileInput = document.getElementById("fileInput");
+const fileNameEl = document.getElementById("fileName");
+const progressWrap = document.getElementById("progressWrap");
+const progressFill = document.getElementById("progressFill");
+const progressText = document.getElementById("progressText");
+const statusText = document.getElementById("statusText");
+
+dropZone.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) handleFile(file);
+});
+
+function showError(msg) {
+  statusText.textContent = msg;
+  statusText.classList.add("error-text");
+  tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error");
+}
+
+async function handleFile(file) {
+  statusText.classList.remove("error-text");
+  statusText.textContent = "";
+
+  // 🆕 فحص فوري لحجم الملف قبل أي اتصال شبكة - دفاع أول (العميل)
+  if (file.size > MAX_SIZE_BYTES) {
+    showError("❌ حجم الملف أكبر من الحد المسموح (250 ميغابايت). يرجى اختيار ملف أصغر.");
+    return;
+  }
+
+  fileNameEl.textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)`;
+  dropZoneText.textContent = "📁 تم اختيار الملف - يمكنك تغييره بالضغط هون";
+  progressWrap.style.display = "block";
+  statusText.textContent = "⏳ جارٍ تجهيز الرفع...";
+
+  try {
+    // 1) طلب جلسة رفع موقّعة من السيرفر (initData + حجم الملف للتحقق المزدوج)
+    const initRes = await fetch(INIT_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        init_data: tg.initData,
+        file_size: file.size,
+        file_name: file.name,
+      }),
+    });
+
+    if (!initRes.ok) {
+      const err = await initRes.json().catch(() => ({}));
+      showError(err.detail || "❌ تعذر بدء جلسة الرفع، حاول مجدداً.");
+      return;
+    }
+
+    const initData = await initRes.json();
+    // المتوقع من السيرفر: { upload_endpoint, token, object_path, bucket }
+
+    // 2) رفع الملف عبر TUS (قابل للاستئناف تلقائياً عند انقطاع الاتصال)
+    const upload = new tus.Upload(file, {
+      endpoint: initData.upload_endpoint,
+      retryDelays: [0, 3000, 5000, 10000, 20000], // إعادة محاولة تلقائية عند انقطاع مؤقت
+      chunkSize: 6 * 1024 * 1024, // 6MB لكل جزء - توازن جيد لاتصالات بطيئة/غير مستقرة
+      headers: {
+        "x-upsert": "true",
+      },
+      metadata: {
+        bucketName: initData.bucket,
+        objectName: initData.object_path,
+        contentType: file.type || "audio/mpeg",
+        cacheControl: "3600",
+      },
+      uploadDataDuringCreation: true,
+      removeFingerprintOnSuccess: true,
+      onError: function (error) {
+        console.error(error);
+        showError("❌ انقطع الرفع ولم تنجح إعادة المحاولة. تحقق من اتصالك وحاول مجدداً.");
+      },
+      onProgress: function (bytesUploaded, bytesTotal) {
+        const percent = ((bytesUploaded / bytesTotal) * 100).toFixed(0);
+        progressFill.style.width = percent + "%";
+        progressText.textContent = `${percent}% (${(bytesUploaded / (1024 * 1024)).toFixed(1)} / ${(bytesTotal / (1024 * 1024)).toFixed(1)} MB)`;
+        statusText.textContent = "📤 جارٍ الرفع... يمكن إغلاق الشاشة يكمل تلقائياً لو رجعت لنفس النت";
+      },
+      onSuccess: async function () {
+        statusText.textContent = "✅ اكتمل الرفع، جارٍ التأكيد...";
+        progressFill.style.width = "100%";
+
+        // 3) إعلام السيرفر إن الرفع اكتمل حتى يبلش المعالجة بالخلفية
+        try {
+          const completeRes = await fetch(COMPLETE_ENDPOINT, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              init_data: tg.initData,
+              object_path: initData.object_path,
+              file_name: file.name,
+            }),
+          });
+          if (!completeRes.ok) {
+            showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+            return;
+          }
+          statusText.textContent = "✅ تم! رجّعك عالمحادثة...";
+          setTimeout(() => tg.close(), 800);
+        } catch (e) {
+          showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+        }
+      },
+    });
+
+    // استئناف رفعة سابقة لنفس الملف لو موجودة (انقطاع سابق بنفس الجلسة)
+    upload.findPreviousUploads().then(function (previousUploads) {
+      if (previousUploads.length) {
+        upload.resumeFromPreviousUpload(previousUploads[0]);
+      }
+      upload.start();
+    });
+  } catch (e) {
+    console.error(e);
+    showError("❌ حدث خطأ غير متوقع، حاول مجدداً.");
+  }
+}
+</script>
+</body>
+</html>
