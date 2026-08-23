@@ -19,7 +19,8 @@ from mutagen import File as MutagenFile
 from config import QuizState, bot, dp
 from constants import (
     ADMIN_CONTACT, ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE,
-    MAX_AUDIO_WEB_UPLOAD_SIZE, MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
+    MAX_AUDIO_DURATION_MINUTES, MAX_AUDIO_WEB_UPLOAD_SIZE,
+    MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
 )
 from helpers.gemini_helper import get_safe_mime_type
 from helpers.points_calculator import calculate_audio_transcription_cost
@@ -98,6 +99,16 @@ def _probe_actual_duration_seconds_sync(file_path: str) -> Optional[int]:
     return None
 
 
+def _duration_cap_exceeded_text(duration_minutes: int) -> str:
+    """🆕 رسالة موحّدة عند تجاوز مدة المحاضرة للحد الأقصى (MAX_AUDIO_DURATION_MINUTES) -
+    مشتركة بين مسار تيليجرام المباشر ومسار رفع الويب."""
+    return (
+        f"❌ مدة هذه المحاضرة ({duration_minutes} دقيقة) تتجاوز الحد الأقصى المسموح به حالياً "
+        f"({MAX_AUDIO_DURATION_MINUTES // 60} ساعات لكل ملف واحد). يرجى تقسيم التسجيل إلى "
+        "أجزاء أصغر وإرسال كل جزء على حدة."
+    )
+
+
 # ==================== استقبال ومعالجة الرسالة الصوتية ====================
 
 @router.message(F.voice | F.audio)
@@ -172,6 +183,18 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
         actual_duration_seconds = await asyncio.to_thread(_probe_actual_duration_seconds_sync, destination)
         duration_seconds = max(reported_duration_seconds, actual_duration_seconds or 0) or reported_duration_seconds
         duration_minutes = max(1, (duration_seconds + 59) // 60)
+
+        # 🆕 سقف مدة فعلية (وليس فقط حجم الملف) - راجع AI-NOTE بجانب MAX_AUDIO_DURATION_MINUTES
+        # بـ constants.py لشرح سبب اختيار 4 ساعات تحديداً (مرتبط بحد توكنز إخراج Gemini).
+        if duration_minutes > MAX_AUDIO_DURATION_MINUTES:
+            await state.set_state(None)
+            safe_file_cleanup(destination)
+            try:
+                await status_msg.edit_text(_duration_cap_exceeded_text(duration_minutes))
+            except Exception:
+                await message.answer(_duration_cap_exceeded_text(duration_minutes))
+            return
+
         cost = calculate_audio_transcription_cost(duration_minutes)
 
         user_info = await _current_user(message)
@@ -287,16 +310,18 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
 
         transcription_started_at = time.monotonic()
         try:
-            pure_text = await transcribe_audio_lecture(destination, mime_type)
+            transcription_result = await transcribe_audio_lecture(destination, mime_type)
         except Exception as exc:
             log_error(logger, f"Audio transcription failed: {exc}", exception=exc)
-            pure_text = None
+            transcription_result = None
         finally:
             # 🆕 سجل الزمن الفعلي مقابل مدة المحاضرة - استخدم هاي القيم لاحقاً لمعايرة
             # ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE بدل الرقم التقريبي الحالي (12)
             elapsed = time.monotonic() - transcription_started_at
             per_minute = elapsed / duration_minutes if duration_minutes else elapsed
             log_info(logger, f"Transcription timing: {duration_minutes}min audio took {elapsed:.1f}s ({per_minute:.1f}s/min)")
+
+        pure_text, truncated = transcription_result if transcription_result else (None, False)
 
         if not pure_text or not pure_text.strip():
             await refund_user_points(call.from_user.id, cost)
@@ -307,12 +332,25 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             )
             return
 
+        # 🆕 نجاح جزئي: انقطع التفريغ قبل نهاية المحاضرة (استُنفد حد توكنز الإخراج
+        # الأقصى لدى Gemini - راجع generate_text_with_cascade). نسترجع نصف التكلفة
+        # كتعويض تقريبي عادل (الطالب استلم جزءاً فعلياً من الخدمة وليس لا شيء) - عدّل
+        # هذه النسبة لاحقاً بناءً على ملاحظات فعلية لطول الجزء المفقود بالمتوسط.
+        partial_refund_amount = 0.0
+        if truncated:
+            partial_refund_amount = round(cost * 0.5, 2)
+            if partial_refund_amount > 0:
+                await refund_user_points(call.from_user.id, partial_refund_amount)
+            asyncio.create_task(log_usage_event(call.from_user.id, "audio_transcription_truncated", {
+                "duration_minutes": duration_minutes, "cost": cost, "partial_refund": partial_refund_amount,
+            }))
+
         final_title = source_title or f"محاضرة صوتية ({duration_minutes} دقيقة)"
         await state.update_data(
             pure_text=pure_text,
             source_title=final_title,
             duration_minutes=duration_minutes,
-            audio_debited_cost=cost,
+            audio_debited_cost=cost - partial_refund_amount,
             input_type="text",
             items_count=1,
             is_album=False,
@@ -323,11 +361,22 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             "duration_minutes": duration_minutes, "cost": cost,
         }))
 
-        await call.message.edit_text(
-            f"✅ <b>تم تفريغ المحاضرة بنجاح!</b> (⏱️ {duration_minutes} دقيقة)\n\nماذا تريد أن تفعل بالنص المستخرج؟",
-            parse_mode="HTML",
-            reply_markup=get_audio_action_keyboard(),
-        )
+        if truncated:
+            await call.message.edit_text(
+                f"⚠️ <b>تم تفريغ جزء من المحاضرة فقط!</b> (⏱️ {duration_minutes} دقيقة)\n\n"
+                "المحاضرة طويلة جداً وتوقف التفريغ قبل الوصول لنهايتها (حد أقصى لطول النص "
+                f"الذي يمكن للذكاء الصناعي توليده دفعة واحدة). تم استرجاع <code>{partial_refund_amount:.2f}</code> "
+                "نقطة تلقائياً كتعويض عن الجزء غير المكتمل.\n\n"
+                "ماذا تريد أن تفعل بالجزء المتوفر من النص؟",
+                parse_mode="HTML",
+                reply_markup=get_audio_action_keyboard(),
+            )
+        else:
+            await call.message.edit_text(
+                f"✅ <b>تم تفريغ المحاضرة بنجاح!</b> (⏱️ {duration_minutes} دقيقة)\n\nماذا تريد أن تفعل بالنص المستخرج؟",
+                parse_mode="HTML",
+                reply_markup=get_audio_action_keyboard(),
+            )
     except Exception as exc:
         log_error(logger, f"Audio confirm/transcription failed: {exc}", exception=exc)
         if charged:
@@ -434,15 +483,21 @@ async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -
             return
 
         status_msg = await call.message.answer("✨ جارٍ تلخيص المحاضرة وصياغتها أكاديمياً، يرجى الانتظار...")
-        summary = await summarize_lecture_text(pure_text)
-        if not summary or not summary.strip():
+        summary_result = await summarize_lecture_text(pure_text)
+        if not summary_result or not summary_result[0] or not summary_result[0].strip():
             await status_msg.edit_text("⚠️ تعذر توليد تلخيص للمحاضرة، حاول مجدداً لاحقاً.")
             return
+        summary, summary_truncated = summary_result
 
         await state.update_data(summary_text=summary)
 
+        truncated_note = (
+            "\n\n⚠️ <i>ملاحظة: النص طويل جداً وتوقف التلخيص قبل تغطية كامل المحاضرة.</i>"
+            if summary_truncated else ""
+        )
+
         if len(summary) <= MAX_INLINE_TEXT_CHARS:
-            await status_msg.edit_text(f"✨ <b>ملخص المحاضرة (صياغة أكاديمية):</b>\n\n{summary}", parse_mode="HTML")
+            await status_msg.edit_text(f"✨ <b>ملخص المحاضرة (صياغة أكاديمية):</b>\n\n{summary}{truncated_note}", parse_mode="HTML")
         else:
             await status_msg.delete()
             ensure_directory_exists(DOWNLOADS_DIR)
@@ -646,6 +701,19 @@ async def process_web_uploaded_audio(
             log_error(logger, f"Could not probe duration for web-uploaded audio '{destination}' - defaulting to 1 minute charge.")
         duration_seconds = actual_duration_seconds or 0
         duration_minutes = max(1, (duration_seconds + 59) // 60)
+
+        # 🆕 سقف مدة فعلية - نفس المنطق المطبَّق بالمسار المباشر بـ handle_audio_message،
+        # وأهم هون تحديداً لأن حد الحجم بهالمسار (250MB) أعلى بكثير وما بيعكس المدة الفعلية.
+        if duration_minutes > MAX_AUDIO_DURATION_MINUTES:
+            await state.set_state(None)
+            safe_file_cleanup(destination)
+            await delete_audio_temp(object_path)
+            try:
+                await status_msg.edit_text(_duration_cap_exceeded_text(duration_minutes))
+            except Exception:
+                await bot.send_message(chat_id, _duration_cap_exceeded_text(duration_minutes))
+            return
+
         cost = calculate_audio_transcription_cost(duration_minutes)
 
         # 2) استنتاج نوع MIME من محتوى الملف الفعلي (لا يوجد mime_type جاهز من

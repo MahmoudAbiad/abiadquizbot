@@ -306,18 +306,25 @@ async def generate_structured_with_cascade(
 async def generate_text_with_cascade(
     contents: List[Any],
     prompt_instruction: Optional[str] = None,
-) -> Optional[Tuple[str, int]]:
+) -> Optional[Tuple[str, int, bool]]:
     """توليد نصي حرّ (بدون إجبار JSON Schema) عبر كامل سلسلة الأولوية (نماذج × مفاتيح) -
     مناسب لمهام مثل تفريغ صوتي (Transcription) أو تلخيص نصوص حيث لا حاجة لبنية مُقيَّدة.
 
     contents: قائمة عناصر المحتوى (نص/صوت.../Part.from_bytes/ملف مرفوع...) بدون البرومبت.
     prompt_instruction: نص تعليمة اختياري يُضاف كأول عنصر بالمحتوى (البرومبت الرئيسي).
 
-    يُرجع (النص الناتج, عدد التوكنز) عند النجاح، أو None إذا فشلت السلسلة بالكامل.
-    """
+    يُرجع (النص الناتج, عدد التوكنز, هل انقطع النص بسبب استنفاد حد توكنز الإخراج) عند
+    النجاح، أو None إذا فشلت السلسلة بالكامل.
+
+    🆕 كشف الانقطاع (truncated=True عند finish_reason == MAX_TOKENS): النص الناتج بهذه
+    الحالة غير فارغ وسليم شكلياً (يعدّي فحص `if not text` بالأسفل بلا مشاكل) لكنه ناقص
+    فعلياً - توقف Gemini عن التوليد فجأة منتصف الجملة لأنه استنفد حد التوكنز الأقصى
+    المسموح بالإخراج، وليس لأنه انتهى من المهمة فعلاً. على المستدعي (caller) معاملة
+    truncated=True كـ"نجاح جزئي" لا نجاح كامل (تنبيه صريح + استرجاع نسبي للنقاط مثلاً)
+    بدل تسليمها للمستخدم بصمت وكأنها نتيجة كاملة."""
     final_contents: List[Any] = ([prompt_instruction] if prompt_instruction else []) + list(contents)
 
-    async def _attempt(client: genai.Client, key_index: int, model: str) -> Tuple[str, int]:
+    async def _attempt(client: genai.Client, key_index: int, model: str) -> Tuple[str, int, bool]:
         response = await asyncio.wait_for(
             client.aio.models.generate_content(
                 model=model,
@@ -329,7 +336,17 @@ async def generate_text_with_cascade(
         if not text or not text.strip():
             raise ValueError(f"{model} returned empty text response")
         token_count = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0
-        return text, int(token_count)
+
+        finish_reason = None
+        candidates = getattr(response, "candidates", None) or []
+        if candidates:
+            finish_reason = getattr(candidates[0], "finish_reason", None)
+        # الـ enum من الـ SDK بيرجّع .name = "MAX_TOKENS"، لكن بنتحقق كمان من str() الخام
+        # كطبقة أمان إضافية بحال تغيّر شكل القيمة بنسخة SDK مختلفة.
+        finish_reason_text = getattr(finish_reason, "name", None) or str(finish_reason or "")
+        truncated = "MAX_TOKENS" in finish_reason_text
+
+        return text, int(token_count), truncated
 
     return await _execute_cascade(_attempt)
 
