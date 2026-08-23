@@ -145,11 +145,15 @@ async def _build_audio_contents(file_path: str, mime_type: str) -> Tuple[List[An
 # ==============================================================================
 # PUBLIC API
 # ==============================================================================
-async def transcribe_audio_lecture(file_path: str, mime_type: str) -> Optional[str]:
+async def transcribe_audio_lecture(file_path: str, mime_type: str) -> Optional[Tuple[str, bool]]:
     """يُفرِّغ محاضرة صوتية (بأي لهجة عربية عامية أو إنكليزية أو مزيج بينهما) إلى نص
     Markdown منظّم، عبر كامل سلسلة الأولوية (نماذج × مفاتيح) الموجودة بـ
-    generate_text_with_cascade. يُرجع النص المُفرَّغ عند النجاح، أو None إذا فشلت
-    السلسلة بالكامل أو تعذّرت قراءة/رفع الملف."""
+    generate_text_with_cascade. يُرجع (النص المُفرَّغ, هل انقطع قبل نهاية المحاضرة)
+    عند النجاح (ولو جزئياً)، أو None إذا فشلت السلسلة بالكامل أو تعذّرت قراءة/رفع الملف.
+
+    🆕 truncated=True يعني وصل Gemini لحد توكنز الإخراج الأقصى قبل إتمام تفريغ كامل
+    المحاضرة (محاضرات طويلة جداً) - النص المُرجَع بهذه الحالة صحيح لكنه جزء فقط من
+    المحاضرة. على المستدعي معاملتها كنجاح جزئي (تنبيه المستخدم + استرجاع نسبي للنقاط)."""
     if not os.path.exists(file_path):
         log_error(logger, f"Audio file not found for transcription: {file_path}")
         return None
@@ -175,16 +179,20 @@ async def transcribe_audio_lecture(file_path: str, mime_type: str) -> Optional[s
         log_error(logger, f"Audio transcription cascade exhausted for file: {file_path}")
         return None
 
-    text, token_count = result
-    log_info(logger, f"Transcribed audio lecture successfully ({token_count} tokens): {file_path}")
-    return text
+    text, token_count, truncated = result
+    if truncated:
+        log_warning(logger, f"Audio transcription truncated at MAX_TOKENS ({token_count} tokens): {file_path}")
+    else:
+        log_info(logger, f"Transcribed audio lecture successfully ({token_count} tokens): {file_path}")
+    return text, truncated
 
 
-async def summarize_lecture_text(text: str) -> Optional[str]:
+async def summarize_lecture_text(text: str) -> Optional[Tuple[str, bool]]:
     """يستخرج ملاحظات دراسية عالية القيمة (مفاهيم محورية، تعريفات، نقاط قابلة
     للمراجعة السريعة) من نص محاضرة كامل (مُفرَّغ آلياً أو مُدخَل يدوياً)، عبر كامل
     سلسلة الأولوية (نماذج × مفاتيح) الموجودة بـ generate_text_with_cascade. يُرجع
-    نص الملخص عند النجاح، أو None إذا كان النص فارغاً أو فشلت السلسلة بالكامل."""
+    (نص الملخص, هل انقطع قبل الاكتمال) عند النجاح، أو None إذا كان النص فارغاً أو
+    فشلت السلسلة بالكامل."""
     if not text or not text.strip():
         log_error(logger, "summarize_lecture_text called with empty text")
         return None
@@ -197,6 +205,9 @@ async def summarize_lecture_text(text: str) -> Optional[str]:
         log_error(logger, "Lecture summarization cascade exhausted")
         return None
 
-    summary, token_count = result
-    log_info(logger, f"Summarized lecture text successfully ({token_count} tokens)")
-    return summary
+    summary, token_count, truncated = result
+    if truncated:
+        log_warning(logger, f"Lecture summary truncated at MAX_TOKENS ({token_count} tokens)")
+    else:
+        log_info(logger, f"Summarized lecture text successfully ({token_count} tokens)")
+    return summary, truncated

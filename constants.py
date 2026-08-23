@@ -500,6 +500,14 @@ def format_syria_time(value, fmt: str = "%Y-%m-%d %I:%M %p") -> str:
 # برفع الملفات عبر صفحة الويب (Mini App) التي تتجاوز حد الـ 20MB لتحميل تيليجرام.
 MAX_AUDIO_WEB_UPLOAD_SIZE = 250 * 1024 * 1024  # 250MB
 
+# 🆕 سقف على المدة الفعلية المقاسة للمحاضرة (وليس فقط حجم الملف بالميغابايت) - 4 ساعات.
+# السبب: حد توكنز الإخراج الأقصى لدى Gemini (~65,536 توكن على موديلات MODELS_CASCADE
+# الحالية، وقد يكون فعلياً أقل على موديلات "التفكير" لأن الحد يُحتسب على مجموع توكنز
+# التفكير الداخلي + النص الظاهر معاً) يجعل تفريغ محاضرات أطول من ~4-6 ساعات عرضة
+# للانقطاع منتصف الطريق (finish_reason=MAX_TOKENS) بغض النظر عن حجم الملف بالميغابايت.
+# راجع services/audio_service.py::transcribe_audio_lecture للتعامل مع حالة الانقطاع.
+MAX_AUDIO_DURATION_MINUTES = 240  # 4 ساعات
+
 # اسم الـ bucket المؤقت بـ Supabase Storage - يجب أن يكون خاصاً (private) وليس عاماً
 AUDIO_UPLOAD_BUCKET = "audio-temp"
 
