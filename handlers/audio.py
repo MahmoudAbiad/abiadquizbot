@@ -19,7 +19,7 @@ from mutagen import File as MutagenFile
 from config import QuizState, bot, dp
 from constants import (
     ADMIN_CONTACT, ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE,
-    MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
+    MAX_AUDIO_WEB_UPLOAD_SIZE, MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
 )
 from helpers.gemini_helper import get_safe_mime_type
 from helpers.points_calculator import calculate_audio_transcription_cost
@@ -628,10 +628,16 @@ async def process_web_uploaded_audio(
 
     try:
         # 1) تنزيل الملف من التخزين المؤقت بـ Supabase للقرص المحلي
-        downloaded = await download_audio_temp_to_file(object_path, destination)
+        # 🆕 max_size_bytes: خط دفاع ثانٍ يرفض أي محتوى تم تحميله فعلياً يتجاوز
+        # الحد المسموح، حتى لو مرّ فحص الحجم الأول (metadata) بـ webhook_server.py
+        # لأي سبب - راجع get_audio_temp_object_size هناك للفحص الأول والأهم.
+        downloaded = await download_audio_temp_to_file(
+            object_path, destination, max_size_bytes=MAX_AUDIO_WEB_UPLOAD_SIZE
+        )
         if not downloaded:
             await state.set_state(None)
-            await status_msg.edit_text("❌ تعذر تحميل الملف المرفوع، يرجى إعادة المحاولة من البوت.")
+            safe_file_cleanup(destination)
+            await status_msg.edit_text("❌ تعذر تحميل الملف المرفوع أو أنه يتجاوز الحجم المسموح، يرجى إعادة المحاولة من البوت.")
             await delete_audio_temp(object_path)
             return
 
