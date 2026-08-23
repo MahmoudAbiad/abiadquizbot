@@ -7,6 +7,7 @@ from constants import (
     BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_BACK_TO_TYPE_SCREEN,
     SUBJECT_MATH, SUBJECT_ENGLISH,
     WEBAPP_PUBLIC_BASE_URL,
+    BTN_AUDIO_CONFIRM_START,
 )
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
@@ -234,6 +235,17 @@ def get_cancel_upload_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 # ==================== 🆕 لوحات معالجة المحاضرات الصوتية ====================
+
+def get_audio_confirm_keyboard() -> types.InlineKeyboardMarkup:
+    """🆕 لوحة تأكيد ما قبل التفريغ: تُعرض مرة واحدة بعد معرفة مدة الملف الفعلية،
+    وتحتوي إقرار الحقوق + المدة/التكلفة ضمن نص الرسالة (MSG_AUDIO_CONFIRM_TEMPLATE)
+    فوق هذه الأزرار مباشرة. لا خصم نقاط قبل ضغط الطالب على زر التأكيد صراحةً."""
+    kb = [
+        [types.InlineKeyboardButton(text=BTN_AUDIO_CONFIRM_START, callback_data="audio_confirm_start")],
+        [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 def get_audio_action_keyboard() -> types.InlineKeyboardMarkup:
     """🆕 لوحة الإجراءات المتاحة بعد تفريغ محاضرة صوتية (voice/audio) بنجاح إلى نص -
