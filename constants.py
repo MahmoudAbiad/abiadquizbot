@@ -509,6 +509,13 @@ AUDIO_UPLOAD_BUCKET = "audio-temp"
 # عبر initData نفسها، فعلياً الـ initData من تيليجرام صالحة لساعة واحدة بشكل قياسي).
 AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS = 3600
 
+# 🆕 تحديد معدل الطلبات (Rate Limiting) على endpoints رفع الصوت عبر الويب، لكل
+# مستخدم (user_id مُتحقَّق منه عبر initData - وليس IP، لأن كثيرين قد يشتركوا
+# بنفس IP خلف NAT). القيم محافظة عمداً: رفع محاضرة حقيقية نادراً ما يحتاج أكثر
+# من محاولة أو اثنتين خلال دقائق قليلة.
+AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS = 8
+AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS = 300  # 5 دقائق
+
 # تقدير أولي (بالثواني لكل دقيقة صوت) لعرض "الوقت المتوقع للتفريغ" داخل البوت.
 # 🆕 عدّل هذا الرقم لاحقاً بناءً على سجلات فعلية (log_info بالزمن الفعلي المُستغرَق
 # بـ services/audio_service.py لكل مكالمة transcribe_audio_lecture، وخذ متوسطها).

@@ -1238,13 +1238,56 @@ async def create_audio_upload_target(user_id: int, file_extension: str = "") -> 
         return None
 
 
-async def download_audio_temp_to_file(object_path: str, destination_path: str) -> bool:
+async def get_audio_temp_object_size(object_path: str) -> Optional[int]:
+    """
+    🆕 يستعلم عن الحجم الفعلي (بالبايت) لملف مرفوع مسبقاً بـ bucket المؤقت، عبر
+    metadata التي يرجعها Supabase Storage عند list() - دون تحميل أي محتوى فعلي.
+
+    يُستخدم كخط دفاع أول (قبل التحميل) للتحقق من أن الحجم الفعلي للملف المرفوع
+    عبر TUS مطابق فعلياً للحد الأقصى المسموح - لأن فحص `file_size` المُصرَّح به
+    بمرحلة /api/audio-upload/init هو فحص من طرف العميل فقط (غير موثوق لوحده)،
+    والرفع الفعلي بعدها يذهب مباشرة من متصفح المستخدم لـ Supabase دون المرور
+    عبر سيرفرنا إطلاقاً.
+
+    Returns:
+        الحجم بالبايت عند النجاح، أو None لو تعذّر إيجاد الملف أو قراءة الـ metadata
+        (يجب معاملة None كفشل تحقق - أي رفض الملف بدل السماح له بشكل متساهل).
+    """
+    try:
+        folder, _, file_name = object_path.rpartition("/")
+        entries = await supabase.storage.from_(AUDIO_UPLOAD_BUCKET).list(folder)
+        for entry in entries:
+            if entry.get("name") != file_name:
+                continue
+            metadata = entry.get("metadata") or {}
+            size = metadata.get("size") or metadata.get("contentLength")
+            return int(size) if size is not None else None
+        return None
+    except Exception as e:
+        log_error(logger, f"Could not read size metadata for temp audio '{object_path}': {e}")
+        return None
+
+
+async def download_audio_temp_to_file(
+    object_path: str, destination_path: str, max_size_bytes: Optional[int] = None
+) -> bool:
     """
     يحمّل الملف الصوتي المؤقت من Supabase Storage إلى القرص المحلي (downloads/)
     تمهيداً لمعالجته بنفس مسار handle_audio_message الحالي (mutagen، ثم Gemini).
+
+    🆕 max_size_bytes: خط دفاع ثانٍ (بعد get_audio_temp_object_size) - لو حُدِّد،
+    يُرفض ويُحذف أي محتوى تم تحميله فعلياً يتجاوز هذا الحد، حتى لو تجاوز فحص
+    الـ metadata لأي سبب (تعارض بين الحجم المُبلَّغ والحجم الفعلي مثلاً).
     """
     try:
         file_bytes = await supabase.storage.from_(AUDIO_UPLOAD_BUCKET).download(object_path)
+        if max_size_bytes is not None and len(file_bytes) > max_size_bytes:
+            log_error(
+                logger,
+                f"Downloaded audio '{object_path}' exceeds max allowed size "
+                f"({len(file_bytes)} > {max_size_bytes} bytes) - rejecting.",
+            )
+            return False
         with open(destination_path, "wb") as f:
             f.write(file_bytes)
         return True

@@ -10,11 +10,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from aiogram.types import Update
-from config import bot, dp, set_bot_commands 
+from config import bot, dp, set_bot_commands, redis_client
 from logger import get_logger
 from constants import (
     WEBHOOK_PATH, WEBHOOK_PORT, TELEGRAM_WEBHOOK_SECRET,
     MAX_AUDIO_WEB_UPLOAD_SIZE, AUDIO_UPLOAD_BUCKET, AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS, AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
 )
 from telegram_webapp_auth import verify_telegram_init_data
 
@@ -23,6 +24,7 @@ from telegram_webapp_auth import verify_telegram_init_data
 from supabase_helper import (
     flush_analytics_queue, auto_cleanup_old_analytics_data,
     create_audio_upload_target, cleanup_stale_audio_uploads, SUPABASE_URL,
+    get_audio_temp_object_size, delete_audio_temp,
 )
 from handlers.audio import process_web_uploaded_audio
 
@@ -170,6 +172,34 @@ async def webhook(request: Request):
 
 # ==================== Audio Web Upload (Telegram Mini App) ====================
 
+async def _enforce_audio_upload_rate_limit(user_id: int, bucket: str) -> None:
+    """
+    🆕 تحديد معدل طلبات بسيط عبر Redis (نفس الاتصال المستخدم أصلاً لبقية المشروع)،
+    لكل مستخدم مُتحقَّق منه (وليس IP - لتفادي حظر مستخدمين شرعيين خلف نفس الـ NAT)
+    ولكل endpoint على حدة (bucket مثل "audio_init"/"audio_complete"، حتى لا يُستهلك
+    نفس الرصيد من endpoint واحد على حساب الآخر).
+
+    يستخدم عداد بسيط (INCR + EXPIRE عند أول طلب بالنافذة) بدل خوارزمية Sliding
+    Window أدق - كافٍ تماماً لمنع إساءة استخدام هذين الـ endpoints تحديداً، وبكلفة
+    نداء Redis واحد أو اثنين فقط لكل طلب.
+
+    يرمي HTTPException 429 عند تجاوز الحد، ولا يفعل شيئاً غير ذلك.
+    """
+    key = f"audio_upload_rl:{bucket}:{user_id}"
+    try:
+        current = await redis_client.incr(key)
+        if current == 1:
+            await redis_client.expire(key, AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
+        if current > AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS:
+            raise HTTPException(status_code=429, detail="طلبات كثيرة جداً، يرجى الانتظار قليلاً قبل إعادة المحاولة.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        # فشل Redis نفسه لا يجب أن يوقف ميزة الرفع بالكامل - يُسجَّل فقط كتحذير،
+        # ويُسمح للطلب بالمتابعة (فشل مفتوح/fail-open) بدل حجب المستخدمين الشرعيين.
+        logger.warning(f"Audio upload rate-limit check failed (allowing request): {e}")
+
+
 class AudioUploadInitRequest(BaseModel):
     init_data: str
     file_size: int
@@ -197,11 +227,12 @@ async def audio_upload_init(payload: AudioUploadInitRequest):
     if not ok or not user:
         raise HTTPException(status_code=403, detail="جلسة غير صالحة، افتح صفحة الرفع من البوت من جديد.")
 
+    user_id = user.get("id")
+    await _enforce_audio_upload_rate_limit(user_id, "audio_init")
+
     # 🆕 دفاع ثانٍ من طرف السيرفر - لا نثق بفحص الحجم من طرف المتصفح وحده
     if payload.file_size <= 0 or payload.file_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="حجم الملف يتجاوز الحد المسموح (250 ميغابايت).")
-
-    user_id = user.get("id")
     ext = os.path.splitext(payload.file_name)[1] if payload.file_name else ""
 
     upload_target = await create_audio_upload_target(user_id, ext)
@@ -238,10 +269,20 @@ async def audio_upload_complete(payload: AudioUploadCompleteRequest):
         raise HTTPException(status_code=403, detail="جلسة غير صالحة.")
 
     user_id = user.get("id")
+    await _enforce_audio_upload_rate_limit(user_id, "audio_complete")
 
     # 🆕 تحقق أمني: المسار لازم يبدأ بمعرف نفس المستخدم (منع استخدام object_path لمستخدم آخر)
     if not payload.object_path.startswith(f"{user_id}/"):
         raise HTTPException(status_code=403, detail="غير مسموح.")
+
+    # 🆕 دفاع أول (الأهم): تحقق من الحجم الفعلي للملف المرفوع فعلياً عبر TUS مباشرة
+    # لـ Supabase (وليس فقط الحجم الذي صرّح به العميل بمرحلة /init، والذي لم يمر
+    # أصلاً عبر سيرفرنا). يُرفض الملف ويُحذف فوراً لو تجاوز الحد أو تعذّر التحقق
+    # من حجمه (متساهل=رفض، وليس العكس، لأننا لا نستطيع التأكد أنه آمن).
+    actual_size = await get_audio_temp_object_size(payload.object_path)
+    if actual_size is None or actual_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
+        await delete_audio_temp(payload.object_path)
+        raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
 
     asyncio.create_task(
         process_web_uploaded_audio(
