@@ -188,7 +188,7 @@ async function handleFile(file) {
         const percent = ((bytesUploaded / bytesTotal) * 100).toFixed(0);
         progressFill.style.width = percent + "%";
         progressText.textContent = `${percent}% (${(bytesUploaded / (1024 * 1024)).toFixed(1)} / ${(bytesTotal / (1024 * 1024)).toFixed(1)} MB)`;
-        statusText.textContent = "📤 جارٍ الرفع... يمكن إغلاق الشاشة يكمل تلقائياً لو رجعت لنفس النت";
+        statusText.textContent = "📤 جارٍ الرفع... يمكن إغلاق الشاشة و سيكمل تلقائياً في الخلفية";
       },
       onSuccess: async function () {
         statusText.textContent = "✅ اكتمل الرفع، جارٍ التأكيد...";
