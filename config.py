@@ -61,10 +61,8 @@ try:
     # إعداد الاتصال بـ Redis
     # يقوم بقراءة REDIS_URL من بيئة Railway، وإذا لم يجده يستخدم المحلي للتطوير
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-    redis_client = Redis.from_url(
-        redis_url,
-        ssl_cert_reqs=None,  # لتجنب مشاكل الشهادة في بيئات معينة)
-    )
+    redis_kwargs = {"ssl_cert_reqs": None} if redis_url.startswith("rediss://") else {}
+    redis_client = Redis.from_url(redis_url, **redis_kwargs)
     # إعداد التخزين الدائم (RedisStorage)
     # جعل حالة المستخدم وبياناته المؤقتة تنتهي وتُحذف تلقائياً من Redis بعد 15 ساعة من خمول المستخدم
     storage = RedisStorage(redis=redis_client, state_ttl=86400, data_ttl=86400)
