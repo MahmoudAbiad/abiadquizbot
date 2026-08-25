@@ -509,7 +509,10 @@ MAX_AUDIO_WEB_UPLOAD_SIZE = 250 * 1024 * 1024  # 250MB
 MAX_AUDIO_DURATION_MINUTES = 240  # 4 ساعات
 
 # اسم الـ bucket المؤقت بـ Supabase Storage - يجب أن يكون خاصاً (private) وليس عاماً
-AUDIO_UPLOAD_BUCKET = "audio-temp"
+# 🆕 انتقل من Supabase Storage لـ Cloudflare R2 (راجع helpers/r2_helper.py) - الاسم
+# هون لأغراض توثيقية فقط الآن، القيمة الفعلية المستخدمة تُقرأ من R2_AUDIO_BUCKET
+# بمتغيرات البيئة (بنفس القيمة الافتراضية أدناه لو لم يُحدَّد).
+AUDIO_UPLOAD_BUCKET = "audio-upload-bucket"
 
 # مدة صلاحية جلسة الرفع بالكامل (من فتح صفحة الويب لحد إتمام الرفع فعلياً) بالثواني.
 # ملاحظة: signed upload URL من Supabase عندها صلاحية ثابتة عند ساعتين (غير قابلة
@@ -543,8 +546,10 @@ MAX_FILE_WEB_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB - خط دفاع أول (ح
 # تجاوز الملف أيّاً من الحدّين.
 MAX_FILE_WEB_UPLOAD_PAGES = 150
 
-# اسم الـ bucket المؤقت بـ Supabase Storage للملفات (منفصل عن audio-temp) - خاص (private).
-FILE_UPLOAD_BUCKET = "file-temp"
+# 🆕 انتقل من Supabase Storage لـ Cloudflare R2 (راجع helpers/r2_helper.py) - الاسم
+# هون لأغراض توثيقية فقط الآن، القيمة الفعلية المستخدمة تُقرأ من R2_FILE_BUCKET
+# بمتغيرات البيئة (بنفس القيمة الافتراضية أدناه لو لم يُحدَّد).
+FILE_UPLOAD_BUCKET = "file-upload-bucket"
 
 # نفس مدة صلاحية الجلسة ومعدل الطلبات المستخدمين لرفع الصوت (AUDIO_UPLOAD_*) - يُعاد
 # استخدامها هون بأسماء مطابقة لتفادي تكرار قيم يجب أن تبقى متزامنة دائماً.
