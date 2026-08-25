@@ -38,25 +38,22 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
         if WEBAPP_PUBLIC_BASE_URL:
             kb.append([
                 types.InlineKeyboardButton(
-                    text="🎙️ تفريغ ملف صوتي كبير (حتى 250MB)",
+                    text="🎙️ تفريغ ملف صوتي (حتى 250MB)",
                     web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/audio_upload.html"),
-                )
+                ),
+                types.InlineKeyboardButton(
+                    text="📄 رفع ملف (حتى 150 صفحة/100MB)",
+                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=document"),
+                ),
+                types.InlineKeyboardButton(
+                    text="🖼️ رفع ألبوم صور (حتى 50 صورة)",
+                     web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=images"),
+                                )
             ])
             # 🆕 نفس فكرة زر الصوت أعلاه، لكن لمستندات كبيرة (حتى 150 صفحة/100MB)
             # أو ألبومات صور كبيرة (حتى 50 صورة سوا) - كلاهما عبر webapp/file_upload.html
             # بباراميتر type يفرّق النوعين (راجع الملف نفسه لتفاصيل الواجهة).
-            kb.append([
-                types.InlineKeyboardButton(
-                    text="📄 رفع ملف كبير (حتى 150 صفحة/100MB)",
-                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=document"),
-                )
-            ])
-            kb.append([
-                types.InlineKeyboardButton(
-                    text="🖼️ رفع ألبوم صور كبير (حتى 50 صورة)",
-                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=images"),
-                )
-            ])
+          
         return types.InlineKeyboardMarkup(inline_keyboard=kb)
     except Exception as e:
         logger.error(f"Error generating main menu keyboard: {e}")
