@@ -5,6 +5,7 @@ Handles HTTP server setup safely with modern lifespan context and proper Pydanti
 
 import os
 import asyncio  
+from typing import List
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -16,6 +17,9 @@ from constants import (
     WEBHOOK_PATH, WEBHOOK_PORT, TELEGRAM_WEBHOOK_SECRET,
     MAX_AUDIO_WEB_UPLOAD_SIZE, AUDIO_UPLOAD_BUCKET, AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
     AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS, AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
+    MAX_FILE_WEB_UPLOAD_SIZE, FILE_UPLOAD_BUCKET, FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
+    MAX_IMAGE_WEB_UPLOAD_COUNT, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE, IMAGE_UPLOAD_BUCKET,
 )
 from telegram_webapp_auth import verify_telegram_init_data
 
@@ -25,8 +29,11 @@ from supabase_helper import (
     flush_analytics_queue, auto_cleanup_old_analytics_data,
     create_audio_upload_target, cleanup_stale_audio_uploads, SUPABASE_URL,
     get_audio_temp_object_size, delete_audio_temp,
+    create_file_upload_target, create_image_upload_targets, cleanup_stale_file_uploads,
+    get_file_temp_object_size, delete_file_temp, delete_file_temp_batch,
 )
 from handlers.audio import process_web_uploaded_audio
+from handlers.files import process_web_uploaded_file, process_web_uploaded_images
 
 logger = get_logger(__name__)
 
@@ -70,6 +77,10 @@ async def scheduled_cleanup_loop():
             deleted = await cleanup_stale_audio_uploads(older_than_seconds=3600)
             if deleted:
                 logger.info(f"Cleaned up {deleted} stale audio-temp file(s) from Supabase Storage.")
+            # 🆕 نفس شبكة الأمان لبucket الملفات (مستندات + ألبومات صور) المؤقت
+            deleted_files = await cleanup_stale_file_uploads(older_than_seconds=3600)
+            if deleted_files:
+                logger.info(f"Cleaned up {deleted_files} stale file-temp object(s) from Supabase Storage.")
         except Exception as e:
             logger.error(f"Error inside the background scheduled cleanup task: {e}")
         await asyncio.sleep(43200)  # فحص وتنظيف كل 12 ساعة (43200 ثانية)
@@ -172,32 +183,40 @@ async def webhook(request: Request):
 
 # ==================== Audio Web Upload (Telegram Mini App) ====================
 
-async def _enforce_audio_upload_rate_limit(user_id: int, bucket: str) -> None:
+async def _enforce_upload_rate_limit(user_id: int, bucket: str, max_requests: int, window_seconds: int) -> None:
     """
     🆕 تحديد معدل طلبات بسيط عبر Redis (نفس الاتصال المستخدم أصلاً لبقية المشروع)،
     لكل مستخدم مُتحقَّق منه (وليس IP - لتفادي حظر مستخدمين شرعيين خلف نفس الـ NAT)
-    ولكل endpoint على حدة (bucket مثل "audio_init"/"audio_complete"، حتى لا يُستهلك
-    نفس الرصيد من endpoint واحد على حساب الآخر).
+    ولكل endpoint على حدة (bucket مثل "audio_init"/"file_init"/"images_init"، حتى لا
+    يُستهلك نفس الرصيد من endpoint واحد على حساب الآخر). عُمِّمت لتقبل max_requests/
+    window_seconds كباراميترات بدل ثوابت الصوت المُثبَّتة، لإعادة استخدامها بمسارات
+    الملفات والصور بنفس الآلية دون تكرار.
 
     يستخدم عداد بسيط (INCR + EXPIRE عند أول طلب بالنافذة) بدل خوارزمية Sliding
-    Window أدق - كافٍ تماماً لمنع إساءة استخدام هذين الـ endpoints تحديداً، وبكلفة
+    Window أدق - كافٍ تماماً لمنع إساءة استخدام هذه الـ endpoints تحديداً، وبكلفة
     نداء Redis واحد أو اثنين فقط لكل طلب.
 
     يرمي HTTPException 429 عند تجاوز الحد، ولا يفعل شيئاً غير ذلك.
     """
-    key = f"audio_upload_rl:{bucket}:{user_id}"
+    key = f"upload_rl:{bucket}:{user_id}"
     try:
         current = await redis_client.incr(key)
         if current == 1:
-            await redis_client.expire(key, AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
-        if current > AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS:
+            await redis_client.expire(key, window_seconds)
+        if current > max_requests:
             raise HTTPException(status_code=429, detail="طلبات كثيرة جداً، يرجى الانتظار قليلاً قبل إعادة المحاولة.")
     except HTTPException:
         raise
     except Exception as e:
         # فشل Redis نفسه لا يجب أن يوقف ميزة الرفع بالكامل - يُسجَّل فقط كتحذير،
         # ويُسمح للطلب بالمتابعة (فشل مفتوح/fail-open) بدل حجب المستخدمين الشرعيين.
-        logger.warning(f"Audio upload rate-limit check failed (allowing request): {e}")
+        logger.warning(f"Upload rate-limit check failed (allowing request): {e}")
+
+
+async def _enforce_audio_upload_rate_limit(user_id: int, bucket: str) -> None:
+    """نظير رقيق فوق _enforce_upload_rate_limit بثوابت الصوت تحديداً - أُبقيَ عليه
+    بنفس الاسم لعدم تغيير أي استدعاء موجود مسبقاً."""
+    await _enforce_upload_rate_limit(user_id, bucket, AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS, AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
 
 
 class AudioUploadInitRequest(BaseModel):
@@ -292,6 +311,170 @@ async def audio_upload_complete(payload: AudioUploadCompleteRequest):
         )
     )
 
+    return {"ok": True}
+
+
+# ==================== 🆕 File Web Upload (Telegram Mini App) ====================
+
+class FileUploadInitRequest(BaseModel):
+    init_data: str
+    file_size: int
+    file_name: str = ""
+
+
+class FileUploadCompleteRequest(BaseModel):
+    init_data: str
+    object_path: str
+    file_name: str = ""
+
+
+@app.post("/api/file-upload/init")
+async def file_upload_init(payload: FileUploadInitRequest):
+    """نظير audio_upload_init لمستند (PDF/Word/PowerPoint/نص) بدل ملف صوتي - راجع
+    توثيق audio_upload_init فوق لشرح كل خطوة، نفس المنطق تماماً بـ bucket مختلف."""
+    ok, user = verify_telegram_init_data(
+        payload.init_data, bot.token, max_age_seconds=FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة، افتح صفحة الرفع من البوت من جديد.")
+
+    user_id = user.get("id")
+    await _enforce_upload_rate_limit(user_id, "file_init", FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
+
+    if payload.file_size <= 0 or payload.file_size > MAX_FILE_WEB_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="حجم الملف يتجاوز الحد المسموح (100 ميغابايت).")
+    ext = os.path.splitext(payload.file_name)[1] if payload.file_name else ""
+
+    upload_target = await create_file_upload_target(user_id, ext)
+    if not upload_target or not upload_target.get("path"):
+        raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
+
+    # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
+    storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
+    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable/sign"
+    return {
+        "upload_endpoint": tus_endpoint,
+        "token": upload_target.get("token"),
+        "object_path": upload_target.get("path"),
+        "bucket": FILE_UPLOAD_BUCKET,
+    }
+
+
+@app.post("/api/file-upload/complete")
+async def file_upload_complete(payload: FileUploadCompleteRequest):
+    """نظير audio_upload_complete لمستند مرفوع - يُطلق process_web_uploaded_file بالخلفية."""
+    ok, user = verify_telegram_init_data(
+        payload.init_data, bot.token, max_age_seconds=FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة.")
+
+    user_id = user.get("id")
+    await _enforce_upload_rate_limit(user_id, "file_complete", FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
+
+    if not payload.object_path.startswith(f"{user_id}/"):
+        raise HTTPException(status_code=403, detail="غير مسموح.")
+
+    actual_size = await get_file_temp_object_size(payload.object_path)
+    if actual_size is None or actual_size > MAX_FILE_WEB_UPLOAD_SIZE:
+        await delete_file_temp(payload.object_path)
+        raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
+
+    asyncio.create_task(
+        process_web_uploaded_file(
+            user_id=user_id,
+            chat_id=user_id,
+            object_path=payload.object_path,
+            declared_file_name=payload.file_name,
+        )
+    )
+    return {"ok": True}
+
+
+# ==================== 🆕 Images Web Upload (ألبوم صور كبير عبر Mini App) ====================
+
+class ImageUploadInitRequest(BaseModel):
+    init_data: str
+    file_sizes: List[int]
+    file_names: List[str] = []
+
+
+class ImageUploadCompleteRequest(BaseModel):
+    init_data: str
+    object_paths: List[str]
+
+
+@app.post("/api/image-upload/init")
+async def image_upload_init(payload: ImageUploadInitRequest):
+    """
+    🆕 يولّد دفعة روابط رفع موقّعة سوا لكل صور الألبوم بنداء واحد (بدل نداء منفصل لكل
+    صورة) - كل الصور تُخزَّن تحت نفس مجلد الجلسة (راجع create_image_upload_targets).
+    """
+    ok, user = verify_telegram_init_data(
+        payload.init_data, bot.token, max_age_seconds=FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة، افتح صفحة الرفع من البوت من جديد.")
+
+    user_id = user.get("id")
+    await _enforce_upload_rate_limit(user_id, "images_init", FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
+
+    count = len(payload.file_sizes)
+    if count <= 0 or count > MAX_IMAGE_WEB_UPLOAD_COUNT:
+        raise HTTPException(status_code=413, detail=f"عدد الصور يجب أن يكون بين 1 و{MAX_IMAGE_WEB_UPLOAD_COUNT}.")
+    if any(size <= 0 or size > MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE for size in payload.file_sizes):
+        raise HTTPException(status_code=413, detail="حجم إحدى الصور يتجاوز الحد المسموح لكل صورة (15 ميغابايت).")
+
+    extensions = [
+        os.path.splitext(payload.file_names[i])[1] if i < len(payload.file_names) and payload.file_names[i] else ".jpg"
+        for i in range(count)
+    ]
+    targets = await create_image_upload_targets(user_id, extensions)
+    if not targets:
+        raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
+
+    # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
+    storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
+    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable/sign"
+    return {
+        "upload_endpoint": tus_endpoint,
+        "bucket": IMAGE_UPLOAD_BUCKET,
+        "targets": [{"token": t.get("token"), "object_path": t.get("path")} for t in targets],
+    }
+
+
+@app.post("/api/image-upload/complete")
+async def image_upload_complete(payload: ImageUploadCompleteRequest):
+    """نظير file_upload_complete لكن لدفعة صور سوا - يتحقق من كل الحجوم فعلياً قبل
+    الإطلاق، ويرفض الدفعة كاملة لو صورة واحدة فقط فشل التحقق منها (لا معالجة جزئية)."""
+    ok, user = verify_telegram_init_data(
+        payload.init_data, bot.token, max_age_seconds=FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة.")
+
+    user_id = user.get("id")
+    await _enforce_upload_rate_limit(user_id, "images_complete", FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
+
+    object_paths = payload.object_paths
+    if not object_paths or len(object_paths) > MAX_IMAGE_WEB_UPLOAD_COUNT:
+        raise HTTPException(status_code=413, detail=f"عدد الصور يجب أن يكون بين 1 و{MAX_IMAGE_WEB_UPLOAD_COUNT}.")
+    if any(not path.startswith(f"{user_id}/") for path in object_paths):
+        raise HTTPException(status_code=403, detail="غير مسموح.")
+
+    for object_path in object_paths:
+        actual_size = await get_file_temp_object_size(object_path)
+        if actual_size is None or actual_size > MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE:
+            await delete_file_temp_batch(object_paths)
+            raise HTTPException(status_code=413, detail="حجم إحدى الصور يتجاوز الحد المسموح أو تعذر التحقق منه.")
+
+    asyncio.create_task(
+        process_web_uploaded_images(
+            user_id=user_id,
+            chat_id=user_id,
+            object_paths=object_paths,
+        )
+    )
     return {"ok": True}
 
 

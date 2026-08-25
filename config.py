@@ -38,6 +38,7 @@ class QuizState(StatesGroup):
     waiting_for_audio_confirm = State()     # 🆕 انتظار تأكيد الطالب (إقرار الحقوق + المدة والتكلفة) قبل خصم أي نقاط أو بدء التفريغ الفعلي
     waiting_for_audio_action = State()      # 🆕 انتظار قرار الطالب بعد تفريغ المحاضرة الصوتية (تلخيص/تصدير/كويز/إرسال النص)
     processing_audio = State()              # 🆕 قفل مؤقت أثناء تحميل/تفريغ محاضرة صوتية قائمة، لمنع معالجة مضاعفة لو وصل مقطع صوتي ثانٍ قبل انتهاء الأول
+    processing_web_file = State()           # 🆕 نظير processing_audio لملف/ألبوم صور مرفوع عبر صفحة الويب قيد التحميل/الفحص
     
 # ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:
@@ -61,10 +62,8 @@ try:
     # إعداد الاتصال بـ Redis
     # يقوم بقراءة REDIS_URL من بيئة Railway، وإذا لم يجده يستخدم المحلي للتطوير
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-    redis_client = Redis.from_url(
-        redis_url,
-        ssl_cert_reqs=None,  # لتجنب مشاكل الشهادة في بيئات معينة)
-    )
+    redis_kwargs = {"ssl_cert_reqs": None} if redis_url.startswith("rediss://") else {}
+    redis_client = Redis.from_url(redis_url, **redis_kwargs)
     # إعداد التخزين الدائم (RedisStorage)
     # جعل حالة المستخدم وبياناته المؤقتة تنتهي وتُحذف تلقائياً من Redis بعد 15 ساعة من خمول المستخدم
     storage = RedisStorage(redis=redis_client, state_ttl=86400, data_ttl=86400)

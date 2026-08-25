@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>رفع محتوى كبير</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tus-js-client@4/dist/tus.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Tahoma, sans-serif;
+    background: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #111111);
+    margin: 0;
+    padding: 20px 16px;
+  }
+  h1 { font-size: 18px; margin-bottom: 6px; }
+  .hint {
+    font-size: 13px;
+    color: var(--tg-theme-hint-color, #888888);
+    margin-bottom: 18px;
+    line-height: 1.5;
+  }
+  .warning-box {
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    color: #7a5b00;
+  }
+
+  /* ==================== شاشة الاختيار (البطاقات الثلاث) ==================== */
+  .card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border: 1px solid rgba(128,128,128,0.25);
+    border-radius: 14px;
+    padding: 16px 14px;
+    margin-bottom: 12px;
+    cursor: pointer;
+    transition: transform 0.1s ease, border-color 0.15s ease;
+  }
+  .card:active { transform: scale(0.98); border-color: var(--tg-theme-button-color, #2ea6ff); }
+  .card-emoji { font-size: 30px; flex-shrink: 0; }
+  .card-title { font-size: 15px; font-weight: 600; margin-bottom: 3px; }
+  .card-sub { font-size: 12.5px; color: var(--tg-theme-hint-color, #888888); line-height: 1.4; }
+
+  /* ==================== شاشات الرفع الداخلية ==================== */
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .back-link {
+    display: inline-block;
+    font-size: 13px;
+    color: var(--tg-theme-link-color, #2ea6ff);
+    margin-bottom: 14px;
+    cursor: pointer;
+  }
+  .drop-zone {
+    border: 2px dashed var(--tg-theme-hint-color, #cccccc);
+    border-radius: 14px;
+    padding: 28px 12px;
+    text-align: center;
+    cursor: pointer;
+    margin-bottom: 8px;
+  }
+  .drop-zone:active { border-color: var(--tg-theme-button-color, #2ea6ff); }
+  .file-name {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--tg-theme-hint-color, #888888);
+    word-break: break-all;
+  }
+  .file-list {
+    margin-top: 10px;
+    max-height: 160px;
+    overflow-y: auto;
+    text-align: right;
+  }
+  .file-list-item {
+    font-size: 12px;
+    color: var(--tg-theme-hint-color, #888888);
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(128,128,128,0.15);
+  }
+  .file-list-item.done { color: #2e7d32; }
+  .file-list-item.error { color: #d32f2f; }
+  .progress-wrap { margin-top: 16px; display: none; }
+  .progress-bar-bg {
+    width: 100%;
+    height: 10px;
+    background: rgba(128,128,128,0.2);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--tg-theme-button-color, #2ea6ff);
+    transition: width 0.2s ease;
+  }
+  .progress-text {
+    margin-top: 8px;
+    font-size: 13px;
+    text-align: center;
+    color: var(--tg-theme-hint-color, #888888);
+  }
+  .status-text {
+    margin-top: 16px;
+    font-size: 14px;
+    text-align: center;
+    min-height: 20px;
+  }
+  .error-text { color: #d32f2f; }
+</style>
+</head>
+<body>
+
+<!-- ==================== شاشة الاختيار ==================== -->
+<div class="panel active" id="panelSelector">
+  <h1>📤 رفع محتوى كبير</h1>
+  <div class="hint">اختر نوع المحتوى اللي بدك ترفعه - كل نوع إله حد مختلف وأنسب لطبيعته.</div>
+
+  <div class="card" data-mode="audio">
+    <div class="card-emoji">🎙️</div>
+    <div>
+      <div class="card-title">محاضرة صوتية</div>
+      <div class="card-sub">تفريغ صوت لنص - حتى 250 ميغابايت / 4 ساعات</div>
+    </div>
+  </div>
+
+  <div class="card" data-mode="document">
+    <div class="card-emoji">📄</div>
+    <div>
+      <div class="card-title">ملف / مستند</div>
+      <div class="card-sub">PDF · Word · PowerPoint · نص - حتى 150 صفحة أو 100 ميغابايت</div>
+    </div>
+  </div>
+
+  <div class="card" data-mode="images">
+    <div class="card-emoji">🖼️</div>
+    <div>
+      <div class="card-title">ألبوم صور</div>
+      <div class="card-sub">حتى 50 صورة سوا (15 ميغابايت لكل صورة)</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== شاشة الرفع (مشتركة، تتغيّر حسب النوع) ==================== -->
+<div class="panel" id="panelUpload">
+  <span class="back-link" id="backLink">‹ رجوع لاختيار نوع تاني</span>
+  <h1 id="pageTitle"></h1>
+  <div class="hint" id="pageHint"></div>
+  <div class="warning-box" id="warningBox"></div>
+
+  <div class="drop-zone" id="dropZone">
+    <div id="dropZoneText"></div>
+    <div class="file-name" id="fileName"></div>
+    <div class="file-list" id="fileList"></div>
+  </div>
+  <input type="file" id="fileInput">
+
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+    <div class="progress-text" id="progressText">0%</div>
+  </div>
+
+  <div class="status-text" id="statusText"></div>
+</div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.ready();
+tg.expand();
+
+// ==================== إعدادات كل نوع (وحدة مصدر واحد للحقيقة - بدل تكرارها 3 مرات) ====================
+const MODES = {
+  audio: {
+    title: "🎙️ رفع محاضرة صوتية",
+    hint: "اختر الملف الصوتي وسيبدأ الرفع مباشرة. بعد اكتمال الرفع رح ترجع تلقائياً للمحادثة، والبوت رح يبلش التفريغ.",
+    warning: "⚠️ الحد الأقصى: <b>250 ميغابايت</b> أو <b>4 ساعات</b> (أيهما أسبق).",
+    dropText: "📁 اضغط هون لاختيار الملف الصوتي",
+    accept: "audio/*",
+    multiple: false,
+    maxSize: 250 * 1024 * 1024,
+    initEndpoint: "/api/audio-upload/init",
+    completeEndpoint: "/api/audio-upload/complete",
+  },
+  document: {
+    title: "📄 رفع ملف كبير",
+    hint: "اختر الملف وسيبدأ الرفع مباشرة. بعد اكتمال الرفع رح ترجع تلقائياً للمحادثة، والبوت رح يكمل معك من هناك.",
+    warning: "⚠️ الحد الأقصى: <b>150 صفحة</b> أو <b>100 ميغابايت</b> (أيهما أسبق).",
+    dropText: "📁 اضغط هون لاختيار الملف",
+    accept: ".pdf,.doc,.docx,.ppt,.pptx,.txt",
+    multiple: false,
+    maxSize: 100 * 1024 * 1024,
+    initEndpoint: "/api/file-upload/init",
+    completeEndpoint: "/api/file-upload/complete",
+  },
+  images: {
+    title: "🖼️ رفع ألبوم صور كبير",
+    hint: "اختر حتى 50 صورة سوا وسيبدأ رفعها مباشرة. بعد اكتمال الرفع رح ترجع تلقائياً للمحادثة، والبوت رح يجهّز الكويز من الألبوم كامل.",
+    warning: "⚠️ الحد الأقصى: <b>50 صورة</b> سوا، وكل صورة لحالها حتى <b>15 ميغابايت</b>.",
+    dropText: "📁 اضغط هون لاختيار الصور (يمكن اختيار أكتر من صورة سوا)",
+    accept: "image/*",
+    multiple: true,
+    maxCount: 50,
+    maxSizePerImage: 15 * 1024 * 1024,
+    initEndpoint: "/api/image-upload/init",
+    completeEndpoint: "/api/image-upload/complete",
+  },
+};
+
+const panelSelector = document.getElementById("panelSelector");
+const panelUpload = document.getElementById("panelUpload");
+const backLink = document.getElementById("backLink");
+const dropZone = document.getElementById("dropZone");
+const dropZoneText = document.getElementById("dropZoneText");
+const fileInput = document.getElementById("fileInput");
+const fileNameEl = document.getElementById("fileName");
+const fileListEl = document.getElementById("fileList");
+const progressWrap = document.getElementById("progressWrap");
+const progressFill = document.getElementById("progressFill");
+const progressText = document.getElementById("progressText");
+const statusText = document.getElementById("statusText");
+const pageTitle = document.getElementById("pageTitle");
+const pageHint = document.getElementById("pageHint");
+const warningBox = document.getElementById("warningBox");
+
+let currentMode = null;
+
+// 🆕 دعم رابط مباشر بباراميتر ?type=... (يُستخدم برسائل التوجيه التلقائي عند فشل
+// الاستقبال المباشر بتيليجرام - راجع keyboards.py::get_web_upload_redirect_keyboard)
+// - بيتخطى شاشة الاختيار مباشرة لأن النوع معروف مسبقاً بهالحالة.
+const params = new URLSearchParams(window.location.search);
+const deepLinkType = params.get("type");
+if (deepLinkType && MODES[deepLinkType]) {
+  openMode(deepLinkType);
+}
+
+document.querySelectorAll(".card").forEach((card) => {
+  card.addEventListener("click", () => openMode(card.dataset.mode));
+});
+
+backLink.addEventListener("click", () => {
+  panelUpload.classList.remove("active");
+  panelSelector.classList.add("active");
+  resetUploadUI();
+});
+
+function openMode(mode) {
+  currentMode = mode;
+  const cfg = MODES[mode];
+  panelSelector.classList.remove("active");
+  panelUpload.classList.add("active");
+  pageTitle.textContent = cfg.title;
+  pageHint.textContent = cfg.hint;
+  warningBox.innerHTML = cfg.warning;
+  dropZoneText.textContent = cfg.dropText;
+  fileInput.setAttribute("accept", cfg.accept);
+  if (cfg.multiple) fileInput.setAttribute("multiple", "multiple");
+  else fileInput.removeAttribute("multiple");
+  resetUploadUI();
+}
+
+function resetUploadUI() {
+  fileInput.value = "";
+  fileNameEl.textContent = "";
+  fileListEl.innerHTML = "";
+  progressWrap.style.display = "none";
+  progressFill.style.width = "0%";
+  progressText.textContent = "0%";
+  clearError();
+}
+
+dropZone.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", (e) => {
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
+  if (currentMode === "images") {
+    handleImages(files);
+  } else {
+    handleSingleFile(files[0]);
+  }
+});
+
+function showError(msg) {
+  statusText.textContent = msg;
+  statusText.classList.add("error-text");
+  tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error");
+}
+
+function clearError() {
+  statusText.classList.remove("error-text");
+  statusText.textContent = "";
+}
+
+// ==================== مسار ملف مفرد (صوت أو مستند - نفس منطق الرفع تماماً) ====================
+
+async function handleSingleFile(file) {
+  clearError();
+  const cfg = MODES[currentMode];
+
+  if (file.size > cfg.maxSize) {
+    const limitMb = (cfg.maxSize / (1024 * 1024)).toFixed(0);
+    showError(`❌ حجم الملف أكبر من الحد المسموح (${limitMb} ميغابايت). يرجى اختيار ملف أصغر.`);
+    return;
+  }
+
+  fileNameEl.textContent = `${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)`;
+  dropZoneText.textContent = "📁 تم اختيار الملف - يمكنك تغييره بالضغط هون";
+  progressWrap.style.display = "block";
+  statusText.textContent = "⏳ جارٍ تجهيز الرفع...";
+
+  try {
+    const initRes = await fetch(cfg.initEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ init_data: tg.initData, file_size: file.size, file_name: file.name }),
+    });
+
+    if (!initRes.ok) {
+      const err = await initRes.json().catch(() => ({}));
+      showError(err.detail || "❌ تعذر بدء جلسة الرفع، حاول مجدداً.");
+      return;
+    }
+
+    const initData = await initRes.json();
+
+    const upload = new tus.Upload(file, {
+      endpoint: initData.upload_endpoint,
+      retryDelays: [0, 3000, 5000, 10000, 20000],
+      chunkSize: 6 * 1024 * 1024,
+      headers: { "x-upsert": "true", "x-signature": initData.token },
+      metadata: {
+        bucketName: initData.bucket,
+        objectName: initData.object_path,
+        contentType: file.type || "application/octet-stream",
+        cacheControl: "3600",
+      },
+      uploadDataDuringCreation: true,
+      removeFingerprintOnSuccess: true,
+      onError: function (error) {
+        console.error(error);
+        showError("❌ انقطع الرفع ولم تنجح إعادة المحاولة. تحقق من اتصالك وحاول مجدداً.");
+      },
+      onProgress: function (bytesUploaded, bytesTotal) {
+        const percent = ((bytesUploaded / bytesTotal) * 100).toFixed(0);
+        progressFill.style.width = percent + "%";
+        progressText.textContent = `${percent}% (${(bytesUploaded / (1024 * 1024)).toFixed(1)} / ${(bytesTotal / (1024 * 1024)).toFixed(1)} MB)`;
+        statusText.textContent = "📤 جارٍ الرفع... يمكن إغلاق الشاشة و سيكمل تلقائياً في الخلفية";
+      },
+      onSuccess: async function () {
+        statusText.textContent = "✅ اكتمل الرفع، جارٍ التأكيد...";
+        progressFill.style.width = "100%";
+        try {
+          const completeRes = await fetch(cfg.completeEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ init_data: tg.initData, object_path: initData.object_path, file_name: file.name }),
+          });
+          if (!completeRes.ok) {
+            showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+            return;
+          }
+          statusText.textContent = "✅ تم! رجّعك عالمحادثة...";
+          setTimeout(() => tg.close(), 800);
+        } catch (e) {
+          showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+        }
+      },
+    });
+
+    upload.findPreviousUploads().then(function (previousUploads) {
+      if (previousUploads.length) upload.resumeFromPreviousUpload(previousUploads[0]);
+      upload.start();
+    });
+  } catch (e) {
+    console.error(e);
+    showError("❌ حدث خطأ غير متوقع، حاول مجدداً.");
+  }
+}
+
+// ==================== مسار ألبوم الصور (حتى 50 صورة سوا) ====================
+
+async function handleImages(files) {
+  clearError();
+  const cfg = MODES.images;
+
+  if (files.length > cfg.maxCount) {
+    showError(`❌ العدد الأقصى ${cfg.maxCount} صورة سوا. اخترت ${files.length}، يرجى تقليل العدد.`);
+    return;
+  }
+  const oversized = files.find((f) => f.size > cfg.maxSizePerImage);
+  if (oversized) {
+    showError(`❌ الصورة "${oversized.name}" أكبر من 15 ميغابايت. يرجى استبدالها.`);
+    return;
+  }
+
+  fileNameEl.textContent = `${files.length} صورة مختارة (${(files.reduce((s, f) => s + f.size, 0) / (1024 * 1024)).toFixed(1)} MB إجمالاً)`;
+  dropZoneText.textContent = "📁 تم اختيار الصور - يمكنك تغييرها بالضغط هون";
+  fileListEl.innerHTML = "";
+  const listItems = files.map((f, i) => {
+    const div = document.createElement("div");
+    div.className = "file-list-item";
+    div.textContent = `${i + 1}. ${f.name}`;
+    fileListEl.appendChild(div);
+    return div;
+  });
+
+  progressWrap.style.display = "block";
+  statusText.textContent = "⏳ جارٍ تجهيز الرفع...";
+
+  try {
+    const initRes = await fetch(cfg.initEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        init_data: tg.initData,
+        file_sizes: files.map((f) => f.size),
+        file_names: files.map((f) => f.name),
+      }),
+    });
+
+    if (!initRes.ok) {
+      const err = await initRes.json().catch(() => ({}));
+      showError(err.detail || "❌ تعذر بدء جلسة الرفع، حاول مجدداً.");
+      return;
+    }
+
+    const initData = await initRes.json();
+    const totalBytes = files.reduce((s, f) => s + f.size, 0);
+    let uploadedBytesPerFile = new Array(files.length).fill(0);
+
+    function updateOverallProgress() {
+      const uploaded = uploadedBytesPerFile.reduce((a, b) => a + b, 0);
+      const percent = ((uploaded / totalBytes) * 100).toFixed(0);
+      progressFill.style.width = percent + "%";
+      progressText.textContent = `${percent}% (${(uploaded / (1024 * 1024)).toFixed(1)} / ${(totalBytes / (1024 * 1024)).toFixed(1)} MB)`;
+    }
+
+    function uploadOne(file, index) {
+      return new Promise((resolve, reject) => {
+        const target = initData.targets[index];
+        const upload = new tus.Upload(file, {
+          endpoint: initData.upload_endpoint,
+          retryDelays: [0, 3000, 5000, 10000, 20000],
+          chunkSize: 6 * 1024 * 1024,
+          headers: { "x-upsert": "true", "x-signature": target.token },
+          metadata: {
+            bucketName: initData.bucket,
+            objectName: target.object_path,
+            contentType: file.type || "image/jpeg",
+            cacheControl: "3600",
+          },
+          uploadDataDuringCreation: true,
+          removeFingerprintOnSuccess: true,
+          onError: function (error) {
+            console.error(error);
+            listItems[index].classList.add("error");
+            reject(error);
+          },
+          onProgress: function (bytesUploaded) {
+            uploadedBytesPerFile[index] = bytesUploaded;
+            updateOverallProgress();
+          },
+          onSuccess: function () {
+            uploadedBytesPerFile[index] = file.size;
+            listItems[index].classList.add("done");
+            listItems[index].textContent = `✅ ${index + 1}. ${file.name}`;
+            updateOverallProgress();
+            resolve(target.object_path);
+          },
+        });
+        upload.findPreviousUploads().then(function (previousUploads) {
+          if (previousUploads.length) upload.resumeFromPreviousUpload(previousUploads[0]);
+          upload.start();
+        });
+      });
+    }
+
+    const CONCURRENCY = 4;
+    statusText.textContent = "📤 جارٍ رفع الصور... يمكن إغلاق الشاشة و سيكمل تلقائياً في الخلفية";
+    const results = new Array(files.length);
+    let cursor = 0;
+    async function worker() {
+      while (cursor < files.length) {
+        const i = cursor++;
+        results[i] = await uploadOne(files[i], i);
+      }
+    }
+    await Promise.all(new Array(Math.min(CONCURRENCY, files.length)).fill(0).map(worker));
+
+    statusText.textContent = "✅ اكتمل رفع كل الصور، جارٍ التأكيد...";
+    const completeRes = await fetch(cfg.completeEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ init_data: tg.initData, object_paths: results }),
+    });
+    if (!completeRes.ok) {
+      showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+      return;
+    }
+    statusText.textContent = "✅ تم! رجّعك عالمحادثة...";
+    setTimeout(() => tg.close(), 800);
+  } catch (e) {
+    console.error(e);
+    showError("❌ حدث خطأ أثناء رفع إحدى الصور، حاول مجدداً.");
+  }
+}
+</script>
+</body>
+</html>
