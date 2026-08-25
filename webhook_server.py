@@ -260,7 +260,7 @@ async def audio_upload_init(payload: AudioUploadInitRequest):
 
 # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
     storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
-    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable/sign"
+    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable"
 
     return {
         "upload_endpoint": tus_endpoint,
@@ -351,7 +351,7 @@ async def file_upload_init(payload: FileUploadInitRequest):
 
     # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
     storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
-    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable/sign"
+    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable"
     return {
         "upload_endpoint": tus_endpoint,
         "token": upload_target.get("token"),
@@ -435,7 +435,7 @@ async def image_upload_init(payload: ImageUploadInitRequest):
 
     # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
     storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
-    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable/sign"
+    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable"
     return {
         "upload_endpoint": tus_endpoint,
         "bucket": IMAGE_UPLOAD_BUCKET,
