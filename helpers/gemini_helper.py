@@ -46,6 +46,7 @@ from constants import (
     DIFFICULTY_MEDIUM,
     DIFFICULTY_PROMPT_INSTRUCTIONS,
     MAX_LIMIT_PAGES,
+    SUPER_IMAGE_BATCH_THRESHOLD,
     OPTION_COUNT,
     QUESTION_TYPE_INSTRUCTION_GENERAL,
     QUESTION_TYPE_PROMPT_INSTRUCTIONS,
@@ -567,6 +568,60 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
             safe_file_cleanup(chunk_path)
 
 
+def split_images_into_three_sync(file_paths: List[str]) -> List[List[str]]:
+    """تقسيم قائمة صور ألبوم كبير لـ 3 دفعات متقاربة الحجم (توزيع دوري Round-Robin)
+    للمعالجة المتوازية بنمط Super Images - نظير split_pdf_into_three_sync تماماً
+    لكن على قائمة مسارات صور بدل صفحات PDF واحد."""
+    if len(file_paths) < 3:
+        return [file_paths]
+    chunks: List[List[str]] = [[], [], []]
+    for index, path in enumerate(file_paths):
+        chunks[index % 3].append(path)
+    return chunks
+
+
+async def _generate_super_images(
+    file_paths: List[str], count: int, prompt_template: str
+) -> Optional[Tuple[List[Dict[str, Any]], int]]:
+    """🆕 معالجة متوازية لألبومات الصور الكبيرة (أكبر من SUPER_IMAGE_BATCH_THRESHOLD -
+    مصدرها حصراً رفع الويب حالياً، راجع handlers/files.py::process_web_uploaded_images)
+    بتوزيع المهام على 3 مفاتيح API مختلفة بطلب واحد لكل دفعة صور، بنفس منطق
+    _generate_super_pdf أعلاه حرفياً - فقط الدفعات هون قوائم صور بدل أجزاء PDF.
+
+    ملاحظة مهمة: التقسيم لـ 3 دفعات هون سببه توزيع عدد الأسئلة الكبير على طلبات
+    متعددة (تفادي انقطاع finish_reason=MAX_TOKENS بالمخرجات) وتسريع الاستجابة عبر
+    التوازي - وليس بسبب أي سقف على عدد الصور بالطلب الواحد لدى Gemini (النماذج
+    المستخدمة هون تدعم حتى 3,600 ملف صورة بالطلب الواحد، أعلى بكثير من أي ألبوم
+    واقعي هون).
+    """
+    if len(API_KEYS) < 3:
+        log_error(logger, "Super image processing requires three distinct GEMINI_API_KEYS")
+        return None
+    chunks = [chunk for chunk in await asyncio.to_thread(split_images_into_three_sync, file_paths) if chunk]
+    if len(chunks) < 2:
+        return await _generate_regular(file_paths, prompt_template.replace("{count}", str(count)))
+
+    top_model = MODELS_CASCADE[0]
+    key_indices = (_available_keys_for_model(top_model) or list(range(len(API_KEYS))))[:len(chunks)]
+    if len(key_indices) < len(chunks):
+        return None
+    base, remainder = divmod(count, len(chunks))
+    question_counts = [base + (1 if index < remainder else 0) for index in range(len(chunks))]
+    tasks = [
+        _generate_single_attempt(
+            chunk, prompt_template.replace("{count}", str(question_count)), key_index, top_model
+        )
+        for chunk, question_count, key_index in zip(chunks, question_counts, key_indices)
+        if question_count > 0
+    ]
+    if not tasks:
+        return None
+    results = await asyncio.gather(*tasks)
+    questions = [question for result, _ in results for question in result]
+    total_tokens = sum(tokens for _, tokens in results)
+    return questions, total_tokens
+
+
 async def _generate_text_quiz(pure_text: str, prompt: str, english_mode: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
     """المسار السريع لتوليد الكويز من النص الصريح فقط عبر Groq API.
 
@@ -750,17 +805,22 @@ async def generate_quiz_smart(
                 log_info(logger, f"Cache hit for {cache_key}; external generation bypassed")
                 return cached["questions_data"]
 
-        # 3. توجيه الملفات للمسار العادي أو مسار Super PDF للملفات الضخمة
+        # 3. توجيه الملفات للمسار العادي، أو Super PDF للملفات الضخمة، أو 🆕 Super
+        #    Images لألبومات الصور الكبيرة (أكبر من SUPER_IMAGE_BATCH_THRESHOLD -
+        #    مصدرها حصراً رفع الويب حالياً؛ الألبوم العادي عبر تيليجرام محدود أصلاً
+        #    بـ MAX_ALBUM_IMAGES من منصة تيليجرام نفسها، أقل من هذا السقف).
         is_super_pdf = (
             len(file_paths) == 1
             and file_paths[0].lower().endswith(".pdf")
             and await asyncio.to_thread(get_pdf_page_count_sync, file_paths[0]) > MAX_LIMIT_PAGES
         )
-        generated = (
-            await _generate_super_pdf(file_paths[0], count, base_prompt_template)
-            if is_super_pdf
-            else await _generate_regular(file_paths, prompt)
-        )
+        is_super_images = len(file_paths) > SUPER_IMAGE_BATCH_THRESHOLD
+        if is_super_pdf:
+            generated = await _generate_super_pdf(file_paths[0], count, base_prompt_template)
+        elif is_super_images:
+            generated = await _generate_super_images(file_paths, count, base_prompt_template)
+        else:
+            generated = await _generate_regular(file_paths, prompt)
         if not generated:
             return None
 

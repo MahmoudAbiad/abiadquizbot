@@ -21,10 +21,14 @@ from constants import (
     ADMIN_CONTACT, ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE,
     MAX_AUDIO_DURATION_MINUTES, MAX_AUDIO_WEB_UPLOAD_SIZE,
     MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
+    MSG_REDIRECT_TO_WEB_UPLOAD,
 )
 from helpers.gemini_helper import get_safe_mime_type
 from helpers.points_calculator import calculate_audio_transcription_cost
-from keyboards import get_audio_action_keyboard, get_document_export_keyboard, get_audio_confirm_keyboard
+from keyboards import (
+    get_audio_action_keyboard, get_document_export_keyboard, get_audio_confirm_keyboard,
+    get_web_upload_redirect_keyboard,
+)
 from logger import get_logger, log_error, log_info
 from services.audio_service import summarize_lecture_text, transcribe_audio_lecture
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
@@ -157,7 +161,16 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     media = message.voice or message.audio
     file_size = media.file_size or 0
     if file_size > MAX_AUDIO_FILE_SIZE:
-        await message.answer("❌ حجم الملف الصوتي أكبر من الحد المسموح به (20 ميجابايت). يرجى إرسال ملف أصغر.")
+        # 🆕 بدل رفض جاف بلا بديل: نوجّه الطالب لصفحة رفع الصوت الكبير (حتى 250MB)
+        # الموجودة أصلاً - هذا الحجم يتجاوز حد تحميل تيليجرام المباشر (Bot API) نفسه.
+        keyboard = get_web_upload_redirect_keyboard("audio")
+        if keyboard.inline_keyboard:
+            await message.answer(
+                MSG_REDIRECT_TO_WEB_UPLOAD.format(limit_mb=MAX_AUDIO_FILE_SIZE // (1024 * 1024)),
+                parse_mode="HTML", reply_markup=keyboard,
+            )
+        else:
+            await message.answer("❌ حجم الملف الصوتي أكبر من الحد المسموح به (20 ميجابايت). يرجى إرسال ملف أصغر.")
         return
 
     # 🆕 نضبط القفل فوراً هون - قبل أي await لعملية شبكة/تحميل - لتضييق نافذة السباق
