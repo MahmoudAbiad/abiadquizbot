@@ -1,0 +1,10 @@
+2026-08-25 19:57:31 - config - INFO - Bot initialized successfully with Redis. Admin ID: 1
+2026-08-25 19:57:33 - asyncio - DEBUG - Using selector: EpollSelector
+2026-08-25 19:57:33 - asyncio - DEBUG - Using selector: EpollSelector
+2026-08-25 19:57:33 - supabase_helper - INFO - Supabase Async client initialized successfully with centralized schema mapping
+2026-08-25 19:57:36 - matplotlib - DEBUG - matplotlib data path: /usr/local/lib/python3.12/dist-packages/matplotlib/mpl-data
+2026-08-25 19:57:36 - matplotlib - DEBUG - CONFIGDIR=/root/.config/matplotlib
+2026-08-25 19:57:36 - matplotlib - DEBUG - interactive is False
+2026-08-25 19:57:36 - matplotlib - DEBUG - platform is linux
+2026-08-25 19:57:36 - matplotlib - DEBUG - CACHEDIR=/root/.cache/matplotlib
+2026-08-25 19:57:36 - matplotlib.font_manager - DEBUG - Using fontManager instance from /root/.cache/matplotlib/fontlist-v390.json

@@ -21,39 +21,28 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
     try:
         ref_link = f"https://t.me/{bot_username}?start={user_id}"
         kb = [
-            [types.InlineKeyboardButton(text="🎬 كيف يعمل البوت؟", callback_data="how_to_use")],
-            [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة", callback_data="favorites_menu")],
+            [types.InlineKeyboardButton(text="🎬 كيف يعمل البوت؟ (دليل سريع)", callback_data="how_to_use")],
+            [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
+            [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
-            [
-                types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}"),
-                types.InlineKeyboardButton(text="💰 شحن الرصيد", callback_data="recharge_info")
-             ],
+            [types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
         # 🆕 زر رفع محاضرة صوتية كبيرة (حتى 250MB) عبر Mini App - يُخفى تلقائياً لو
         # WEBAPP_PUBLIC_BASE_URL فاضي (مثلاً بوضع polling محلي بدون WEBHOOK_URL)
         # حتى ما نعرض زر مكسور بيفتح رابط فاضي.
+        # 🆕 زر واحد موحّد بدل 3 أزرار متفرقة - يفتح صفحة اختيار (Hub) فيها 3 بطاقات
+        # (صوت/ملف/صور) الاختيار يصير داخل الصفحة نفسها بلمسة وحدة، بدل تشتيت قائمة
+        # البوت بـ 3 أزرار WebApp منفصلة. يُخفى تلقائياً لو WEBAPP_PUBLIC_BASE_URL فاضي.
         if WEBAPP_PUBLIC_BASE_URL:
             kb.append([
                 types.InlineKeyboardButton(
-                    text="🎙️ ملف صوتي",
-                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/audio_upload.html"),
-                ),
-                types.InlineKeyboardButton(
-                    text="📄 مستند",
-                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=document"),
-                ),
-                types.InlineKeyboardButton(
-                    text="🖼️ ألبوم صور)",
-                     web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=images"),
-                                )
+                    text="📤 رفع صوت / ملف / صور كبيرة",
+                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/upload_hub.html"),
+                )
             ])
-            # 🆕 نفس فكرة زر الصوت أعلاه، لكن لمستندات كبيرة (حتى 150 صفحة/100MB)
-            # أو ألبومات صور كبيرة (حتى 50 صورة سوا) - كلاهما عبر webapp/file_upload.html
-            # بباراميتر type يفرّق النوعين (راجع الملف نفسه لتفاصيل الواجهة).
-          
         return types.InlineKeyboardMarkup(inline_keyboard=kb)
     except Exception as e:
         logger.error(f"Error generating main menu keyboard: {e}")
@@ -64,16 +53,14 @@ def get_web_upload_redirect_keyboard(upload_type: str = "document") -> types.Inl
     """
     🆕 لوحة برفقة رسالة MSG_REDIRECT_TO_WEB_UPLOAD - تُعرض لما يفشل استقبال ملف/صوت
     مباشرة عبر تيليجرام بسبب تجاوز حد Bot API (20MB)، كبديل فوري بدل رفض جاف بلا حل.
-    upload_type: "audio" (صفحة audio_upload.html الحالية) أو "document"/"images"
-    (صفحة file_upload.html؟type=... الموحّدة). تُرجع لوحة فاضية لو WEBAPP_PUBLIC_BASE_URL
-    غير مُهيّأ (بدل زر مكسور برابط فاضي).
+    upload_type: "audio"/"document"/"images" - رابط مباشر (Deep Link) لصفحة الرفع
+    الموحّدة webapp/upload_hub.html؟type=... يتخطى شاشة الاختيار مباشرة (النوع معروف
+    مسبقاً بهالحالة، فلا داعي يختار الطالب من جديد). تُرجع لوحة فاضية لو
+    WEBAPP_PUBLIC_BASE_URL غير مُهيّأ (بدل زر مكسور برابط فاضي).
     """
     if not WEBAPP_PUBLIC_BASE_URL:
         return types.InlineKeyboardMarkup(inline_keyboard=[])
-    if upload_type == "audio":
-        url = f"{WEBAPP_PUBLIC_BASE_URL}/webapp/audio_upload.html"
-    else:
-        url = f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type={upload_type}"
+    url = f"{WEBAPP_PUBLIC_BASE_URL}/webapp/upload_hub.html?type={upload_type}"
     return types.InlineKeyboardMarkup(inline_keyboard=[[
         types.InlineKeyboardButton(text=BTN_OPEN_UPLOAD_PAGE, web_app=types.WebAppInfo(url=url)),
     ]])
