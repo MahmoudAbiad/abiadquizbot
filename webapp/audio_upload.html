@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>رفع محاضرة صوتية</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tus-js-client@4/dist/tus.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -101,7 +100,6 @@ tg.expand();
 const MAX_SIZE_BYTES = 250 * 1024 * 1024;
 const INIT_ENDPOINT = "/api/audio-upload/init";
 const COMPLETE_ENDPOINT = "/api/audio-upload/complete";
-const TUS_ENDPOINT = "/storage/v1/upload/resumable"; // يُستكمل بدومين مشروع Supabase عبر uploadUrlBase القادم من init
 
 const dropZone = document.getElementById("dropZone");
 const dropZoneText = document.getElementById("dropZoneText");
@@ -158,75 +156,60 @@ async function handleFile(file) {
     }
 
     const initData = await initRes.json();
-    // المتوقع من السيرفر: { upload_endpoint, token, object_path, bucket }
+    // المتوقع من السيرفر: { upload_url, object_path }
 
-    // 2) رفع الملف عبر TUS (قابل للاستئناف تلقائياً عند انقطاع الاتصال)
-    const upload = new tus.Upload(file, {
-      endpoint: initData.upload_endpoint,
-      retryDelays: [0, 3000, 5000, 10000, 20000], // إعادة محاولة تلقائية عند انقطاع مؤقت
-      chunkSize: 6 * 1024 * 1024, // 6MB لكل جزء - توازن جيد لاتصالات بطيئة/غير مستقرة
-      headers: {
-        "x-upsert": "true",
-        // 🆕 إصلاح: توكن الرفع الموقّع (من create_signed_upload_url) لازم يترسل
-        // بهاد الـ header تحديداً حسب بروتوكول Supabase Resumable Uploads، وإلا
-        // بيفشل الرفع بعد أول جزء (chunk) بالضبط - وهو ما كان يحصل قبل هذا الإصلاح.
-        "x-signature": initData.token,
-      },
-      metadata: {
-        bucketName: initData.bucket,
-        objectName: initData.object_path,
-        contentType: file.type || "audio/mpeg",
-        cacheControl: "3600",
-      },
-      uploadDataDuringCreation: true,
-      removeFingerprintOnSuccess: true,
-      onError: function (error) {
-        console.error(error);
-        showError("❌ انقطع الرفع ولم تنجح إعادة المحاولة. تحقق من اتصالك وحاول مجدداً.");
-      },
-      onProgress: function (bytesUploaded, bytesTotal) {
-        const percent = ((bytesUploaded / bytesTotal) * 100).toFixed(0);
+    // 2) رفع الملف مباشرة إلى Cloudflare R2 عبر رابط موقّع (presigned PUT) - طلب
+    // واحد (بدون تجزئة/استئناف)، كافٍ تماماً لحد 250MB الحالي.
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", initData.upload_url);
+      xhr.setRequestHeader("Content-Type", file.type || "audio/mpeg");
+      xhr.upload.onprogress = function (e) {
+        if (!e.lengthComputable) return;
+        const percent = ((e.loaded / e.total) * 100).toFixed(0);
         progressFill.style.width = percent + "%";
-        progressText.textContent = `${percent}% (${(bytesUploaded / (1024 * 1024)).toFixed(1)} / ${(bytesTotal / (1024 * 1024)).toFixed(1)} MB)`;
+        progressText.textContent = `${percent}% (${(e.loaded / (1024 * 1024)).toFixed(1)} / ${(e.total / (1024 * 1024)).toFixed(1)} MB)`;
         statusText.textContent = "📤 جارٍ الرفع... يمكن إغلاق الشاشة و سيكمل تلقائياً في الخلفية";
-      },
-      onSuccess: async function () {
-        statusText.textContent = "✅ اكتمل الرفع، جارٍ التأكيد...";
-        progressFill.style.width = "100%";
-
-        // 3) إعلام السيرفر إن الرفع اكتمل حتى يبلش المعالجة بالخلفية
-        try {
-          const completeRes = await fetch(COMPLETE_ENDPOINT, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              init_data: tg.initData,
-              object_path: initData.object_path,
-              file_name: file.name,
-            }),
-          });
-          if (!completeRes.ok) {
-            showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
-            return;
-          }
-          statusText.textContent = "✅ تم! رجّعك عالمحادثة...";
-          setTimeout(() => tg.close(), 800);
-        } catch (e) {
-          showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+      };
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          reject(new Error(`Upload failed with status ${xhr.status}`));
         }
-      },
+      };
+      xhr.onerror = function () {
+        reject(new Error("Network error during upload"));
+      };
+      xhr.send(file);
     });
 
-    // استئناف رفعة سابقة لنفس الملف لو موجودة (انقطاع سابق بنفس الجلسة)
-    upload.findPreviousUploads().then(function (previousUploads) {
-      if (previousUploads.length) {
-        upload.resumeFromPreviousUpload(previousUploads[0]);
+    statusText.textContent = "✅ اكتمل الرفع، جارٍ التأكيد...";
+    progressFill.style.width = "100%";
+
+    // 3) إعلام السيرفر إن الرفع اكتمل حتى يبلش المعالجة بالخلفية
+    try {
+      const completeRes = await fetch(COMPLETE_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          init_data: tg.initData,
+          object_path: initData.object_path,
+          file_name: file.name,
+        }),
+      });
+      if (!completeRes.ok) {
+        showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+        return;
       }
-      upload.start();
-    });
+      statusText.textContent = "✅ تم! رجّعك عالمحادثة...";
+      setTimeout(() => tg.close(), 800);
+    } catch (e) {
+      showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+    }
   } catch (e) {
     console.error(e);
-    showError("❌ حدث خطأ غير متوقع، حاول مجدداً.");
+    showError("❌ انقطع الرفع أو حدث خطأ غير متوقع. تحقق من اتصالك وحاول مجدداً.");
   }
 }
 </script>

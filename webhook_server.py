@@ -15,19 +15,23 @@ from config import bot, dp, set_bot_commands, redis_client
 from logger import get_logger
 from constants import (
     WEBHOOK_PATH, WEBHOOK_PORT, TELEGRAM_WEBHOOK_SECRET,
-    MAX_AUDIO_WEB_UPLOAD_SIZE, AUDIO_UPLOAD_BUCKET, AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    MAX_AUDIO_WEB_UPLOAD_SIZE, AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
     AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS, AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
-    MAX_FILE_WEB_UPLOAD_SIZE, FILE_UPLOAD_BUCKET, FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    MAX_FILE_WEB_UPLOAD_SIZE, FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
     FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
-    MAX_IMAGE_WEB_UPLOAD_COUNT, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE, IMAGE_UPLOAD_BUCKET,
+    MAX_IMAGE_WEB_UPLOAD_COUNT, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE,
 )
 from telegram_webapp_auth import verify_telegram_init_data
 
-# 🆕 استيراد دوال الدُفعات والتنظيف الدوري الاسم الصحيح المُعدّل في supabase_helper
-# SUPABASE_URL مستوردة هون بنفس أسلوب المشروع (بدون بادئة helpers.) لبناء رابط TUS
-from supabase_helper import (
-    flush_analytics_queue, auto_cleanup_old_analytics_data,
-    create_audio_upload_target, cleanup_stale_audio_uploads, SUPABASE_URL,
+# 🆕 دوال التحليلات وتنظيف قاعدة البيانات تضل من Supabase (Postgres) - لا علاقة لها
+# بمشكلة سقف الـ50MB (تلك خاصة بـStorage فقط، مو بقاعدة البيانات).
+from supabase_helper import flush_analytics_queue, auto_cleanup_old_analytics_data
+
+# 🆕 دوال التخزين المؤقت (رفع الصوت/الملفات/الصور) انتقلت من Supabase Storage
+# لـ Cloudflare R2 (راجع helpers/r2_helper.py) - نفس الأسماء تماماً (drop-in)
+# لتفادي أي تعديل إضافي بمكان استدعائها هون أو بـ handlers/audio.py و files.py.
+from r2_helper import (
+    create_audio_upload_target, cleanup_stale_audio_uploads,
     get_audio_temp_object_size, delete_audio_temp,
     create_file_upload_target, create_image_upload_targets, cleanup_stale_file_uploads,
     get_file_temp_object_size, delete_file_temp, delete_file_temp_batch,
@@ -72,15 +76,15 @@ async def scheduled_cleanup_loop():
         try:
             # تم تعديل اسم الدالة للاستدعاء الصحيح من supabase_helper
             await auto_cleanup_old_analytics_data()
-            # 🆕 شبكة أمان: حذف أي ملفات صوتية مؤقتة تبقّت بـ Supabase Storage
-            # لأكثر من ساعة (معالجة انقطعت استثنائياً قبل الوصول لـ finally)
+            # 🆕 شبكة أمان: حذف أي ملفات صوتية مؤقتة تبقّت بـ R2 لأكثر من ساعة
+            # (معالجة انقطعت استثنائياً قبل الوصول لـ finally)
             deleted = await cleanup_stale_audio_uploads(older_than_seconds=3600)
             if deleted:
-                logger.info(f"Cleaned up {deleted} stale audio-temp file(s) from Supabase Storage.")
-            # 🆕 نفس شبكة الأمان لبucket الملفات (مستندات + ألبومات صور) المؤقت
+                logger.info(f"Cleaned up {deleted} stale audio-temp file(s) from R2.")
+            # 🆕 نفس شبكة الأمان لباكيت الملفات (مستندات + ألبومات صور) المؤقت
             deleted_files = await cleanup_stale_file_uploads(older_than_seconds=3600)
             if deleted_files:
-                logger.info(f"Cleaned up {deleted_files} stale file-temp object(s) from Supabase Storage.")
+                logger.info(f"Cleaned up {deleted_files} stale file-temp object(s) from R2.")
         except Exception as e:
             logger.error(f"Error inside the background scheduled cleanup task: {e}")
         await asyncio.sleep(43200)  # فحص وتنظيف كل 12 ساعة (43200 ثانية)
@@ -234,9 +238,9 @@ class AudioUploadCompleteRequest(BaseModel):
 @app.post("/api/audio-upload/init")
 async def audio_upload_init(payload: AudioUploadInitRequest):
     """
-    يتحقق من initData ومن حجم الملف المُعلَن، ثم يولّد جلسة رفع TUS موقّعة على
-    Supabase Storage. الرفع الفعلي بعدها يصير مباشرة من متصفح المستخدم لـ Supabase
-    (مو عبر Heroku) - حد الـ 30 ثانية لـ Heroku router مو مشكلة هون.
+    يتحقق من initData ومن حجم الملف المُعلَن، ثم يولّد رابط رفع موقّع (presigned PUT
+    URL) على Cloudflare R2. الرفع الفعلي بعدها يصير مباشرة من متصفح المستخدم لـ R2
+    (مو عبر Heroku/Railway) - حد الـ 30 ثانية لراوتر السيرفر مو مشكلة هون.
     """
     ok, user = verify_telegram_init_data(
         payload.init_data,
@@ -258,15 +262,9 @@ async def audio_upload_init(payload: AudioUploadInitRequest):
     if not upload_target or not upload_target.get("path"):
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
-# تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
-    storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
-    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable"
-
     return {
-        "upload_endpoint": tus_endpoint,
-        "token": upload_target.get("token"),
+        "upload_url": upload_target.get("upload_url"),
         "object_path": upload_target.get("path"),
-        "bucket": AUDIO_UPLOAD_BUCKET,
     }
 
 
@@ -349,14 +347,9 @@ async def file_upload_init(payload: FileUploadInitRequest):
     if not upload_target or not upload_target.get("path"):
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
-    # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
-    storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
-    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable"
     return {
-        "upload_endpoint": tus_endpoint,
-        "token": upload_target.get("token"),
+        "upload_url": upload_target.get("upload_url"),
         "object_path": upload_target.get("path"),
-        "bucket": FILE_UPLOAD_BUCKET,
     }
 
 
@@ -433,13 +426,8 @@ async def image_upload_init(payload: ImageUploadInitRequest):
     if not targets:
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
-    # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
-    storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
-    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable"
     return {
-        "upload_endpoint": tus_endpoint,
-        "bucket": IMAGE_UPLOAD_BUCKET,
-        "targets": [{"token": t.get("token"), "object_path": t.get("path")} for t in targets],
+        "targets": [{"object_path": t.get("path"), "upload_url": t.get("upload_url")} for t in targets],
     }
 
 
