@@ -258,10 +258,9 @@ async def audio_upload_init(payload: AudioUploadInitRequest):
     if not upload_target or not upload_target.get("path"):
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
-    # 🆕 إصلاح: مسار الرفع المرن (TUS) لازم ينتهي بـ /sign حتى يفعّل السيرفر مسار
-    # التحقق عبر x-signature (التوكن الموقّع) بدل التحقق العادي بـ JWT - بدون هالـ
-    # لاحقة، الـ x-signature header يُتجاهل تماماً ويفشل الطلب فوراً بـ 400.
-    tus_endpoint = f"{SUPABASE_URL}/storage/v1/upload/resumable/sign"
+# تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
+    storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
+    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable/sign"
 
     return {
         "upload_endpoint": tus_endpoint,
@@ -350,7 +349,9 @@ async def file_upload_init(payload: FileUploadInitRequest):
     if not upload_target or not upload_target.get("path"):
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
-    tus_endpoint = f"{SUPABASE_URL}/storage/v1/upload/resumable/sign"
+    # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
+    storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
+    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable/sign"
     return {
         "upload_endpoint": tus_endpoint,
         "token": upload_target.get("token"),
@@ -432,7 +433,9 @@ async def image_upload_init(payload: ImageUploadInitRequest):
     if not targets:
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
-    tus_endpoint = f"{SUPABASE_URL}/storage/v1/upload/resumable/sign"
+    # تحويل النطاق إلى النطاق المخصص للتخزين المباشر (.storage.supabase.co) لتفادي خطأ 413
+    storage_url = SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co")
+    tus_endpoint = f"{storage_url}/storage/v1/upload/resumable/sign"
     return {
         "upload_endpoint": tus_endpoint,
         "bucket": IMAGE_UPLOAD_BUCKET,
