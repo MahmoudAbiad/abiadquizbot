@@ -8,6 +8,7 @@ from constants import (
     SUBJECT_MATH, SUBJECT_ENGLISH,
     WEBAPP_PUBLIC_BASE_URL,
     BTN_AUDIO_CONFIRM_START,
+    BTN_OPEN_UPLOAD_PAGE,
 )
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
@@ -39,10 +40,44 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
                     web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/audio_upload.html"),
                 )
             ])
+            # 🆕 نفس فكرة زر الصوت أعلاه، لكن لمستندات كبيرة (حتى 150 صفحة/100MB)
+            # أو ألبومات صور كبيرة (حتى 50 صورة سوا) - كلاهما عبر webapp/file_upload.html
+            # بباراميتر type يفرّق النوعين (راجع الملف نفسه لتفاصيل الواجهة).
+            kb.append([
+                types.InlineKeyboardButton(
+                    text="📄 رفع ملف كبير (حتى 150 صفحة/100MB)",
+                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=document"),
+                )
+            ])
+            kb.append([
+                types.InlineKeyboardButton(
+                    text="🖼️ رفع ألبوم صور كبير (حتى 50 صورة)",
+                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=images"),
+                )
+            ])
         return types.InlineKeyboardMarkup(inline_keyboard=kb)
     except Exception as e:
         logger.error(f"Error generating main menu keyboard: {e}")
         return types.InlineKeyboardMarkup(inline_keyboard=[])
+
+
+def get_web_upload_redirect_keyboard(upload_type: str = "document") -> types.InlineKeyboardMarkup:
+    """
+    🆕 لوحة برفقة رسالة MSG_REDIRECT_TO_WEB_UPLOAD - تُعرض لما يفشل استقبال ملف/صوت
+    مباشرة عبر تيليجرام بسبب تجاوز حد Bot API (20MB)، كبديل فوري بدل رفض جاف بلا حل.
+    upload_type: "audio" (صفحة audio_upload.html الحالية) أو "document"/"images"
+    (صفحة file_upload.html؟type=... الموحّدة). تُرجع لوحة فاضية لو WEBAPP_PUBLIC_BASE_URL
+    غير مُهيّأ (بدل زر مكسور برابط فاضي).
+    """
+    if not WEBAPP_PUBLIC_BASE_URL:
+        return types.InlineKeyboardMarkup(inline_keyboard=[])
+    if upload_type == "audio":
+        url = f"{WEBAPP_PUBLIC_BASE_URL}/webapp/audio_upload.html"
+    else:
+        url = f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type={upload_type}"
+    return types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text=BTN_OPEN_UPLOAD_PAGE, web_app=types.WebAppInfo(url=url)),
+    ]])
 
 def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMarkup:
     """لوحة اختيار شكل تنسيق الملف (بسيط / عصري / أكاديمي) - أول خطوة بمسار التصدير."""

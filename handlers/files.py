@@ -18,16 +18,21 @@ from constants import (
     MAX_FILE_QUIZZES_LIMIT, MIN_QUIZZES_PER_FILE, MSG_MAX_QUIZZES_REACHED,
     MSG_ENGLISH_CONTENT_DETECTED, SUBJECT_ENGLISH, SUBJECT_OTHER,
     QUESTION_TYPE_GENERAL, DIFFICULTY_MEDIUM, MSG_QUIZ_TYPE_PROMPT,
+    MAX_DOC_SIZE, MAX_FILE_WEB_UPLOAD_SIZE, MAX_FILE_WEB_UPLOAD_PAGES,
+    MAX_IMAGE_WEB_UPLOAD_COUNT, BTN_OPEN_UPLOAD_PAGE, MSG_REDIRECT_TO_WEB_UPLOAD,
+    WEBAPP_PUBLIC_BASE_URL,
 )
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from keyboards import (
     get_multiple_quizzes_keyboard, get_question_count_keyboard,
-    get_translation_choice_keyboard, get_quiz_type_keyboard
+    get_translation_choice_keyboard, get_quiz_type_keyboard,
+    get_web_upload_redirect_keyboard,
 )
 from logger import get_logger, log_error
 from supabase_helper import (
-    check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped
+    check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped,
+    delete_file_temp, delete_file_temp_batch, download_file_temp_to_file,
 )
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup
 from validators import validate_file_size, validate_question_count
@@ -39,6 +44,7 @@ from services.quiz_service import (
     determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow,
     combo_quiz_count, build_question_type_label,
 )
+from handlers.audio import _build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لرفع الصوت عبر الويب
 
 logger = get_logger(__name__)
 router = Router()
@@ -110,7 +116,16 @@ async def process_album_background(message: types.Message, state: FSMContext):
                 
         if not photos: return
         if len(photos) > MAX_ALBUM_IMAGES:
-            await message.answer(ERROR_ALBUM_TOO_LARGE)
+            # 🆕 هاد سقف تيليجرام نفسه للألبوم (media group)، مش رقم اخترناه - نوجّه
+            # الطالب لصفحة رفع ألبوم كبير (حتى 50 صورة سوا) بدل رفض جاف بلا بديل.
+            keyboard = get_web_upload_redirect_keyboard("images")
+            if keyboard.inline_keyboard:
+                await message.answer(
+                    f"{ERROR_ALBUM_TOO_LARGE}\n\nبس فيك ترفع حتى {MAX_IMAGE_WEB_UPLOAD_COUNT} صورة سوا عبر صفحة الويب:",
+                    reply_markup=keyboard,
+                )
+            else:
+                await message.answer(ERROR_ALBUM_TOO_LARGE)
             return
             
         file_paths, err = await download_photos_service(message.from_user.id, photos)
@@ -341,10 +356,22 @@ async def handle_cache_filter_difficulty(call: types.CallbackQuery, state: FSMCo
     await call.answer()
 
 
-async def _finalize_media_processing(message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int, is_album: bool, file_hash: str):
+async def _finalize_media_processing(
+    message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int,
+    is_album: bool, file_hash: str, user_id: Optional[int] = None,
+):
+    """
+    🆕 user_id: مُمرَّر صراحة (بدل الاعتماد حصراً على message.from_user.id) لأنه لما
+    تُستدعى هاي الدالة من مسار رفع الويب (process_web_uploaded_file/_images أدناه)،
+    "message" هون بيكون رسالة حالة أرسلها البوت نفسه (bot.send_message) - يعني
+    message.from_user فعلياً هو حساب البوت وليس الطالب الفعلي. بالمسار العادي
+    (تيليجرام مباشرة) تُترك القيمة الافتراضية (None) فيُستخدم message.from_user.id
+    كالمعتاد بلا أي تغيير بالسلوك الحالي.
+    """
+    resolved_user_id = user_id if user_id is not None else (message.from_user.id if message.from_user else None)
     try:
         content_type = "album" if is_album else ("photo" if len(file_paths) == 1 and file_paths[0].lower().endswith((".jpg", ".jpeg", ".png")) else "document")
-        asyncio.create_task(log_usage_event(message.from_user.id, "content_uploaded", {
+        asyncio.create_task(log_usage_event(resolved_user_id, "content_uploaded", {
             "content_type": content_type, "items_count": items, "is_album": is_album, "file_hash": file_hash,
         }))
 
@@ -419,7 +446,18 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
         else:
             valid, error = validate_file_size(message.document.file_size, "document")
             if not valid:
-                await message.answer(error)
+                # 🆕 بدل رفض جاف بلا بديل: نوجّه الطالب لصفحة رفع الملفات الكبيرة
+                # (حتى 150 صفحة/100MB) لو مُهيّأة، لأن هذا الحجم يتجاوز أصلاً حد
+                # تحميل تيليجرام المباشر (Bot API) وليس رقماً اخترناه نحن.
+                limit_mb = int(MAX_DOC_SIZE / (1024 * 1024))
+                keyboard = get_web_upload_redirect_keyboard("document")
+                if keyboard.inline_keyboard:
+                    await message.answer(
+                        MSG_REDIRECT_TO_WEB_UPLOAD.format(limit_mb=limit_mb),
+                        parse_mode="HTML", reply_markup=keyboard,
+                    )
+                else:
+                    await message.answer(error)
                 return
             title, extension = os.path.splitext(message.document.file_name or "document")
             destination = os.path.join(DOWNLOADS_DIR, f"{message.from_user.id}_{uuid.uuid4().hex}{extension}")
@@ -742,5 +780,170 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
     except Exception as exc:
         log_error(logger, f"Cancel request failed: {exc}", exception=exc)
         await call.answer("❌ تعذر إلغاء الطلب، حاول مجدداً.", show_alert=True)
+
+# ==================== 🆕 رفع ملف/ألبوم صور كبير عبر صفحة الويب (Mini App) ====================
+
+async def _reject_web_upload(chat_id: int, state: FSMContext, status_msg: Optional[types.Message], text: str) -> None:
+    """تنظيف موحّد عند رفض/فشل طلب رفع ويب (ملف أو صور): فكّ القفل وعرض رسالة الخطأ."""
+    await state.set_state(None)
+    if status_msg:
+        try:
+            await status_msg.edit_text(text, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    await bot.send_message(chat_id, text, parse_mode="HTML")
+
+
+async def process_web_uploaded_file(
+    user_id: int, chat_id: int, object_path: str, declared_file_name: str = "",
+) -> None:
+    """
+    🆕 نظير handle_media (فرع document) لكن لمستند رُفع عبر صفحة الويب (Mini App)
+    بدل رسالة مستند مباشرة على تيليجرام. يُستدعى كـ background task من
+    webhook_server.py فور تأكيد اكتمال الرفع على Supabase.
+
+    الفروقات عن مسار تيليجرام المباشر:
+    - لا يوجد حد MAX_DOC_SIZE (20MB) هون - الحد المطبَّق مسبقاً هو
+      MAX_FILE_WEB_UPLOAD_SIZE (100MB) بمرحلة /api/file-upload/init.
+    - سقف الصفحات هون MAX_FILE_WEB_UPLOAD_PAGES (150) بدل MAX_SUPER_PAGES (100) -
+      نفس السبب اللي خلينا نرفع سقف الحجم: مصدر هذا المسار حصراً طلاب بمحتوى كبير
+      متعمّد، فمنطقي يكون سقفه أعلى شوي من المسار العادي.
+    - بعد التحميل والفحص، التسليم لباقي خط الأنابيب هو _finalize_media_processing
+      نفسه المستخدم بالمسار العادي بلا أي تعديل - راجع توثيق user_id بتوقيعها فوق.
+    """
+    state = _build_state_for_chat(chat_id, user_id)
+
+    current_state = await state.get_state()
+    if current_state == QuizState.answering_quiz:
+        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع ملف جديد.")
+        await delete_file_temp(object_path)
+        return
+    if current_state == QuizState.processing_web_file:
+        await bot.send_message(chat_id, "⏳ لديك ملف آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
+        await delete_file_temp(object_path)
+        return
+    if current_state in PENDING_REQUEST_STATES:
+        if await _discard_pending_upload(state):
+            await bot.send_message(chat_id, MSG_PREVIOUS_REQUEST_REPLACED)
+        await state.set_state(None)
+    elif current_state is not None:
+        await state.set_state(None)
+
+    await state.set_state(QuizState.processing_web_file)
+    ensure_directory_exists(DOWNLOADS_DIR)
+    extension = os.path.splitext(declared_file_name)[1] or os.path.splitext(object_path)[1] or ".pdf"
+    destination = os.path.join(DOWNLOADS_DIR, f"file_web_{user_id}_{uuid.uuid4().hex}{extension}")
+
+    status_msg = await bot.send_message(chat_id, "📥 <b>تم استلام الملف، جارٍ تجهيزه...</b>", parse_mode="HTML")
+
+    try:
+        # 🆕 خط دفاع ثانٍ: تحقق فعلي من حجم المحتوى المُنزَّل نفسه (وليس فقط الحجم
+        # المُصرَّح به بمرحلة /init) - نفس منطق download_audio_temp_to_file تماماً.
+        downloaded = await download_file_temp_to_file(object_path, destination, max_size_bytes=MAX_FILE_WEB_UPLOAD_SIZE)
+        if not downloaded:
+            await delete_file_temp(object_path)
+            await _reject_web_upload(chat_id, state, status_msg, "❌ تعذر تحميل الملف المرفوع أو أنه يتجاوز الحجم المسموح، يرجى إعادة المحاولة من البوت.")
+            return
+
+        items = 1
+        if destination.lower().endswith(".pdf"):
+            items = await asyncio.to_thread(get_pdf_page_count_sync, destination)
+            if items > MAX_FILE_WEB_UPLOAD_PAGES:
+                safe_file_cleanup(destination)
+                await delete_file_temp(object_path)
+                await _reject_web_upload(
+                    chat_id, state, status_msg,
+                    f"❌ الحد الأقصى لمعالجة ملفات PDF عبر صفحة الويب هو {MAX_FILE_WEB_UPLOAD_PAGES} صفحة.",
+                )
+                return
+
+        await delete_file_temp(object_path)  # انتهى الغرض من النسخة المؤقتة بـ Supabase - النسخة المحلية هي اللي رح تُعالَج الآن
+
+        title = os.path.splitext(declared_file_name)[0] if declared_file_name else "ملف مرفوع عبر الويب"
+        file_hash = await asyncio.to_thread(calculate_file_hash, destination)
+
+        await state.set_state(None)  # فكّ القفل - _finalize_media_processing بتحدد الحالة التالية بنفسها
+        await status_msg.delete()
+        await _finalize_media_processing(status_msg, state, [destination], title, items, False, file_hash, user_id=user_id)
+    except Exception as exc:
+        log_error(logger, f"Web-uploaded file preparation failed: {exc}", exception=exc)
+        safe_file_cleanup(destination)
+        await delete_file_temp(object_path)
+        await _reject_web_upload(chat_id, state, status_msg, "❌ حدث خطأ غير متوقع أثناء تجهيز الملف.")
+
+
+async def process_web_uploaded_images(
+    user_id: int, chat_id: int, object_paths: List[str],
+) -> None:
+    """
+    🆕 نظير process_album_background لكن لألبوم صور كبير (حتى MAX_IMAGE_WEB_UPLOAD_COUNT
+    صورة) رُفع عبر صفحة الويب - تيليجرام نفسه يمنع ألبوماً أكبر من MAX_ALBUM_IMAGES
+    (10) بمسار الرسائل المباشر، فهذا هو المسار الوحيد الممكن لألبوم أكبر من هيك.
+
+    التوليد الفعلي لاحقاً (بعد اختيار عدد الأسئلة) بيتوجه تلقائياً لوضع "Super Images"
+    (3 دفعات متوازية) لو عدد الصور تجاوز SUPER_IMAGE_BATCH_THRESHOLD - راجع
+    helpers/gemini_helper.py::generate_quiz_smart، بلا أي تدخل إضافي هون؛ is_album=True
+    وitems_count=عدد الصور كافيان تماماً لأن نفس منطق التسعير المسطّح (نقطة/صورة)
+    يشتغل تلقائياً بغض النظر عن العدد.
+    """
+    state = _build_state_for_chat(chat_id, user_id)
+
+    current_state = await state.get_state()
+    if current_state == QuizState.answering_quiz:
+        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع ألبوم صور جديد.")
+        await delete_file_temp_batch(object_paths)
+        return
+    if current_state == QuizState.processing_web_file:
+        await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
+        await delete_file_temp_batch(object_paths)
+        return
+    if current_state in PENDING_REQUEST_STATES:
+        if await _discard_pending_upload(state):
+            await bot.send_message(chat_id, MSG_PREVIOUS_REQUEST_REPLACED)
+        await state.set_state(None)
+    elif current_state is not None:
+        await state.set_state(None)
+
+    await state.set_state(QuizState.processing_web_file)
+    ensure_directory_exists(DOWNLOADS_DIR)
+
+    status_msg = await bot.send_message(
+        chat_id, f"📥 <b>تم استلام {len(object_paths)} صورة، جارٍ تجهيزها...</b>", parse_mode="HTML",
+    )
+
+    local_paths: List[str] = []
+    try:
+        for index, object_path in enumerate(object_paths):
+            ext = os.path.splitext(object_path)[1] or ".jpg"
+            destination = os.path.join(DOWNLOADS_DIR, f"images_web_{user_id}_{uuid.uuid4().hex}_{index}{ext}")
+            # 🆕 نفس حد الحجم لكل صورة على حدة (MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE) -
+            # مستورد ضمن MAX_FILE_WEB_UPLOAD_SIZE هون كسقف كلي احترازي إضافي فقط
+            # (الفحص الدقيق لكل صورة صار مسبقاً بمرحلة /api/image-upload/complete).
+            downloaded = await download_file_temp_to_file(object_path, destination, max_size_bytes=MAX_FILE_WEB_UPLOAD_SIZE)
+            if not downloaded:
+                for path in local_paths:
+                    safe_file_cleanup(path)
+                await delete_file_temp_batch(object_paths)
+                await _reject_web_upload(chat_id, state, status_msg, "❌ تعذر تحميل إحدى الصور المرفوعة، يرجى إعادة المحاولة من البوت.")
+                return
+            local_paths.append(destination)
+
+        await delete_file_temp_batch(object_paths)
+
+        is_album = len(local_paths) > 1
+        title = f"كويز من ألبوم صور ({len(local_paths)} صور)" if is_album else "كويز من صورة"
+        file_hash = await asyncio.to_thread(compute_combined_hash, local_paths)
+
+        await state.set_state(None)
+        await status_msg.delete()
+        await _finalize_media_processing(status_msg, state, local_paths, title, len(local_paths), is_album, file_hash, user_id=user_id)
+    except Exception as exc:
+        log_error(logger, f"Web-uploaded images preparation failed: {exc}", exception=exc)
+        for path in local_paths:
+            safe_file_cleanup(path)
+        await delete_file_temp_batch(object_paths)
+        await _reject_web_upload(chat_id, state, status_msg, "❌ حدث خطأ غير متوقع أثناء تجهيز الصور.")
+
 
 files_router = router

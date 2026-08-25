@@ -38,6 +38,7 @@ class QuizState(StatesGroup):
     waiting_for_audio_confirm = State()     # 🆕 انتظار تأكيد الطالب (إقرار الحقوق + المدة والتكلفة) قبل خصم أي نقاط أو بدء التفريغ الفعلي
     waiting_for_audio_action = State()      # 🆕 انتظار قرار الطالب بعد تفريغ المحاضرة الصوتية (تلخيص/تصدير/كويز/إرسال النص)
     processing_audio = State()              # 🆕 قفل مؤقت أثناء تحميل/تفريغ محاضرة صوتية قائمة، لمنع معالجة مضاعفة لو وصل مقطع صوتي ثانٍ قبل انتهاء الأول
+    processing_web_file = State()           # 🆕 نظير processing_audio لملف/ألبوم صور مرفوع عبر صفحة الويب قيد التحميل/الفحص
     
 # ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:
