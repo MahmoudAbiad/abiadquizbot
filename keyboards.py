@@ -21,14 +21,16 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
     try:
         ref_link = f"https://t.me/{bot_username}?start={user_id}"
         kb = [
-            [types.InlineKeyboardButton(text="🎬 كيف يعمل البوت؟ (دليل سريع)", callback_data="how_to_use")],
-            [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
-            [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
+            [types.InlineKeyboardButton(text="🎬 كيف يعمل البوت؟", callback_data="how_to_use")],
+            [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة", callback_data="favorites_menu")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
-            [types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
+            [
+                types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}"),
+                types.InlineKeyboardButton(text="💰 شحن الرصيد", callback_data="recharge_info")
+             ],
         ]
         # 🆕 زر رفع محاضرة صوتية كبيرة (حتى 250MB) عبر Mini App - يُخفى تلقائياً لو
         # WEBAPP_PUBLIC_BASE_URL فاضي (مثلاً بوضع polling محلي بدون WEBHOOK_URL)
