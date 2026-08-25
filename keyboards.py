@@ -38,15 +38,15 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
         if WEBAPP_PUBLIC_BASE_URL:
             kb.append([
                 types.InlineKeyboardButton(
-                    text="🎙️ تفريغ ملف صوتي (حتى 250MB)",
+                    text="🎙️ ملف صوتي",
                     web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/audio_upload.html"),
                 ),
                 types.InlineKeyboardButton(
-                    text="📄 رفع ملف (حتى 150 صفحة/100MB)",
+                    text="📄 مستند",
                     web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=document"),
                 ),
                 types.InlineKeyboardButton(
-                    text="🖼️ رفع ألبوم صور (حتى 50 صورة)",
+                    text="🖼️ ألبوم صور)",
                      web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/file_upload.html?type=images"),
                                 )
             ])
