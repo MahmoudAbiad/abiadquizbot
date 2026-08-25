@@ -1,0 +1,13 @@
+{
+  "name": "quiz-maker-bot",
+  "version": "2.0.0",
+  "description": "Telegram bot for generating AI-powered quizzes from documents and images",
+  "engines": {
+    "python": "3.11"
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}

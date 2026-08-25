@@ -1,0 +1,34 @@
+2026-08-24 21:48:06 - config - CRITICAL - Failed to initialize bot components: BOT_TOKEN is not set in .env file
+2026-08-24 21:48:13 - config - INFO - Bot initialized successfully with Redis. Admin ID: 1
+2026-08-24 21:49:10 - config - INFO - Bot initialized successfully with Redis. Admin ID: 1
+2026-08-24 21:49:11 - asyncio - DEBUG - Using selector: EpollSelector
+2026-08-24 21:49:11 - asyncio - DEBUG - Using selector: EpollSelector
+2026-08-24 21:49:11 - supabase_helper - INFO - Supabase Async client initialized successfully with centralized schema mapping
+2026-08-24 21:49:11 - matplotlib - DEBUG - matplotlib data path: /usr/local/lib/python3.12/dist-packages/matplotlib/mpl-data
+2026-08-24 21:49:11 - matplotlib - DEBUG - CONFIGDIR=/root/.config/matplotlib
+2026-08-24 21:49:11 - matplotlib - DEBUG - interactive is False
+2026-08-24 21:49:11 - matplotlib - DEBUG - platform is linux
+2026-08-24 21:49:11 - matplotlib - DEBUG - CACHEDIR=/root/.cache/matplotlib
+2026-08-24 21:49:11 - matplotlib.font_manager - DEBUG - font search path [PosixPath('/usr/local/lib/python3.12/dist-packages/matplotlib/mpl-data/fonts/ttf'), PosixPath('/usr/local/lib/python3.12/dist-packages/matplotlib/mpl-data/fonts/afm'), PosixPath('/usr/local/lib/python3.12/dist-packages/matplotlib/mpl-data/fonts/pdfcorefonts')]
+2026-08-24 21:49:11 - matplotlib.font_manager - INFO - Failed to extract font properties from /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf: In FT2Font: Can not load face (unknown file format; error code 0x2)
+2026-08-24 21:49:11 - matplotlib.font_manager - INFO - generated new fontManager
+2026-08-24 21:49:23 - config - INFO - Bot initialized successfully with Redis. Admin ID: 1
+2026-08-24 21:49:23 - asyncio - DEBUG - Using selector: EpollSelector
+2026-08-24 21:49:23 - asyncio - DEBUG - Using selector: EpollSelector
+2026-08-24 21:49:23 - supabase_helper - INFO - Supabase Async client initialized successfully with centralized schema mapping
+2026-08-24 21:49:23 - matplotlib - DEBUG - matplotlib data path: /usr/local/lib/python3.12/dist-packages/matplotlib/mpl-data
+2026-08-24 21:49:23 - matplotlib - DEBUG - CONFIGDIR=/root/.config/matplotlib
+2026-08-24 21:49:23 - matplotlib - DEBUG - interactive is False
+2026-08-24 21:49:23 - matplotlib - DEBUG - platform is linux
+2026-08-24 21:49:23 - matplotlib - DEBUG - CACHEDIR=/root/.cache/matplotlib
+2026-08-24 21:49:23 - matplotlib.font_manager - DEBUG - Using fontManager instance from /root/.cache/matplotlib/fontlist-v390.json
+2026-08-24 21:50:51 - config - INFO - Bot initialized successfully with Redis. Admin ID: 1
+2026-08-24 21:50:52 - asyncio - DEBUG - Using selector: EpollSelector
+2026-08-24 21:50:52 - asyncio - DEBUG - Using selector: EpollSelector
+2026-08-24 21:50:52 - supabase_helper - INFO - Supabase Async client initialized successfully with centralized schema mapping
+2026-08-24 21:50:52 - matplotlib - DEBUG - matplotlib data path: /usr/local/lib/python3.12/dist-packages/matplotlib/mpl-data
+2026-08-24 21:50:52 - matplotlib - DEBUG - CONFIGDIR=/root/.config/matplotlib
+2026-08-24 21:50:52 - matplotlib - DEBUG - interactive is False
+2026-08-24 21:50:52 - matplotlib - DEBUG - platform is linux
+2026-08-24 21:50:52 - matplotlib - DEBUG - CACHEDIR=/root/.cache/matplotlib
+2026-08-24 21:50:52 - matplotlib.font_manager - DEBUG - Using fontManager instance from /root/.cache/matplotlib/fontlist-v390.json
