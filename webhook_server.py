@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from aiogram.types import Update
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 from config import bot, dp, set_bot_commands, redis_client
 from logger import get_logger
 from constants import (
@@ -47,9 +48,23 @@ async def process_update_safely(update: Update):
     """
     معالجة التحديث الخاص بـ Telegram في الخلفية مع التقاط الأخطاء
     لضمان عدم توقف المهمة أو ضياع السجلات عند حدوث استثناء.
+
+    🩹 محاولة إعادة واحدة عند أخطاء اتصال Redis العابرة (ConnectionError/TimeoutError):
+    الـ webhook أصلاً بيرد على تيليجرام بـ 200 OK فوراً (راجع endpoint /webhook تحت)
+    قبل ما توصل هالدالة هون، فتيليجرام ما رح يعيد إرسال نفس التحديث أبداً لو فشلت
+    المعالجة هون - يعني أي استثناء غير مُعالَج = رسالة المستخدم ضاعت نهائياً بصمت بدون
+    أي رد أو خطأ ظاهر له. إعادة محاولة واحدة فورية (بعد ما الـ connection pool يكون
+    استبدل الاتصال الميت تلقائياً) كافية عملياً لأغلب حالات انقطاع Redis العابرة
+    (راجع نفس الإصلاح بـ config.py::redis_client لتقليل تكرارها من الأساس).
     """
     try:
         await dp.feed_update(bot, update)
+    except (RedisConnectionError, RedisTimeoutError) as e:
+        logger.warning(f"Transient Redis connection error processing update, retrying once: {e}")
+        try:
+            await dp.feed_update(bot, update)
+        except Exception as retry_exc:
+            logger.error(f"Error processing update after retry: {retry_exc}", exc_info=True)
     except Exception as e:
         logger.error(f"Error processing update in background task: {e}", exc_info=True)
 
