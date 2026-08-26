@@ -676,13 +676,22 @@ async def auto_cleanup_bad_quizzes():
         log_error(logger, f"Error running the background auto cleanup query: {e}")
 
 # ==================== Admin Operations ====================
-async def admin_add_points(target_id: int, amount: int) -> Optional[int]:
+async def admin_add_points(target_id: int, amount: int, balance_type: str = "paid") -> Optional[int]:
     try:
+        if balance_type not in ("free", "paid"):
+            return None
         user = await supabase.table("users").select("free_points, paid_points").eq("user_id", target_id).execute()
         if user.data:
-            paid_points = float(user.data[0].get('paid_points') or 0) + amount
+            paid_points = float(user.data[0].get('paid_points') or 0)
             free_points = float(user.data[0].get('free_points') or 0)
-            await supabase.table("users").update({"paid_points": paid_points}).eq("user_id", target_id).execute()
+            if balance_type == "free":
+                free_points += amount
+            else:
+                paid_points += amount
+            await supabase.table("users").update({
+                "free_points": free_points,
+                "paid_points": paid_points,
+            }).eq("user_id", target_id).execute()
             return int(free_points + paid_points)
         return None
     except Exception as e:

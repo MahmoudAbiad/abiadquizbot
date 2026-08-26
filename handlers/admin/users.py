@@ -25,6 +25,8 @@ from keyboards import (
     get_admin_dashboard_keyboard,
     get_admin_user_actions_keyboard,
     get_admin_charge_options_keyboard,
+    get_admin_direct_message_charge_keyboard,
+    get_admin_direct_message_mode_keyboard,
     get_cancel_keyboard
 )
 from logger import get_logger
@@ -289,11 +291,24 @@ async def process_direct_message_target(msg: types.Message, state: FSMContext):
             else str(target_id)
         ),
     )
-    await state.set_state(AdminState.waiting_for_direct_message_text)
+    await state.set_state(AdminState.waiting_for_direct_message_mode)
     await msg.answer(
-        f"📝 المستخدم المستهدف: <code>{target_id}</code>\n\nأرسل نص الرسالة التي تريد إرسالها:",
-        reply_markup=get_cancel_keyboard(),
+        f"📝 المستخدم المستهدف: <code>{target_id}</code>\n\nاختر نوع العملية:",
+        reply_markup=get_admin_direct_message_mode_keyboard(),
         parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admin_direct_mode_"), AdminState.waiting_for_direct_message_mode)
+async def process_direct_message_mode(call: types.CallbackQuery, state: FSMContext):
+    mode = call.data.rsplit("_", 1)[1]
+    await state.update_data(direct_message_mode=mode)
+    await state.set_state(AdminState.waiting_for_direct_message_text)
+    await call.answer()
+    await safe_edit_text(
+        call.message,
+        "📝 أرسل نص الرسالة التي تريد إرسالها:",
+        reply_markup=get_cancel_keyboard(),
     )
 
 
@@ -307,21 +322,72 @@ async def process_direct_message_text(msg: types.Message, state: FSMContext):
 
     data = await state.get_data()
     await state.update_data(direct_message_text=message_text)
-    await state.set_state(AdminState.waiting_for_direct_message_confirm)
+    data = await state.get_data()
+    if data.get("direct_message_mode") == "message":
+        await state.update_data(direct_message_charge_amount=0, direct_message_charge_type="none")
+        return await show_direct_message_confirmation(msg, state)
 
+    await state.set_state(AdminState.waiting_for_direct_message_charge_amount)
+    await msg.answer(
+        "💰 أرسل عدد النقاط المراد شحنها مع الرسالة.\n"
+        "أرسل <code>0</code> إذا كنت لا تريد شحن رصيد.",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminState.waiting_for_direct_message_charge_amount)
+async def process_direct_message_charge_amount(msg: types.Message, state: FSMContext):
+    amount_text = (msg.text or "").strip()
+    if not amount_text.isdigit():
+        return await msg.answer("❌ أرسل عدد نقاط صحيحاً (صفر أو أكثر).", reply_markup=get_cancel_keyboard())
+
+    amount = int(amount_text)
+    if amount > 1000000:
+        return await msg.answer("❌ العدد كبير جداً. الحد الأقصى هو 1,000,000 نقطة.", reply_markup=get_cancel_keyboard())
+
+    data = await state.get_data()
+    await state.update_data(direct_message_charge_amount=amount)
+    if amount == 0:
+        await state.update_data(direct_message_charge_type="none")
+        return await show_direct_message_confirmation(msg, state)
+
+    await state.set_state(AdminState.waiting_for_direct_message_charge_type)
+    await msg.answer(
+        f"اختر وجهة <code>{amount}</code> نقطة للمستخدم <code>{data['direct_message_target_id']}</code>:",
+        reply_markup=get_admin_direct_message_charge_keyboard(data["direct_message_target_id"]),
+        parse_mode="HTML",
+    )
+
+
+async def show_direct_message_confirmation(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    charge_type = data.get("direct_message_charge_type")
+    amount = int(data.get("direct_message_charge_amount") or 0)
+    charge_label = {"free": "مجاني", "paid": "مدفوع", "none": "بدون شحن"}.get(charge_type, "غير محدد")
     preview = (
-        "🔍 <b>معاينة الرسالة المخصصة</b>\n"
+        "🔍 <b>معاينة العملية</b>\n"
         f"المستخدم: <code>{html.escape(str(data['direct_message_target_id']))}</code>\n"
+        f"الشحن: <code>{amount}</code> نقطة ({charge_label})\n"
         "───────────────────\n"
-        f"{html.escape(message_text)}\n"
+        f"{html.escape(data['direct_message_text'])}\n"
         "───────────────────\n\n"
-        "هل تريد تأكيد إرسالها؟"
+        "هل تريد تأكيد إرسال الرسالة وتنفيذ الشحن؟"
     )
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
-        types.InlineKeyboardButton(text="✅ تأكيد الإرسال", callback_data="admin_confirm_direct_message"),
+        types.InlineKeyboardButton(text="✅ تأكيد العملية", callback_data="admin_confirm_direct_message"),
         types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_main_menu"),
     ]])
-    await msg.answer(preview, reply_markup=keyboard, parse_mode="HTML")
+    await message.answer(preview, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(AdminState.waiting_for_direct_message_confirm)
+
+
+@router.callback_query(F.data.startswith("admin_direct_charge_"), AdminState.waiting_for_direct_message_charge_type)
+async def process_direct_message_charge_type(call: types.CallbackQuery, state: FSMContext):
+    charge_type = call.data.split("_")[3]
+    await state.update_data(direct_message_charge_type=charge_type)
+    await call.answer()
+    await show_direct_message_confirmation(call.message, state)
 
 
 @router.callback_query(
@@ -332,11 +398,22 @@ async def process_confirm_direct_message(call: types.CallbackQuery, state: FSMCo
     data = await state.get_data()
     target_id = data.get("direct_message_target_id")
     message_text = data.get("direct_message_text")
+    charge_amount = int(data.get("direct_message_charge_amount") or 0)
+    charge_type = data.get("direct_message_charge_type", "none")
     await state.clear()
     await call.answer()
 
     if not target_id or not message_text:
         return await safe_edit_text(call.message, "❌ انتهت جلسة الرسالة، يرجى بدء العملية مجدداً.", reply_markup=get_admin_dashboard_keyboard())
+
+    if charge_amount and charge_type in ("free", "paid"):
+        new_balance = await admin_add_points(target_id, charge_amount, balance_type=charge_type)
+        if new_balance is None:
+            return await safe_edit_text(
+                call.message,
+                "❌ تعذر شحن الرصيد، لذلك لم يتم إرسال الرسالة.",
+                reply_markup=get_admin_dashboard_keyboard(),
+            )
 
     try:
         await bot.send_message(chat_id=int(target_id), text=message_text)
@@ -356,7 +433,8 @@ async def process_confirm_direct_message(call: types.CallbackQuery, state: FSMCo
 
     await safe_edit_text(
         call.message,
-        f"✅ تم إرسال الرسالة بنجاح إلى المستخدم <code>{target_id}</code>.",
+        f"✅ تم إرسال الرسالة بنجاح إلى المستخدم <code>{target_id}</code>\n"
+        f"💰 الشحن: <code>{charge_amount}</code> نقطة ({'مجاني' if charge_type == 'free' else 'مدفوع' if charge_type == 'paid' else 'بدون شحن'})",
         reply_markup=get_admin_dashboard_keyboard(),
     )
 
