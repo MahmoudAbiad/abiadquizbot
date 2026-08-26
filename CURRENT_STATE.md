@@ -139,7 +139,9 @@
 - **بادئات callback_data المحجوزة حالياً (لا تكرر أي وحدة فيها لأي زر جديد):**
   `qtype_`, `qdiff_`, `qback_to_type`, `qcount_pick_`, `qcount_custom`, `qcount_start`,
   `cachefilter_type_`, `cachefilter_diff_`, `cache_action_no`, `use_multi_`,
-  `cancel_upload_request`, `publish_score_`, `hide_score_`, `leaderboard_`.
+  `cancel_upload_request`, `publish_score_`, `hide_score_`, `leaderboard_`,
+  `admin_recent_errors` (exact match), `admin_referrals_`, `admin_ref_detail_`
+  (آخر ثلاثة من دمج تتبع الأخطاء/الإحالات — راجع `HISTORY_LOG.md` [2026-08-27]).
 - **قبل تسجيل أي معالج callback جديد:** شغّل هالفحص للتأكد من عدم وجود تصادم بادئات
   (استبدل المسار حسب الحاجة):
   ```python

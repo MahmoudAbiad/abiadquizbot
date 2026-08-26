@@ -2,6 +2,7 @@ import asyncio
 import io
 import csv
 import json
+import re
 from aiogram import Router, types, F
 from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest
@@ -13,7 +14,9 @@ from supabase_helper import (
     admin_get_today_active_users,
     admin_get_today_quizzes,
     admin_get_user_activity,
-    admin_get_all_usage_events
+    admin_get_all_usage_events,
+    admin_get_recent_errors,
+    admin_get_referral_leaderboard,
 )
 from keyboards import get_analytics_keyboard, get_admin_dashboard_keyboard
 from logger import get_logger
@@ -29,6 +32,8 @@ router.callback_query.filter(IsAdminFilter())
 
 QUIZZES_PAGE_SIZE = 4      # عدد الكويزات المعروضة في الصفحة الواحدة
 TODAY_USERS_PAGE_SIZE = 5  # عدد الطلاب النشطين المعروضين في الصفحة الواحدة
+REFERRERS_PAGE_SIZE = 10   # عدد "المُحيلين" المعروضين بصفحة قائمة الإحالات
+REFERRED_PAGE_SIZE = 15    # عدد الأسماء المعروضة بالقائمة المنفردة لكل مُحيل
 
 EVENT_LABELS = {
     "bot_start": "▶️ تشغيل البوت",
@@ -47,6 +52,24 @@ EVENT_LABELS = {
     "feedback_submitted": "✍️ إرسال ملاحظة",
     "score_published": "🏆 نشر نتيجة",
     "leaderboard_viewed": "📋 عرض لوحة الشرف",
+    "error_occurred": "🐞 خطأ واجهه الطالب",
+    # 🆕 كانت هذه الأحداث تُسجَّل فعلياً بقاعدة البيانات من قبل، لكن بدون تسمية عربية هنا
+    "score_hidden": "🙈 إخفاء نتيجة منشورة",
+    "audio_uploaded": "🎙 رفع محاضرة صوتية",
+    "audio_transcription_confirmed": "🎙 تأكيد تفريغ الصوت",
+    "audio_transcription_completed": "🎙 اكتمال تفريغ الصوت",
+    "audio_transcription_truncated": "🎙 تفريغ صوت مقطوع (طويل)",
+    "tutorial_opened": "📘 فتح الشرح التعريفي",
+    "tutorial_completed": "📘 إنهاء الشرح التعريفي",
+    "recharge_info_viewed": "💳 عرض معلومات الشحن",
+    "support_opened": "🆘 فتح الدعم الفني",
+    "channel_opened": "📢 فتح القناة",
+    "request_cancelled": "🚫 إلغاء طلب أثناء العملية",
+    # 🆕 أحداث جديدة أضيفت بهذا التحديث
+    "quiz_exported": "📄 تصدير كويز (Word/PDF)",
+    "favorite_opened": "⭐ فتح كويز من المفضلة",
+    "favorite_deleted": "🗑 حذف كويز من المفضلة",
+    "joined_via_referral": "🎯 انضمام عبر رابط دعوة",
 }
 
 SOURCE_LABELS = {
@@ -212,7 +235,9 @@ async def show_usage_analytics(call: types.CallbackQuery):
             f"🎯 محاولات كويز: <code>{overview['total_attempts']}</code> (مكتمل: <code>{overview['completed_attempts']}</code>)\n"
             f"✅ معدل الإكمال: <code>{overview['completion_rate']:.1f}%</code>\n"
             f"⏱ متوسط مدة الحل: <code>{_format_seconds(overview['avg_duration_seconds'])}</code>\n"
-            f"🎓 متوسط النتائج: <code>{overview['avg_score_percentage']:.1f}%</code>\n\n"
+            f"🎓 متوسط النتائج: <code>{overview['avg_score_percentage']:.1f}%</code>\n"
+            f"🐞 أخطاء واجهها الطلاب: <code>{overview.get('error_count', 0)}</code> "
+            f"(<code>{overview.get('users_with_errors', 0)}</code> طالب متأثر)\n\n"
             f"📊 <b>الأحداث الأكثر تكراراً:</b>\n{events_lines}\n\n"
             f"🗂 <b>مصدر الكويزات:</b>\n{source_lines}"
         )
@@ -270,7 +295,153 @@ async def export_usage_events(call: types.CallbackQuery):
         logger.error(f"Error exporting events: {e}")
         await safe_edit_text(call.message, "❌ حدث خطأ أثناء استخراج الملف.", reply_markup=get_analytics_keyboard(7))
 
-# 📈 6. معالج نشاط طالب محدد
+# 🐞 6. معالج آخر الأخطاء التي واجهها الطلاب
+@router.callback_query(F.data == "admin_recent_errors")
+async def show_recent_errors(call: types.CallbackQuery):
+    try:
+        errors = await admin_get_recent_errors(limit=20, days=7)
+        if not errors:
+            await call.answer("✅ لا توجد أي أخطاء مسجّلة خلال آخر 7 أيام.", show_alert=True)
+            return
+
+        report_lines = []
+        for idx, err in enumerate(errors, start=1):
+            meta = err.get("metadata") or {}
+            user = err.get("user") or {}
+            username_str = f"@{user['username']}" if user.get("username") and user['username'] != "Unknown" else "بدون يوزر"
+            name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "بدون اسم"
+            msg = (meta.get("message") or "غير معروف")[:150]
+            tag = "🔴 غير معالج" if meta.get("unhandled") else "🟡 معالج"
+
+            report_lines.append(
+                f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{err.get('user_id')}</code>\n"
+                f" ┣ {tag} {('· ' + meta['error_type']) if meta.get('error_type') else ''}\n"
+                f" ┣ 🕒 <code>{err.get('time_str')}</code>\n"
+                f" ┗ 📝 <code>{msg}</code>\n"
+            )
+
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="📥 تصدير كل الأحداث (CSV)", callback_data="admin_export_events")],
+            [types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")],
+            [types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")],
+        ])
+
+        text = (
+            f"🐞 <b>آخر الأخطاء التي واجهها الطلاب (آخر 7 أيام)</b>\n"
+            f"عدد الأخطاء المعروضة: <code>{len(errors)}</code>\n"
+            f"───────────────────\n\n" +
+            "\n".join(report_lines)
+        )
+        await safe_edit_text(call.message, text, reply_markup=kb)
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error rendering recent errors: {e}")
+        await call.answer("❌ تعذر جلب سجل الأخطاء.", show_alert=True)
+
+# 🎯 6.5 معالج قائمة الإحالات (الطلاب الذين شاركوا رابط الدعوة، مرتبين حسب عدد الإحالات)
+@router.callback_query(F.data.startswith("admin_referrals_"))
+async def show_referral_leaderboard(call: types.CallbackQuery):
+    try:
+        page = int(call.data.replace("admin_referrals_", "", 1) or "1")
+    except ValueError:
+        page = 1
+
+    try:
+        leaderboard = await admin_get_referral_leaderboard(limit=200)
+        if not leaderboard:
+            await call.answer("لا يوجد أي طالب حالياً أحال أشخاصاً عبر رابط الدعوة.", show_alert=True)
+            return
+
+        total_pages = max(1, (len(leaderboard) + REFERRERS_PAGE_SIZE - 1) // REFERRERS_PAGE_SIZE)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * REFERRERS_PAGE_SIZE
+        page_items = leaderboard[start:start + REFERRERS_PAGE_SIZE]
+        total_referred = sum(r["referral_count"] for r in leaderboard)
+
+        lines = []
+        kb_rows = []
+        for idx, ref in enumerate(page_items, start=start + 1):
+            username_str = f"@{ref['referrer_username']}" if ref.get("referrer_username") and ref["referrer_username"] != "Unknown" else "بدون يوزر"
+            lines.append(
+                f"<b>{idx}. {ref['referrer_name']}</b> ({username_str})\n"
+                f" ┗ 🎯 عدد الإحالات: <code>{ref['referral_count']}</code> — 🆔 <code>{ref['referrer_id']}</code>"
+            )
+            kb_rows.append([types.InlineKeyboardButton(
+                text=f"👁 عرض إحالات #{idx} ({ref['referral_count']})",
+                callback_data=f"admin_ref_detail_{ref['referrer_id']}_1"
+            )])
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"admin_referrals_{page - 1}"))
+        if page < total_pages:
+            nav_row.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"admin_referrals_{page + 1}"))
+        if nav_row:
+            kb_rows.append(nav_row)
+        kb_rows.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
+        kb_rows.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+
+        text = (
+            f"🎯 <b>قائمة الإحالات (مرتبة تنازلياً)</b>\n"
+            f"عدد المُحيلين: <code>{len(leaderboard)}</code> | إجمالي المُحالين: <code>{total_referred}</code>\n"
+            f"صفحة {page}/{total_pages}\n"
+            f"───────────────────\n\n" +
+            "\n\n".join(lines)
+        )
+        await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb_rows))
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error rendering referral leaderboard: {e}")
+        await call.answer("❌ تعذر جلب قائمة الإحالات.", show_alert=True)
+
+
+# 🎯 6.6 معالج القائمة المنفردة لمن انضم عن طريق مُحيل معيّن (لمنع ازدحام الواجهة الرئيسية)
+@router.callback_query(F.data.regexp(r"^admin_ref_detail_(-?\d+)_(\d+)$"))
+async def show_referrer_detail(call: types.CallbackQuery):
+    match = re.match(r"^admin_ref_detail_(-?\d+)_(\d+)$", call.data)
+    referrer_id = int(match.group(1))
+    page = int(match.group(2))
+
+    try:
+        leaderboard = await admin_get_referral_leaderboard(limit=200)
+        entry = next((r for r in leaderboard if r["referrer_id"] == referrer_id), None)
+        if not entry:
+            await call.answer("❌ لا توجد بيانات لهذا المُحيل حالياً.", show_alert=True)
+            return
+
+        referred = entry["referred_users"]
+        total_pages = max(1, (len(referred) + REFERRED_PAGE_SIZE - 1) // REFERRED_PAGE_SIZE)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * REFERRED_PAGE_SIZE
+        page_items = referred[start:start + REFERRED_PAGE_SIZE]
+
+        lines = []
+        for idx, u in enumerate(page_items, start=start + 1):
+            username_str = f"@{u['username']}" if u.get("username") and u["username"] != "Unknown" else "بدون يوزر"
+            lines.append(f"{idx}. {u['name']} ({username_str}) — 🆔 <code>{u['user_id']}</code>")
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"admin_ref_detail_{referrer_id}_{page - 1}"))
+        if page < total_pages:
+            nav_row.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"admin_ref_detail_{referrer_id}_{page + 1}"))
+        kb_rows = [nav_row] if nav_row else []
+        kb_rows.append([types.InlineKeyboardButton(text="🎯 رجوع لقائمة الإحالات", callback_data="admin_referrals_1")])
+
+        text = (
+            f"👥 <b>الطلاب الذين انضموا عن طريق: {entry['referrer_name']}</b>\n"
+            f"إجمالي إحالاته: <code>{entry['referral_count']}</code> | صفحة {page}/{total_pages}\n"
+            f"───────────────────\n\n" +
+            "\n".join(lines)
+        )
+        await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb_rows))
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error rendering referrer detail: {e}")
+        await call.answer("❌ تعذر جلب تفاصيل هذا المُحيل.", show_alert=True)
+
+
+# 📈 7. معالج نشاط طالب محدد
 @router.callback_query(F.data.startswith("admin_user_activity_"))
 async def show_user_activity(call: types.CallbackQuery):
     try:

@@ -582,6 +582,8 @@ def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
         period_row,
         [types.InlineKeyboardButton(text="⚡ النشطون اليوم حصراً", callback_data="admin_analytics_today")],
         [types.InlineKeyboardButton(text="📅 النشاط اليومي (آخر 14 يوم)", callback_data="admin_analytics_daily")],
+        [types.InlineKeyboardButton(text="🐞 آخر الأخطاء", callback_data="admin_recent_errors")],
+        [types.InlineKeyboardButton(text="🎯 قائمة الإحالات", callback_data="admin_referrals_1")],
         [types.InlineKeyboardButton(text="📥 تصدير سجل الأحداث CSV", callback_data="admin_export_events")],
         [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]

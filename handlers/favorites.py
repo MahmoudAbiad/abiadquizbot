@@ -11,7 +11,7 @@ from constants import (
 )
 from supabase_helper import (
     list_favorite_quizzes, list_favorite_sections,
-    get_favorite_quiz, remove_favorite_quiz,
+    get_favorite_quiz, remove_favorite_quiz, log_usage_event,
     supabase # 🆕 تم استيراد كائن سوبابيس لعمل الاستعلام المباشر للـ UUID
 )
 from keyboards import (
@@ -270,6 +270,7 @@ async def open_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
             origin="favorite",
             quiz_id=str(actual_quiz_id) if actual_quiz_id else "" # تمرير المعرف الفريد للمركزية
         )
+        asyncio.create_task(log_usage_event(call.from_user.id, "favorite_opened", {"favorite_id": fid}))
     except Exception as e: 
         log_error(logger, f"Error in open_favorite_quiz: {e}")
         await call.answer("❌ تعذر تشغيل واختبار هذا الكويز حالياً", show_alert=True)
@@ -282,6 +283,7 @@ async def delete_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
         fid = call.data.replace("fav_del_", "", 1)
         if await remove_favorite_quiz(call.from_user.id, fid):
             await call.answer("🗑️ تم مسح الاختبار من قائمتك المفضلة وتفريغ مساحته.", show_alert=True)
+            asyncio.create_task(log_usage_event(call.from_user.id, "favorite_deleted", {"favorite_id": fid}))
             await _send_favorites_menu(call, state)
         else: 
             await call.answer("❌ تعذر إتمام طلب الحذف", show_alert=True)

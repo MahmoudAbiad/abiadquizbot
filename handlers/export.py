@@ -20,7 +20,7 @@ from services.export_service import (
     build_quiz_docx,
     build_quiz_pdf,
 )
-from supabase_helper import get_favorite_quiz
+from supabase_helper import get_favorite_quiz, log_usage_event
 
 logger = get_logger(__name__)
 router = Router()
@@ -63,6 +63,10 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
         document = BufferedInputFile(file_bytes, filename=filename)
         await call.message.answer_document(document=document, caption=caption)
         await status.delete()
+
+        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_exported", {
+            "format": fmt, "style": style, "title": title,
+        }))
     except ExportError as e:
         try:
             await status.edit_text(f"❌ {e}")

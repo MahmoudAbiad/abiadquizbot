@@ -27,7 +27,7 @@ from handlers import (
     tutorial_router,
     audio_router
 )
-from middlewares import ThrottlingMiddleware
+from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
 
 # تهيئة Sentry للتتبع
 SENTRY_DSN = os.getenv("SENTRY_DSN")
@@ -45,6 +45,12 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = get_logger(__name__)
 
 def main():
+    # 0. 🐞 تتبع الأخطاء: يغطي كل أنواع الـ Update (رسائل/أزرار/إجابات استفتاء...) ويُسجَّل
+    # كل خطأ يواجهه الطالب فعلياً بلوحة تحليلات الأدمن. يجب تسجيله كـ outer middleware
+    # (أول شيء يشتغل وآخر شيء يلف حوله) ليغطي أي استثناء يحدث بأي مرحلة لاحقة، بما فيها
+    # ThrottlingMiddleware نفسها.
+    dp.update.outer_middleware(ErrorTrackingMiddleware())
+
     # 1. تفعيل الحماية من التكرار (Rate Limiting)
     dp.message.middleware(ThrottlingMiddleware(limit=1.2))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
