@@ -294,7 +294,7 @@ async def upload_quiz_question_image(image_bytes: bytes, object_path: str) -> Op
             file=image_bytes,
             file_options={"content-type": "image/png", "upsert": "true"},
         )
-        return supabase.storage.from_(QUIZ_IMAGES_BUCKET).get_public_url(object_path)
+        return await supabase.storage.from_(QUIZ_IMAGES_BUCKET).get_public_url(object_path)
     except Exception as e:
         log_warning(logger, f"Could not upload quiz question image to storage (falling back to raw bytes): {e}")
         return None
