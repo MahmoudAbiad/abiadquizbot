@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>رفع محتوى كبير</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tus-js-client@4/dist/tus.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -298,6 +297,28 @@ function clearError() {
   statusText.textContent = "";
 }
 
+// 🆕 رفع ملف واحد مباشرة إلى Cloudflare R2 عبر رابط موقّع (presigned PUT) - طلب
+// واحد بدون تجزئة/استئناف (بديل tus.Upload القديم الخاص بـ Supabase)، كافٍ تماماً
+// لحدودنا الحالية (250MB صوت / 100MB ملفات / 15MB لكل صورة).
+function uploadToPresignedUrl(file, uploadUrl, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl);
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.upload.onprogress = function (e) {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`Upload failed with status ${xhr.status}`));
+    };
+    xhr.onerror = function () {
+      reject(new Error("Network error during upload"));
+    };
+    xhr.send(file);
+  });
+}
+
 // ==================== مسار ملف مفرد (صوت أو مستند - نفس منطق الرفع تماماً) ====================
 
 async function handleSingleFile(file) {
@@ -328,59 +349,35 @@ async function handleSingleFile(file) {
       return;
     }
 
-    const initData = await initRes.json();
+    const initData = await initRes.json(); // { upload_url, object_path }
 
-    const upload = new tus.Upload(file, {
-      endpoint: initData.upload_endpoint,
-      retryDelays: [0, 3000, 5000, 10000, 20000],
-      chunkSize: 6 * 1024 * 1024,
-      headers: { "x-upsert": "true", "x-signature": initData.token },
-      metadata: {
-        bucketName: initData.bucket,
-        objectName: initData.object_path,
-        contentType: file.type || "application/octet-stream",
-        cacheControl: "3600",
-      },
-      uploadDataDuringCreation: true,
-      removeFingerprintOnSuccess: true,
-      onError: function (error) {
-        console.error(error);
-        showError("❌ انقطع الرفع ولم تنجح إعادة المحاولة. تحقق من اتصالك وحاول مجدداً.");
-      },
-      onProgress: function (bytesUploaded, bytesTotal) {
-        const percent = ((bytesUploaded / bytesTotal) * 100).toFixed(0);
-        progressFill.style.width = percent + "%";
-        progressText.textContent = `${percent}% (${(bytesUploaded / (1024 * 1024)).toFixed(1)} / ${(bytesTotal / (1024 * 1024)).toFixed(1)} MB)`;
-        statusText.textContent = "📤 جارٍ الرفع... يمكن إغلاق الشاشة و سيكمل تلقائياً في الخلفية";
-      },
-      onSuccess: async function () {
-        statusText.textContent = "✅ اكتمل الرفع، جارٍ التأكيد...";
-        progressFill.style.width = "100%";
-        try {
-          const completeRes = await fetch(cfg.completeEndpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ init_data: tg.initData, object_path: initData.object_path, file_name: file.name }),
-          });
-          if (!completeRes.ok) {
-            showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
-            return;
-          }
-          statusText.textContent = "✅ تم! رجّعك عالمحادثة...";
-          setTimeout(() => tg.close(), 800);
-        } catch (e) {
-          showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
-        }
-      },
+    await uploadToPresignedUrl(file, initData.upload_url, (loaded, total) => {
+      const percent = ((loaded / total) * 100).toFixed(0);
+      progressFill.style.width = percent + "%";
+      progressText.textContent = `${percent}% (${(loaded / (1024 * 1024)).toFixed(1)} / ${(total / (1024 * 1024)).toFixed(1)} MB)`;
+      statusText.textContent = "📤 جارٍ الرفع... يمكن إغلاق الشاشة و سيكمل تلقائياً في الخلفية";
     });
 
-    upload.findPreviousUploads().then(function (previousUploads) {
-      if (previousUploads.length) upload.resumeFromPreviousUpload(previousUploads[0]);
-      upload.start();
-    });
+    statusText.textContent = "✅ اكتمل الرفع، جارٍ التأكيد...";
+    progressFill.style.width = "100%";
+    try {
+      const completeRes = await fetch(cfg.completeEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ init_data: tg.initData, object_path: initData.object_path, file_name: file.name }),
+      });
+      if (!completeRes.ok) {
+        showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+        return;
+      }
+      statusText.textContent = "✅ تم! رجّعك عالمحادثة...";
+      setTimeout(() => tg.close(), 800);
+    } catch (e) {
+      showError("⚠️ اكتمل الرفع لكن تعذر إعلام البوت، يرجى إعادة المحاولة من البوت.");
+    }
   } catch (e) {
     console.error(e);
-    showError("❌ حدث خطأ غير متوقع، حاول مجدداً.");
+    showError("❌ انقطع الرفع أو حدث خطأ غير متوقع. تحقق من اتصالك وحاول مجدداً.");
   }
 }
 
@@ -431,7 +428,7 @@ async function handleImages(files) {
       return;
     }
 
-    const initData = await initRes.json();
+    const initData = await initRes.json(); // { targets: [{object_path, upload_url}, ...] }
     const totalBytes = files.reduce((s, f) => s + f.size, 0);
     let uploadedBytesPerFile = new Array(files.length).fill(0);
 
@@ -442,46 +439,28 @@ async function handleImages(files) {
       progressText.textContent = `${percent}% (${(uploaded / (1024 * 1024)).toFixed(1)} / ${(totalBytes / (1024 * 1024)).toFixed(1)} MB)`;
     }
 
-    function uploadOne(file, index) {
-      return new Promise((resolve, reject) => {
-        const target = initData.targets[index];
-        const upload = new tus.Upload(file, {
-          endpoint: initData.upload_endpoint,
-          retryDelays: [0, 3000, 5000, 10000, 20000],
-          chunkSize: 6 * 1024 * 1024,
-          headers: { "x-upsert": "true", "x-signature": target.token },
-          metadata: {
-            bucketName: initData.bucket,
-            objectName: target.object_path,
-            contentType: file.type || "image/jpeg",
-            cacheControl: "3600",
-          },
-          uploadDataDuringCreation: true,
-          removeFingerprintOnSuccess: true,
-          onError: function (error) {
-            console.error(error);
-            listItems[index].classList.add("error");
-            reject(error);
-          },
-          onProgress: function (bytesUploaded) {
-            uploadedBytesPerFile[index] = bytesUploaded;
-            updateOverallProgress();
-          },
-          onSuccess: function () {
-            uploadedBytesPerFile[index] = file.size;
-            listItems[index].classList.add("done");
-            listItems[index].textContent = `✅ ${index + 1}. ${file.name}`;
-            updateOverallProgress();
-            resolve(target.object_path);
-          },
+    // رفع الصور بالتوازي (كل صورة عبر رابطها الموقّع الخاص فيها على R2)
+    async function uploadOne(file, index) {
+      const target = initData.targets[index];
+      try {
+        await uploadToPresignedUrl(file, target.upload_url, (loaded) => {
+          uploadedBytesPerFile[index] = loaded;
+          updateOverallProgress();
         });
-        upload.findPreviousUploads().then(function (previousUploads) {
-          if (previousUploads.length) upload.resumeFromPreviousUpload(previousUploads[0]);
-          upload.start();
-        });
-      });
+        uploadedBytesPerFile[index] = file.size;
+        listItems[index].classList.add("done");
+        listItems[index].textContent = `✅ ${index + 1}. ${file.name}`;
+        updateOverallProgress();
+        return target.object_path;
+      } catch (error) {
+        console.error(error);
+        listItems[index].classList.add("error");
+        throw error;
+      }
     }
 
+    // تحديد تزامن الرفعات بحد أقصى 4 صور بنفس الوقت - توازن بين السرعة وعدم إغراق
+    // الاتصال بعدد كبير من الاتصالات المتوازية دفعة وحدة (خصوصاً بالجوال).
     const CONCURRENCY = 4;
     statusText.textContent = "📤 جارٍ رفع الصور... يمكن إغلاق الشاشة و سيكمل تلقائياً في الخلفية";
     const results = new Array(files.length);
