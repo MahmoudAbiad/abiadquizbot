@@ -3,6 +3,7 @@ import asyncio
 import io
 import csv
 import json
+import html
 from typing import Optional, Dict
 from datetime import datetime, timezone, timedelta
 from constants import SYRIA_TZ, USER_QUIZZES_PAGE_SIZE, format_syria_time as _format_syria_time
@@ -251,6 +252,113 @@ async def process_broadcast_text(msg: types.Message, state: FSMContext):
         "⚠️ <b>هل أنت متأكد من إرسال هذه الرسالة لكافة الطلاب؟</b>"
     )
     await msg.answer(preview, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+
+
+# ==================== مسار الرسالة المخصصة لمستخدم واحد ====================
+
+@router.callback_query(F.data == "admin_direct_message_prompt")
+async def callback_direct_message_prompt(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminState.waiting_for_direct_message_target)
+    await safe_edit_text(
+        call.message,
+        "✉️ <b>إرسال رسالة مخصصة</b>\n\nأرسل الآن آيدي المستخدم أو معرفه مثل <code>@username</code>:",
+        reply_markup=get_cancel_keyboard(),
+    )
+    await call.answer()
+
+
+@router.message(AdminState.waiting_for_direct_message_target)
+async def process_direct_message_target(msg: types.Message, state: FSMContext):
+    query = (msg.text or "").strip()
+    if not query:
+        return await msg.answer("⚠️ أرسل آيدي المستخدم أو معرفه.", reply_markup=get_cancel_keyboard())
+
+    users_data = await admin_search_user(query)
+    if not users_data:
+        return await msg.answer(
+            "❌ لم يتم العثور على مستخدم بهذا الآيدي أو المعرف. حاول مجدداً:",
+            reply_markup=get_cancel_keyboard(),
+        )
+
+    user = users_data[0]
+    target_id = int(user["user_id"])
+    await state.update_data(
+        direct_message_target_id=target_id,
+        direct_message_target_name=(
+            f"@{user['username']}" if user.get("username") and user["username"] != "Unknown"
+            else str(target_id)
+        ),
+    )
+    await state.set_state(AdminState.waiting_for_direct_message_text)
+    await msg.answer(
+        f"📝 المستخدم المستهدف: <code>{target_id}</code>\n\nأرسل نص الرسالة التي تريد إرسالها:",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminState.waiting_for_direct_message_text)
+async def process_direct_message_text(msg: types.Message, state: FSMContext):
+    message_text = msg.text or ""
+    if not message_text.strip():
+        return await msg.answer("⚠️ يرجى إرسال نص للرسالة.", reply_markup=get_cancel_keyboard())
+    if len(message_text) > 4096:
+        return await msg.answer("❌ الرسالة طويلة جداً. الحد الأقصى هو 4096 حرفاً.", reply_markup=get_cancel_keyboard())
+
+    data = await state.get_data()
+    await state.update_data(direct_message_text=message_text)
+    await state.set_state(AdminState.waiting_for_direct_message_confirm)
+
+    preview = (
+        "🔍 <b>معاينة الرسالة المخصصة</b>\n"
+        f"المستخدم: <code>{html.escape(str(data['direct_message_target_id']))}</code>\n"
+        "───────────────────\n"
+        f"{html.escape(message_text)}\n"
+        "───────────────────\n\n"
+        "هل تريد تأكيد إرسالها؟"
+    )
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text="✅ تأكيد الإرسال", callback_data="admin_confirm_direct_message"),
+        types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_main_menu"),
+    ]])
+    await msg.answer(preview, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(
+    F.data == "admin_confirm_direct_message",
+    AdminState.waiting_for_direct_message_confirm,
+)
+async def process_confirm_direct_message(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    target_id = data.get("direct_message_target_id")
+    message_text = data.get("direct_message_text")
+    await state.clear()
+    await call.answer()
+
+    if not target_id or not message_text:
+        return await safe_edit_text(call.message, "❌ انتهت جلسة الرسالة، يرجى بدء العملية مجدداً.", reply_markup=get_admin_dashboard_keyboard())
+
+    try:
+        await bot.send_message(chat_id=int(target_id), text=message_text)
+    except TelegramForbiddenError:
+        return await safe_edit_text(
+            call.message,
+            f"🚫 تعذر إرسال الرسالة. المستخدم <code>{target_id}</code> حظر البوت أو لم يبدأ المحادثة.",
+            reply_markup=get_admin_dashboard_keyboard(),
+        )
+    except Exception as e:
+        logger.error(f"Error sending direct message to user {target_id}: {e}")
+        return await safe_edit_text(
+            call.message,
+            "❌ حدث خطأ أثناء إرسال الرسالة. حاول مجدداً.",
+            reply_markup=get_admin_dashboard_keyboard(),
+        )
+
+    await safe_edit_text(
+        call.message,
+        f"✅ تم إرسال الرسالة بنجاح إلى المستخدم <code>{target_id}</code>.",
+        reply_markup=get_admin_dashboard_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "admin_confirm_broadcast", AdminState.waiting_for_broadcast_confirm)

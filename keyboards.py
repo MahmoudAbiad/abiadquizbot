@@ -527,6 +527,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
     """لوحة تحكم الإدارة الرئيسية محدثة مع زر الإرسال الجماعي واستعراض الطلاب والكويزات والنشطين"""
     kb = [
         [types.InlineKeyboardButton(text="📢 إرسال رسالة جماعية", callback_data="admin_broadcast_prompt")],
+        [types.InlineKeyboardButton(text="✉️ إرسال رسالة مخصصة", callback_data="admin_direct_message_prompt")],
         [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
         [types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1")],
         [
