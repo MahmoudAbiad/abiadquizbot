@@ -37,7 +37,10 @@ class AdminState(StatesGroup):
     waiting_for_broadcast_text = State()
     waiting_for_broadcast_confirm = State()
     waiting_for_direct_message_target = State()
+    waiting_for_direct_message_mode = State()
     waiting_for_direct_message_text = State()
+    waiting_for_direct_message_charge_amount = State()
+    waiting_for_direct_message_charge_type = State()
     waiting_for_direct_message_confirm = State()
 
 

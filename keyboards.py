@@ -573,6 +573,21 @@ def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+def get_admin_direct_message_charge_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🎁 شحن مجاني", callback_data=f"admin_direct_charge_free_{user_id}")],
+        [types.InlineKeyboardButton(text="💳 شحن مدفوع", callback_data=f"admin_direct_charge_paid_{user_id}")],
+        [types.InlineKeyboardButton(text="⏭️ بدون شحن", callback_data=f"admin_direct_charge_none_{user_id}")],
+        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")],
+    ])
+
+def get_admin_direct_message_mode_keyboard() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✉️ رسالة عادية فقط", callback_data="admin_direct_mode_message")],
+        [types.InlineKeyboardButton(text="💰 رسالة مع شحن رصيد", callback_data="admin_direct_mode_charge")],
+        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")],
+    ])
+
 def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
     period_row = []
     for d, label in [(7, "7 أيام"), (30, "30 يوم"), (90, "90 يوم")]:
