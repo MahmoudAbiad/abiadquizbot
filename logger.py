@@ -76,6 +76,7 @@ def log_error(logger: logging.Logger, message: str, exception: Optional[Exceptio
         logger.error(message, exc_info=True)
     else:
         logger.error(message)
+    _track_error_for_current_user(message, exception)
 
 def log_debug(logger: logging.Logger, message: str) -> None:
     """Log debug level message"""
@@ -87,3 +88,38 @@ def log_critical(logger: logging.Logger, message: str, exception: Optional[Excep
         logger.critical(message, exc_info=True)
     else:
         logger.critical(message)
+    _track_error_for_current_user(message, exception)
+
+
+def _track_error_for_current_user(message: str, exception: Optional[Exception]) -> None:
+    """
+    يربط أي استدعاء لـ log_error()/log_critical() (من أي مكان بالمشروع) بالمستخدم الذي
+    كان يستخدم البوت لحظة حدوث الخطأ (إن وُجد سياق طلب حالي عبر error_context.py)، ويسجله
+    كحدث تحليلات (usage_events, event_type='error_occurred') يظهر بلوحة تحكم الأدمن.
+
+    مصمّم ليكون صامتاً تماماً عند الفشل: لا يرمي أي استثناء، ولا يستخدم log_error() نفسها
+    (لتفادي أي حلقة استدعاء ذاتية لا نهائية)، ولا يؤثر مطلقاً على تدفق الطالب الأساسي —
+    تماماً كباقي دوال التسجيل بالمشروع (fire-and-forget عبر asyncio.create_task).
+    """
+    try:
+        from error_context import get_error_context
+        ctx = get_error_context()
+        if not ctx or not ctx.user_id:
+            return
+
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # لا يوجد event loop نشط حالياً (مثلاً كود مزامن خارج سياق البوت)
+
+        from supabase_helper import log_error_event
+        loop.create_task(log_error_event(
+            user_id=ctx.user_id,
+            error_message=message,
+            exception=exception,
+            update_type=ctx.update_type,
+            context=ctx.context,
+        ))
+    except Exception:
+        pass

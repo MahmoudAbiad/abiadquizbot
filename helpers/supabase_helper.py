@@ -7,6 +7,7 @@ import asyncio
 import os
 import datetime
 import uuid
+import traceback
 from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv, find_dotenv
 from supabase import create_async_client
@@ -89,11 +90,14 @@ async def check_or_add_user(user_id: int, username: str, first_name: str, last_n
 async def _add_new_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int], today: str) -> Dict[str, Any]:
     try:
         actual_referrer = None
+        referrer_name = None
         if referrer_id and str(referrer_id) != str(user_id):
-            ref_check = await supabase.table("users").select("paid_points").eq("user_id", referrer_id).execute()
+            ref_check = await supabase.table("users").select("paid_points, first_name, last_name, username").eq("user_id", referrer_id).execute()
             if ref_check.data:
                 actual_referrer = referrer_id
-                new_ref_points = float(ref_check.data[0].get('paid_points') or 0) + REFERRAL_BONUS_POINTS
+                referrer_row = ref_check.data[0]
+                referrer_name = f"{referrer_row.get('first_name', '')} {referrer_row.get('last_name', '')}".strip() or referrer_row.get("username") or "غير معروف"
+                new_ref_points = float(referrer_row.get('paid_points') or 0) + REFERRAL_BONUS_POINTS
                 await supabase.table("users").update({"paid_points": new_ref_points}).eq("user_id", referrer_id).execute()
                 
         await supabase.table("users").insert({
@@ -107,7 +111,15 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
             "referred_by": actual_referrer,
             "last_renewal": today
         }).execute()
-        
+
+        # 🆕 تسجيل نشاط "انضم عبر رابط دعوة بواسطة فلان" — حدث تحليلات عادي (usage_events)
+        # يظهر بلوحة الأدمن ويُستخدم أيضاً كسجل زمني دقيق لكل إحالة جديدة من الآن فصاعداً
+        if actual_referrer:
+            asyncio.create_task(log_usage_event(user_id, "joined_via_referral", {
+                "referrer_id": actual_referrer,
+                "referrer_name": referrer_name,
+            }))
+
         return _balance_payload(WELCOME_POINTS, 0, status="new", referrer=actual_referrer)
     except Exception as e:
         log_error(logger, f"Error adding new user: {e}", exception=e)
@@ -831,7 +843,49 @@ async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict
         try:
             await redis_client.rpush("analytics_queue", json.dumps(payload))
         except Exception as redis_err:
-            log_error(logger, f"Error logging usage event for user {user_id}: {e} | Redis fallback failed: {redis_err}")
+            # ⚠️ نستخدم logger.error مباشرة هنا (وليس log_error) عن قصد: log_error تحاول
+            # ربط أي خطأ بالمستخدم الحالي عبر log_error_event، والتي بدورها تنادي
+            # log_usage_event — فلو استُخدمت log_error هنا لدخلنا بحلقة استدعاء ذاتية
+            # لا نهائية عند فشل التسجيل. هذا الفشل بالذات (فشل تسجيل + فشل احتياطي Redis)
+            # نادر جداً وغير حرج لتجربة الطالب، فيكفي تسجيله بالـ logger فقط.
+            logger.error(f"Error logging usage event for user {user_id}: {e} | Redis fallback failed: {redis_err}")
+
+# 1️⃣.5 تسجيل الأخطاء التي يواجهها الطالب فعلياً (خطأ = حدث بنوع 'error_occurred')
+async def log_error_event(user_id: int, error_message: str, exception: Optional[Exception] = None,
+                           update_type: Optional[str] = None, context: Optional[str] = None,
+                           unhandled: bool = False) -> None:
+    """
+    تسجيل خطأ واجهه طالب فعلياً أثناء استخدام البوت، كحدث تحليلات عادي بجدول usage_events
+    (event_type='error_occurred') — بنفس آلية log_usage_event تماماً (صامتة عند الفشل،
+    مع مسار احتياطي عبر Redis)، فيظهر تلقائياً بلوحة الأدمن (قائمة الأحداث، تصدير CSV،
+    وقسم "🐞 آخر الأخطاء" المخصص).
+
+    تُستدعى تلقائياً من logger.log_error()/log_critical() لأي استدعاء بأي مكان بالمشروع
+    طالما هناك سياق مستخدم حالي (راجع error_context.py)، بالإضافة لاستدعاء صريح من
+    ErrorTrackingMiddleware عند حدوث استثناء غير متوقع بالكامل لم يلتقطه أي try/except
+    محلي (unhandled=True).
+    """
+    tb_str = None
+    if exception is not None:
+        try:
+            tb_str = "".join(
+                traceback.format_exception(type(exception), exception, exception.__traceback__)
+            )[-2000:]  # آخر 2000 حرف كافية عادةً لمعرفة مكان الخطأ دون تضخيم الصف بالداتابيز
+        except Exception:
+            tb_str = None
+
+    metadata: Dict[str, Any] = {
+        "message": (error_message or "")[:500],
+        "error_type": type(exception).__name__ if exception else None,
+        "update_type": update_type,
+        "context": (context or "")[:200] if context else None,
+        "unhandled": unhandled,
+    }
+    if tb_str:
+        metadata["traceback"] = tb_str
+
+    await log_usage_event(user_id, "error_occurred", metadata)
+
 
 # 2️⃣ تفريغ طابور Redis بأمان دون فقدان البيانات (Transactional Pop)
 async def flush_analytics_queue() -> None:
@@ -939,7 +993,7 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
     empty = {
         "days": days, "active_users": 0, "event_counts": {}, "total_attempts": 0,
         "completed_attempts": 0, "completion_rate": 0.0, "avg_duration_seconds": 0,
-        "source_breakdown": {}, "avg_score_percentage": 0.0,
+        "source_breakdown": {}, "avg_score_percentage": 0.0, "error_count": 0, "users_with_errors": 0,
     }
     try:
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
@@ -955,6 +1009,10 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
         event_counts: Dict[str, int] = {}
         for e in events:
             event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
+
+        error_events = [e for e in events if e["event_type"] == "error_occurred"]
+        error_count = len(error_events)
+        users_with_errors = len({e["user_id"] for e in error_events})
 
         # استعلام المحاولات مع استبعاد الآدمن
         attempts_query = supabase.table("quiz_attempts").select(
@@ -991,6 +1049,8 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
             "avg_duration_seconds": avg_duration,
             "source_breakdown": source_breakdown,
             "avg_score_percentage": avg_score_pct,
+            "error_count": error_count,
+            "users_with_errors": users_with_errors,
         }
     except Exception as e:
         log_error(logger, f"Error building usage overview: {e}")
@@ -1080,6 +1140,97 @@ async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
         return res.data or []
     except Exception as e:
         log_error(logger, f"Error exporting usage events: {e}")
+        return []
+
+
+async def admin_get_recent_errors(limit: int = 20, days: int = 7) -> List[Dict[str, Any]]:
+    """جلب آخر الأخطاء التي واجهها الطلاب فعلياً (event_type='error_occurred') مع بيانات الطالب."""
+    try:
+        since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
+        query = supabase.table("usage_events") \
+            .select("user_id, metadata, created_at") \
+            .eq("event_type", "error_occurred") \
+            .gte("created_at", since)
+        if ADMIN_ID:
+            query = query.neq("user_id", ADMIN_ID)
+        res = await query.order("created_at", desc=True).limit(limit).execute()
+        errors = res.data or []
+        if not errors:
+            return []
+
+        user_ids = list({e["user_id"] for e in errors if e.get("user_id")})
+        users_map = {}
+        if user_ids:
+            users_res = await supabase.table("users") \
+                .select("user_id, first_name, last_name, username") \
+                .in_("user_id", user_ids) \
+                .execute()
+            users_map = {u["user_id"]: u for u in (users_res.data or [])}
+
+        for e in errors:
+            e["user"] = users_map.get(e.get("user_id"), {})
+            e["time_str"] = format_syria_time(e.get("created_at"), fmt="%I:%M %p (%Y-%m-%d)")
+
+        return errors
+    except Exception as e:
+        log_error(logger, f"Error fetching recent errors: {e}")
+        return []
+
+
+async def admin_get_referral_leaderboard(limit: int = 30) -> List[Dict[str, Any]]:
+    """
+    يبني ترتيب الطلاب الذين أحالوا غيرهم (الأكثر إحالة أولاً)، مع القائمة الكاملة لمن
+    انضم عن طريق كل واحد منهم (لعرضها كقائمة منفردة عند الطلب، حتى لا تزدحم الواجهة
+    الرئيسية بأسماء كل المُحالين دفعة واحدة).
+
+    المصدر: عمود users.referred_by (مصدر رسمي وكامل تاريخياً لكل الإحالات، وليس فقط ما
+    بعد إضافة حدث joined_via_referral)، لذا يشمل كل الإحالات القديمة والجديدة.
+    """
+    try:
+        res = await supabase.table("users") \
+            .select("user_id, first_name, last_name, username, referred_by") \
+            .not_.is_("referred_by", "null") \
+            .execute()
+        referred_users = res.data or []
+        if not referred_users:
+            return []
+
+        referrer_ids = list({u["referred_by"] for u in referred_users if u.get("referred_by")})
+        referrers_res = await supabase.table("users") \
+            .select("user_id, first_name, last_name, username") \
+            .in_("user_id", referrer_ids) \
+            .execute()
+        referrers_map = {u["user_id"]: u for u in (referrers_res.data or [])}
+
+        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        for u in referred_users:
+            grouped.setdefault(u["referred_by"], []).append(u)
+
+        def _display_name(row: Dict[str, Any]) -> str:
+            return f"{row.get('first_name', '')} {row.get('last_name', '')}".strip() or row.get("username") or "غير معروف"
+
+        leaderboard = []
+        for ref_id, referred_list in grouped.items():
+            referrer_row = referrers_map.get(ref_id, {})
+            leaderboard.append({
+                "referrer_id": ref_id,
+                "referrer_name": _display_name(referrer_row),
+                "referrer_username": referrer_row.get("username"),
+                "referral_count": len(referred_list),
+                "referred_users": [
+                    {
+                        "user_id": u["user_id"],
+                        "name": _display_name(u),
+                        "username": u.get("username"),
+                    }
+                    for u in referred_list
+                ],
+            })
+
+        leaderboard.sort(key=lambda x: x["referral_count"], reverse=True)
+        return leaderboard[:limit]
+    except Exception as e:
+        log_error(logger, f"Error building referral leaderboard: {e}")
         return []
 
 
