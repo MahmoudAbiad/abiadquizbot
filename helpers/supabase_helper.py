@@ -176,20 +176,37 @@ async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
 
 # ==================== Central Quiz & Cache Operations ====================
 
+def _is_transient_jwt_clock_skew_error(error: Exception) -> bool:
+    """🩹 خطأ PGRST303 ('JWT issued at future') متقطع وغير متعلق بالكود - سببه انزياح
+    بسيط بساعة نظام الـ dyno (clock skew) وقت restart أحياناً، وليس مشكلة بالتوكن نفسه
+    (SUPABASE_KEY ثابت من env، لا يُبنى بالكود). عادة يزول خلال ثوانٍ لما الساعة تتزامن
+    من جديد عبر NTP، فمحاولة واحدة بعد تأخير بسيط كفيلة بحله دون التأثير على أي مسار آخر."""
+    message = str(error).lower()
+    return "pgrst303" in message or "jwt issued at future" in message
+
+
 async def get_file_quizzes(file_hash: str) -> list:
     """جلب كل الكويزات التابعة للملف مرتبة تلقائياً حسب التقييم الأعلى لزملائك الطلاب.
     🆕 يشمل الآن subject_type/question_type/question_type_label/difficulty لعرض
     تفاصيل كل كويز مخزّن (نوع + صعوبة) وللسماح بالفلترة والتحقق من سقف كل تركيبة
-    على حدة بدل سقف مشترك واحد للملف بأكمله."""
-    try:
-        res = await supabase.table("quizzes").select(
-            "id, likes, dislikes, score, quiz_data, is_math_quiz, "
-            "subject_type, question_type, question_type_label, difficulty"
-        ).eq("file_hash", file_hash).order("score", desc=True).execute()
-        return res.data or []
-    except Exception as e:
-        log_error(logger, f"Error getting file quizzes from central table: {e}")
-        return []
+    على حدة بدل سقف مشترك واحد للملف بأكمله.
+    🩹 يعيد المحاولة مرة واحدة عند PGRST303 (انزياح ساعة مؤقت) بدل الاستسلام فوراً
+    وإرجاع قائمة فارغة (كانت تُفسَّر خطأً كـ"لا يوجد كويزات محفوظة لهذا الملف")."""
+    for attempt in range(2):
+        try:
+            res = await supabase.table("quizzes").select(
+                "id, likes, dislikes, score, quiz_data, is_math_quiz, "
+                "subject_type, question_type, question_type_label, difficulty"
+            ).eq("file_hash", file_hash).order("score", desc=True).execute()
+            return res.data or []
+        except Exception as e:
+            if attempt == 0 and _is_transient_jwt_clock_skew_error(e):
+                log_warning(logger, f"Transient JWT clock-skew error getting file quizzes, retrying once: {e}")
+                await asyncio.sleep(2)
+                continue
+            log_error(logger, f"Error getting file quizzes from central table: {e}")
+            return []
+    return []
 
 async def save_file_quiz_multiple(
     file_hash: str, creator_id: int, source_title: str, quiz_data: list, total_tokens: int,
