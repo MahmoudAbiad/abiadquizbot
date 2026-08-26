@@ -39,6 +39,10 @@ class QuizState(StatesGroup):
     waiting_for_audio_action = State()      # 🆕 انتظار قرار الطالب بعد تفريغ المحاضرة الصوتية (تلخيص/تصدير/كويز/إرسال النص)
     processing_audio = State()              # 🆕 قفل مؤقت أثناء تحميل/تفريغ محاضرة صوتية قائمة، لمنع معالجة مضاعفة لو وصل مقطع صوتي ثانٍ قبل انتهاء الأول
     processing_web_file = State()           # 🆕 نظير processing_audio لملف/ألبوم صور مرفوع عبر صفحة الويب قيد التحميل/الفحص
+    processing_file_quiz = State()          # 🆕 قفل مؤقت أثناء تنفيذ execute_quiz_generation_workflow الفعلي (بعد ضغط "ابدأ التوليد") -
+                                             # يمنع أي رسالة/ملف جديد وصل بهالأثناء من حذف ملفات الطلب الجاري معالجته حالياً عند Gemini
+                                             # (كانت هاي الحالة تضل waiting_for_count طول التوليد، وهي جوا PENDING_REQUEST_STATES، فأي
+                                             # إرسال ثانٍ للملف كان يُفسَّر كـ"استبدال طلب معلّق" ويحذف الملف وهو لسا قيد الرفع لـ Gemini).
     
 # ==================== Bot Initialization Helpers ====================
 def _get_bot_token() -> str:

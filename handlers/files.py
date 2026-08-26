@@ -69,6 +69,31 @@ async def _discard_pending_upload(state: FSMContext) -> int:
     removed = sum(1 for path in file_paths if safe_file_cleanup(path))
     return removed
 
+
+async def _run_processing_heartbeat(status_msg: types.Message, interval_seconds: int = 20) -> None:
+    """🩹 يحدّث رسالة "جاري المعالجة" دورياً بوقت منقضي واضح طول مدة انتظار Gemini
+    (يمكن تطول جداً وقت الازدحام - راجع التعليق بمكان الاستدعاء). يُنهى فوراً عبر
+    asyncio.CancelledError بمجرد ما يخلص التوليد (finally بمكان الاستدعاء) - لا داعي
+    لأي شرط خروج آخر. أي فشل بالتعديل (رسالة محذوفة، rate limit...) غير حرج وتم تجاهله."""
+    elapsed = 0
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            elapsed += interval_seconds
+            minutes = elapsed // 60
+            seconds = elapsed % 60
+            time_label = f"{minutes} دقيقة و{seconds} ثانية" if minutes else f"{seconds} ثانية"
+            try:
+                await status_msg.edit_text(
+                    f"🤖 لسا عم نعالج المستند ونولّد الأسئلة... ({time_label})\n"
+                    "الذكاء الاصطناعي مزدحم شوي حالياً، بس طلبك قيد التنفيذ فعلياً - ما في داعي "
+                    "لإعادة إرسال نفس الملف."
+                )
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        pass
+
 async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> None:
     if user_info.get("status") == "renewed":
         await message.answer(f"☀️ تم تجديد رصيدك اليومي إلى <b>{DAILY_RENEWAL_POINTS} نقطة مجانية</b>.", parse_mode="HTML")
@@ -420,6 +445,13 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
             await state.clear()
             await message.answer("ℹ️ <b>تم إيقاف اختبارك السابق تلقائياً وجاري معالجة المحتوى الجديد...</b>", parse_mode="HTML")
 
+        elif current_state == QuizState.processing_file_quiz:
+            # 🩹 طلب توليد فعلي قيد التنفيذ عند Gemini حالياً (بعد ضغط "ابدأ التوليد") - لازم
+            # نرفض أي ملف جديد بدل حذف/استبدال الطلب الحالي، وإلا بنحذف الملف يلي عم يُرفع
+            # فعلياً لـ Gemini بهالّحظة ونفشّل التوليد بالكامل (راجع handle_count_start).
+            await message.answer("⏳ في طلب توليد كويز قيد المعالجة حالياً؛ يرجى الانتظار حتى ينتهي قبل إرسال ملف جديد.")
+            return
+
         elif current_state in PENDING_REQUEST_STATES:
             if await _discard_pending_upload(state):
                 await message.answer(MSG_PREVIOUS_REQUEST_REPLACED)
@@ -727,7 +759,25 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
 
         status_msg = await call.message.answer(MSG_PROCESSING)
 
-        quiz_data, new_quiz_id, error_code = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
+        # 🩹 إصلاح خلل حقيقي: كانت الحالة تضل waiting_for_count (وهي جوا PENDING_REQUEST_STATES)
+        # طوال مدة execute_quiz_generation_workflow (يلي ممكن تاخد دقايق طويلة لما Gemini يكون
+        # overloaded). فلو الطالب أرسل نفس الملف/صورة مرة ثانية بهالأثناء (توقعاً إنو الطلب الأول
+        # ضاع)، handle_media كان يفسّرها كـ"استبدال طلب معلّق" ويحذف ملفات الطلب الأول من الديسك
+        # وهي لسا قيد الرفع الفعلي لـ Gemini - يفشل التوليد بالكامل بخطأ "not a valid file path"
+        # عبر كل المفاتيح/الموديلات بالـ cascade. قفل الحالة هون يمنع هالتضارب.
+        await state.set_state(QuizState.processing_file_quiz)
+
+        # 🩹 UX: Gemini بيصير أحياناً overloaded لدقائق طويلة (شفنا حالات وصلت ~20 دقيقة
+        # باللوغز) وMSG_PROCESSING بيوعد بـ"ثوانٍ معدودة" فقط - هالفجوة كانت تدفع الطالب
+        # يعيد إرسال نفس الملف ظناً إنو الطلب ضاع (وهو تحديداً السبب يلي كان يفعّل خلل حذف
+        # الملف الموصوف فوق). heartbeat خفيف هون بيحدّث نفس الرسالة كل ~20 ثانية بوقت
+        # منقضي واضح، بلا أي تأثير على منطق التوليد نفسه - يُلغى تلقائياً بمجرد انتهاء
+        # execute_quiz_generation_workflow (نجاحاً أو فشلاً) عبر finally.
+        heartbeat_task = asyncio.create_task(_run_processing_heartbeat(status_msg))
+        try:
+            quiz_data, new_quiz_id, error_code = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
+        finally:
+            heartbeat_task.cancel()
 
         if error_code == "unreadable_office":
             await refund_user_on_failure(call.from_user.id, data)
@@ -823,6 +873,12 @@ async def process_web_uploaded_file(
         await bot.send_message(chat_id, "⏳ لديك ملف آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
         await delete_file_temp(object_path)
         return
+    if current_state == QuizState.processing_file_quiz:
+        # 🩹 نفس إصلاح handle_media: طلب توليد فعلي قيد التنفيذ عند Gemini حالياً - لازم نرفض
+        # هذا الرفع الجديد بدل حذف/استبدال ملفات الطلب الجاري معالجته فعلياً.
+        await bot.send_message(chat_id, "⏳ في طلب توليد كويز قيد المعالجة حالياً؛ يرجى الانتظار حتى ينتهي قبل رفع ملف جديد.")
+        await delete_file_temp(object_path)
+        return
     if current_state in PENDING_REQUEST_STATES:
         if await _discard_pending_upload(state):
             await bot.send_message(chat_id, MSG_PREVIOUS_REQUEST_REPLACED)
@@ -896,6 +952,12 @@ async def process_web_uploaded_images(
         return
     if current_state == QuizState.processing_web_file:
         await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
+        await delete_file_temp_batch(object_paths)
+        return
+    if current_state == QuizState.processing_file_quiz:
+        # 🩹 نفس إصلاح handle_media: طلب توليد فعلي قيد التنفيذ عند Gemini حالياً - لازم نرفض
+        # هذا الرفع الجديد بدل حذف/استبدال ملفات الطلب الجاري معالجته فعلياً.
+        await bot.send_message(chat_id, "⏳ في طلب توليد كويز قيد المعالجة حالياً؛ يرجى الانتظار حتى ينتهي قبل رفع ألبوم جديد.")
         await delete_file_temp_batch(object_paths)
         return
     if current_state in PENDING_REQUEST_STATES:
