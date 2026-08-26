@@ -9,6 +9,9 @@ from aiogram import Bot, Dispatcher, types
 # إضافة مكتبات Redis
 from aiogram.fsm.storage.redis import RedisStorage
 from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 from logger import get_logger
@@ -67,7 +70,24 @@ try:
     # يقوم بقراءة REDIS_URL من بيئة Railway، وإذا لم يجده يستخدم المحلي للتطوير
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     redis_kwargs = {"ssl_cert_reqs": None} if redis_url.startswith("rediss://") else {}
-    redis_client = Redis.from_url(redis_url, **redis_kwargs)
+    # 🩹 إصلاح خلل حقيقي: مزوّد Redis المُستخدَم فعلياً (Upstash عبر Heroku) بيقفل أي
+    # اتصال خامل (idle) من جهته بعد فترة قصيرة دون أي إشعار للعميل - فأول عملية Redis
+    # بعد فترة هدوء (مثلاً مستخدم ما تفاعل مع البوت لدقائق) كانت ترمي مباشرة
+    # ConnectionError('Connection lost') لأن الـ connection pool كان يعيد استخدام اتصال
+    # ميت دون علم. هيدا كان يُسقط أي تحديث تيليجرام بالكامل (dp.feed_update بيفشل، والبوت
+    # أصلاً رد على تيليجرام بـ 200 OK فوراً قبل المعالجة، فتيليجرام ما بيعيد إرسالها إطلاقاً -
+    # يعني رسالة المستخدم بتضيع نهائياً بصمت من غير أي رد أو خطأ ظاهر له).
+    # الحل: health_check_interval بيخلي المكتبة تفحص كل اتصال دورياً وتستبدله لو ميت *قبل*
+    # الاستخدام الفعلي، وsocket_keepalive بيقلل احتمال انقطاعه بالأساس، وretry_on_error
+    # بيعطي محاولة تلقائية إضافية فوراً (بنفس الاتصال الجديد من الـ pool) لو انقطع رغم كل هيك.
+    redis_client = Redis.from_url(
+        redis_url,
+        socket_keepalive=True,
+        health_check_interval=30,
+        retry_on_error=[RedisConnectionError, RedisTimeoutError, ConnectionResetError],
+        retry=Retry(ExponentialBackoff(base=0.1, cap=1), retries=2),
+        **redis_kwargs,
+    )
     # إعداد التخزين الدائم (RedisStorage)
     # جعل حالة المستخدم وبياناته المؤقتة تنتهي وتُحذف تلقائياً من Redis بعد 15 ساعة من خمول المستخدم
     storage = RedisStorage(redis=redis_client, state_ttl=86400, data_ttl=86400)
