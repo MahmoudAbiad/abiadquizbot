@@ -32,8 +32,8 @@ from keyboards import (
 from logger import get_logger, log_error
 from supabase_helper import (
     check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped,
-    delete_file_temp, delete_file_temp_batch, download_file_temp_to_file,
 )
+from r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup
 from validators import validate_file_size, validate_question_count
 
