@@ -34,8 +34,8 @@ from services.audio_service import summarize_lecture_text, transcribe_audio_lect
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
 from supabase_helper import (
     check_or_add_user, refund_user_points, update_user_stats, log_usage_event,
-    download_audio_temp_to_file, delete_audio_temp,
 )
+from r2_helper import download_audio_temp_to_file, delete_audio_temp
 from utils import ensure_directory_exists, safe_file_cleanup
 
 logger = get_logger(__name__)
