@@ -15,7 +15,9 @@ from keyboards import (
     get_main_menu_keyboard,
     get_quiz_result_keyboard,
     get_quiz_exit_confirmation_keyboard,
-    get_rating_keyboard
+    get_rating_keyboard,
+    get_question_edit_keyboard,
+    get_answer_edit_keyboard,
 )
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import (
@@ -31,6 +33,7 @@ from supabase_helper import (
     start_quiz_attempt,
     complete_quiz_attempt,
     mark_quiz_attempt_stopped,
+    update_quiz_question,
     _is_valid_uuid
 )
 from services.quiz_engine import send_quiz_poll
@@ -43,6 +46,12 @@ ACTIVE_QUIZ_STATES = (
     QuizState.waiting_for_custom_name, 
     QuizState.waiting_for_new_section_title,
     QuizState.waiting_for_quiz_feedback
+)
+QUIZ_EDIT_STATES = (
+    QuizState.waiting_for_question_edit_choice,
+    QuizState.waiting_for_question_edit_text,
+    QuizState.waiting_for_answer_edit_choice,
+    QuizState.waiting_for_answer_edit_text,
 )
 
 # 🩹 نفس حالات الكويز النشط + None: تُستخدم حصراً لهاندلرات ويزارد "حفظ في المفضلة"
@@ -203,6 +212,154 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
             await state.update_data(score=current_data.get('score', 0) + 1)
     except Exception as e:
         log_error(logger, f"Error in handle_poll_answer: {e}", exception=e)
+
+
+@router.message(QuizState.answering_quiz, F.text == ".")
+async def request_question_edit(msg: types.Message, state: FSMContext):
+    """تبدأ التعديل فقط عند الرد على Poll السؤال الجاري بالنقطة."""
+    reply = msg.reply_to_message
+    if not reply or not reply.poll:
+        return
+    try:
+        poll_data = await redis_client.get(f"poll:{reply.poll.id}")
+        if not poll_data:
+            return
+        poll_info = json.loads(poll_data)
+        data = await state.get_data()
+        question_index = int(poll_info.get("question_index", -1))
+        if (poll_info.get("user_id") != msg.from_user.id or
+                question_index != data.get("current_index")):
+            return
+        questions = data.get("questions", [])
+        if not 0 <= question_index < len(questions):
+            return
+        await state.update_data(edit_question_index=question_index)
+        await state.set_state(QuizState.waiting_for_question_edit_choice)
+        await msg.answer(
+            "✏️ يمكنك تعديل السؤال، اختر ما تريد تعديله بالضبط:",
+            reply_markup=get_question_edit_keyboard(),
+        )
+    except Exception as e:
+        log_error(logger, f"Error starting question edit: {e}", exception=e)
+
+
+@router.callback_query(QuizState.waiting_for_question_edit_choice, F.data == "edit_question_text")
+async def request_question_text_edit(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(QuizState.waiting_for_question_edit_text)
+    await call.message.answer("✏️ أرسل الآن نص السؤال المعدّل:")
+    await call.answer()
+
+
+@router.callback_query(QuizState.waiting_for_question_edit_choice, F.data == "edit_question_answer")
+async def request_answer_edit(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    question_index = data.get("edit_question_index")
+    questions = data.get("questions", [])
+    if not isinstance(question_index, int) or not 0 <= question_index < len(questions):
+        await call.answer("❌ انتهت جلسة التعديل، أرسل النقطة مجدداً.", show_alert=True)
+        return
+    await state.set_state(QuizState.waiting_for_answer_edit_choice)
+    await call.message.answer(
+        "📝 اختر الإجابة التي تريد تعديلها:",
+        reply_markup=get_answer_edit_keyboard(questions[question_index].get("options", [])),
+    )
+    await call.answer()
+
+
+@router.callback_query(QuizState.waiting_for_answer_edit_choice, F.data.startswith("edit_answer_"))
+async def select_answer_to_edit(call: types.CallbackQuery, state: FSMContext):
+    try:
+        option_index = int(call.data.replace("edit_answer_", ""))
+        data = await state.get_data()
+        question_index = data.get("edit_question_index")
+        questions = data.get("questions", [])
+        if not isinstance(question_index, int) or not 0 <= question_index < len(questions):
+            raise ValueError("invalid question index")
+        options = questions[question_index].get("options", [])
+        if not 0 <= option_index < len(options):
+            raise ValueError("invalid option index")
+        await state.update_data(edit_option_index=option_index)
+        await state.set_state(QuizState.waiting_for_answer_edit_text)
+        await call.message.answer(f"✏️ أرسل النص الجديد للإجابة رقم {option_index + 1}:")
+        await call.answer()
+    except Exception as e:
+        log_error(logger, f"Error selecting answer to edit: {e}", exception=e)
+        await call.answer("❌ تعذر اختيار الإجابة للتعديل.", show_alert=True)
+
+
+async def _save_edited_question(
+    msg: types.Message,
+    state: FSMContext,
+    question_index: int,
+    question: dict,
+    edit_type: str,
+    option_index: Optional[int] = None,
+) -> None:
+    data = await state.get_data()
+    quiz_id = data.get("quiz_id")
+    saved = await update_quiz_question(quiz_id, question_index, question) if quiz_id else False
+    asyncio.create_task(log_usage_event(msg.from_user.id, "quiz_question_edited", {
+        "quiz_id": quiz_id,
+        "question_index": question_index,
+        "edit_type": edit_type,
+        "option_index": option_index,
+        "database_updated": saved,
+    }))
+    questions = list(data.get("questions", []))
+    questions[question_index] = question
+    await state.update_data(questions=questions, current_index=question_index)
+    await state.set_state(QuizState.answering_quiz)
+    if saved:
+        await msg.answer("✅ تم تعديل السؤال في قاعدة البيانات والذاكرة المؤقتة. سيُعرض لك الآن بالسؤال المعدّل.")
+    else:
+        await msg.answer("✅ تم تعديل السؤال في الكويز الحالي. لا يوجد معرّف كويز دائم لتحديث قاعدة البيانات.")
+    await send_question(msg, state)
+
+
+@router.message(QuizState.waiting_for_question_edit_text, F.text)
+async def save_question_text_edit(msg: types.Message, state: FSMContext):
+    text = msg.text.strip()
+    if not text or len(text) > 2000:
+        await msg.answer("❌ نص السؤال غير صالح، أرسله بحد أقصى 2000 حرف.")
+        return
+    data = await state.get_data()
+    question_index = data.get("edit_question_index")
+    questions = data.get("questions", [])
+    if not isinstance(question_index, int) or not 0 <= question_index < len(questions):
+        await msg.answer("❌ انتهت جلسة التعديل، أرسل النقطة على السؤال مرة أخرى.")
+        await state.set_state(QuizState.answering_quiz)
+        return
+    question = dict(questions[question_index])
+    question["question"] = text
+    question.pop("image_url", None)
+    await _save_edited_question(msg, state, question_index, question, "question_text")
+
+
+@router.message(QuizState.waiting_for_answer_edit_text, F.text)
+async def save_answer_text_edit(msg: types.Message, state: FSMContext):
+    text = msg.text.strip()
+    if not text or len(text) > 500:
+        await msg.answer("❌ نص الإجابة غير صالح، أرسله بحد أقصى 500 حرف.")
+        return
+    data = await state.get_data()
+    question_index = data.get("edit_question_index")
+    option_index = data.get("edit_option_index")
+    questions = data.get("questions", [])
+    if (not isinstance(question_index, int) or not isinstance(option_index, int) or
+            not 0 <= question_index < len(questions)):
+        await msg.answer("❌ انتهت جلسة التعديل، أرسل النقطة على السؤال مرة أخرى.")
+        await state.set_state(QuizState.answering_quiz)
+        return
+    question = dict(questions[question_index])
+    options = list(question.get("options", []))
+    if not 0 <= option_index < len(options):
+        await msg.answer("❌ تعذر العثور على الإجابة المطلوبة.")
+        await state.set_state(QuizState.answering_quiz)
+        return
+    options[option_index] = text
+    question["options"] = options
+    question.pop("image_url", None)
+    await _save_edited_question(msg, state, question_index, question, "answer_text", option_index)
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "next_question")
 async def handle_next(call: types.CallbackQuery, state: FSMContext):

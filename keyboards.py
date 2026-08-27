@@ -141,6 +141,19 @@ def get_quiz_exit_confirmation_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+def get_question_edit_keyboard() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✏️ تعديل نص السؤال", callback_data="edit_question_text")],
+        [types.InlineKeyboardButton(text="📝 تعديل أحد الإجابات", callback_data="edit_question_answer")],
+    ])
+
+def get_answer_edit_keyboard(options: list) -> types.InlineKeyboardMarkup:
+    rows = [
+        [types.InlineKeyboardButton(text=f"{index + 1}. {str(option)[:45]}", callback_data=f"edit_answer_{index}")]
+        for index, option in enumerate(options)
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
 def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineKeyboardMarkup:
     """نسخة احتياطية بسيطة (بدون أسعار) - تُستخدم فقط كـ reply_markup لرسائل الخطأ
     (مثال: 'أدخل رقماً صحيحاً') حيث لا داعي لإعادة حساب التكلفة الكاملة."""

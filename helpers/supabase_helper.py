@@ -319,6 +319,24 @@ async def save_question_image_url(quiz_id: str, question_index: int, image_url: 
     except Exception as e:
         log_warning(logger, f"Could not cache question image URL for quiz {quiz_id}: {e}")
 
+async def update_quiz_question(quiz_id: str, question_index: int, question: Dict[str, Any]) -> bool:
+    """تحديث سؤال واحد داخل الكويز المركزي مع إبقاء بقية الأسئلة كما هي."""
+    if not _is_valid_uuid(quiz_id):
+        return False
+    try:
+        res = await supabase.table("quizzes").select("quiz_data").eq("id", quiz_id).limit(1).execute()
+        if not res.data:
+            return False
+        quiz_data = res.data[0].get("quiz_data") or []
+        if not 0 <= question_index < len(quiz_data):
+            return False
+        quiz_data[question_index] = question
+        await supabase.table("quizzes").update({"quiz_data": quiz_data}).eq("id", quiz_id).execute()
+        return True
+    except Exception as e:
+        log_error(logger, f"Error updating question {question_index} in quiz {quiz_id}: {e}")
+        return False
+
 # ==================== Shared Quiz Operations (Deep Linking) ====================
 def create_shared_quiz_id() -> str:
     return uuid.uuid4().hex[:12]

@@ -44,6 +44,7 @@ EVENT_LABELS = {
     "quiz_started": "🚀 بدء كويز",
     "quiz_completed": "🏁 إكمال كويز",
     "quiz_stopped": "⏹ إيقاف كويز مبكراً",
+    "quiz_question_edited": "✏️ تعديل سؤال أثناء الكويز",
     "quiz_shared": "🔗 مشاركة كويز",
     "share_link_created": "🔗 إنشاء رابط مشاركة",
     "shared_link_opened": "📬 فتح رابط مشترك",
