@@ -297,13 +297,21 @@ async def _save_edited_question(
 ) -> None:
     data = await state.get_data()
     quiz_id = data.get("quiz_id")
-    saved = await update_quiz_question(quiz_id, question_index, question) if quiz_id else False
+    saved = await update_quiz_question(quiz_id, question_index, question, msg.from_user.id) if quiz_id else None
+    if saved is None:
+        await state.set_state(QuizState.answering_quiz)
+        await msg.answer("⛔ لا تملك صلاحية تعديل هذا الكويز. يمكن لمالكه أو الأدمن فقط تعديله.")
+        return
+    if not saved:
+        await state.set_state(QuizState.answering_quiz)
+        await msg.answer("❌ تعذر حفظ التعديل في قاعدة البيانات، ولم يتم تغيير الكويز.")
+        return
     asyncio.create_task(log_usage_event(msg.from_user.id, "quiz_question_edited", {
         "quiz_id": quiz_id,
         "question_index": question_index,
         "edit_type": edit_type,
         "option_index": option_index,
-        "database_updated": saved,
+        "database_updated": True,
     }))
     questions = list(data.get("questions", []))
     questions[question_index] = question
