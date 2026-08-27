@@ -524,15 +524,17 @@ def get_pagination_keyboard(current_page: int, total_pages: int, query: str) -> 
 # ==================== Admin Keyboards ====================
 
 def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
-    """لوحة تحكم الإدارة الرئيسية محدثة مع زر الإرسال الجماعي واستعراض الطلاب والكويزات والنشطين"""
+    """لوحة الإدارة الرئيسية مرتبة حسب نوع العملية."""
     kb = [
-        [types.InlineKeyboardButton(text="📢 إرسال رسالة جماعية", callback_data="admin_broadcast_prompt")],
-        [types.InlineKeyboardButton(text="✉️ إرسال رسالة مخصصة", callback_data="admin_direct_message_prompt")],
+        [
+            types.InlineKeyboardButton(text="✉️ رسالة مخصصة", callback_data="admin_direct_message_prompt"),
+            types.InlineKeyboardButton(text="📢 رسالة جماعية", callback_data="admin_broadcast_prompt"),
+        ],
         [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
         [types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1")],
         [
-            types.InlineKeyboardButton(text="⚡ الطلاب النشطون اليوم", callback_data="admin_analytics_today"),
-            types.InlineKeyboardButton(text="🎯 كويزات اليوم", callback_data="admin_today_quizzes_p_1")
+            types.InlineKeyboardButton(text="⚡ النشطون اليوم", callback_data="admin_analytics_today"),
+            types.InlineKeyboardButton(text="🎯 كويزات اليوم", callback_data="admin_today_quizzes_p_1"),
         ],
         [
             types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
@@ -540,7 +542,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         ],
         [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
-        [types.InlineKeyboardButton(text="❌ إغلاق القائمة", callback_data="admin_cancel")]
+        [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
