@@ -546,7 +546,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
 
         [
             types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt"),
-            types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1"),
+            types.InlineKeyboardButton(text="👥 استعراض الطلاب", callback_data="admin_users_page_1"),
         ],
         [
             types.InlineKeyboardButton(text="⚡ النشطون اليوم", callback_data="admin_analytics_today"),
