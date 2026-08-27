@@ -286,6 +286,7 @@ async def process_direct_message_target(msg: types.Message, state: FSMContext):
     target_id = int(user["user_id"])
     await state.update_data(
         direct_message_target_id=target_id,
+        direct_message_balance_before=user_total_points(user),
         direct_message_target_name=(
             f"@{user['username']}" if user.get("username") and user["username"] != "Unknown"
             else str(target_id)
@@ -317,8 +318,8 @@ async def process_direct_message_text(msg: types.Message, state: FSMContext):
     message_text = msg.text or ""
     if not message_text.strip():
         return await msg.answer("⚠️ يرجى إرسال نص للرسالة.", reply_markup=get_cancel_keyboard())
-    if len(message_text) > 4096:
-        return await msg.answer("❌ الرسالة طويلة جداً. الحد الأقصى هو 4096 حرفاً.", reply_markup=get_cancel_keyboard())
+    if len(message_text) > 4000:
+        return await msg.answer("❌ الرسالة طويلة جداً. الحد الأقصى هو 4000 حرفاً لتوفير مساحة لتفاصيل الرصيد.", reply_markup=get_cancel_keyboard())
 
     data = await state.get_data()
     await state.update_data(direct_message_text=message_text)
@@ -364,11 +365,15 @@ async def show_direct_message_confirmation(message: types.Message, state: FSMCon
     data = await state.get_data()
     charge_type = data.get("direct_message_charge_type")
     amount = int(data.get("direct_message_charge_amount") or 0)
+    balance_before = float(data.get("direct_message_balance_before") or 0)
+    include_balance = bool(data.get("direct_message_include_balance"))
     charge_label = {"free": "مجاني", "paid": "مدفوع", "none": "بدون شحن"}.get(charge_type, "غير محدد")
     preview = (
         "🔍 <b>معاينة العملية</b>\n"
         f"المستخدم: <code>{html.escape(str(data['direct_message_target_id']))}</code>\n"
         f"الشحن: <code>{amount}</code> نقطة ({charge_label})\n"
+        f"الرصيد قبل الشحن: <code>{balance_before:.2f}</code> نقطة\n"
+        f"إرفاق الرصيد بالرسالة: {'☑️ نعم' if include_balance else '☐ لا'}\n"
         "───────────────────\n"
         f"{html.escape(data['direct_message_text'])}\n"
         "───────────────────\n\n"
@@ -377,6 +382,11 @@ async def show_direct_message_confirmation(message: types.Message, state: FSMCon
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
         types.InlineKeyboardButton(text="✅ تأكيد العملية", callback_data="admin_confirm_direct_message"),
         types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_main_menu"),
+    ], [
+        types.InlineKeyboardButton(
+            text="☑️ إرفاق الرصيد قبل/بعد الشحن" if include_balance else "☐ إرفاق الرصيد قبل/بعد الشحن",
+            callback_data="admin_direct_balance_toggle",
+        ),
     ]])
     await message.answer(preview, reply_markup=keyboard, parse_mode="HTML")
     await state.set_state(AdminState.waiting_for_direct_message_confirm)
@@ -386,6 +396,14 @@ async def show_direct_message_confirmation(message: types.Message, state: FSMCon
 async def process_direct_message_charge_type(call: types.CallbackQuery, state: FSMContext):
     charge_type = call.data.split("_")[3]
     await state.update_data(direct_message_charge_type=charge_type)
+    await call.answer()
+    await show_direct_message_confirmation(call.message, state)
+
+
+@router.callback_query(F.data == "admin_direct_balance_toggle", AdminState.waiting_for_direct_message_confirm)
+async def toggle_direct_message_balance(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(direct_message_include_balance=not bool(data.get("direct_message_include_balance")))
     await call.answer()
     await show_direct_message_confirmation(call.message, state)
 
@@ -400,6 +418,8 @@ async def process_confirm_direct_message(call: types.CallbackQuery, state: FSMCo
     message_text = data.get("direct_message_text")
     charge_amount = int(data.get("direct_message_charge_amount") or 0)
     charge_type = data.get("direct_message_charge_type", "none")
+    balance_before = float(data.get("direct_message_balance_before") or 0)
+    include_balance = bool(data.get("direct_message_include_balance"))
     await state.clear()
     await call.answer()
 
@@ -414,9 +434,19 @@ async def process_confirm_direct_message(call: types.CallbackQuery, state: FSMCo
                 "❌ تعذر شحن الرصيد، لذلك لم يتم إرسال الرسالة.",
                 reply_markup=get_admin_dashboard_keyboard(),
             )
+    else:
+        new_balance = balance_before
+
+    outgoing_message = html.escape(message_text) if include_balance else message_text
+    if include_balance:
+        outgoing_message += (
+            "\n\n📊 <b>تفاصيل الرصيد</b>\n"
+            f"┣ قبل الشحن: <code>{balance_before:.2f}</code> نقطة\n"
+            f"┗ بعد الشحن: <code>{new_balance:.2f}</code> نقطة"
+        )
 
     try:
-        await bot.send_message(chat_id=int(target_id), text=message_text)
+        await bot.send_message(chat_id=int(target_id), text=outgoing_message, parse_mode="HTML" if include_balance else None)
     except TelegramForbiddenError:
         return await safe_edit_text(
             call.message,
