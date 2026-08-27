@@ -50,6 +50,11 @@ logging.basicConfig(
     ]
 )
 
+# Matplotlib is intentionally verbose when the application root logger is DEBUG;
+# keep only rendering warnings and errors in application logs.
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)
+
 def get_logger(name: str) -> logging.Logger:
     """
     Get a logger instance for a specific module.

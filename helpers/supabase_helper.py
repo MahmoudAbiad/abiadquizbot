@@ -319,14 +319,24 @@ async def save_question_image_url(quiz_id: str, question_index: int, image_url: 
     except Exception as e:
         log_warning(logger, f"Could not cache question image URL for quiz {quiz_id}: {e}")
 
-async def update_quiz_question(quiz_id: str, question_index: int, question: Dict[str, Any]) -> bool:
-    """تحديث سؤال واحد داخل الكويز المركزي مع إبقاء بقية الأسئلة كما هي."""
+async def update_quiz_question(
+    quiz_id: str, question_index: int, question: Dict[str, Any], editor_id: int
+) -> Optional[bool]:
+    """تحديث سؤال بعد التحقق من أن المحرر هو المالك أو الأدمن.
+
+    تعيد True عند النجاح، وFalse عند فشل التحديث، وNone عند رفض الصلاحية.
+    """
     if not _is_valid_uuid(quiz_id):
-        return False
+        return None
     try:
-        res = await supabase.table("quizzes").select("quiz_data").eq("id", quiz_id).limit(1).execute()
+        res = await supabase.table("quizzes").select("quiz_data, creator_id").eq("id", quiz_id).limit(1).execute()
         if not res.data:
             return False
+        creator_id = res.data[0].get("creator_id")
+        admin_id = os.getenv("ADMIN_ID", "0")
+        if str(editor_id) != str(creator_id) and str(editor_id) != admin_id:
+            log_warning(logger, f"Rejected quiz edit by user {editor_id} for quiz {quiz_id}")
+            return None
         quiz_data = res.data[0].get("quiz_data") or []
         if not 0 <= question_index < len(quiz_data):
             return False
