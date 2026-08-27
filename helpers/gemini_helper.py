@@ -156,12 +156,23 @@ def get_safe_mime_type(file_path: str) -> str:
 # PYDANTIC SCHEMAS (STRUCTURED OUTPUT)
 # ==============================================================================
 # AI-NOTE: نضمن إجبار Gemini و Groq على التقيُّد بهذه البنية الدقيقة لتفادي أخطاء Parsing
+class QuizTable(BaseModel):
+    """🆕 جدول بيانات هيكلي (زي جداول التوزيعات التكرارية بالإحصاء) - يُملأ فقط
+    عند نمط الكويز المصوّر الرياضي (is_math_mode) ولمسائل تعتمد فعلياً على جدول،
+    بدل محاولة حشر الجدول كنص/LaTeX داخل question (غير مدعوم برسم الصورة).
+    راجع services/image_quiz_renderer.py لكيفية رسمه فعلياً ضمن صورة السؤال."""
+    headers: List[str] = Field(default_factory=list, description="Table column headers")
+    rows: List[List[str]] = Field(default_factory=list, description="Table data rows")
+
+
 class QuizQuestion(BaseModel):
     question: str = Field(description="Question text")
     options: List[str] = Field(description="Four answer options")
     correct_option_id: int = Field(description="Correct option index")
     hint: str = Field(description="Hint")
     explanation: str = Field(default="", description="Explanation")
+    # 🆕 اختياري - يُملأ فقط لو المسألة تعتمد فعلياً على جدول بيانات (راجع QuizTable أعلاه)
+    table: Optional[QuizTable] = Field(default=None, description="Optional structured data table")
 
 
 class QuizResponse(BaseModel):

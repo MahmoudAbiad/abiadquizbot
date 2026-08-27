@@ -20,6 +20,7 @@ from keyboards import (
     get_answer_edit_keyboard,
 )
 from logger import get_logger, log_error, log_info, log_warning
+from services.latex_text import latex_to_plain
 from supabase_helper import (
     list_favorite_quizzes,
     update_user_stats,
@@ -396,9 +397,10 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
         q = data['questions'][data['current_index']]
         hint_text = q['hint']
         if q.get("is_math"):
-            # التلميح يُعرض داخل تنبيه Telegram عادي لا يدعم LaTeX، لذا نجرّد
-            # علامات $ فقط لعرض النص بشكل مقروء بدل رموز LaTeX خام
-            hint_text = hint_text.replace("$", "")
+            # التلميح يُعرض داخل تنبيه Telegram عادي لا يدعم LaTeX إطلاقاً، لذا
+            # نحوّل أي صيغة LaTeX (حتى لو تسرّبت رغم تعليمات البرومبت) لنص عادي
+            # مقروء (كسور/جذور/أسس/رموز يونانية...) بدل تجريد $ فقط وترك الأوامر خام.
+            hint_text = latex_to_plain(hint_text)
         # 🩹 UX: show_alert=True لأن التلميح نص يحتاج وقتاً ليُقرأ؛ الإشعار الخاطف
         # (toast) كان يختفي خلال ثانية أو ثانيتين قبل أن يتمكن الطالب من قراءته كاملاً.
         await call.answer(f"💡 تلميح ذكي:\n{hint_text}", show_alert=True)

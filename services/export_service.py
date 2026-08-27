@@ -10,7 +10,7 @@
 import io
 import os
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -20,6 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
 from logger import get_logger, log_error
+from services.image_quiz_renderer import render_question_image, looks_arabic
+from services.latex_text import latex_to_plain
 
 logger = get_logger(__name__)
 
@@ -58,6 +60,22 @@ class ExportError(Exception):
 
 
 _PARENS_RE = re.compile(r"\([^()]*\)|\uFF08[^\uFF08\uFF09]*\uFF09")
+_LATEX_SPAN_RE = re.compile(r"\$[^$]+\$")
+
+
+def _is_math_question(q: Dict[str, Any]) -> bool:
+    """يكتشف هل السؤال من نمط الكويز المصوّر LaTeX - عبر علم is_math الصريح، أو
+    كخط دفاع ثانٍ لو كويز قديم محفوظ بالمفضلة قبل إضافة هذا العلم: وجود جدول بيانات
+    أو مقطع $...$ فعلي بنص السؤال/الخيارات كافٍ لاعتباره سؤالاً رياضياً يحتاج رسماً
+    كصورة بدل نص خام."""
+    if q.get("is_math"):
+        return True
+    if q.get("table"):
+        return True
+    question = str(q.get("question", ""))
+    if _LATEX_SPAN_RE.search(question):
+        return True
+    return any(_LATEX_SPAN_RE.search(str(opt)) for opt in (q.get("options") or []))
 
 
 def _strip_parens(text: str) -> str:
@@ -69,6 +87,17 @@ def _strip_parens(text: str) -> str:
         prev = text
         text = _PARENS_RE.sub(" ", text)
     return text
+
+
+def _render_math_question_image_bytes(q: Dict[str, Any], idx0: int, total: int, is_ar: bool) -> Optional[bytes]:
+    """يرسم صورة السؤال الرياضي (بنفس محرك عرض الكويز الفعلي services/image_quiz_renderer.py)
+    لتضمينها بملف التصدير بدل كتابة رموز LaTeX خام كنص. فشل آمن: يرجع None لو تعذّر الرسم
+    لأي سبب، فيسقط المستدعي تلقائياً للمسار النصي العادي بدل تعطيل التصدير بأكمله."""
+    try:
+        return render_question_image(q, idx0, total, is_ar)
+    except Exception as e:
+        log_error(logger, f"Failed rendering math question image for export (idx={idx0}): {e}", exception=e)
+        return None
 
 
 def detect_language(questions: List[Dict[str, Any]]) -> str:
@@ -352,10 +381,29 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
         doc.add_paragraph()
 
     # ==================== الأسئلة ====================
+    total_questions = len(questions)
     for idx, q in enumerate(questions, 1):
         q_text = str(q.get("question", "")).strip()
         options = q.get("options") or []
         label = f"السؤال {idx}: " if is_ar else f"Question {idx}: "
+
+        # 🆕 سؤال رياضي (نمط الكويز المصوّر LaTeX، أو جدول بيانات): يُرسم كصورة
+        # نظيفة بنفس محرك عرض الكويز الفعلي بدل كتابة رموز LaTeX الخام كنص -
+        # هيك تُصدَّر المسألة كاملة (نص + معادلات + جدول لو وُجد) في وحدة واحدة
+        # غير قابلة للتقسيم أو التشويه، تماماً كما تظهر للطالب أثناء حل الكويز.
+        if _is_math_question(q):
+            img_bytes = _render_math_question_image_bytes(q, idx - 1, total_questions, is_ar)
+            if img_bytes:
+                img_p = doc.add_paragraph()
+                img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                img_run = img_p.add_run()
+                img_run.add_picture(io.BytesIO(img_bytes), width=Cm(min(usable_width_cm, 15)))
+                img_p.paragraph_format.space_after = Pt(12)
+                continue
+            # فشل الرسم لسبب ما - نكمل للمسار النصي العادي أدناه كخط أمان أخير
+            # (نظّف علامات $ ورموز LaTeX الخام أولاً بدل عرضها كما هي)
+            q_text = latex_to_plain(q_text)
+            options = [latex_to_plain(str(o)) for o in options]
 
         if cfg["question_box"]:
             tbl = doc.add_table(rows=1, cols=1)
@@ -454,8 +502,8 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
         except (TypeError, ValueError):
             correct_idx = -1
         correct_letter = letters[correct_idx] if 0 <= correct_idx < len(letters) else "-"
-        correct_text = options[correct_idx] if 0 <= correct_idx < len(options) else "-"
-        explanation = str(q.get("explanation") or "").strip() or ("لا يوجد شرح" if is_ar else "No explanation")
+        correct_text = latex_to_plain(str(options[correct_idx])) if 0 <= correct_idx < len(options) else "-"
+        explanation = latex_to_plain(str(q.get("explanation") or "").strip()) or ("لا يوجد شرح" if is_ar else "No explanation")
 
         row_cells = table.add_row().cells
         values = [str(idx), f"{correct_letter}) {correct_text}", explanation]
@@ -578,6 +626,7 @@ except ImportError:  # pragma: no cover
 
 from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
@@ -818,20 +867,45 @@ class _QuizPDFRenderer:
             self.c.line(self.margin, self.y + 8, self.page_w - self.margin, self.y + 8)
             self.y -= 12
 
+    def _draw_math_question_image(self, q: Dict[str, Any], idx0: int) -> bool:
+        """يرسم صورة السؤال الرياضي (نفس محرك الرسم الفعلي) داخل صفحة الـ PDF بدل
+        كتابة رموز LaTeX خام كنص - يرجع True لو نجح الرسم فعلياً، أو False لو تعذّر
+        (فيسقط المستدعي تلقائياً للمسار النصي العادي كخط أمان أخير)."""
+        img_bytes = _render_math_question_image_bytes(q, idx0, len(self.questions), self.is_ar)
+        if not img_bytes:
+            return False
+        try:
+            reader = ImageReader(io.BytesIO(img_bytes))
+            img_w_px, img_h_px = reader.getSize()
+            max_w = self.page_w - 2 * self.margin
+            display_w = min(max_w, max_w * 0.92)
+            display_h = display_w * (img_h_px / img_w_px)
+            self._ensure_space(display_h + 14)
+            x = self.margin + (max_w - display_w) / 2
+            self.c.drawImage(reader, x, self.y - display_h, width=display_w, height=display_h,
+                              preserveAspectRatio=True, mask="auto")
+            self.y -= (display_h + 14)
+            return True
+        except Exception as e:
+            log_error(logger, f"Failed drawing math question image in PDF (idx={idx0}): {e}", exception=e)
+            return False
+
     def _render_questions(self):
         cfg = self.cfg
         if cfg["box"]:
             self._render_questions_boxed()
             return
         for idx, q in enumerate(self.questions, 1):
-            label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {str(q.get('question', '')).strip()}"
+            if _is_math_question(q) and self._draw_math_question_image(q, idx - 1):
+                continue
+            label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {latex_to_plain(str(q.get('question', '')).strip())}"
             self._ensure_space(30)
             label_color = cfg["accent"] if self.style == STYLE_ACADEMIC else "#111111"
             self._draw_paragraph(label, 12.5, bold=True, color=label_color, gap_after=4)
             for oidx, opt in enumerate(q.get("options") or []):
                 letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
                 sep = "." if self.style == STYLE_ACADEMIC else ")"
-                self._draw_paragraph(f"{letter}{sep} {opt}", 11, extra_indent=18, gap_after=2)
+                self._draw_paragraph(f"{letter}{sep} {latex_to_plain(str(opt))}", 11, extra_indent=18, gap_after=2)
             if cfg["divider"]:
                 self._ensure_space(14)
                 self.c.setStrokeColor(HexColor("#AAAAAA"))
@@ -849,8 +923,10 @@ class _QuizPDFRenderer:
         max_w = self.page_w - 2 * self.margin - 2 * pad
 
         for idx, q in enumerate(self.questions, 1):
-            label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {str(q.get('question', '')).strip()}"
-            options = q.get("options") or []
+            if _is_math_question(q) and self._draw_math_question_image(q, idx - 1):
+                continue
+            label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {latex_to_plain(str(q.get('question', '')).strip())}"
+            options = [latex_to_plain(str(o)) for o in (q.get("options") or [])]
 
             q_lines = _wrap_line(label, self.is_ar, font_en_b, font_ar_b, 12.5, max_w)
             content_h = 2 * pad + len(q_lines) * (12.5 + 5) + 6
@@ -958,8 +1034,8 @@ class _QuizPDFRenderer:
             except (TypeError, ValueError):
                 correct_idx = -1
             correct_letter = self.letters[correct_idx] if 0 <= correct_idx < len(self.letters) else "-"
-            correct_text = options[correct_idx] if 0 <= correct_idx < len(options) else "-"
-            explanation = str(q.get("explanation") or "").strip() or ("لا يوجد شرح" if self.is_ar else "No explanation")
+            correct_text = latex_to_plain(str(options[correct_idx])) if 0 <= correct_idx < len(options) else "-"
+            explanation = latex_to_plain(str(q.get("explanation") or "").strip()) or ("لا يوجد شرح" if self.is_ar else "No explanation")
             draw_row([str(idx), f"{correct_letter}) {correct_text}", explanation], zebra=(idx % 2 == 0))
 
     def render(self) -> bytes:

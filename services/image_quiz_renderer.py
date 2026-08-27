@@ -24,7 +24,7 @@ MODULE: Image Quiz Renderer (نمط الكويز المصوّر LaTeX)
 import io
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -59,6 +59,21 @@ OPTION_GAP_PX = 22
 QUESTION_FONT_SIZE = 21
 OPTION_FONT_SIZE = 19
 BADGE_COLORS = ["#2E86DE", "#10AC84", "#EE5253", "#F5A623", "#8854D0", "#00B8D9", "#EA5455", "#5E5CE6"]
+
+# 🆕 ==================== إعدادات جدول البيانات (Data Table) ====================
+# جدول بيانات اختياري (مثال: توزيع تكراري بالإحصاء) يُرسم مباشرة بعناصر Matplotlib
+# (مستطيلات + نص) وليس بصيغة LaTeX نصية - لأن محرك mathtext لا يدعم بيئات الجداول
+# إطلاقاً (راجع تعليمات SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS بـ constants.py). هيك
+# تُرسل المسألة كاملة (سؤال + جدول + خيارات) بصورة واحدة غير قابلة للتقسيم.
+TABLE_FONT_SIZE = 16
+TABLE_ROW_LINE_HEIGHT_PX = 24
+TABLE_CELL_PAD_X = 10
+TABLE_CELL_PAD_Y = 10
+TABLE_HEADER_BG = "#4C6FFF"
+TABLE_ROW_BG_ALT = "#F5F7FF"
+TABLE_BORDER_COLOR = "#C7D0E0"
+TABLE_TOP_GAP_PX = 18
+TABLE_BOTTOM_GAP_PX = 26
 
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
 _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
@@ -222,6 +237,99 @@ def _sanitize_line_for_mathtext(line: str) -> str:
         return line.replace("$", "")
 
 
+# ==================== جدول البيانات (Data Table) ====================
+def _prepare_table(table: Any, is_ar: bool, max_width_px: float) -> Optional[Dict[str, Any]]:
+    """يجهّز بيانات الجدول للرسم: أعمدة متساوية العرض، كل خلية مُلفوفة ومُهيّأة (RTL
+    لو عربي) ومُطهّرة من رموز LaTeX غير المدعومة بنفس أسلوب سطور السؤال/الخيارات.
+    يرجع None لو الجدول فارغ أو غير صالح (بدون أعمدة فعلية)."""
+    if not table:
+        return None
+    headers = [str(h).strip() for h in (table.get("headers") or [])]
+    rows = [[str(c).strip() for c in (row or [])] for row in (table.get("rows") or [])]
+    ncols = len(headers) if headers else (len(rows[0]) if rows else 0)
+    if ncols == 0:
+        return None
+    # توحيد عدد أعمدة كل صف مع رأس الجدول (حماية من صفوف ناقصة/زائدة يرجعها النموذج)
+    rows = [(row + [""] * ncols)[:ncols] for row in rows]
+
+    col_width = max_width_px / ncols
+    cell_font_prop = _font_prop_sized(is_ar, bold=False, size=TABLE_FONT_SIZE)
+    header_font_prop = _font_prop_sized(is_ar, bold=True, size=TABLE_FONT_SIZE)
+    cell_wrap_width = max(col_width - 2 * TABLE_CELL_PAD_X, 30)
+
+    def _prep_row(cells: List[str], font_prop: fm.FontProperties) -> List[List[str]]:
+        return [
+            [_sanitize_line_for_mathtext(line) for line in _wrap_and_shape(cell, is_ar, cell_wrap_width, font_prop)]
+            for cell in cells
+        ]
+
+    header_lines = _prep_row(headers, header_font_prop) if headers else []
+    row_lines = [_prep_row(row, cell_font_prop) for row in rows]
+
+    def _row_height(lines_per_cell: List[List[str]]) -> float:
+        max_lines = max((len(lines) for lines in lines_per_cell), default=1) or 1
+        return max_lines * TABLE_ROW_LINE_HEIGHT_PX + 2 * TABLE_CELL_PAD_Y
+
+    header_h = _row_height(header_lines) if header_lines else 0.0
+    row_heights = [_row_height(lines) for lines in row_lines]
+    total_h = header_h + sum(row_heights)
+    if total_h <= 0:
+        return None
+
+    return {
+        "ncols": ncols, "col_width": col_width,
+        "header_lines": header_lines, "header_h": header_h,
+        "row_lines": row_lines, "row_heights": row_heights,
+        "total_h": total_h,
+    }
+
+
+def _draw_table(ax, table_data: Dict[str, Any], x_left: float, y_top: float,
+                 max_width_px: float, is_ar: bool) -> float:
+    """يرسم الجدول المُجهَّز مسبقاً (_prepare_table) داخل الـ Axes الحالي، ويرجع
+    إحداثي y أسفل الجدول (بعد آخر صف) ليكمل الرسم من هناك (الخيارات...)."""
+    ncols = table_data["ncols"]
+    col_w = table_data["col_width"]
+    header_font_prop = _font_prop_sized(is_ar, bold=True, size=TABLE_FONT_SIZE)
+    cell_font_prop = _font_prop_sized(is_ar, bold=False, size=TABLE_FONT_SIZE)
+
+    # ترتيب الأعمدة: RTL للعربي (أول عمود منطقي يبدأ من أقصى اليمين)
+    col_x_starts = [x_left + i * col_w for i in range(ncols)]
+    if is_ar:
+        col_x_starts = list(reversed(col_x_starts))
+
+    y = y_top
+
+    def _draw_row(lines_per_cell: List[List[str]], row_h: float, bg: Optional[str], font_prop: fm.FontProperties):
+        nonlocal y
+        for col_idx in range(ncols):
+            cx = col_x_starts[col_idx]
+            if bg:
+                ax.add_patch(plt.Rectangle((cx, y - row_h), col_w, row_h,
+                                            facecolor=bg, edgecolor=TABLE_BORDER_COLOR, linewidth=0.8))
+            else:
+                ax.add_patch(plt.Rectangle((cx, y - row_h), col_w, row_h,
+                                            facecolor="none", edgecolor=TABLE_BORDER_COLOR, linewidth=0.8))
+            lines = lines_per_cell[col_idx] if col_idx < len(lines_per_cell) else [""]
+            cell_center_x = cx + col_w / 2
+            text_y = y - TABLE_CELL_PAD_Y - TABLE_ROW_LINE_HEIGHT_PX / 2
+            for line in lines:
+                ax.text(cell_center_x, text_y, line, ha="center", va="center",
+                        fontsize=TABLE_FONT_SIZE, color="#1a1a1a" if bg != TABLE_HEADER_BG else "white",
+                        fontproperties=font_prop)
+                text_y -= TABLE_ROW_LINE_HEIGHT_PX
+        y -= row_h
+
+    if table_data["header_lines"]:
+        _draw_row(table_data["header_lines"], table_data["header_h"], TABLE_HEADER_BG, header_font_prop)
+
+    for i, (lines, row_h) in enumerate(zip(table_data["row_lines"], table_data["row_heights"])):
+        bg = TABLE_ROW_BG_ALT if i % 2 == 1 else None
+        _draw_row(lines, row_h, bg, cell_font_prop)
+
+    return y
+
+
 # ==================== الرسم الفعلي ====================
 def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
     """
@@ -261,6 +369,11 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     q_render_lines = [_sanitize_line_for_mathtext(line) for line in q_lines]
     q_line_heights = [_measure_line_height_px(line, q_font_prop, QUESTION_LINE_HEIGHT_PX) for line in q_render_lines]
 
+    # 🆕 جدول بيانات اختياري (راجع QuizTable بـ helpers/gemini_helper.py) - يُرسم بين
+    # نص السؤال والخيارات مباشرة عبر مستطيلات/نص Matplotlib بدل LaTeX نصي.
+    table_data = _prepare_table(question.get("table"), is_ar, max_width_px)
+    table_extra_h = (TABLE_TOP_GAP_PX + table_data["total_h"] + TABLE_BOTTOM_GAP_PX) if table_data else 0.0
+
     option_render_blocks: List[List[str]] = []
     option_block_heights: List[List[float]] = []
     for block in option_blocks:
@@ -272,6 +385,7 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     height_px = (
         HEADER_HEIGHT_PX + MARGIN_PX * 2
         + sum(q_line_heights)
+        + table_extra_h
         + sum(sum(heights) for heights in option_block_heights)
         + len(option_blocks) * OPTION_GAP_PX
     )
@@ -302,6 +416,13 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
                 fontsize=QUESTION_FONT_SIZE, color="#1a1a1a", fontweight="bold",
                 fontproperties=_font_prop(is_ar, bold=True))
         y -= line_h
+
+    if table_data:
+        # الجدول يُرسم بعرض المحتوى الكامل (من x=MARGIN_PX)، بمحاذاة يمين/يسار
+        # منطقية داخلياً عبر _draw_table نفسه (RTL حسب is_ar) - لسنا بحاجة x/align هون.
+        y -= TABLE_TOP_GAP_PX
+        y = _draw_table(ax, table_data, MARGIN_PX, y, max_width_px, is_ar)
+        y -= TABLE_BOTTOM_GAP_PX
 
     y -= OPTION_GAP_PX
     for i, (block, heights) in enumerate(zip(option_render_blocks, option_block_heights)):
