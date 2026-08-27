@@ -134,7 +134,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
                 f"🎁 هدية البداية: أضفنا لحسابك <b>{points} نقطة مجانية</b> لتجربته فوراً!"
             )
             if user_info["referrer"]:
-                intro_text += "\n✨ وجميلك ما ننساه! تم منح زميلك الذي دعاك مكافأة إضافية أيضاً. 🤝"
+                intro_text += "\n✨ عند توليدك أول كويز بنجاح، سيحصل زميلك الذي دعاك على مكافأة إحالة إضافية. 🤝"
             intro_text += f"\n📊 رصيدك الحالي: <code>{points:.2f}</code> نقطة (تقريباً نقطة واحدة لكل صفحة/سؤال)"
             intro_text += f"\n🔄 وتتجدد نقاطك المجانية تلقائياً كل يوم بـ <b>{DAILY_RENEWAL_POINTS} نقطة</b> إضافية."
 

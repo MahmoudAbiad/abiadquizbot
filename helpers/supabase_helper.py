@@ -92,13 +92,11 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
         actual_referrer = None
         referrer_name = None
         if referrer_id and str(referrer_id) != str(user_id):
-            ref_check = await supabase.table("users").select("paid_points, first_name, last_name, username").eq("user_id", referrer_id).execute()
+            ref_check = await supabase.table("users").select("first_name, last_name, username").eq("user_id", referrer_id).execute()
             if ref_check.data:
                 actual_referrer = referrer_id
                 referrer_row = ref_check.data[0]
                 referrer_name = f"{referrer_row.get('first_name', '')} {referrer_row.get('last_name', '')}".strip() or referrer_row.get("username") or "غير معروف"
-                new_ref_points = float(referrer_row.get('paid_points') or 0) + REFERRAL_BONUS_POINTS
-                await supabase.table("users").update({"paid_points": new_ref_points}).eq("user_id", referrer_id).execute()
                 
         await supabase.table("users").insert({
             "user_id": user_id,
@@ -124,6 +122,75 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
     except Exception as e:
         log_error(logger, f"Error adding new user: {e}", exception=e)
         return _balance_payload(status="error", referrer=None)
+
+async def reward_referrer_if_eligible(user_id: int) -> bool:
+    """منح مكافأة الإحالة بعد أول توليد كويز ناجح فقط وبشكل غير مكرر."""
+    try:
+        user_response = await supabase.table("users").select(
+            "referred_by, referral_reward_awarded"
+        ).eq("user_id", user_id).limit(1).execute()
+        if not user_response.data:
+            return False
+
+        user = user_response.data[0]
+        referrer_id = user.get("referred_by")
+        if not referrer_id or user.get("referral_reward_awarded"):
+            return False
+
+        # quiz_generated is written only after the generation workflow succeeds.
+        # 🆕 نتحقق من "على الأقل مرة واحدة" وليس "بالضبط مرة واحدة": منع الصرف المكرر
+        # مضمون فعلياً عبر شرط referral_reward_awarded = FALSE في claim_response أدناه
+        # (تحديث ذري)، فلا حاجة لتحقق count == 1 هنا. لو اعتمدنا == 1 وفشل استدعاء هذه
+        # الدالة لأي سبب (تعطل، انقطاع) بعد أول كويز ناجح، سيصبح العدّاد 2 عند ثاني
+        # كويز حقيقي ويُحرم المُحيل من مكافأته للأبد رغم أن الشرط الفعلي (صديق أنجز
+        # كويزاً حقيقياً) قد تحقق فعلاً.
+        activity_response = await supabase.table("usage_events").select("id").eq(
+            "user_id", user_id
+        ).eq("event_type", "quiz_generated").limit(1).execute()
+        if not activity_response.data:
+            return False
+
+        referrer_response = await supabase.table("users").select("user_id").eq(
+            "user_id", referrer_id
+        ).limit(1).execute()
+        if not referrer_response.data:
+            return False
+
+        # Claim first so concurrent requests cannot award the same referral twice.
+        claim_response = await supabase.table("users").update(
+            {"referral_reward_awarded": True}
+        ).eq("user_id", user_id).eq("referral_reward_awarded", False).select("user_id").execute()
+        if not claim_response.data:
+            return False
+
+        # 🆕 يُنفَّذ عبر RPC ذري (UPDATE ... SET paid_points = paid_points + amount) بدل
+        # قراءة الرصيد ثم كتابته من بايثون - القراءة-ثم-الكتابة كانت عرضة لفقدان
+        # تحديثات (lost update) لو أكمل أكثر من صديق واحد لنفس المُحيل أول كويز له
+        # بشكل شبه متزامن؛ الآن كل عملية زيادة مقفولة على مستوى الصف في قاعدة البيانات.
+        try:
+            await supabase.rpc("award_referral_bonus_atomic", {
+                "referrer_user_id": referrer_id,
+                "bonus_amount": REFERRAL_BONUS_POINTS,
+            }).execute()
+        except Exception:
+            await supabase.table("users").update({
+                "referral_reward_awarded": False
+            }).eq("user_id", user_id).eq("referral_reward_awarded", True).execute()
+            raise
+
+        try:
+            from config import bot
+            await bot.send_message(
+                referrer_id,
+                f"🎉 قام صديقك بإجراء أول اختبار له، وتمت إضافة {REFERRAL_BONUS_POINTS} نقطة مكافأة إلى رصيدك!",
+            )
+        except Exception as notification_error:
+            log_warning(logger, f"Could not notify referrer {referrer_id}: {notification_error}")
+
+        return True
+    except Exception as e:
+        log_error(logger, f"Error rewarding referrer for user {user_id}: {e}", exception=e)
+        return False
 
 async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dict[str, Any]:
     try:
