@@ -310,9 +310,9 @@ async def _save_edited_question(
     await state.update_data(questions=questions, current_index=question_index)
     await state.set_state(QuizState.answering_quiz)
     if saved:
-        await msg.answer("✅ تم تعديل السؤال في قاعدة البيانات والذاكرة المؤقتة. سيُعرض لك الآن بالسؤال المعدّل.")
+        await msg.answer("✅ تم تعديل السؤال بنجاح ! يمكنك الان متابعة اختبارك.")
     else:
-        await msg.answer("✅ تم تعديل السؤال في الكويز الحالي. لا يوجد معرّف كويز دائم لتحديث قاعدة البيانات.")
+        await msg.answer("✅ تم تعديل السؤال في الكويز الحالي بنجاح ! يمكنك الان متابعة اختبارك.")
     await send_question(msg, state)
 
 
