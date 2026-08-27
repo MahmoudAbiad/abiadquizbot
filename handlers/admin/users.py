@@ -284,6 +284,12 @@ async def process_direct_message_target(msg: types.Message, state: FSMContext):
 
     user = users_data[0]
     target_id = int(user["user_id"])
+    username = user.get("username") if user.get("username") and user.get("username") != "Unknown" else "بدون يوزر"
+    full_name = " ".join(
+        part for part in (user.get("first_name"), user.get("last_name")) if part
+    ).strip() or "بدون اسم"
+    free_points = float(user.get("free_points") or 0)
+    paid_points = float(user.get("paid_points") or 0)
     await state.update_data(
         direct_message_target_id=target_id,
         direct_message_balance_before=user_total_points(user),
@@ -294,7 +300,15 @@ async def process_direct_message_target(msg: types.Message, state: FSMContext):
     )
     await state.set_state(AdminState.waiting_for_direct_message_mode)
     await msg.answer(
-        f"📝 المستخدم المستهدف: <code>{target_id}</code>\n\nاختر نوع العملية:",
+        "👤 <b>المستخدم المستهدف</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"┣ الاسم: <b>{html.escape(full_name)}</b>\n"
+        f"┣ اليوزر: <code>{html.escape(username)}</code>\n"
+        f"┣ الآيدي: <code>{target_id}</code>\n"
+        f"┣ إجمالي النقاط: <code>{free_points + paid_points:.2f}</code>\n"
+        f"┣ النقاط المجانية: <code>{free_points:.2f}</code>\n"
+        f"┗ النقاط المدفوعة: <code>{paid_points:.2f}</code>\n\n"
+        "اختر نوع العملية:",
         reply_markup=get_admin_direct_message_mode_keyboard(),
         parse_mode="HTML",
     )

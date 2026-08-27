@@ -530,8 +530,11 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(text="✉️ رسالة مخصصة", callback_data="admin_direct_message_prompt"),
             types.InlineKeyboardButton(text="📢 رسالة جماعية", callback_data="admin_broadcast_prompt"),
         ],
-        [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
-        [types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1")],
+
+        [
+            types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt"),
+            types.InlineKeyboardButton(text="👥 استعراض الطلاب (مصفّح)", callback_data="admin_users_page_1"),
+        ],
         [
             types.InlineKeyboardButton(text="⚡ النشطون اليوم", callback_data="admin_analytics_today"),
             types.InlineKeyboardButton(text="🎯 كويزات اليوم", callback_data="admin_today_quizzes_p_1"),
