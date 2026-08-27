@@ -82,7 +82,7 @@ async def _send_math_image_question(chat_id: int, user_id: int, q: Dict[str, Any
         is_anonymous=False,
     )
 
-    quiz_data = {"chat_id": chat_id, "user_id": user_id, "correct_option_id": int(q["correct_option_id"])}
+    quiz_data = {"chat_id": chat_id, "user_id": user_id, "correct_option_id": int(q["correct_option_id"]), "question_index": idx}
     await redis_client.set(f"poll:{poll_msg.poll.id}", json.dumps(quiz_data), ex=7200)
     return poll_msg
 
@@ -126,7 +126,8 @@ async def send_quiz_poll(chat_id: int, user_id: int, q: Dict[str, Any], idx: int
     quiz_data = {
         "chat_id": chat_id,
         "user_id": user_id,
-        "correct_option_id": int(q['correct_option_id'])
+        "correct_option_id": int(q['correct_option_id']),
+        "question_index": idx,
     }
     await redis_client.set(f"poll:{poll_msg.poll.id}", json.dumps(quiz_data), ex=7200)
     return poll_msg
