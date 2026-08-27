@@ -32,6 +32,7 @@ from keyboards import (
 from logger import get_logger, log_error
 from supabase_helper import (
     check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped,
+    reward_referrer_if_eligible,
 )
 from r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup
@@ -790,9 +791,10 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
             return
 
-        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generated", {
+        await log_usage_event(call.from_user.id, "quiz_generated", {
             "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost
-        }))
+        })
+        await reward_referrer_if_eligible(call.from_user.id)
 
         from handlers.quiz_runner import _start_loaded_quiz
         await _start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)

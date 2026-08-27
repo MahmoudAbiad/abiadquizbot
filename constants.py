@@ -168,9 +168,9 @@ MATH_DETECTION_TEXT_SAMPLE_CHARS = 1500
 AI_REQUEST_TIMEOUT = 120  # Seconds
 
 # ==================== Points & Token System ====================
-WELCOME_POINTS = 80           # 50 نقطة ترحيبية = 50,000 توكن مجاني
-DAILY_RENEWAL_POINTS = 80     # التجديد المجاني اليومي 50 نقطة = 50,000 توكن
-REFERRAL_BONUS_POINTS = 10
+WELCOME_POINTS = 100          # تمنح مرة واحدة عند تسجيل المستخدم لأول مرة
+DAILY_RENEWAL_POINTS = 25     # تجديد مجاني يومي يكفي لكويز سريع واحد
+REFERRAL_BONUS_POINTS = 50
 DISCOUNT_RATE_FOR_CACHED = 0.1  # تكلفة 10% فقط للكويز المعاد استخدامه (خصم 90%)
 
 # ==================== API Rate Limiting ====================
