@@ -134,6 +134,22 @@ def _measure_px(text: str, font_prop: fm.FontProperties) -> float:
         return len(text) * font_prop.get_size() * 0.62
 
 
+def _measure_line_height_px(text: str, font_prop: fm.FontProperties, fallback_px: float) -> float:
+    """يقيس الارتفاع الفعلي (height + depth) لسطر واحد باستخدام نفس محرك mathtext،
+    بدل الاعتماد على ثابت واحد لكل الأسطر. مهم جداً للأسطر يلي فيها كسور/جذور/مجاميع
+    بحدود، لأنها بترتفع فعلياً أكتر بكتير من سطر نص عادي (مثلاً \\sum_{i=1}^{n} ممكن
+    يطلع أطول من السطر العادي بـ3 أضعاف)، وبدون القياس ده الأسطر بتتراكب فوق بعضها
+    أو بتنقص عند حافة الصورة السفلية. بنضيف هامش أمان 20% فوق القيمة المقاسة."""
+    if not text:
+        return fallback_px
+    try:
+        r = _MATH_PARSER.parse(text, dpi=DPI, prop=font_prop)
+        measured = (r.height + r.depth) * 1.2
+        return max(measured, fallback_px)
+    except Exception:
+        return fallback_px
+
+
 def _wrap_tokens(tokens: List[str], max_width_px: float, is_ar: bool, font_prop: fm.FontProperties) -> List[str]:
     """يلف الكلمات على أسطر بالاعتماد على العرض الفعلي بالبكسل (مش عدد الحروف)،
     مع تشكيل أي كلمة عربية قبل قياسها عشان القياس يطابق شكلها الحقيقي وقت الرسم."""
@@ -229,15 +245,34 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     question_wrap_width = max_width_px * 0.96
     q_lines = _wrap_and_shape(question_text, is_ar, question_wrap_width, q_font_prop)
 
+    # نفس هامش الأمان المستخدم مع نص السؤال (0.96) - القياس التقريبي وقت اللف بيكون
+    # أحياناً أقل شوية من العرض الفعلي وقت الرسم، فبدون هامش الخيارات بتوصل لحافة
+    # الصورة تقريباً (كانت هاي المشكلة الأصلية بالخيارات تحديداً).
+    option_wrap_width = max_width_px * 0.96
     option_blocks: List[List[str]] = []
     for letter, opt in zip(letters, options):
         combined = f"({letter} {opt}" if is_ar else f"{letter}) {opt}"
-        option_blocks.append(_wrap_and_shape(combined, is_ar, max_width_px, opt_font_prop))
+        option_blocks.append(_wrap_and_shape(combined, is_ar, option_wrap_width, opt_font_prop))
+
+    # نقيس ارتفاع كل سطر فعلياً (بدل الاعتماد على ثابت واحد لكل الأسطر) - ضروري
+    # للأسطر يلي فيها كسور/جذور/مجاميع بحدود لأنها بترتفع أكتر بكتير من سطر نص عادي.
+    # نجهّز السطر النهائي (بعد sanitize) مرة واحدة ونستخدمه للقياس وللرسم معاً،
+    # عشان القياس يطابق تماماً الشيء يلي رح يترسم فعلياً.
+    q_render_lines = [_sanitize_line_for_mathtext(line) for line in q_lines]
+    q_line_heights = [_measure_line_height_px(line, q_font_prop, QUESTION_LINE_HEIGHT_PX) for line in q_render_lines]
+
+    option_render_blocks: List[List[str]] = []
+    option_block_heights: List[List[float]] = []
+    for block in option_blocks:
+        rendered = [_sanitize_line_for_mathtext(line) for line in block]
+        heights = [_measure_line_height_px(line, opt_font_prop, OPTION_LINE_HEIGHT_PX) for line in rendered]
+        option_render_blocks.append(rendered)
+        option_block_heights.append(heights)
 
     height_px = (
         HEADER_HEIGHT_PX + MARGIN_PX * 2
-        + len(q_lines) * QUESTION_LINE_HEIGHT_PX
-        + sum(len(block) * OPTION_LINE_HEIGHT_PX for block in option_blocks)
+        + sum(q_line_heights)
+        + sum(sum(heights) for heights in option_block_heights)
         + len(option_blocks) * OPTION_GAP_PX
     )
     height_px = max(height_px, 380)
@@ -262,14 +297,14 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     x = FIG_WIDTH_PX - MARGIN_PX if is_ar else MARGIN_PX
     y = height_px - HEADER_HEIGHT_PX - MARGIN_PX + 6
 
-    for line in q_lines:
-        ax.text(x, y, _sanitize_line_for_mathtext(line), ha=align, va="top",
+    for line, line_h in zip(q_render_lines, q_line_heights):
+        ax.text(x, y, line, ha=align, va="top",
                 fontsize=QUESTION_FONT_SIZE, color="#1a1a1a", fontweight="bold",
                 fontproperties=_font_prop(is_ar, bold=True))
-        y -= QUESTION_LINE_HEIGHT_PX
+        y -= line_h
 
     y -= OPTION_GAP_PX
-    for i, block in enumerate(option_blocks):
+    for i, (block, heights) in enumerate(zip(option_render_blocks, option_block_heights)):
         if i > 0:
             sep_y = y + OPTION_GAP_PX / 2
             ax.plot([MARGIN_PX, FIG_WIDTH_PX - MARGIN_PX], [sep_y, sep_y], color="#e8e8e8", linewidth=1.2)
@@ -277,12 +312,22 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
         # نقطة ملوّنة صغيرة بجانب كل خيار لتمييزه بصرياً (بدون تكرار الحرف - موجود أصلاً بالنص)
         badge_x = MARGIN_PX - 20 if not is_ar else FIG_WIDTH_PX - MARGIN_PX + 20
         ax.scatter([badge_x], [y + 10], s=90, color=color, zorder=3, clip_on=False)
-        for line in block:
-            ax.text(x, y, _sanitize_line_for_mathtext(line), ha=align, va="top",
+        for line, line_h in zip(block, heights):
+            ax.text(x, y, line, ha=align, va="top",
                     fontsize=OPTION_FONT_SIZE, color="#2c2c2c",
                     fontproperties=_font_prop(is_ar))
-            y -= OPTION_LINE_HEIGHT_PX
+            y -= line_h
         y -= OPTION_GAP_PX
+
+    # شبكة أمان أخيرة: لو رغم القياس المسبق (بهامش 20%) في حالة متطرفة نادرة خلت
+    # آخر سطر يوصل لتحت حدود الصورة (y سالب)، نمدّد الصورة فعلياً لتحت بدل ما نقص
+    # المحتوى. العرض بيضل ثابت (1000px)، بس الارتفاع بيتمدد حسب المحتوى الحقيقي.
+    bottom_y = min(0, y - MARGIN_PX)
+    if bottom_y < 0:
+        extra_px = -bottom_y
+        log_warning(logger, f"image_quiz_renderer: overflow detected, extending canvas by {extra_px:.0f}px")
+        fig.set_size_inches(FIG_WIDTH_PX / DPI, (height_px + extra_px) / DPI)
+        ax.set_ylim(bottom_y, height_px)
 
     buf = io.BytesIO()
     try:
