@@ -8,6 +8,7 @@ from aiogram import types
 
 from logger import get_logger, log_warning
 from services.image_quiz_renderer import render_question_image, looks_arabic, letters_for
+from services.latex_text import latex_to_plain
 from supabase_helper import _is_valid_uuid, save_question_image_url, upload_quiz_question_image
 
 logger = get_logger(__name__)
@@ -26,7 +27,9 @@ def prepare_question_payload(q: Dict[str, Any], idx: int, total: int) -> Tuple[s
             needs_fallback = True
         clean_options.append(opt_str if len(opt_str) <= 100 else opt_str[:97] + "...")
 
-    raw_exp = q.get("explanation") or "إجابة صحيحة!"
+    # حقل explanation يُعرض داخل Telegram Poll الذي لا يدعم LaTeX إطلاقاً - نحوّله
+    # لنص عادي مقروء أولاً (خط دفاع ثانٍ، آمن تماماً على أي نص لا يحوي LaTeX أصلاً)
+    raw_exp = latex_to_plain(q.get("explanation") or "إجابة صحيحة!")
     clean_explanation = raw_exp if len(raw_exp) <= 200 else raw_exp[:197] + "..."
 
     return raw_question, clean_options, clean_explanation, needs_fallback
@@ -68,7 +71,9 @@ async def _send_math_image_question(chat_id: int, user_id: int, q: Dict[str, Any
         await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption)
 
     poll_question = "اختر الإجابة الصحيحة بالاعتماد على الصورة أعلاه 👆" if is_ar else "Choose the correct answer based on the image above 👆"
-    raw_exp = q.get("explanation") or ("إجابة صحيحة!" if is_ar else "Correct answer!")
+    # نمط الكويز المصوّر: explanation يُعرض بحقل Poll نصي عادي (وليس صورة)، لذا لازم
+    # يتحوّل لنص عادي بالكامل قبل الإرسال - راجع services/latex_text.py
+    raw_exp = latex_to_plain(q.get("explanation") or ("إجابة صحيحة!" if is_ar else "Correct answer!"))
     clean_exp = raw_exp if len(raw_exp) <= 200 else raw_exp[:197] + "..."
 
     poll_msg = await bot.send_poll(
