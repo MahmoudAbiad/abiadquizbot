@@ -509,7 +509,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
         log_error(logger, f"Media handling failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
 
-@router.message(StateFilter(None, QuizState.answering_quiz), F.text, ~F.text.startswith("/"))
+@router.message(StateFilter(None, QuizState.answering_quiz), F.text, ~F.text.startswith("/"), F.text != ".")
 async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     text = message.text.strip()
     if await state.get_state() == QuizState.answering_quiz:
