@@ -8,7 +8,7 @@ from constants import (
     SUBJECT_MATH, SUBJECT_ENGLISH,
     WEBAPP_PUBLIC_BASE_URL,
     BTN_AUDIO_CONFIRM_START,
-    BTN_OPEN_UPLOAD_PAGE,
+    BTN_OPEN_UPLOAD_PAGE, REFERRAL_BONUS_POINTS
 )
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
@@ -28,7 +28,7 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
-            [types.InlineKeyboardButton(text="🔗 شارك واربح نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
+            [types.InlineKeyboardButton(text=f"🔗 شارك واربح {REFERRAL_BONUS_POINTS} نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
         # 🆕 زر رفع محاضرة صوتية كبيرة (حتى 250MB) عبر Mini App - يُخفى تلقائياً لو
         # WEBAPP_PUBLIC_BASE_URL فاضي (مثلاً بوضع polling محلي بدون WEBHOOK_URL)
