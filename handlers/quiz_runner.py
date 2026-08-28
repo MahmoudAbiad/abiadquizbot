@@ -64,7 +64,7 @@ SAVE_WIZARD_STATES = ACTIVE_QUIZ_STATES + (None,)
 
 async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
     bot_info = await bot.get_me()
-    menu = get_main_menu_keyboard(bot_info.username, user_id)
+    menu = await get_main_menu_keyboard(bot_info.username, user_id)
     text = "🏠 القائمة الرئيسية"
     if isinstance(call_or_message, types.CallbackQuery):
         await call_or_message.message.answer(text, reply_markup=menu)

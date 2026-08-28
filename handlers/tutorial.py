@@ -186,7 +186,7 @@ async def finish_tutorial(call: types.CallbackQuery) -> None:
         bot_info = await bot.get_me()
         await call.message.answer(
             "🏠 القائمة الرئيسية",
-            reply_markup=get_main_menu_keyboard(bot_info.username, call.from_user.id)
+            reply_markup=await get_main_menu_keyboard(bot_info.username, call.from_user.id)
         )
         asyncio.create_task(log_usage_event(call.from_user.id, "tutorial_completed"))
     except Exception as exc:
@@ -200,7 +200,7 @@ async def close_tutorial(call: types.CallbackQuery) -> None:
     """إغلاق الدليل دون فرض أي خطوة إضافية على المستخدم، مع إبقاء القائمة الرئيسية متاحة."""
     try:
         bot_info = await bot.get_me()
-        menu_kb = get_main_menu_keyboard(bot_info.username, call.from_user.id)
+        menu_kb = await get_main_menu_keyboard(bot_info.username, call.from_user.id)
         try:
             await call.message.delete()
         except Exception:

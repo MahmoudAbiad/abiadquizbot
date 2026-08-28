@@ -13,11 +13,11 @@ from dotenv import load_dotenv, find_dotenv
 from supabase import create_async_client
 from logger import get_logger, log_error, log_warning, log_info
 from constants import (
-    WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS,
     DEFAULT_FAVORITE_SECTION_TITLE, MAX_FAVORITE_SECTIONS,
     SYRIA_TZ, to_syria_datetime, format_syria_time,
 )
 from validators import validate_user_id, validate_points_amount
+from settings_helper import get_setting
 
 dotenv_path = find_dotenv()
 load_dotenv(dotenv_path)
@@ -97,13 +97,17 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
                 actual_referrer = referrer_id
                 referrer_row = ref_check.data[0]
                 referrer_name = f"{referrer_row.get('first_name', '')} {referrer_row.get('last_name', '')}".strip() or referrer_row.get("username") or "غير معروف"
-                
+
+        # 🆕 نقاط الترحيب تُقرأ الآن من app_settings (قابلة للتعديل من لوحة الإدارة)
+        # بدل الاعتماد على القيمة الثابتة في constants.py مباشرة.
+        welcome_points = await get_setting("welcome_points")
+
         await supabase.table("users").insert({
             "user_id": user_id,
             "username": username,
             "first_name": first_name,
             "last_name": last_name or "Unknown",
-            "free_points": float(WELCOME_POINTS),
+            "free_points": float(welcome_points),
             "paid_points": 0.0,
             "total_questions": 0,
             "referred_by": actual_referrer,
@@ -118,7 +122,7 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
                 "referrer_name": referrer_name,
             }))
 
-        return _balance_payload(WELCOME_POINTS, 0, status="new", referrer=actual_referrer)
+        return _balance_payload(welcome_points, 0, status="new", referrer=actual_referrer)
     except Exception as e:
         log_error(logger, f"Error adding new user: {e}", exception=e)
         return _balance_payload(status="error", referrer=None)
@@ -167,10 +171,13 @@ async def reward_referrer_if_eligible(user_id: int) -> bool:
         # قراءة الرصيد ثم كتابته من بايثون - القراءة-ثم-الكتابة كانت عرضة لفقدان
         # تحديثات (lost update) لو أكمل أكثر من صديق واحد لنفس المُحيل أول كويز له
         # بشكل شبه متزامن؛ الآن كل عملية زيادة مقفولة على مستوى الصف في قاعدة البيانات.
+        # 🆕 مكافأة الإحالة تُقرأ من app_settings (قابلة للتعديل من لوحة الإدارة)
+        referral_bonus = await get_setting("referral_bonus_points")
+
         try:
             await supabase.rpc("award_referral_bonus_atomic", {
                 "referrer_user_id": referrer_id,
-                "bonus_amount": REFERRAL_BONUS_POINTS,
+                "bonus_amount": referral_bonus,
             }).execute()
         except Exception:
             await supabase.table("users").update({
@@ -182,7 +189,7 @@ async def reward_referrer_if_eligible(user_id: int) -> bool:
             from config import bot
             await bot.send_message(
                 referrer_id,
-                f"🎉 قام صديقك بإجراء أول اختبار له، وتمت إضافة {REFERRAL_BONUS_POINTS} نقطة مكافأة إلى رصيدك!",
+                f"🎉 قام صديقك بإجراء أول اختبار له، وتمت إضافة {int(referral_bonus)} نقطة مكافأة إلى رصيدك!",
             )
         except Exception as notification_error:
             log_warning(logger, f"Could not notify referrer {referrer_id}: {notification_error}")
@@ -194,10 +201,15 @@ async def reward_referrer_if_eligible(user_id: int) -> bool:
 
 async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dict[str, Any]:
     try:
+        # 🆕 نقاط التجديد اليومي تُقرأ من app_settings (قابلة للتعديل من لوحة الإدارة).
+        # لو تعذّر الجلب لأي سبب، الدالة الذرية في قاعدة البيانات لديها خط أمان خاص بها
+        # (تقرأ من app_settings مباشرة، ثم تعود لـ 50 كحد أخير) عند تمرير None.
+        daily_renewal_points = await get_setting("daily_renewal_points")
+
         rpc_response = await supabase.rpc("check_and_apply_daily_renewal_atomic", {
             "target_user_id": user_id,
             "today_date": today,
-            "renewal_amount": DAILY_RENEWAL_POINTS
+            "renewal_amount": daily_renewal_points
         }).execute()
         
         if rpc_response.data:
