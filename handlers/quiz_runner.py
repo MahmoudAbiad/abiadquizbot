@@ -71,6 +71,22 @@ async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQu
     else:
         await call_or_message.answer(text, reply_markup=menu)
 
+@router.callback_query(F.data == "show_menu_after_first_quiz")
+async def show_menu_after_first_quiz(call: types.CallbackQuery) -> None:
+    """🆕 زر "📋 عرض القائمة" برسالة تهنئة أول اختبار مكتمل (راجع _handle_quiz_completion
+    تحت) - يُظهر القائمة الرئيسية عند الطلب فقط بدل إرفاقها تلقائياً، تخفيفاً للازدحام
+    البصري. يزيل الزر نفسه من الرسالة بعد الضغط لتفادي ضغطه أكثر من مرة بلا داعٍ."""
+    try:
+        await _send_main_menu(call, call.from_user.id)
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    except Exception as e:
+        log_error(logger, f"Error in show_menu_after_first_quiz for {call.from_user.id}: {e}", exception=e)
+    finally:
+        await call.answer()
+
 async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: Optional[str] = "") -> None:
     user_id = msg_or_call.from_user.id
     attempt_id = start_quiz_attempt(user_id, quiz_id or None, origin, len(quiz_data))
@@ -188,20 +204,24 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
 
     await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
 
-    # 🆕 أول اختبار كامل لمستخدم جديد: نعرض القائمة الرئيسية الآن (بعد نتيجة الاختبار
-    # مباشرة) بدل لحظة /start - حتى يرى المستخدم الجديد قيمة فعلية (نتيجته) قبل أي
-    # قائمة أزرار إضافية، ويبقى مسار الوصول للنقاط/المفضلة/الدعم مفتوحاً بعدها كالمعتاد.
+    # 🆕 أول اختبار كامل لمستخدم جديد: نعرض رسالة تهنئة قصيرة بعد النتيجة مباشرة، لكن
+    # بزر واحد فقط "📋 عرض القائمة" بدل إرفاق القائمة الرئيسية كاملة مباشرة - تخفيفاً
+    # للازدحام البصري (طلب صريح من المستخدم 2026-08-28). الضغط على الزر هو ما يستدعي
+    # فعلياً القائمة الرئيسية عبر المعالج الجديد show_main_menu_after_first_quiz تحت.
     if is_first_completion:
         try:
-            bot_info = await bot.get_me()
             await bot.send_message(
                 chat_id,
-                "🎉 <b>أحسنت في أول اختبار لك!</b> استخدم القائمة بالأسفل لاستكشاف باقي مزايا البوت 👇",
-                reply_markup=await get_main_menu_keyboard(bot_info.username, user_id),
+                "🎉 <b>أحسنت في أول اختبار لك!</b>\n\n"
+                "💡 تقدر تولّد كويزات جديدة في أي وقت تحب بنفس الطريقة اللي سويتها قبل شوي.\n"
+                "🔄 ونقاطك تتجدد يومياً، فما تحتاج تقلق إذا خلصتها.",
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="📋 عرض القائمة", callback_data="show_menu_after_first_quiz")]
+                ]),
                 parse_mode="HTML",
             )
         except Exception as e:
-            log_error(logger, f"Error sending first-completion main menu to {user_id}: {e}", exception=e)
+            log_error(logger, f"Error sending first-completion congrats to {user_id}: {e}", exception=e)
 
     # التمييز الدقيق في التتبع بين الكويز المكتمل والتوقف المبكر
     if stopped_early:
