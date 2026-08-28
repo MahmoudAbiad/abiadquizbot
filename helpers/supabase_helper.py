@@ -1089,6 +1089,26 @@ async def complete_quiz_attempt(attempt_ref: Optional[str], score: int) -> None:
         log_error(logger, f"Error completing quiz attempt {attempt_ref}: {e}")
 
 
+async def has_completed_any_quiz_before(user_id: int) -> bool:
+    """
+    🆕 UX: تُستخدم فقط لتحديد ما إذا كان المستخدم قد أنهى أي اختبار من قبل (لتأجيل ظهور
+    القائمة الرئيسية عن مستخدم جديد إلى ما بعد أول اختبار كامل له - راجع
+    handlers/quiz_runner.py::_handle_quiz_completion). فحص بسيط بـ count("exact")
+    بدون جلب صفوف فعلية. أي خطأ هنا يُعامل بتحفّظ كـ "نعم أكمل من قبل" (True) - أي
+    نُفضّل عدم إزعاج مستخدم قديم بقائمة إضافية غير متوقعة على خطر إخفاء القائمة عن
+    مستخدم جديد فعلاً بسبب عطل مؤقت بالاستعلام.
+    """
+    try:
+        res = await supabase.table("quiz_attempts").select(
+            "id", count="exact"
+        ).eq("user_id", user_id).eq("is_completed", True).limit(1).execute()
+        total = res.count if res.count is not None else len(res.data or [])
+        return total > 0
+    except Exception as e:
+        log_error(logger, f"Error checking prior completed quizzes for user {user_id}: {e}")
+        return True
+
+
 async def mark_quiz_attempt_stopped(attempt_ref: Optional[str]) -> None:
     """تسجيل توقف الطالب المبكر."""
     if not attempt_ref:

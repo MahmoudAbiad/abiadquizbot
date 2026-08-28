@@ -214,18 +214,15 @@ async def handle_deep_link_overwrite_cancel(call: types.CallbackQuery, state: FS
 @router.callback_query(F.data == "new_user_send_now")
 async def ack_new_user_start(call: types.CallbackQuery):
     """تأكيد بسيط بعد ضغط زر «أرسل أول ملف الآن» بترحيب المستخدم الجديد - لا محتوى
-    تعليمي هنا عمداً (الدليل القديم حُذف بالكامل). فقط تأكيد قصير + إظهار القائمة
-    الرئيسية فوراً حتى تبقى أزرار الوصول (شحن الرصيد/المفضلة/الدعم) متاحة للمستخدم
-    دون الحاجة لكتابة /start يدوياً من جديد."""
+    تعليمي هنا عمداً (الدليل القديم حُذف بالكامل).
+    🆕 (2026-08-28) لم تعد القائمة الرئيسية تظهر هنا: أُجِّل ظهورها عمداً إلى ما بعد
+    أول اختبار كامل ينهيه هذا المستخدم فعلياً (راجع
+    handlers/quiz_runner.py::_handle_quiz_completion) - بحيث لا يرى مستخدم جديد أي
+    أزرار/خيارات إضافية قبل أن يجرّب صلب المنتج فعلياً ويحصل على أول نتيجة ملموسة."""
     try:
         await call.message.edit_text(
             "📥 تمام! أرسل الآن ملفك (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشرة في هذه المحادثة 🔥",
             parse_mode="HTML",
-        )
-        bot_info = await bot.get_me()
-        await call.message.answer(
-            "🏠 القائمة الرئيسية",
-            reply_markup=await get_main_menu_keyboard(bot_info.username, call.from_user.id)
         )
         asyncio.create_task(log_usage_event(call.from_user.id, "start_cta_acknowledged"))
     except Exception as e:

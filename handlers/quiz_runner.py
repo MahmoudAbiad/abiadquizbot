@@ -168,6 +168,17 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
         f"{'🏆 ممتاز!' if percentage >= 80 else '👍 جيد!' if percentage >= 60 else '📚 استمر في الممارسة!'}"
     )
 
+    from supabase_helper import has_completed_any_quiz_before  # استيراد محلي لتفادي دورة استيراد غير ضرورية
+
+    # 🆕 UX (2026-08-28): تأجيل ظهور القائمة الرئيسية لمستخدم جديد إلى ما بعد أول اختبار
+    # كامل ينهيه فعلياً - بدل إظهارها فوراً بعد ضغط زر "أرسل أول ملف الآن" بـ /start (كانت
+    # تُعرض هناك سابقاً عبر handlers/start.py::ack_new_user_start، أُزيلت من هناك الآن).
+    # الفحص يتم *قبل* منطق stopped_early/quiz_completed أدناه، وفقط لو الاختبار اكتمل
+    # فعلياً (وليس أُوقف مبكراً) نعرض القائمة - حتى لا نكافئ إيقافاً مبكراً بنفس تجربة
+    # الإكمال الفعلي. is_first_completion يُحسب دائماً (حتى لو stopped_early=True) لكن
+    # يُستخدم فقط بالفرع else تحت.
+    is_first_completion = not stopped_early and not await has_completed_any_quiz_before(user_id)
+
     # التحقق من صحة المعرف لإظهار لوحة التقييم بشكل آمن
     if quiz_id and _is_valid_uuid(quiz_id):
         keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id)
@@ -176,6 +187,21 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
         keyboard = get_quiz_result_keyboard(quiz_id=quiz_id)
 
     await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
+
+    # 🆕 أول اختبار كامل لمستخدم جديد: نعرض القائمة الرئيسية الآن (بعد نتيجة الاختبار
+    # مباشرة) بدل لحظة /start - حتى يرى المستخدم الجديد قيمة فعلية (نتيجته) قبل أي
+    # قائمة أزرار إضافية، ويبقى مسار الوصول للنقاط/المفضلة/الدعم مفتوحاً بعدها كالمعتاد.
+    if is_first_completion:
+        try:
+            bot_info = await bot.get_me()
+            await bot.send_message(
+                chat_id,
+                "🎉 <b>أحسنت في أول اختبار لك!</b> استخدم القائمة بالأسفل لاستكشاف باقي مزايا البوت 👇",
+                reply_markup=await get_main_menu_keyboard(bot_info.username, user_id),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            log_error(logger, f"Error sending first-completion main menu to {user_id}: {e}", exception=e)
 
     # التمييز الدقيق في التتبع بين الكويز المكتمل والتوقف المبكر
     if stopped_early:
