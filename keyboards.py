@@ -8,8 +8,9 @@ from constants import (
     SUBJECT_MATH, SUBJECT_ENGLISH,
     WEBAPP_PUBLIC_BASE_URL,
     BTN_AUDIO_CONFIRM_START,
-    BTN_OPEN_UPLOAD_PAGE, REFERRAL_BONUS_POINTS
+    BTN_OPEN_UPLOAD_PAGE
 )
+from settings_helper import get_setting
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
 
@@ -17,9 +18,12 @@ logger = get_logger(__name__)
 
 # ==================== لوحات التحكم والملاحة العامة ====================
 
-def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeyboardMarkup:
+async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeyboardMarkup:
     try:
         ref_link = f"https://t.me/{bot_username}?start={user_id}"
+        # 🆕 مكافأة الإحالة تُقرأ من app_settings كي يبقى نص الزر متطابقاً مع القيمة
+        # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
+        referral_bonus_points = await get_setting("referral_bonus_points")
         kb = [
             [types.InlineKeyboardButton(text="🎬 كيف يعمل البوت؟ (دليل سريع)", callback_data="how_to_use")],
             [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
@@ -28,7 +32,7 @@ def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.InlineKeybo
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
-            [types.InlineKeyboardButton(text=f"🔗 شارك واربح {REFERRAL_BONUS_POINTS} نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
+            [types.InlineKeyboardButton(text=f"🔗 شارك واربح {referral_bonus_points:.0f} نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
         # 🆕 زر رفع محاضرة صوتية كبيرة (حتى 250MB) عبر Mini App - يُخفى تلقائياً لو
         # WEBAPP_PUBLIC_BASE_URL فاضي (مثلاً بوضع polling محلي بدون WEBHOOK_URL)
@@ -558,8 +562,23 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         ],
         [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
+        [types.InlineKeyboardButton(text="⚙️ إعدادات النقاط", callback_data="admin_settings_menu")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKeyboardMarkup:
+    """لوحة إعدادات النقاط: زر تعديل لكل إعداد + رجوع."""
+    kb = []
+    for key, label in labels.items():
+        value = settings.get(key)
+        value_text = f"{value:.0f}" if value is not None else "؟"
+        kb.append([types.InlineKeyboardButton(
+            text=f"{label}: {value_text}",
+            callback_data=f"admin_setting_edit_{key}"
+        )])
+    kb.append([types.InlineKeyboardButton(text="🏠 رجوع للوحة الرئيسية", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_user_actions_keyboard(user_id: int) -> types.InlineKeyboardMarkup:

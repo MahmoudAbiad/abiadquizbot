@@ -42,6 +42,7 @@ class AdminState(StatesGroup):
     waiting_for_direct_message_charge_amount = State()
     waiting_for_direct_message_charge_type = State()
     waiting_for_direct_message_confirm = State()
+    waiting_for_setting_edit = State()
 
 
 # ==================== الدالات المساعدة ====================

@@ -10,8 +10,9 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 
 from config import QuizState, bot, redis_client
+from settings_helper import get_setting
 from constants import (
-    ADMIN_CONTACT, BTN_CANCEL_REQUEST, DAILY_RENEWAL_POINTS, ERROR_ALBUM_TOO_LARGE,
+    ADMIN_CONTACT, BTN_CANCEL_REQUEST, ERROR_ALBUM_TOO_LARGE,
     MAX_ALBUM_IMAGES, MAX_SUPER_PAGES, MAX_TEXT_INPUT_SIZE, MSG_NOTHING_TO_CANCEL,
     MSG_PREVIOUS_REQUEST_REPLACED, MSG_PROCESSING, MSG_REQUEST_CANCELLED,
     MSG_SUPER_PROCESSING_ALERT, SUCCESS_MEDIA_RECEIVED, PAGES_PER_QUIZ_RATIO,
@@ -97,11 +98,15 @@ async def _run_processing_heartbeat(status_msg: types.Message, interval_seconds:
 
 async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> None:
     if user_info.get("status") == "renewed":
-        await message.answer(f"☀️ تم تجديد رصيدك اليومي إلى <b>{DAILY_RENEWAL_POINTS} نقطة مجانية</b>.", parse_mode="HTML")
+        # نستخدم free_points الفعلية المُطبَّقة من الدالة الذرية (وليس إعادة جلب الإعداد)
+        # لضمان تطابق الرقم المعروض مع ما تمت إضافته فعلياً لحساب الطالب.
+        applied_points = float(user_info.get("free_points") or 0)
+        await message.answer(f"☀️ تم تجديد رصيدك اليومي إلى <b>{applied_points:.0f} نقطة مجانية</b>.", parse_mode="HTML")
 
 async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float) -> None:
     balance = float(user_info.get("points") or 0)
     deficit = max(0.0, required - balance)
+    daily_renewal_points = await get_setting("daily_renewal_points")
     contact = ADMIN_CONTACT.lstrip("@")
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]])
     await message.answer(
@@ -112,7 +117,7 @@ async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any
         f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>\n\n"
         # 🩹 UX: أهم لحظة لذكر التجديد اليومي المجاني — الطالب هنا على وشك اتخاذ قرار
         # الدفع، ومن حقه يعرف أن لديه بديلاً مجانياً إن لم يكن مستعجلاً.
-        f"💡 <b>تذكير:</b> نقاطك المجانية تتجدد تلقائياً كل يوم بـ <b>{DAILY_RENEWAL_POINTS} نقطة</b> — "
+        f"💡 <b>تذكير:</b> نقاطك المجانية تتجدد تلقائياً كل يوم بـ <b>{daily_renewal_points:.0f} نقطة</b> — "
         "إن لم تكن مستعجلاً يمكنك الانتظار لتجديد الغد بدل الشحن الآن.",
         reply_markup=keyboard, parse_mode="HTML"
     )

@@ -169,7 +169,7 @@ AI_REQUEST_TIMEOUT = 120  # Seconds
 
 # ==================== Points & Token System ====================
 WELCOME_POINTS = 100          # تمنح مرة واحدة عند تسجيل المستخدم لأول مرة
-DAILY_RENEWAL_POINTS = 25     # تجديد مجاني يومي يكفي لكويز سريع واحد
+DAILY_RENEWAL_POINTS = 50     # تجديد مجاني يومي يكفي لكويز سريع واحد
 REFERRAL_BONUS_POINTS = 50
 DISCOUNT_RATE_FOR_CACHED = 0.1  # تكلفة 10% فقط للكويز المعاد استخدامه (خصم 90%)
 

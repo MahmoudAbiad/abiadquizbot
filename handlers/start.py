@@ -10,7 +10,8 @@ from supabase_helper import (
     supabase, log_usage_event, mark_quiz_attempt_stopped
 )
 from logger import get_logger, log_warning, log_info
-from constants import ADMIN_CONTACT, MAX_PDF_PAGES, DAILY_RENEWAL_POINTS, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
+from constants import ADMIN_CONTACT, MAX_PDF_PAGES, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
+from settings_helper import get_setting
 
 logger = get_logger(__name__)
 router = Router()
@@ -128,6 +129,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         # عليها. أزرار القائمة الرئيسية (شحن الرصيد/الدعم/الإحالة...) تبقى متاحة لاحقاً
         # عبر /start مجدداً أو تلقائياً بمجرد إغلاق/إنهاء الدليل (راجع tutorial.py).
         if status == "new":
+            daily_renewal_points = await get_setting("daily_renewal_points")
             intro_text = (
                 "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
                 "مكانك الأول لتحويل المحاضرات لاختبارات تفاعلية بسهولة. 🚀\n\n"
@@ -136,7 +138,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             if user_info["referrer"]:
                 intro_text += "\n✨ عند توليدك أول كويز بنجاح، سيحصل زميلك الذي دعاك على مكافأة إحالة إضافية. 🤝"
             intro_text += f"\n📊 رصيدك الحالي: <code>{points:.2f}</code> نقطة (تقريباً نقطة واحدة لكل صفحة/سؤال)"
-            intro_text += f"\n🔄 وتتجدد نقاطك المجانية تلقائياً كل يوم بـ <b>{DAILY_RENEWAL_POINTS} نقطة</b> إضافية."
+            intro_text += f"\n🔄 وتتجدد نقاطك المجانية تلقائياً كل يوم بـ <b>{daily_renewal_points:.0f} نقطة</b> إضافية."
 
             from handlers.tutorial import get_tutorial_step_content
             step_text, step_kb = get_tutorial_step_content(0)
@@ -152,7 +154,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         if status == "renewed":
             welcome_text = (
                 "☀️ <b>يا أهلاً، يومك سعيد!</b>\n\n"
-                f"دائماً معك في رحلتك الدراسية.. تم تجديد رصيدك اليومي وإضافة <b>{DAILY_RENEWAL_POINTS} نقطة مجانية جديدة</b> لحسابك. 🔄\n"
+                f"دائماً معك في رحلتك الدراسية.. تم تجديد رصيدك اليومي وإضافة <b>{free_points:.0f} نقطة مجانية جديدة</b> لحسابك. 🔄\n"
             )
         else:
             welcome_text = "👋 <b>يا مرحباً بك مجدداً!</b>\n جاهز لاختبار جديد اليوم؟ ✍️\n"
@@ -171,7 +173,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         await msg.answer(
             welcome_text,
             parse_mode="HTML",
-            reply_markup=get_main_menu_keyboard(bot_info.username, msg.from_user.id)
+            reply_markup=await get_main_menu_keyboard(bot_info.username, msg.from_user.id)
         )
         log_info(logger, f"User {msg.from_user.id} started bot. Status: {status}, Points: {points}")
         
@@ -220,13 +222,14 @@ async def handle_deep_link_overwrite_cancel(call: types.CallbackQuery, state: FS
 @router.callback_query(F.data == "recharge_info")
 async def show_recharge_info(call: types.CallbackQuery):
     try:
+        daily_renewal_points = await get_setting("daily_renewal_points")
         recharge_text = (
             "🔋 <b>شحن النقاط وزيادة الرصيد</b>\n\n"
             "هل استهلكت نقاطك المجانية وتحتاج للمزيد? لا تقلق! "
             "يمكنك شحن رصيدك بكميات مخصصة لتوليد اختبارات بلا حدود والتحضير للامتحانات بكل راحة. 📚\n\n"
             # 🩹 UX: نذكّر بالبديل المجاني قبل الدفع مباشرة — الشحن مفيد فقط لمن يحتاج
             # نقاطاً أكثر الآن، لا لمن يستطيع الانتظار ليوم واحد فقط.
-            f"💡 <b>تذكير:</b> نقاطك المجانية تتجدد تلقائياً كل يوم بـ <b>{DAILY_RENEWAL_POINTS} نقطة</b> "
+            f"💡 <b>تذكير:</b> نقاطك المجانية تتجدد تلقائياً كل يوم بـ <b>{daily_renewal_points:.0f} نقطة</b> "
             "بدون أي مقابل — الشحن اختياري فقط إن كنت بحاجة الى نقاط إضافية الآن.\n\n"
             "لطلب الشحن، كل ما عليك هو التواصل مباشرة مع الدعم والإدارة عبر الرابط التالي:\n"
             f"👉 <b>{ADMIN_CONTACT}</b>\n\n"
