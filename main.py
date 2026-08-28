@@ -24,7 +24,6 @@ from handlers import (
     sharing_router,
     leaderboard_router,
     export_router,
-    tutorial_router,
     audio_router
 )
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
@@ -58,7 +57,6 @@ def main():
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
     dp.include_routers(
         start_router,
-        tutorial_router,  # 👈 الدليل التفاعلي الجديد (يجب أن يُسجَّل قبل files_router)
         admin_router,
         sharing_router,
         audio_router,  # 🆕 معالج المحاضرات الصوتية (يجب أن يُسجَّل قبل files_router لالتقاط

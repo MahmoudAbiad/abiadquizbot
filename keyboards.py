@@ -25,7 +25,6 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
         referral_bonus_points = await get_setting("referral_bonus_points")
         kb = [
-            [types.InlineKeyboardButton(text="🎬 كيف يعمل البوت؟ (دليل سريع)", callback_data="how_to_use")],
             [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
             [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
             [
