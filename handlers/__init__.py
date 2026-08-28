@@ -12,7 +12,6 @@ from handlers.favorites import router as favorites_router
 from handlers.sharing import router as sharing_router
 from handlers.leaderboard import router as leaderboard_router
 from handlers.export import export_router
-from handlers.tutorial import tutorial_router
 from handlers.audio import audio_router
 
 __all__ = [
@@ -25,6 +24,5 @@ __all__ = [
     "sharing_router",
     "leaderboard_router",
     "export_router",
-    "tutorial_router",
     "audio_router"
 ]

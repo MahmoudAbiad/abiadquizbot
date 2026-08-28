@@ -122,32 +122,24 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             "has_referrer": bool(referrer_id),
         }))
         
-        # 🆕 نقطة ألم في تجربة أول 3 ثوانٍ: كان المستخدم الجديد يستقبل رسالتين متتاليتين
-        # فوراً (ترحيب طويل بـ6 أزرار، ثم خطوة 1 من الدليل بأزرار إضافية) تحتويان معلومة
-        # مكررة حرفياً ("أرسل ملف/صورة/نص" تتكرر مرتين). هنا نُدمجهما في رسالة واحدة
-        # مختصرة: ترحيب + رصيد فقط، متبوعة مباشرة بخطوة 1 من الدليل كبديل لها لا كإضافة
-        # عليها. أزرار القائمة الرئيسية (شحن الرصيد/الدعم/الإحالة...) تبقى متاحة لاحقاً
-        # عبر /start مجدداً أو تلقائياً بمجرد إغلاق/إنهاء الدليل (راجع tutorial.py).
+        # 🆕 (2026-08-28) إلغاء دليل الـ5 خطوات نهائياً بناءً على طلب صريح من المستخدم:
+        # لا نفع حقيقي كان يُضاف من الشرح المطوّل - استبدلناه برسالة ترحيب من سطرين
+        # فقط + زر إجراء واحد بارز يقود مباشرة لصلب الاستخدام (إرسال ملف). الضغط على
+        # الزر لا يفعل شيئاً "سحرياً" (لأن الفعل الحقيقي هو إرسال المستخدم لملف/نص من
+        # طرفه) لكنه يُستخدم فقط لتأكيد الفهم وإظهار القائمة الرئيسية بعدها مباشرة -
+        # حتى لا يبقى المستخدم بلا أي أزرار وصول (شحن رصيد/مفضلة/دعم) إلى أن يكتب
+        # /start يدوياً من جديد (نفس المبدأ اللي كان بمعالج tut_finish القديم بالدليل
+        # المحذوف الآن بالكامل - راجع HISTORY_LOG.md لتفاصيل الإزالة).
         if status == "new":
-            daily_renewal_points = await get_setting("daily_renewal_points")
             intro_text = (
                 "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
-                "مكانك الأول لتحويل المحاضرات لاختبارات تفاعلية بسهولة. 🚀\n\n"
-                f"🎁 هدية البداية: أضفنا لحسابك <b>{points} نقطة مجانية</b> لتجربته فوراً!"
+                f"🎁 أضفنا لحسابك <b>{points} نقطة مجانية</b> — استخدمها الآن لتوليد أول اختبار لك 🚀"
             )
-            if user_info["referrer"]:
-                intro_text += "\n✨ عند توليدك أول كويز بنجاح، سيحصل زميلك الذي دعاك على مكافأة إحالة إضافية. 🤝"
-            intro_text += f"\n📊 رصيدك الحالي: <code>{points:.2f}</code> نقطة (تقريباً نقطة واحدة لكل صفحة/سؤال)"
-            intro_text += f"\n🔄 وتتجدد نقاطك المجانية تلقائياً كل يوم بـ <b>{daily_renewal_points:.0f} نقطة</b> إضافية."
+            start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="🚀 أرسل أول ملف الآن", callback_data="new_user_send_now")]
+            ])
 
-            from handlers.tutorial import get_tutorial_step_content
-            step_text, step_kb = get_tutorial_step_content(0)
-
-            await msg.answer(
-                f"{intro_text}\n\n━━━━━━━━━━━━━━━\n\n{step_text}",
-                parse_mode="HTML",
-                reply_markup=step_kb
-            )
+            await msg.answer(intro_text, parse_mode="HTML", reply_markup=start_kb)
             log_info(logger, f"User {msg.from_user.id} started bot. Status: new, Points: {points}")
             return
 
@@ -219,6 +211,29 @@ async def handle_deep_link_overwrite_cancel(call: types.CallbackQuery, state: FS
     finally:
         await call.answer()
 
+@router.callback_query(F.data == "new_user_send_now")
+async def ack_new_user_start(call: types.CallbackQuery):
+    """تأكيد بسيط بعد ضغط زر «أرسل أول ملف الآن» بترحيب المستخدم الجديد - لا محتوى
+    تعليمي هنا عمداً (الدليل القديم حُذف بالكامل). فقط تأكيد قصير + إظهار القائمة
+    الرئيسية فوراً حتى تبقى أزرار الوصول (شحن الرصيد/المفضلة/الدعم) متاحة للمستخدم
+    دون الحاجة لكتابة /start يدوياً من جديد."""
+    try:
+        await call.message.edit_text(
+            "📥 تمام! أرسل الآن ملفك (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشرة في هذه المحادثة 🔥",
+            parse_mode="HTML",
+        )
+        bot_info = await bot.get_me()
+        await call.message.answer(
+            "🏠 القائمة الرئيسية",
+            reply_markup=await get_main_menu_keyboard(bot_info.username, call.from_user.id)
+        )
+        asyncio.create_task(log_usage_event(call.from_user.id, "start_cta_acknowledged"))
+    except Exception as e:
+        logger.error(f"Error in ack_new_user_start: {e}")
+    finally:
+        await call.answer()
+
+
 @router.callback_query(F.data == "recharge_info")
 async def show_recharge_info(call: types.CallbackQuery):
     try:
@@ -254,7 +269,6 @@ async def set_bot_commands(bot):
     # النسخة الفعلية المستخدمة على Railway/الويبهوك هي config.py::set_bot_commands
     commands = [
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
-        types.BotCommand(command="help", description="🎬 كيف يعمل البوت؟ (دليل سريع)"),
         types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
     ]
     await bot.set_my_commands(commands)

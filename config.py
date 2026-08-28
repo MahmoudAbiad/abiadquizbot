@@ -115,7 +115,6 @@ async def set_bot_commands(bot_instance: Bot):
         # أوامر الطلاب الافتراضية
         student_commands = [
             types.BotCommand(command="start", description="🔄 تشغيل البوت وعرض الرصيد"),
-            types.BotCommand(command="help", description="🎬 كيف يعمل البوت؟ (دليل سريع)"),
             types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
             types.BotCommand(command="channel", description="📢 قناة التحديثات والأخبار"),
             types.BotCommand(command="support", description="💬 التواصل مع الدعم الفني"),
@@ -126,7 +125,6 @@ async def set_bot_commands(bot_instance: Bot):
         if ADMIN_ID != 0:
             admin_commands = [
                 types.BotCommand(command="start", description="🔄 تشغيل البوت وعرض الرصيد"),
-                types.BotCommand(command="help", description="🎬 كيف يعمل البوت؟ (دليل سريع)"),
                 types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
                 types.BotCommand(command="admin", description="⚙️ لوحة تحكم الإدارة"),
                 types.BotCommand(command="charge", description="💰 شحن نقاط لطالب"),
