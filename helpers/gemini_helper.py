@@ -29,6 +29,7 @@ import json
 import mimetypes
 import os
 import random
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
@@ -69,6 +70,10 @@ logger = get_logger(__name__)
 
 # AI-NOTE: يتم تحميل مفاتيح Gemini كقائمة وتتبع المفاتيح المعطلة مؤقتاً في ذاكرة السيرفر
 API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") if key.strip()]
+# 🛠️ FIX: يطابق أي backslash غير متبوع بحرف escape شرعي بمعيار JSON (" \ / b f n r t u)
+# - يُستخدم لترميم استجابات Groq الخام قبل json.loads() (راجع _generate_text_quiz).
+_JSON_BACKSLASH_REPAIR_RE = re.compile(r'\\(?!["\\/bfnrtu])')
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # AI-NOTE (memory-leak fix): سابقاً كان يتم إنشاء genai.Client()/AsyncGroq() جديد بكل
@@ -690,7 +695,14 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
             ),
             timeout=45,
         )
-        parsed = QuizResponse(**json.loads(response.choices[0].message.content))
+        raw_content = response.choices[0].message.content
+        # 🛠️ FIX (Defense in Depth): نموذجات Groq أحياناً تكتب backslash خام داخل نص JSON
+        # (مثلاً مسار ويندوز أو أمر LaTeX متسرّب) بدل تهريبه بشكل صحيح (\\ بدل \) - وهذا
+        # يجعل json.loads يُفسِّر \f \t \n \r \b كحروف تحكّم صامتة (تلف بصمت) أو يرمي
+        # استثناء "Invalid \escape" لأي حرف آخر. نُرمِّم أي backslash غير متبوع بحرف
+        # escape شرعي في JSON قبل التحليل، بدل تركه يتلف البيانات أو يُسقط الاستجابة كلها.
+        raw_content = _JSON_BACKSLASH_REPAIR_RE.sub(r"\\\\", raw_content)
+        parsed = QuizResponse(**json.loads(raw_content))
         return [question.model_dump() for question in parsed.questions]
     except Exception as exc:
         log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
@@ -806,7 +818,22 @@ async def generate_quiz_smart(
 
         # 1. مسار النصوص الصريحة
         if pure_text:
-            questions = await _generate_text_quiz(pure_text, prompt, english_mode=english_mode if not is_math_mode else None)
+            # 🛠️ FIX: نمط الكويز المصوّر الرياضي (is_math_mode) يُوجَّه مباشرة لمسار Gemini
+            # (generate_structured_with_cascade + response_schema) ولا يمر إطلاقاً بمسار
+            # Groq السريع (_generate_text_quiz). السبب: Groq يُستدعى بـ
+            # response_format={"type": "json_object"} ثم يُحلَّل ناتجه بـ json.loads() يدوياً،
+            # ونموذج gpt-oss-120b لا يُهرِّب الـ backslash بشكل صحيح داخل نصوص LaTeX
+            # (يكتب \frac بدل \\frac). قواعد تهريب JSON الرسمية تُفسِّر \f و\t و\n و\r و\b
+            # كحروف تحكّم صامتة (form-feed/tab/newline...) فتُبتلع بصمت - وهذا بالضبط
+            # سبب ظهور "⍰rac"/"⍰ext" بدل \frac/\text داخل صور الكويزات الرياضية (رموز
+            # LaTeX تبدأ بحرف escape شرعي بـ JSON زي \frac \text \theta \times \beta \neq
+            # تتلف بصمت، بينما \sqrt \alpha \pi \sum ... تُسبب استثناء JSON كامل فيُعاد
+            # التوليد تلقائياً عبر Gemini - ولهذا كانت المشكلة تظهر جزئياً فقط). مسار Gemini
+            # (response_schema=QuizResponse) يستخدم توليداً مُقيَّداً يضمن تهريب JSON سليم
+            # دائماً، بغض النظر عن محتوى الـ backslash داخل النص.
+            if is_math_mode:
+                return await _generate_text_quiz_with_gemini(pure_text, prompt)
+            questions = await _generate_text_quiz(pure_text, prompt, english_mode=english_mode)
             if not questions:
                 questions = await _generate_text_quiz_with_gemini(pure_text, prompt)
             return questions
