@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>محرر سؤال الرياضيات</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Tahoma, sans-serif;
+    background: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #111111);
+    margin: 0;
+    padding: 16px 14px 90px;
+  }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 18px 0 8px; color: var(--tg-theme-text-color, #111111); }
+  .hint {
+    font-size: 12.5px;
+    color: var(--tg-theme-hint-color, #888888);
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+  .section {
+    border: 1px solid rgba(128,128,128,0.22);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 14px;
+  }
+  label.field-label {
+    display: block;
+    font-size: 12.5px;
+    font-weight: 600;
+    margin-bottom: 5px;
+    color: var(--tg-theme-hint-color, #888888);
+  }
+  textarea, input[type="text"] {
+    width: 100%;
+    border: 1px solid rgba(128,128,128,0.35);
+    border-radius: 10px;
+    padding: 9px 10px;
+    font-size: 14px;
+    font-family: inherit;
+    color: var(--tg-theme-text-color, #111111);
+    background: var(--tg-theme-secondary-bg-color, #f7f7f7);
+    resize: vertical;
+  }
+  textarea { min-height: 54px; }
+  .option-block { margin-bottom: 12px; }
+  .option-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 5px;
+  }
+  .correct-badge {
+    font-size: 11px;
+    background: #e6f7ec;
+    color: #1e7d3a;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-weight: 600;
+  }
+  .preview-box {
+    margin-top: 6px;
+    background: var(--tg-theme-secondary-bg-color, #f2f2f2);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13.5px;
+    min-height: 20px;
+    line-height: 1.7;
+    word-break: break-word;
+  }
+  .preview-box:empty::before { content: "المعاينة هون..."; color: var(--tg-theme-hint-color, #999); }
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13.5px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .toggle-row input { width: 17px; height: 17px; }
+  table.grid-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  table.grid-table td, table.grid-table th { padding: 3px; }
+  table.grid-table input {
+    width: 100%;
+    min-width: 46px;
+    text-align: center;
+    padding: 6px 4px;
+    font-size: 13px;
+  }
+  .grid-btns { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .small-btn {
+    font-size: 12.5px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--tg-theme-button-color, #2ea6ff);
+    color: var(--tg-theme-button-color, #2ea6ff);
+    background: transparent;
+    cursor: pointer;
+  }
+  .small-btn.danger { border-color: #e05252; color: #e05252; }
+  .matrix-card {
+    border: 1px dashed rgba(128,128,128,0.35);
+    border-radius: 10px;
+    padding: 10px;
+    margin-bottom: 12px;
+  }
+  .matrix-top-row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .matrix-top-row input[type="text"] { flex: 1; }
+  select {
+    border: 1px solid rgba(128,128,128,0.35);
+    border-radius: 10px;
+    padding: 8px;
+    font-size: 13px;
+    background: var(--tg-theme-secondary-bg-color, #f7f7f7);
+    color: var(--tg-theme-text-color, #111111);
+  }
+  .remove-x {
+    background: none;
+    border: none;
+    color: #e05252;
+    font-size: 18px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 4px 8px;
+  }
+  .footer-bar {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: var(--tg-theme-bg-color, #ffffff);
+    border-top: 1px solid rgba(128,128,128,0.2);
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+  }
+  .save-btn {
+    width: 100%;
+    padding: 12px;
+    border-radius: 12px;
+    border: none;
+    background: var(--tg-theme-button-color, #2ea6ff);
+    color: var(--tg-theme-button-text-color, #ffffff);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .save-btn:disabled { opacity: 0.55; }
+  .status-text { font-size: 12.5px; text-align: center; margin-top: 8px; min-height: 16px; }
+  .status-text.error { color: #d32f2f; }
+  .status-text.ok { color: #1e7d3a; }
+  #loadingState, #errorState { text-align: center; padding: 60px 10px; font-size: 14px; color: var(--tg-theme-hint-color, #888); }
+  #formState { display: none; }
+  .char-counter { font-size: 11px; color: var(--tg-theme-hint-color, #999); text-align: left; margin-top: 3px; }
+</style>
+</head>
+<body>
+
+<div id="loadingState">⏳ جارٍ تحميل السؤال...</div>
+<div id="errorState" style="display:none;"></div>
+
+<div id="formState">
+  <h1>🌐 محرر سؤال الرياضيات</h1>
+  <div class="hint">عدّل النص أدناه (يمكنك ترك رموز <code>$...$</code> كما هي لصياغة رياضية صحيحة) وشاهد المعاينة الحية، ثم اضغط حفظ.</div>
+
+  <div class="section">
+    <h2 style="margin-top:0;">🔎 معاينة حية</h2>
+    <div class="preview-box" id="fullPreview"></div>
+  </div>
+
+  <div class="section">
+    <label class="field-label">نص السؤال</label>
+    <textarea id="questionInput" rows="3"></textarea>
+    <div class="char-counter" id="questionCounter"></div>
+  </div>
+
+  <div class="section" id="optionsSection">
+    <h2 style="margin-top:0;">الإجابات</h2>
+    <div id="optionsContainer"></div>
+  </div>
+
+  <div class="section">
+    <div class="toggle-row" id="tableToggleRow">
+      <input type="checkbox" id="tableToggle">
+      <span>هذا السؤال يحتوي جدول بيانات</span>
+    </div>
+    <div id="tableEditor" style="display:none;"></div>
+  </div>
+
+  <div class="section">
+    <h2 style="margin-top:0;">المصفوفات</h2>
+    <div id="matricesContainer"></div>
+    <div class="grid-btns">
+      <button type="button" class="small-btn" id="addMatrixBtn">➕ أضف مصفوفة</button>
+    </div>
+  </div>
+</div>
+
+<div class="footer-bar" id="footerBar" style="display:none;">
+  <button class="save-btn" id="saveBtn">💾 حفظ التعديلات</button>
+  <div class="status-text" id="statusText"></div>
+</div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.ready();
+tg.expand();
+
+const params = new URLSearchParams(window.location.search);
+const quizId = params.get("quiz_id") || "";
+const questionIndex = parseInt(params.get("question_index"), 10);
+
+const loadingState = document.getElementById("loadingState");
+const errorState = document.getElementById("errorState");
+const formState = document.getElementById("formState");
+const footerBar = document.getElementById("footerBar");
+const statusText = document.getElementById("statusText");
+const saveBtn = document.getElementById("saveBtn");
+
+const questionInput = document.getElementById("questionInput");
+const questionCounter = document.getElementById("questionCounter");
+const optionsContainer = document.getElementById("optionsContainer");
+const tableToggle = document.getElementById("tableToggle");
+const tableEditor = document.getElementById("tableEditor");
+const matricesContainer = document.getElementById("matricesContainer");
+const addMatrixBtn = document.getElementById("addMatrixBtn");
+const fullPreview = document.getElementById("fullPreview");
+
+let LIMITS = {
+  max_question_len: 2000, max_option_len: 500, max_cell_len: 60,
+  max_table_rows: 12, max_table_cols: 8,
+  max_matrices: 4, max_matrix_rows: 6, max_matrix_cols: 6,
+};
+let correctOptionId = null;
+let tableState = { headers: [], rows: [] };
+let matricesState = [];
+
+// ==================== تحميل بيانات السؤال ====================
+if (!quizId || Number.isNaN(questionIndex)) {
+  showError("رابط غير صالح - ارجع للمحادثة وأعد فتح المحرر من جديد.");
+} else {
+  loadQuestion();
+}
+
+async function loadQuestion() {
+  try {
+    const res = await fetch("/api/question-edit/fetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ init_data: tg.initData, quiz_id: quizId, question_index: questionIndex }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showError(err.detail || "تعذر تحميل السؤال.");
+      return;
+    }
+    const data = await res.json();
+    LIMITS = data.limits || LIMITS;
+    correctOptionId = data.correct_option_id;
+    tableState = data.table && (data.table.headers || data.table.rows)
+      ? { headers: data.table.headers || [], rows: data.table.rows || [] }
+      : { headers: [], rows: [] };
+    matricesState = (data.matrices || []).map((m) => ({
+      label: m.label || "", bracket: m.bracket || "square", rows: m.rows || [["", ""], ["", ""]],
+    }));
+
+    questionInput.value = data.question || "";
+    questionInput.maxLength = LIMITS.max_question_len;
+    buildOptions(data.options || []);
+    buildTableEditor();
+    buildMatrices();
+    updatePreview();
+
+    loadingState.style.display = "none";
+    formState.style.display = "block";
+    footerBar.style.display = "block";
+  } catch (e) {
+    showError("تعذر الاتصال بالخادم، تحقق من الإنترنت وحاول من جديد.");
+  }
+}
+
+function showError(msg) {
+  loadingState.style.display = "none";
+  errorState.style.display = "block";
+  errorState.textContent = "⚠️ " + msg;
+}
+
+// ==================== بناء الإجابات (عدد ثابت) ====================
+function buildOptions(options) {
+  optionsContainer.innerHTML = "";
+  options.forEach((opt, idx) => {
+    const block = document.createElement("div");
+    block.className = "option-block";
+    const isCorrect = correctOptionId === idx;
+    block.innerHTML = `
+      <div class="option-header">
+        <label class="field-label" style="margin:0;">الإجابة ${idx + 1}</label>
+        ${isCorrect ? '<span class="correct-badge">✅ الإجابة الصحيحة</span>' : ""}
+      </div>
+      <textarea rows="2" data-option-index="${idx}" maxlength="${LIMITS.max_option_len}">${escapeHtmlAttr(opt)}</textarea>
+    `;
+    optionsContainer.appendChild(block);
+  });
+  optionsContainer.querySelectorAll("textarea").forEach((el) => {
+    el.addEventListener("input", debouncedPreview);
+  });
+}
+
+function getOptionValues() {
+  return Array.from(optionsContainer.querySelectorAll("textarea")).map((el) => el.value);
+}
+
+// ==================== محرر الجدول ====================
+function buildTableEditor() {
+  const hasTable = tableState.headers.length > 0 || tableState.rows.length > 0;
+  tableToggle.checked = hasTable;
+  tableEditor.style.display = hasTable ? "block" : "none";
+  if (!hasTable) {
+    tableState = { headers: ["", ""], rows: [["", ""]] };
+  }
+  renderTableGrid();
+}
+
+tableToggle.addEventListener("change", () => {
+  tableEditor.style.display = tableToggle.checked ? "block" : "none";
+  if (tableToggle.checked && tableState.headers.length === 0) {
+    tableState = { headers: ["", ""], rows: [["", ""]] };
+    renderTableGrid();
+  }
+  updatePreview();
+});
+
+function renderTableGrid() {
+  syncTableStateFromDom(); // نحافظ على القيم المكتوبة قبل إعادة الرسم (إضافة/حذف صف أو عمود)
+  const cols = tableState.headers.length;
+  let html = '<table class="grid-table"><thead><tr>';
+  for (let c = 0; c < cols; c++) {
+    html += `<th><input type="text" data-th="${c}" maxlength="${LIMITS.max_cell_len}" value="${escapeHtmlAttr(tableState.headers[c] || "")}" placeholder="عنوان ${c + 1}"></th>`;
+  }
+  html += '<th></th></tr></thead><tbody>';
+  tableState.rows.forEach((row, r) => {
+    html += "<tr>";
+    for (let c = 0; c < cols; c++) {
+      html += `<td><input type="text" data-tr="${r}" data-tc="${c}" maxlength="${LIMITS.max_cell_len}" value="${escapeHtmlAttr(row[c] || "")}"></td>`;
+    }
+    html += `<td><button type="button" class="remove-x" data-remove-row="${r}">✕</button></td></tr>`;
+  });
+  html += "</tbody></table>";
+  html += `<div class="grid-btns">
+    <button type="button" class="small-btn" id="addTableRow">➕ صف</button>
+    <button type="button" class="small-btn" id="addTableCol">➕ عمود</button>
+  </div>`;
+  tableEditor.innerHTML = html;
+
+  tableEditor.querySelectorAll("input").forEach((el) => el.addEventListener("input", debouncedPreview));
+  tableEditor.querySelectorAll("[data-remove-row]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const r = parseInt(btn.dataset.removeRow, 10);
+      syncTableStateFromDom();
+      tableState.rows.splice(r, 1);
+      renderTableGrid();
+      updatePreview();
+    });
+  });
+  const addRowBtn = document.getElementById("addTableRow");
+  const addColBtn = document.getElementById("addTableCol");
+  if (addRowBtn) addRowBtn.addEventListener("click", () => {
+    syncTableStateFromDom();
+    if (tableState.rows.length >= LIMITS.max_table_rows) return;
+    tableState.rows.push(new Array(tableState.headers.length).fill(""));
+    renderTableGrid();
+  });
+  if (addColBtn) addColBtn.addEventListener("click", () => {
+    syncTableStateFromDom();
+    if (tableState.headers.length >= LIMITS.max_table_cols) return;
+    tableState.headers.push("");
+    tableState.rows.forEach((row) => row.push(""));
+    renderTableGrid();
+  });
+}
+
+function syncTableStateFromDom() {
+  const headerInputs = tableEditor.querySelectorAll("[data-th]");
+  if (headerInputs.length) {
+    headerInputs.forEach((el) => { tableState.headers[parseInt(el.dataset.th, 10)] = el.value; });
+  }
+  const cellInputs = tableEditor.querySelectorAll("[data-tr]");
+  cellInputs.forEach((el) => {
+    const r = parseInt(el.dataset.tr, 10), c = parseInt(el.dataset.tc, 10);
+    if (tableState.rows[r]) tableState.rows[r][c] = el.value;
+  });
+}
+
+// ==================== محرر المصفوفات ====================
+function buildMatrices() {
+  matricesContainer.innerHTML = "";
+  matricesState.forEach((m, idx) => renderMatrixCard(m, idx));
+  addMatrixBtn.disabled = matricesState.length >= LIMITS.max_matrices;
+}
+
+addMatrixBtn.addEventListener("click", () => {
+  if (matricesState.length >= LIMITS.max_matrices) return;
+  matricesState.push({ label: "", bracket: "square", rows: [["", ""], ["", ""]] });
+  buildMatrices();
+  updatePreview();
+});
+
+function renderMatrixCard(m, idx) {
+  const card = document.createElement("div");
+  card.className = "matrix-card";
+  card.dataset.matrixIndex = idx;
+
+  const topRow = document.createElement("div");
+  topRow.className = "matrix-top-row";
+  topRow.innerHTML = `
+    <input type="text" placeholder="تسمية اختيارية مثل A =" data-mlabel maxlength="${LIMITS.max_cell_len}" value="${escapeHtmlAttr(m.label)}">
+    <select data-mbracket>
+      <option value="square" ${m.bracket === "square" ? "selected" : ""}>قوس مربع [ ]</option>
+      <option value="round" ${m.bracket === "round" ? "selected" : ""}>قوس دائري ( )</option>
+      <option value="bar" ${m.bracket === "bar" ? "selected" : ""}>محدّد | |</option>
+    </select>
+    <button type="button" class="remove-x" data-remove-matrix>✕</button>
+  `;
+  card.appendChild(topRow);
+
+  const gridWrap = document.createElement("div");
+  gridWrap.innerHTML = matrixGridHtml(m);
+  card.appendChild(gridWrap);
+
+  matricesContainer.appendChild(card);
+
+  topRow.querySelector("[data-mlabel]").addEventListener("input", (e) => { m.label = e.target.value; debouncedPreview(); });
+  topRow.querySelector("[data-mbracket]").addEventListener("change", (e) => { m.bracket = e.target.value; debouncedPreview(); });
+  topRow.querySelector("[data-remove-matrix]").addEventListener("click", () => {
+    matricesState.splice(idx, 1);
+    buildMatrices();
+    updatePreview();
+  });
+
+  bindMatrixGridEvents(card, m, idx);
+}
+
+function matrixGridHtml(m) {
+  const cols = m.rows[0] ? m.rows[0].length : 2;
+  let html = '<table class="grid-table"><tbody>';
+  m.rows.forEach((row, r) => {
+    html += "<tr>";
+    for (let c = 0; c < cols; c++) {
+      html += `<td><input type="text" data-mr="${r}" data-mc="${c}" maxlength="${LIMITS.max_cell_len}" value="${escapeHtmlAttr(row[c] || "")}"></td>`;
+    }
+    html += `<td><button type="button" class="remove-x" data-remove-mrow="${r}">✕</button></td></tr>`;
+  });
+  html += "</tbody></table>";
+  html += `<div class="grid-btns">
+    <button type="button" class="small-btn" data-add-mrow>➕ صف</button>
+    <button type="button" class="small-btn" data-add-mcol>➕ عمود</button>
+    ${m.rows.length > 1 ? '' : ''}
+  </div>`;
+  return html;
+}
+
+function bindMatrixGridEvents(card, m, idx) {
+  const rerender = () => {
+    const gridWrap = card.children[1];
+    gridWrap.innerHTML = matrixGridHtml(m);
+    bindMatrixGridEvents(card, m, idx);
+    updatePreview();
+  };
+  card.querySelectorAll("[data-mr]").forEach((el) => {
+    el.addEventListener("input", () => {
+      const r = parseInt(el.dataset.mr, 10), c = parseInt(el.dataset.mc, 10);
+      m.rows[r][c] = el.value;
+      debouncedPreview();
+    });
+  });
+  card.querySelectorAll("[data-remove-mrow]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (m.rows.length <= 1) return;
+      m.rows.splice(parseInt(btn.dataset.removeMrow, 10), 1);
+      rerender();
+    });
+  });
+  const addRowBtn = card.querySelector("[data-add-mrow]");
+  const addColBtn = card.querySelector("[data-add-mcol]");
+  if (addRowBtn) addRowBtn.addEventListener("click", () => {
+    if (m.rows.length >= LIMITS.max_matrix_rows) return;
+    m.rows.push(new Array(m.rows[0].length).fill(""));
+    rerender();
+  });
+  if (addColBtn) addColBtn.addEventListener("click", () => {
+    if (m.rows[0].length >= LIMITS.max_matrix_cols) return;
+    m.rows.forEach((row) => row.push(""));
+    rerender();
+  });
+}
+
+// ==================== المعاينة الحية (KaTeX) ====================
+let previewTimer = null;
+function debouncedPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(updatePreview, 250);
+}
+questionInput.addEventListener("input", () => {
+  questionCounter.textContent = `${questionInput.value.length} / ${LIMITS.max_question_len}`;
+  debouncedPreview();
+});
+
+const BRACKET_ENV = { square: "bmatrix", round: "pmatrix", bar: "vmatrix" };
+
+function matrixToLatex(m) {
+  // 🆕 escapeHtml هون ضروري (زي html.escape() المستخدم بجانب البوت بتلغرام - نفس
+  // المبدأ بالضبط) لأن الناتج بينحقن لاحقاً كـ innerHTML مباشرة: بدونه، أي "<" أو
+  // "&" بمحتوى خلية يكتبها المستخدم بينكسر كـ HTML خام (self-XSS بمتصفحه هو نفسه)
+  // بدل ما يظهر كنص حرفي داخل $...$. escapeHtml ما بيلمس "$" ولا "\" فرموز LaTeX
+  // (\begin, \\, إلخ) تضل سليمة لـ KaTeX بعد فك الـ entities من المتصفح.
+  const body = m.rows.map((row) => row.map((cell) => escapeHtml(cell || "")).join(" & ")).join(" \\\\ ");
+  const env = BRACKET_ENV[m.bracket] || "bmatrix";
+  const label = m.label ? escapeHtml(m.label) + " " : "";
+  return `${label}$\\begin{${env}}${body}\\end{${env}}$`;
+}
+
+function updatePreview() {
+  const qText = questionInput.value || "";
+  const options = getOptionValues();
+  let html = `<div style="margin-bottom:8px;"><b>س:</b> ${escapeHtml(qText)}</div>`;
+  options.forEach((opt, idx) => {
+    html += `<div>${idx + 1}. ${escapeHtml(opt)}</div>`;
+  });
+
+  if (tableToggle.checked) {
+    syncTableStateFromDom();
+    if (tableState.headers.length) {
+      html += '<table style="margin-top:10px;border-collapse:collapse;width:100%;">';
+      html += "<tr>" + tableState.headers.map((h) => `<th style="border:1px solid #ccc;padding:4px;font-size:12px;">${escapeHtml(h)}</th>`).join("") + "</tr>";
+      tableState.rows.forEach((row) => {
+        html += "<tr>" + row.map((c) => `<td style="border:1px solid #ccc;padding:4px;font-size:12px;text-align:center;">${escapeHtml(c)}</td>`).join("") + "</tr>";
+      });
+      html += "</table>";
+    }
+  }
+
+  matricesState.forEach((m) => {
+    html += `<div style="margin-top:10px;">${matrixToLatex(m)}</div>`;
+  });
+
+  fullPreview.innerHTML = html;
+  try {
+    renderMathInElement(fullPreview, {
+      delimiters: [{ left: "$", right: "$", display: false }],
+      throwOnError: false,
+    });
+  } catch (e) { /* أي خطأ صياغة LaTeX من المستخدم لا يجب أن يكسر الصفحة - نتجاهله بصمت هون فقط للمعاينة */ }
+}
+
+function escapeHtml(str) {
+  // 🆕 لازم نغطي " كمان (مو بس &<>) لأن الناتج بينحقن جوا value="..." بعدة أماكن
+  // (خيارات الجدول/المصفوفات) - ورموز الرياضيات كتير بتحوي " (إنش) أو '" (قدم/إنش)
+  // بشكل طبيعي، فبدون تغطيتها بتنكسر بنية الـ HTML لأي مستخدم يكتب رمز زاوية أو قياس.
+  return String(str).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function escapeHtmlAttr(str) { return escapeHtml(str || ""); }
+
+// ==================== الحفظ ====================
+saveBtn.addEventListener("click", async () => {
+  statusText.className = "status-text";
+  statusText.textContent = "";
+
+  const questionText = questionInput.value.trim();
+  const options = getOptionValues().map((o) => o.trim());
+
+  if (!questionText) {
+    statusText.className = "status-text error";
+    statusText.textContent = "⚠️ نص السؤال لا يمكن أن يكون فارغاً.";
+    return;
+  }
+  if (options.some((o) => !o)) {
+    statusText.className = "status-text error";
+    statusText.textContent = "⚠️ لا يمكن ترك أي إجابة فارغة.";
+    return;
+  }
+
+  syncTableStateFromDom();
+  const tablePayload = tableToggle.checked && tableState.headers.length
+    ? { headers: tableState.headers, rows: tableState.rows }
+    : null;
+
+  saveBtn.disabled = true;
+  statusText.textContent = "⏳ جارٍ الحفظ...";
+  try {
+    const res = await fetch("/api/question-edit/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        init_data: tg.initData,
+        quiz_id: quizId,
+        question_index: questionIndex,
+        question: questionText,
+        options,
+        table: tablePayload,
+        matrices: matricesState,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      statusText.className = "status-text error";
+      statusText.textContent = "⚠️ " + (err.detail || "تعذر حفظ التعديل.");
+      saveBtn.disabled = false;
+      return;
+    }
+    statusText.className = "status-text ok";
+    statusText.textContent = "✅ تم الحفظ! رجّعك عالمحادثة...";
+    setTimeout(() => tg.close(), 800);
+  } catch (e) {
+    statusText.className = "status-text error";
+    statusText.textContent = "⚠️ تعذر الاتصال بالخادم، حاول من جديد.";
+    saveBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

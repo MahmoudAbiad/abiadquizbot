@@ -1,7 +1,8 @@
 # Handlers/quiz_runner.py
 import asyncio
+import html
 import json
-from typing import Union, Optional, List, Dict, Any
+from typing import Union, Optional, List, Dict, Any, Tuple
 
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -9,7 +10,8 @@ from aiogram.filters import StateFilter
 
 from config import bot, QuizState, redis_client
 from constants import (
-    MSG_QUIZ_STOPPED, MSG_FEEDBACK_PROMPT, MSG_FEEDBACK_SAVED
+    MSG_QUIZ_STOPPED, MSG_FEEDBACK_PROMPT, MSG_FEEDBACK_SAVED,
+    WEBAPP_PUBLIC_BASE_URL,
 )
 from keyboards import (
     get_main_menu_keyboard,
@@ -18,9 +20,11 @@ from keyboards import (
     get_rating_keyboard,
     get_question_edit_keyboard,
     get_answer_edit_keyboard,
+    get_math_question_edit_keyboard,
 )
 from logger import get_logger, log_error, log_info, log_warning
 from services.latex_text import latex_to_plain
+from handlers.audio import _build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لاستئناف الكويز من خلفية (محرر أسئلة الرياضيات عبر الويب)
 from supabase_helper import (
     list_favorite_quizzes,
     update_user_stats,
@@ -111,12 +115,23 @@ async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQue
     await send_question(msg_or_call, state)
 
 async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext) -> None:
+    chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
+    user_id = msg_or_call.from_user.id
+    await send_question_by_ids(chat_id, user_id, state)
+
+
+async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) -> None:
+    """
+    🆕 نفس منطق send_question بالضبط لكن تاخذ chat_id/user_id مباشرة بدل Message/
+    CallbackQuery - ضرورية لاستئناف الكويز من خلفية (background task) مش من داخل
+    handler عادي، متل بعد الحفظ من محرر أسئلة الرياضيات عبر صفحة الويب (راجع
+    save_question_edit_from_web أدناه وwebhook_server.py). send_question نفسها
+    صارت غلاف رقيق فوقها لتفادي تكرار أي منطق.
+    """
     try:
         data = await state.get_data()
         questions = data['questions']
         idx = data['current_index']
-        chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
-        user_id = msg_or_call.from_user.id
 
         # 1. حالة انتهاء الاختبار
         if idx >= len(questions):
@@ -138,9 +153,8 @@ async def send_question(msg_or_call: Union[types.Message, types.CallbackQuery], 
         await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb, quiz_id=data.get('quiz_id'))
         await state.update_data(is_switching_question=False)
     except Exception as e:
-        log_error(logger, f"Error in send_question: {e}", exception=e)
+        log_error(logger, f"Error in send_question_by_ids: {e}", exception=e)
         await state.update_data(is_switching_question=False)
-        chat_id = msg_or_call.chat.id if isinstance(msg_or_call, types.Message) else msg_or_call.message.chat.id
         try:
             await bot.send_message(
                 chat_id=chat_id,
@@ -282,6 +296,24 @@ async def request_question_edit(msg: types.Message, state: FSMContext):
             return
         await state.update_data(edit_question_index=question_index)
         await state.set_state(QuizState.waiting_for_question_edit_choice)
+
+        question = questions[question_index]
+        quiz_id = data.get("quiz_id")
+        # 🆕 لأسئلة الرياضيات المصوّرة (is_math): التعديل النصي البسيط داخل الشات غير
+        # كافٍ (السؤال يظهر كصورة، وقد يحتوي جدول/مصفوفة لا يمكن التعبير عنهما بنص
+        # عادي). نفتح محرراً كاملاً بصفحة ويب (معاينة LaTeX حية + محرر جدول/مصفوفات)
+        # بدلاً من لوحة الاختيار النصية - فقط لو متوفر رابط WebApp ومعرف كويز حقيقي
+        # (بدونهما، الحفظ نفسه غير ممكن أصلاً - راجع update_quiz_question)، وإلا
+        # نرجع تلقائياً لنفس التعديل النصي البسيط كخط دفاع ثانٍ.
+        if question.get("is_math") and quiz_id and WEBAPP_PUBLIC_BASE_URL:
+            url = f"{WEBAPP_PUBLIC_BASE_URL}/webapp/question_edit.html?quiz_id={quiz_id}&question_index={question_index}"
+            await msg.answer(
+                "✏️ هذا سؤال رياضيات مصوّر. افتح المحرر الكامل بالأسفل لتعديل نص السؤال أو "
+                "الإجابات أو الجدول أو المصفوفة، مع معاينة حية للصيغة الرياضية:",
+                reply_markup=get_math_question_edit_keyboard(url),
+            )
+            return
+
         await msg.answer(
             "✏️ يمكنك تعديل السؤال، اختر ما تريد تعديله بالضبط:",
             reply_markup=get_question_edit_keyboard(),
@@ -292,8 +324,20 @@ async def request_question_edit(msg: types.Message, state: FSMContext):
 
 @router.callback_query(QuizState.waiting_for_question_edit_choice, F.data == "edit_question_text")
 async def request_question_text_edit(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    question_index = data.get("edit_question_index")
+    questions = data.get("questions", [])
+    if not isinstance(question_index, int) or not 0 <= question_index < len(questions):
+        await call.answer("❌ انتهت جلسة التعديل، أرسل النقطة مجدداً.", show_alert=True)
+        return
+    current_text = str(questions[question_index].get("question", ""))
     await state.set_state(QuizState.waiting_for_question_edit_text)
-    await call.message.answer("✏️ أرسل الآن نص السؤال المعدّل:")
+    await call.message.answer(
+        "✏️ أرسل الآن نص السؤال المعدّل.\n\n"
+        "👇 النص الحالي (اضغط عليه لنسخه، ثم عدّل ما تريد وأرسله):\n"
+        f"<code>{html.escape(current_text)}</code>",
+        parse_mode="HTML",
+    )
     await call.answer()
 
 
@@ -327,11 +371,64 @@ async def select_answer_to_edit(call: types.CallbackQuery, state: FSMContext):
             raise ValueError("invalid option index")
         await state.update_data(edit_option_index=option_index)
         await state.set_state(QuizState.waiting_for_answer_edit_text)
-        await call.message.answer(f"✏️ أرسل النص الجديد للإجابة رقم {option_index + 1}:")
+        current_answer_text = str(options[option_index])
+        await call.message.answer(
+            f"✏️ أرسل النص الجديد للإجابة رقم {option_index + 1}.\n\n"
+            "👇 النص الحالي (اضغط عليه لنسخه، ثم عدّل ما تريد وأرسله):\n"
+            f"<code>{html.escape(current_answer_text)}</code>",
+            parse_mode="HTML",
+        )
         await call.answer()
     except Exception as e:
         log_error(logger, f"Error selecting answer to edit: {e}", exception=e)
         await call.answer("❌ تعذر اختيار الإجابة للتعديل.", show_alert=True)
+
+
+async def apply_question_edit_and_resume(
+    chat_id: int,
+    user_id: int,
+    state: FSMContext,
+    question_index: int,
+    question: dict,
+    edit_type: str,
+    option_index: Optional[int] = None,
+) -> Tuple[bool, str]:
+    """
+    🆕 المنطق المشترك لحفظ سؤال مُعدَّل واستئناف الكويز بعده - يُستخدم من مسارين:
+    1. التعديل النصي السريع داخل الشات (سؤال عادي، أو حقل واحد بسؤال رياضيات).
+    2. محرر أسئلة الرياضيات الكامل عبر صفحة الويب (نص + إجابات + جدول + مصفوفات
+       سوا بنداء واحد - راجع save_question_edit_from_web أدناه).
+    يرجع (نجح؟, رسالة تُعرض للمستخدم) بدل إرسال الرسالة مباشرة، لأن المسار الثاني
+    (من خلفية webhook_server.py) لا يملك أصلاً كائن Message لإرسال رد عليه.
+    """
+    data = await state.get_data()
+    questions = data.get("questions", [])
+    if not 0 <= question_index < len(questions):
+        await state.set_state(QuizState.answering_quiz)
+        return False, "❌ انتهت جلسة التعديل، أرسل النقطة على السؤال مرة أخرى."
+
+    quiz_id = data.get("quiz_id")
+    saved = await update_quiz_question(quiz_id, question_index, question, user_id) if quiz_id else None
+    if saved is None:
+        await state.set_state(QuizState.answering_quiz)
+        return False, "⛔ لا تملك صلاحية تعديل هذا الكويز. يمكن لمالكه أو الأدمن فقط تعديله."
+    if not saved:
+        await state.set_state(QuizState.answering_quiz)
+        return False, "❌ تعذر حفظ التعديل في قاعدة البيانات، ولم يتم تغيير الكويز."
+
+    asyncio.create_task(log_usage_event(user_id, "quiz_question_edited", {
+        "quiz_id": quiz_id,
+        "question_index": question_index,
+        "edit_type": edit_type,
+        "option_index": option_index,
+        "database_updated": True,
+    }))
+    questions = list(questions)
+    questions[question_index] = question
+    await state.update_data(questions=questions, current_index=question_index)
+    await state.set_state(QuizState.answering_quiz)
+    await send_question_by_ids(chat_id, user_id, state)
+    return True, "✅ تم تعديل السؤال بنجاح ! يمكنك الان متابعة اختبارك."
 
 
 async def _save_edited_question(
@@ -342,33 +439,84 @@ async def _save_edited_question(
     edit_type: str,
     option_index: Optional[int] = None,
 ) -> None:
+    """غلاف رقيق فوق apply_question_edit_and_resume لمسار التعديل النصي داخل الشات."""
+    _, reply_text = await apply_question_edit_and_resume(
+        msg.chat.id, msg.from_user.id, state, question_index, question, edit_type, option_index,
+    )
+    await msg.answer(reply_text)
+
+
+async def fetch_question_for_edit_web(chat_id: int, user_id: int, quiz_id: str, question_index: int) -> Optional[dict]:
+    """
+    🆕 تُستدعى من webhook_server.py (POST /api/question-edit/fetch) للتحقق من صلاحية
+    جلسة تعديل سؤال رياضي عبر صفحة الويب، وإرجاع بيانات السؤال الحالية لتعبئة النموذج.
+    الحماية: نبني FSMContext الحقيقي لنفس المستخدم (نفس آلية _build_state_for_chat
+    المستخدمة برفع الصوت/الملفات عبر الويب) ونتحقق أن الحالة الحالية بالضبط
+    waiting_for_question_edit_choice (الحالة التي تدخلها request_question_edit فور
+    الرد بنقطة)، وأن quiz_id/question_index مطابقان تماماً لما خزّنته تلك الدالة -
+    لا نثق بأي قيمة قادمة من الصفحة نفسها بمعزل عن جلسة FSM الفعلية.
+    """
+    state = _build_state_for_chat(chat_id, user_id)
+    current_state = await state.get_state()
+    if current_state != QuizState.waiting_for_question_edit_choice:
+        return None
     data = await state.get_data()
-    quiz_id = data.get("quiz_id")
-    saved = await update_quiz_question(quiz_id, question_index, question, msg.from_user.id) if quiz_id else None
-    if saved is None:
-        await state.set_state(QuizState.answering_quiz)
-        await msg.answer("⛔ لا تملك صلاحية تعديل هذا الكويز. يمكن لمالكه أو الأدمن فقط تعديله.")
-        return
-    if not saved:
-        await state.set_state(QuizState.answering_quiz)
-        await msg.answer("❌ تعذر حفظ التعديل في قاعدة البيانات، ولم يتم تغيير الكويز.")
-        return
-    asyncio.create_task(log_usage_event(msg.from_user.id, "quiz_question_edited", {
-        "quiz_id": quiz_id,
-        "question_index": question_index,
-        "edit_type": edit_type,
-        "option_index": option_index,
-        "database_updated": True,
-    }))
-    questions = list(data.get("questions", []))
-    questions[question_index] = question
-    await state.update_data(questions=questions, current_index=question_index)
-    await state.set_state(QuizState.answering_quiz)
-    if saved:
-        await msg.answer("✅ تم تعديل السؤال بنجاح ! يمكنك الان متابعة اختبارك.")
+    if data.get("quiz_id") != quiz_id or data.get("edit_question_index") != question_index:
+        return None
+    questions = data.get("questions", [])
+    if not 0 <= question_index < len(questions):
+        return None
+    question = questions[question_index]
+    if not question.get("is_math"):
+        return None
+    return question
+
+
+async def save_question_edit_from_web(
+    chat_id: int,
+    user_id: int,
+    quiz_id: str,
+    question_index: int,
+    question_text: str,
+    options: List[str],
+    table: Optional[Dict[str, Any]],
+    matrices: List[Dict[str, Any]],
+) -> Tuple[bool, str]:
+    """
+    🆕 نظير _save_edited_question لكن لمحرر الويب الكامل (نص + إجابات + جدول +
+    مصفوفات سوا بنداء واحد بدل التعديل المجزّأ داخل الشات). نفس تحقق الصلاحية
+    المستخدم بـ fetch_question_for_edit_web أعلاه بالضبط - راجعها لتفاصيل الحماية.
+    """
+    state = _build_state_for_chat(chat_id, user_id)
+    current_state = await state.get_state()
+    if current_state != QuizState.waiting_for_question_edit_choice:
+        return False, "❌ انتهت جلسة التعديل، ارجع للمحادثة وأرسل النقطة على السؤال من جديد."
+    data = await state.get_data()
+    if data.get("quiz_id") != quiz_id or data.get("edit_question_index") != question_index:
+        return False, "❌ انتهت جلسة التعديل، ارجع للمحادثة وأرسل النقطة على السؤال من جديد."
+    questions = data.get("questions", [])
+    if not 0 <= question_index < len(questions):
+        return False, "❌ انتهت جلسة التعديل، ارجع للمحادثة وأرسل النقطة على السؤال من جديد."
+    original = questions[question_index]
+    if not original.get("is_math"):
+        return False, "❌ هذا المحرر متاح فقط لأسئلة الرياضيات المصوّرة."
+    original_options = original.get("options") or []
+    if len(options) != len(original_options):
+        return False, "❌ عدد الإجابات يجب أن يبقى كما هو (لا يمكن إضافة أو حذف إجابة من هذا المحرر)."
+
+    question = dict(original)
+    question["question"] = question_text
+    question["options"] = options
+    if table and (table.get("headers") or table.get("rows")):
+        question["table"] = table
     else:
-        await msg.answer("✅ تم تعديل السؤال في الكويز الحالي بنجاح ! يمكنك الان متابعة اختبارك.")
-    await send_question(msg, state)
+        question.pop("table", None)
+    question["matrices"] = matrices or []
+    # 🆕 نفس مبدأ التعديل النصي: إبطال الصورة المولَّدة سابقاً حتى يُعاد رسمها من
+    # القيم الجديدة عند إعادة عرض السؤال (راجع send_question_by_ids → send_quiz_poll).
+    question.pop("image_url", None)
+
+    return await apply_question_edit_and_resume(chat_id, user_id, state, question_index, question, "web_full_edit")
 
 
 @router.message(QuizState.waiting_for_question_edit_text, F.text)

@@ -8,7 +8,8 @@ from constants import (
     SUBJECT_MATH, SUBJECT_ENGLISH,
     WEBAPP_PUBLIC_BASE_URL,
     BTN_AUDIO_CONFIRM_START,
-    BTN_OPEN_UPLOAD_PAGE
+    BTN_OPEN_UPLOAD_PAGE,
+    BTN_OPEN_QUESTION_EDIT_PAGE,
 )
 from settings_helper import get_setting
 from logger import get_logger
@@ -156,6 +157,13 @@ def get_answer_edit_keyboard(options: list) -> types.InlineKeyboardMarkup:
         for index, option in enumerate(options)
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+def get_math_question_edit_keyboard(url: str) -> types.InlineKeyboardMarkup:
+    """🆕 زر WebApp يفتح محرر أسئلة الرياضيات الكامل (webapp/question_edit.html) -
+    نص + إجابات + جدول + مصفوفات بمعاينة LaTeX حية، بدل التعديل النصي المجزّأ."""
+    return types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text=BTN_OPEN_QUESTION_EDIT_PAGE, web_app=types.WebAppInfo(url=url)),
+    ]])
 
 def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineKeyboardMarkup:
     """نسخة احتياطية بسيطة (بدون أسعار) - تُستخدم فقط كـ reply_markup لرسائل الخطأ
