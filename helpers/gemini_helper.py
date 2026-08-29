@@ -170,6 +170,17 @@ class QuizTable(BaseModel):
     rows: List[List[str]] = Field(default_factory=list, description="Table data rows")
 
 
+class QuizMatrix(BaseModel):
+    """🆕 مصفوفة رياضية هيكلية واحدة (زي جداول البيانات أعلاه، نفس المبدأ) - تُملأ فقط
+    عند نمط الكويز المصوّر الرياضي ولمسائل تعتمد فعلياً على مصفوفة/محدّد، بدل محاولة
+    كتابتها بصيغة LaTeX (\\begin{matrix}/\\begin{pmatrix} غير مدعومة إطلاقاً بمحرك الرسم
+    mathtext). راجع services/image_quiz_renderer.py._draw_matrices لكيفية رسمها فعلياً
+    بأقواس حقيقية (مربعة/دائرية/خط عمودي للمحدّد) بعناصر رسم مباشرة."""
+    label: str = Field(default="", description="Optional short label before the bracket, e.g. 'A ='")
+    rows: List[List[str]] = Field(default_factory=list, description="Matrix rows, each a list of cell values")
+    bracket: str = Field(default="square", description="'square' (matrix) | 'round' (pmatrix) | 'bar' (determinant)")
+
+
 class QuizQuestion(BaseModel):
     question: str = Field(description="Question text")
     options: List[str] = Field(description="Four answer options")
@@ -178,6 +189,9 @@ class QuizQuestion(BaseModel):
     explanation: str = Field(default="", description="Explanation")
     # 🆕 اختياري - يُملأ فقط لو المسألة تعتمد فعلياً على جدول بيانات (راجع QuizTable أعلاه)
     table: Optional[QuizTable] = Field(default=None, description="Optional structured data table")
+    # 🆕 اختياري - يُملأ فقط لو المسألة تعتمد فعلياً على مصفوفة/مصفوفتين أو أكثر (راجع
+    # QuizMatrix أعلاه). تُرسم بجانب بعضها أفقياً بترتيب القائمة.
+    matrices: List[QuizMatrix] = Field(default_factory=list, description="Optional structured matrices")
 
 
 class QuizResponse(BaseModel):

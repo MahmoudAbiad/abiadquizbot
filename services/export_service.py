@@ -72,6 +72,8 @@ def _is_math_question(q: Dict[str, Any]) -> bool:
         return True
     if q.get("table"):
         return True
+    if q.get("matrices"):
+        return True
     question = str(q.get("question", ""))
     if _LATEX_SPAN_RE.search(question):
         return True
