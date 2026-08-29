@@ -75,6 +75,23 @@ TABLE_BORDER_COLOR = "#C7D0E0"
 TABLE_TOP_GAP_PX = 18
 TABLE_BOTTOM_GAP_PX = 26
 
+# 🆕 ==================== إعدادات المصفوفات (Matrices) ====================
+# مصفوفة/محدّد رياضي اختياري يُرسم مباشرة بعناصر Matplotlib (خطوط للأقواس + شبكة نص)
+# بنفس مبدأ جدول البيانات أعلاه بالضبط - لأن mathtext لا يدعم \begin{matrix}/\begin{pmatrix}
+# إطلاقاً (راجع تعليمات SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS بـ constants.py).
+MATRIX_FONT_SIZE = 19
+MATRIX_LABEL_FONT_SIZE = 19
+MATRIX_CELL_PAD_X = 22          # هامش أفقي بين الخلايا (كل خلية بعرض موحّد داخل نفس المصفوفة)
+MATRIX_ROW_GAP_PX = 30          # تباعد عمودي بين مراكز صفوف المصفوفة
+MATRIX_BRACKET_MARGIN_PX = 16   # مسافة بين آخر عمود/أول عمود وخط القوس
+MATRIX_BRACKET_CAP_PX = 12      # امتداد "خطاف" القوس المربع أعلى/أسفل الشبكة، ونصف قطر القوس الدائري
+MATRIX_BRACKET_LINEWIDTH = 1.8
+MATRIX_LABEL_GAP_PX = 10        # مسافة بين نص التسمية (label) والقوس
+MATRIX_GAP_BETWEEN_PX = 46      # مسافة أفقية بين مصفوفتين متجاورتين
+MATRIX_TOP_GAP_PX = 20
+MATRIX_BOTTOM_GAP_PX = 28
+MATRIX_COLOR = "#1a1a1a"
+
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
 _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 _MATH_SPAN_RE = re.compile(r"\$[^$]+\$")
@@ -343,6 +360,139 @@ def _draw_table(ax, table_data: Dict[str, Any], x_left: float, y_top: float,
     return y
 
 
+# ==================== 🆕 المصفوفات (Matrices) ====================
+def _prepare_matrices(matrices: Any, is_ar: bool) -> Optional[List[Dict[str, Any]]]:
+    """يجهّز قائمة المصفوفات للرسم: يقيس عرض/ارتفاع كل مصفوفة (عمود واحد بعرض موحّد
+    = أعرض خلية بالمصفوفة، حتى تبقى شبكة نظيفة بلا خطوط داخلية زي جدول البيانات).
+    يرجع None لو ما فيه مصفوفات فعلية (قائمة فارغة/غير صالحة)."""
+    if not matrices:
+        return None
+    cell_font_prop = _font_prop_sized(is_ar, bold=False, size=MATRIX_FONT_SIZE)
+    label_font_prop = _font_prop_sized(is_ar, bold=True, size=MATRIX_LABEL_FONT_SIZE)
+
+    prepared: List[Dict[str, Any]] = []
+    for m in matrices:
+        rows = [[str(c).strip() for c in (row or [])] for row in (m.get("rows") or [])]
+        rows = [r for r in rows if r]
+        if not rows:
+            continue
+        ncols = max(len(r) for r in rows)
+        rows = [(r + [""] * ncols)[:ncols] for r in rows]
+        bracket = m.get("bracket") or "square"
+        if bracket not in ("square", "round", "bar"):
+            bracket = "square"
+        label = _sanitize_line_for_mathtext(str(m.get("label") or "").strip())
+
+        cell_lines = [[_sanitize_line_for_mathtext(c) for c in row] for row in rows]
+        col_w = max(
+            (_measure_px(c, cell_font_prop) for row in cell_lines for c in row if c),
+            default=20.0,
+        ) + 2 * MATRIX_CELL_PAD_X
+        row_h = MATRIX_ROW_GAP_PX
+        nrows = len(rows)
+        grid_w = col_w * ncols
+        grid_h = row_h * nrows
+        label_w = _measure_px(label, label_font_prop) + MATRIX_LABEL_GAP_PX if label else 0.0
+        total_w = label_w + grid_w + 2 * (MATRIX_BRACKET_MARGIN_PX + (MATRIX_BRACKET_CAP_PX if bracket == "round" else 4))
+
+        prepared.append({
+            "rows": cell_lines, "ncols": ncols, "nrows": nrows,
+            "bracket": bracket, "label": label,
+            "col_w": col_w, "row_h": row_h, "grid_w": grid_w, "grid_h": grid_h,
+            "label_w": label_w, "total_w": total_w,
+        })
+
+    if not prepared:
+        return None
+    return prepared
+
+
+def _draw_bracket_pair(ax, x_left: float, x_right: float, y_top: float, y_bottom: float, bracket: str) -> None:
+    """يرسم زوج الأقواس المحيط بالمصفوفة (يسار/يمين) بعناصر رسم مباشرة - matplotlib
+    مافيه رمز '[' أو '(' قابل للتمديد الرأسي زي LaTeX، فنرسم الشكل يدوياً بخطوط/قوس."""
+    color = MATRIX_COLOR
+    lw = MATRIX_BRACKET_LINEWIDTH
+    if bracket == "bar":
+        ax.plot([x_left, x_left], [y_top, y_bottom], color=color, linewidth=lw, solid_capstyle="butt")
+        ax.plot([x_right, x_right], [y_top, y_bottom], color=color, linewidth=lw, solid_capstyle="butt")
+        return
+    if bracket == "round":
+        height = y_top - y_bottom
+        # قوس دائري (نصف قطر أفقي صغير) يعطي شكل "(" و ")" مفتوح للداخل
+        rx = MATRIX_BRACKET_CAP_PX
+        left_arc = plt.matplotlib.patches.Arc((x_left + rx, (y_top + y_bottom) / 2), 2 * rx, height,
+                                               angle=0, theta1=100, theta2=260, color=color, linewidth=lw)
+        right_arc = plt.matplotlib.patches.Arc((x_right - rx, (y_top + y_bottom) / 2), 2 * rx, height,
+                                                angle=0, theta1=280, theta2=80, color=color, linewidth=lw)
+        ax.add_patch(left_arc)
+        ax.add_patch(right_arc)
+        return
+    # square (افتراضي): خط عمودي + "خطاف" أفقي قصير أعلى وأسفل، متجه للداخل
+    cap = MATRIX_BRACKET_CAP_PX
+    ax.plot([x_left, x_left], [y_top, y_bottom], color=color, linewidth=lw, solid_capstyle="butt")
+    ax.plot([x_left, x_left + cap], [y_top, y_top], color=color, linewidth=lw, solid_capstyle="butt")
+    ax.plot([x_left, x_left + cap], [y_bottom, y_bottom], color=color, linewidth=lw, solid_capstyle="butt")
+    ax.plot([x_right, x_right], [y_top, y_bottom], color=color, linewidth=lw, solid_capstyle="butt")
+    ax.plot([x_right - cap, x_right], [y_top, y_top], color=color, linewidth=lw, solid_capstyle="butt")
+    ax.plot([x_right - cap, x_right], [y_bottom, y_bottom], color=color, linewidth=lw, solid_capstyle="butt")
+
+
+def _draw_matrices(ax, matrices_data: List[Dict[str, Any]], x_left: float, y_top: float,
+                    max_width_px: float, is_ar: bool) -> float:
+    """يرسم كل المصفوفات جنباً إلى جنب أفقياً (بترتيب RTL للعربي) داخل الـ Axes الحالي،
+    ويرجع إحداثي y أسفل أطول مصفوفة ليكمل الرسم من هناك (الخيارات...). يلتف المصفوفات
+    لصف جديد تلقائياً لو تجاوز إجمالي عرضها عرض الصورة المتاح."""
+    cell_font_prop = _font_prop_sized(is_ar, bold=False, size=MATRIX_FONT_SIZE)
+    label_font_prop = _font_prop_sized(is_ar, bold=True, size=MATRIX_LABEL_FONT_SIZE)
+
+    # تجميع المصفوفات بصفوف أفقية حسب العرض المتاح (نادراً ما يلزم أكثر من صف واحد)
+    display_order = list(reversed(matrices_data)) if is_ar else matrices_data
+    lines: List[List[Dict[str, Any]]] = [[]]
+    cur_w = 0.0
+    for m in display_order:
+        add_w = m["total_w"] + (MATRIX_GAP_BETWEEN_PX if lines[-1] else 0.0)
+        if lines[-1] and cur_w + add_w > max_width_px:
+            lines.append([])
+            cur_w = 0.0
+            add_w = m["total_w"]
+        lines[-1].append(m)
+        cur_w += add_w
+
+    y = y_top
+    for row_group in lines:
+        row_max_h = max(m["grid_h"] for m in row_group)
+        row_total_w = sum(m["total_w"] for m in row_group) + MATRIX_GAP_BETWEEN_PX * (len(row_group) - 1)
+        # توسيط أفقي لصف المصفوفات بالكامل ضمن عرض المحتوى
+        cx = x_left + (max_width_px - row_total_w) / 2
+        grid_y_top = y
+        grid_y_bottom = y - row_max_h
+        for m in row_group:
+            # كل مصفوفة تتمركز عمودياً ضمن ارتفاع أطول مصفوفة بنفس الصف
+            m_y_top = (grid_y_top + grid_y_bottom) / 2 + m["grid_h"] / 2
+            m_y_bottom = m_y_top - m["grid_h"]
+            if m["label"]:
+                ax.text(cx + m["label_w"] - MATRIX_LABEL_GAP_PX, (m_y_top + m_y_bottom) / 2, m["label"],
+                        ha="right", va="center", fontsize=MATRIX_LABEL_FONT_SIZE, color=MATRIX_COLOR,
+                        fontweight="bold", fontproperties=label_font_prop)
+            bracket_x_left = cx + m["label_w"]
+            grid_x_left = bracket_x_left + MATRIX_BRACKET_MARGIN_PX
+            grid_x_right = grid_x_left + m["grid_w"]
+            bracket_x_right = grid_x_right + MATRIX_BRACKET_MARGIN_PX
+            cap_extra = MATRIX_BRACKET_CAP_PX * 0.4
+            _draw_bracket_pair(ax, bracket_x_left, bracket_x_right,
+                                m_y_top + cap_extra, m_y_bottom - cap_extra, m["bracket"])
+            for r_idx, row in enumerate(m["rows"]):
+                cell_y = m_y_top - m["row_h"] / 2 - r_idx * m["row_h"]
+                for c_idx, cell in enumerate(row):
+                    cell_x = grid_x_left + c_idx * m["col_w"] + m["col_w"] / 2
+                    ax.text(cell_x, cell_y, cell, ha="center", va="center",
+                            fontsize=MATRIX_FONT_SIZE, color=MATRIX_COLOR, fontproperties=cell_font_prop)
+            cx += m["total_w"] + MATRIX_GAP_BETWEEN_PX
+        y -= row_max_h + MATRIX_GAP_BETWEEN_PX * 0.6
+
+    return y + MATRIX_GAP_BETWEEN_PX * 0.6
+
+
 # ==================== الرسم الفعلي ====================
 def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
     """
@@ -387,6 +537,28 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     table_data = _prepare_table(question.get("table"), is_ar, max_width_px)
     table_extra_h = (TABLE_TOP_GAP_PX + table_data["total_h"] + TABLE_BOTTOM_GAP_PX) if table_data else 0.0
 
+    # 🆕 مصفوفة/محدّد اختياري أو أكثر (راجع QuizMatrix بـ helpers/gemini_helper.py) -
+    # تُرسم بعد الجدول (لو وُجد) مباشرة وقبل الخيارات، بنفس مبدأ الجدول (عناصر رسم
+    # مباشرة بدل LaTeX نصي غير مدعوم لبيئات \begin{matrix}).
+    matrices_data = _prepare_matrices(question.get("matrices"), is_ar)
+    matrices_extra_h = 0.0
+    if matrices_data:
+        # نحسب الارتفاع الفعلي بنفس منطق _draw_matrices (التفاف صفوف حسب العرض المتاح)
+        display_order = list(reversed(matrices_data)) if is_ar else matrices_data
+        rows_groups: List[List[Dict[str, Any]]] = [[]]
+        cur_w = 0.0
+        for m in display_order:
+            add_w = m["total_w"] + (MATRIX_GAP_BETWEEN_PX if rows_groups[-1] else 0.0)
+            if rows_groups[-1] and cur_w + add_w > max_width_px:
+                rows_groups.append([])
+                cur_w = 0.0
+                add_w = m["total_w"]
+            rows_groups[-1].append(m)
+            cur_w += add_w
+        matrices_extra_h = MATRIX_TOP_GAP_PX + MATRIX_BOTTOM_GAP_PX + sum(
+            max(m["grid_h"] for m in group) + MATRIX_GAP_BETWEEN_PX * 0.6 for group in rows_groups
+        )
+
     option_render_blocks: List[List[str]] = []
     option_block_heights: List[List[float]] = []
     for block in option_blocks:
@@ -399,6 +571,7 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
         HEADER_HEIGHT_PX + MARGIN_PX * 2
         + sum(q_line_heights)
         + table_extra_h
+        + matrices_extra_h
         + sum(sum(heights) for heights in option_block_heights)
         + len(option_blocks) * OPTION_GAP_PX
     )
@@ -436,6 +609,11 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
         y -= TABLE_TOP_GAP_PX
         y = _draw_table(ax, table_data, MARGIN_PX, y, max_width_px, is_ar)
         y -= TABLE_BOTTOM_GAP_PX
+
+    if matrices_data:
+        y -= MATRIX_TOP_GAP_PX
+        y = _draw_matrices(ax, matrices_data, MARGIN_PX, y, max_width_px, is_ar)
+        y -= MATRIX_BOTTOM_GAP_PX
 
     y -= OPTION_GAP_PX
     for i, (block, heights) in enumerate(zip(option_render_blocks, option_block_heights)):
