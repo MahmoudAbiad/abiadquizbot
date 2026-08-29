@@ -568,6 +568,31 @@ FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS = AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS
 MAX_IMAGE_WEB_UPLOAD_COUNT = 50
 MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE = 15 * 1024 * 1024  # 15MB لكل صورة على حدة
 
+# ==============================================================================
+# 🆕 محرر أسئلة الرياضيات الكامل (Telegram Mini App) - نص + إجابات + جدول +
+# مصفوفات بمعاينة LaTeX حية، بديل عن التعديل النصي المجزّأ داخل الشات لأسئلة
+# is_math تحديداً (راجع handlers/quiz_runner.py: request_question_edit). نفس مدة
+# صلاحية initData ومعدل الطلبات المستخدمين برفع الصوت/الملفات (AUDIO_UPLOAD_*).
+# ==============================================================================
+QUESTION_EDIT_INIT_DATA_MAX_AGE_SECONDS = AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS
+QUESTION_EDIT_RATE_LIMIT_MAX_REQUESTS = AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS
+QUESTION_EDIT_RATE_LIMIT_WINDOW_SECONDS = AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS
+
+# حدود طول/حجم حقول المحرر - نفس سقف نص السؤال/الإجابة المستخدم بالتعديل النصي
+# داخل الشات (2000/500 حرف) حفاظاً على توافق العرض بصورة السؤال المرسومة (راجع
+# services/image_quiz_renderer.py). حدود الجدول/المصفوفات مبنية على مساحة الصورة
+# المتاحة فعلياً (FIG_WIDTH_PX) - قيم محافظة تمنع صورة سؤال مشوّهة أو فائقة الطول.
+QUESTION_EDIT_MAX_QUESTION_LEN = 2000
+QUESTION_EDIT_MAX_OPTION_LEN = 500
+QUESTION_EDIT_MAX_CELL_LEN = 60
+QUESTION_EDIT_MAX_TABLE_ROWS = 12
+QUESTION_EDIT_MAX_TABLE_COLS = 8
+QUESTION_EDIT_MAX_MATRICES = 4
+QUESTION_EDIT_MAX_MATRIX_ROWS = 6
+QUESTION_EDIT_MAX_MATRIX_COLS = 6
+
+BTN_OPEN_QUESTION_EDIT_PAGE = "🌐 افتح محرر السؤال الكامل"
+
 # 🆕 نفس bucket الملفات (file-temp) - الصور تُخزَّن بمجلد فرعي لكل جلسة رفع
 # ({user_id}/{session_uuid}/{index}{ext}) بدل bucket منفصل، لتفادي إعداد إضافي
 # يدوي بلوحة تحكم Supabase.

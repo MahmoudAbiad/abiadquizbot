@@ -5,7 +5,7 @@ Handles HTTP server setup safely with modern lifespan context and proper Pydanti
 
 import os
 import asyncio  
-from typing import List
+from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -21,6 +21,11 @@ from constants import (
     MAX_FILE_WEB_UPLOAD_SIZE, FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
     FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
     MAX_IMAGE_WEB_UPLOAD_COUNT, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE,
+    QUESTION_EDIT_INIT_DATA_MAX_AGE_SECONDS, QUESTION_EDIT_RATE_LIMIT_MAX_REQUESTS,
+    QUESTION_EDIT_RATE_LIMIT_WINDOW_SECONDS, QUESTION_EDIT_MAX_QUESTION_LEN,
+    QUESTION_EDIT_MAX_OPTION_LEN, QUESTION_EDIT_MAX_CELL_LEN, QUESTION_EDIT_MAX_TABLE_ROWS,
+    QUESTION_EDIT_MAX_TABLE_COLS, QUESTION_EDIT_MAX_MATRICES, QUESTION_EDIT_MAX_MATRIX_ROWS,
+    QUESTION_EDIT_MAX_MATRIX_COLS,
 )
 from telegram_webapp_auth import verify_telegram_init_data
 
@@ -39,6 +44,7 @@ from r2_helper import (
 )
 from handlers.audio import process_web_uploaded_audio
 from handlers.files import process_web_uploaded_file, process_web_uploaded_images
+from handlers.quiz_runner import fetch_question_for_edit_web, save_question_edit_from_web
 
 logger = get_logger(__name__)
 
@@ -478,6 +484,141 @@ async def image_upload_complete(payload: ImageUploadCompleteRequest):
             object_paths=object_paths,
         )
     )
+    return {"ok": True}
+
+
+# ==================== 🆕 محرر أسئلة الرياضيات الكامل (نص + جدول + مصفوفات) ====================
+# راجع webapp/question_edit.html للواجهة، وhandlers/quiz_runner.py
+# (fetch_question_for_edit_web / save_question_edit_from_web) لمنطق التحقق والحفظ
+# واستئناف الكويز. نفس مبدأ audio/file/image upload تماماً: initData + rate limit
+# لكل مستخدم، والتحقق الحقيقي من الصلاحية يصير مقابل جلسة FSM الفعلية للمستخدم
+# (chat_id == user_id لأنها محادثة خاصة دائماً، نفس افتراض بقية endpoints الويب هون).
+
+class QuestionEditFetchRequest(BaseModel):
+    init_data: str
+    quiz_id: str
+    question_index: int
+
+
+class QuestionEditSaveRequest(BaseModel):
+    init_data: str
+    quiz_id: str
+    question_index: int
+    question: str
+    options: List[str]
+    table: Optional[Dict[str, Any]] = None
+    matrices: List[Dict[str, Any]] = []
+
+
+@app.post("/api/question-edit/fetch")
+async def question_edit_fetch(payload: QuestionEditFetchRequest):
+    """يرجع بيانات السؤال الرياضي الحالية (نص/إجابات/جدول/مصفوفات) لتعبئة نموذج
+    المحرر، بعد التحقق أن للمستخدم فعلاً جلسة تعديل مفتوحة على نفس هذا السؤال."""
+    ok, user = verify_telegram_init_data(
+        payload.init_data, bot.token, max_age_seconds=QUESTION_EDIT_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة، افتح صفحة التعديل من البوت من جديد.")
+
+    user_id = user.get("id")
+    await _enforce_upload_rate_limit(user_id, "qedit_fetch", QUESTION_EDIT_RATE_LIMIT_MAX_REQUESTS, QUESTION_EDIT_RATE_LIMIT_WINDOW_SECONDS)
+
+    question = await fetch_question_for_edit_web(
+        chat_id=user_id, user_id=user_id, quiz_id=payload.quiz_id, question_index=payload.question_index,
+    )
+    if question is None:
+        raise HTTPException(
+            status_code=403,
+            detail="جلسة التعديل غير صالحة أو انتهت - ارجع للمحادثة وأرسل النقطة على السؤال من جديد.",
+        )
+
+    return {
+        "question": str(question.get("question", "")),
+        "options": [str(o) for o in (question.get("options") or [])],
+        "correct_option_id": question.get("correct_option_id"),
+        "table": question.get("table"),
+        "matrices": question.get("matrices") or [],
+        "limits": {
+            "max_question_len": QUESTION_EDIT_MAX_QUESTION_LEN,
+            "max_option_len": QUESTION_EDIT_MAX_OPTION_LEN,
+            "max_cell_len": QUESTION_EDIT_MAX_CELL_LEN,
+            "max_table_rows": QUESTION_EDIT_MAX_TABLE_ROWS,
+            "max_table_cols": QUESTION_EDIT_MAX_TABLE_COLS,
+            "max_matrices": QUESTION_EDIT_MAX_MATRICES,
+            "max_matrix_rows": QUESTION_EDIT_MAX_MATRIX_ROWS,
+            "max_matrix_cols": QUESTION_EDIT_MAX_MATRIX_COLS,
+        },
+    }
+
+
+def _validate_question_edit_payload(payload: QuestionEditSaveRequest) -> Optional[str]:
+    """يرجع نص أول خطأ يتجاوز الحدود المسموحة، أو None لو كل شي سليم. تحقق خادمي
+    مستقل تماماً عن أي تحقق بالمتصفح (JS) - لا نثق بأي شي قادم من العميل."""
+    text = (payload.question or "").strip()
+    if not text or len(text) > QUESTION_EDIT_MAX_QUESTION_LEN:
+        return f"نص السؤال فارغ أو يتجاوز الحد المسموح ({QUESTION_EDIT_MAX_QUESTION_LEN} حرف)."
+
+    if not payload.options or any(
+        not str(opt).strip() or len(str(opt)) > QUESTION_EDIT_MAX_OPTION_LEN for opt in payload.options
+    ):
+        return f"إحدى الإجابات فارغة أو تتجاوز الحد المسموح ({QUESTION_EDIT_MAX_OPTION_LEN} حرف)."
+
+    if payload.table:
+        headers = payload.table.get("headers") or []
+        rows = payload.table.get("rows") or []
+        if len(headers) > QUESTION_EDIT_MAX_TABLE_COLS or len(rows) > QUESTION_EDIT_MAX_TABLE_ROWS:
+            return f"الجدول يتجاوز الحد المسموح ({QUESTION_EDIT_MAX_TABLE_ROWS} صفوف × {QUESTION_EDIT_MAX_TABLE_COLS} أعمدة)."
+        if any(len(row) > QUESTION_EDIT_MAX_TABLE_COLS for row in rows):
+            return f"أحد صفوف الجدول يتجاوز الحد المسموح للأعمدة ({QUESTION_EDIT_MAX_TABLE_COLS})."
+        all_cells = list(headers) + [cell for row in rows for cell in row]
+        if any(len(str(cell)) > QUESTION_EDIT_MAX_CELL_LEN for cell in all_cells):
+            return f"إحدى خلايا الجدول تتجاوز الحد المسموح ({QUESTION_EDIT_MAX_CELL_LEN} حرف)."
+
+    if payload.matrices:
+        if len(payload.matrices) > QUESTION_EDIT_MAX_MATRICES:
+            return f"عدد المصفوفات يتجاوز الحد المسموح ({QUESTION_EDIT_MAX_MATRICES})."
+        for matrix in payload.matrices:
+            rows = matrix.get("rows") or []
+            if len(rows) > QUESTION_EDIT_MAX_MATRIX_ROWS or any(len(row) > QUESTION_EDIT_MAX_MATRIX_COLS for row in rows):
+                return f"إحدى المصفوفات تتجاوز الحد المسموح ({QUESTION_EDIT_MAX_MATRIX_ROWS} صفوف × {QUESTION_EDIT_MAX_MATRIX_COLS} أعمدة)."
+            cells = [str(matrix.get("label") or "")] + [str(cell) for row in rows for cell in row]
+            if any(len(cell) > QUESTION_EDIT_MAX_CELL_LEN for cell in cells):
+                return f"إحدى خلايا المصفوفة تتجاوز الحد المسموح ({QUESTION_EDIT_MAX_CELL_LEN} حرف)."
+            if matrix.get("bracket") not in ("square", "round", "bar"):
+                return "نوع قوس المصفوفة غير صالح."
+
+    return None
+
+
+@app.post("/api/question-edit/save")
+async def question_edit_save(payload: QuestionEditSaveRequest):
+    """يتحقق من initData والحدود، ثم يحفظ السؤال المُعدَّل ويستأنف الكويز بالمحادثة
+    فوراً (send_question_by_ids داخل save_question_edit_from_web)."""
+    ok, user = verify_telegram_init_data(
+        payload.init_data, bot.token, max_age_seconds=QUESTION_EDIT_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة.")
+
+    user_id = user.get("id")
+    await _enforce_upload_rate_limit(user_id, "qedit_save", QUESTION_EDIT_RATE_LIMIT_MAX_REQUESTS, QUESTION_EDIT_RATE_LIMIT_WINDOW_SECONDS)
+
+    validation_error = _validate_question_edit_payload(payload)
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
+
+    saved, message = await save_question_edit_from_web(
+        chat_id=user_id,
+        user_id=user_id,
+        quiz_id=payload.quiz_id,
+        question_index=payload.question_index,
+        question_text=payload.question.strip(),
+        options=[str(opt).strip() for opt in payload.options],
+        table=payload.table,
+        matrices=payload.matrices,
+    )
+    if not saved:
+        raise HTTPException(status_code=409, detail=message)
     return {"ok": True}
 
 
