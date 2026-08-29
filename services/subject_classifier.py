@@ -42,7 +42,7 @@ MODULE: Unified Subject Classifier (الفحص الموحّد لتصنيف ال�
 
 import asyncio
 import os
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 from google import genai
 from google.genai import types
@@ -77,7 +77,17 @@ DETECTION_INLINE_SIZE_THRESHOLD = 15 * 1024 * 1024
 
 
 class SubjectClassification(BaseModel):
-    subject: str = Field(description="one of: math, english, other")
+    # 🩹 BUGFIX: كانت description تقول "one of: math, english, other" فقط - نسيت
+    # تحديثها لما أُضيف SUBJECT_FRENCH، رغم إن SYSTEM_PROMPT_CLASSIFY_SUBJECT وكل
+    # الطبقات الأخرى كانت محدّثة بالفعل. بما إن هالـ description بتتحول تلقائياً
+    # لجزء من الـ JSON Schema المُرسل فعلياً لـ Gemini (response_schema=...)، كانت
+    # بتناقض الـ system prompt وتمنع النموذج عملياً من إرجاع "french" أبداً.
+    # استخدام Literal بدل str+description بيضمن القيمة من مستوى الـ schema نفسه
+    # (تعليمة صريحة وملزمة للنموذج) بدل الاعتماد فقط على نص وصفي حر قد يُنسى تحديثه
+    # بالمستقبل لو أُضيفت مادة جديدة.
+    subject: Literal["math", "english", "french", "other"] = Field(
+        description="one of: math, english, french, other"
+    )
     suggested_types: List[str] = Field(default_factory=list, max_length=4)
 
 
