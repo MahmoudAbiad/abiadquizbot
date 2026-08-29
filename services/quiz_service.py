@@ -6,7 +6,7 @@ from typing import Any, Dict, Tuple, Optional, List
 
 from constants import (
     MAX_LIMIT_PAGES, MAX_LIMIT_QUESTIONS, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS,
-    SUBJECT_MATH, SUBJECT_OTHER, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
+    SUBJECT_MATH, SUBJECT_OTHER, SUBJECT_ENGLISH, SUBJECT_FRENCH, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
     QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM, QUESTION_TYPE_OPTIONS,
 )
 from gemini_helper import generate_quiz_smart
@@ -219,6 +219,11 @@ async def execute_quiz_generation_workflow(
         #     منفصل تماماً ولا يدعم الترجمة المزدوجة داخل نفس الحقل.
         english_mode = None if is_math_mode else data.get("english_mode")
 
+        # 2.65 🆕 لغة المحتوى المكتشفة (إنجليزي/فرنسي) - تُستخدم مع english_mode أعلاه
+        #      باختيار موجّه التوليد الصحيح (services/gemini_helper.py). None لأي مادة
+        #      أخرى (رياضيات/عام) لأن نمط الترجمة أصلاً لا يُعرض لها.
+        content_language = subject_type if subject_type in (SUBJECT_ENGLISH, SUBJECT_FRENCH) else None
+
         # 2.7 🆕 نوع الأسئلة والصعوبة المختاران من الطالب عبر شاشة الخيارات
         #     (handlers/quiz_options.py). قيمة question_type قد تكون: قيمة ثابتة من
         #     القائمة الجاهزة، "general" (افتراضي)، "custom" (نص حر)، أو "other_<index>"
@@ -241,6 +246,7 @@ async def execute_quiz_generation_workflow(
             previous_questions=previous_questions if previous_questions else None,
             is_math_mode=is_math_mode,
             english_mode=english_mode,
+            content_language=content_language,
             difficulty=difficulty,
             question_type=question_type,
             custom_question_type_text=custom_question_type_text,

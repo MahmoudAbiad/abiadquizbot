@@ -2,10 +2,11 @@ from aiogram import types
 from constants import (
     OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL, BTN_CANCEL_REQUEST,
     BTN_TRANSLATE_YES, BTN_TRANSLATE_NO,
+    BTN_TRANSLATE_YES_FRENCH, BTN_TRANSLATE_NO_FRENCH,
     QUESTION_TYPE_OPTIONS, QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM,
     DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE, DIFFICULTY_LABELS_AR,
     BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_BACK_TO_TYPE_SCREEN,
-    SUBJECT_MATH, SUBJECT_ENGLISH,
+    SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH,
     WEBAPP_PUBLIC_BASE_URL,
     BTN_AUDIO_CONFIRM_START,
     BTN_OPEN_UPLOAD_PAGE,
@@ -209,7 +210,7 @@ def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_ty
     """
     kb = []
 
-    if subject_type in (SUBJECT_MATH, SUBJECT_ENGLISH):
+    if subject_type in (SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH):
         type_options = list(QUESTION_TYPE_OPTIONS.get(subject_type, []))
     else:
         # 🆕 اقتراحات AI الديناميكية للمواد غير المصنّفة
@@ -227,11 +228,11 @@ def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_ty
 
     general_text = f"✅ {BTN_QUESTION_TYPE_GENERAL}" if selected_type == QUESTION_TYPE_GENERAL else BTN_QUESTION_TYPE_GENERAL
     custom_text = f"✅ {BTN_QUESTION_TYPE_CUSTOM}" if selected_type == QUESTION_TYPE_CUSTOM else BTN_QUESTION_TYPE_CUSTOM
-    # 🆕 زر "عام" العمومي يُخفى لمادة الإنجليزي تحديداً لأن "🎯 اختبار عام" (general_test)
-    # من القائمة الجاهزة أعلاه يؤدي نفس الغرض بالضبط - عرض الاثنين معاً كان يبدو
-    # كخيارين متطابقين مربكين بصرياً. باقي المواد (رياضيات/أخرى) لا تملك خياراً مكافئاً
-    # بنفس المعنى ضمن قوائمها، فيبقى الزر العمومي ضرورياً لها.
-    if subject_type != SUBJECT_ENGLISH:
+    # 🆕 زر "عام" العمومي يُخفى لمادتي الإنجليزي والفرنسي تحديداً لأن "🎯 اختبار عام"
+    # (general_test) من القائمة الجاهزة أعلاه يؤدي نفس الغرض بالضبط - عرض الاثنين معاً
+    # كان يبدو كخيارين متطابقين مربكين بصرياً. باقي المواد (رياضيات/أخرى) لا تملك خياراً
+    # مكافئاً بنفس المعنى ضمن قوائمها، فيبقى الزر العمومي ضرورياً لها.
+    if subject_type not in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
         kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
     kb.append([types.InlineKeyboardButton(text=custom_text, callback_data="qtype_custom")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
@@ -263,11 +264,17 @@ def get_quiz_difficulty_keyboard(selected_difficulty: str) -> types.InlineKeyboa
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_translation_choice_keyboard() -> types.InlineKeyboardMarkup:
-    """🆕 لوحة اختيار نمط الأسئلة عند اكتشاف محتوى إنجليزي: مترجمة للعربية أو إنجليزية فقط."""
+def get_translation_choice_keyboard(subject_type: str = SUBJECT_ENGLISH) -> types.InlineKeyboardMarkup:
+    """🆕 لوحة اختيار نمط الأسئلة عند اكتشاف محتوى إنجليزي أو فرنسي: مترجمة للعربية أو
+    باللغة الأصلية فقط. subject_type يحدد نص الأزرار (إنجليزي/فرنسي) - السلوك والـ
+    callback_data نفسهما لكلتا المادتين (راجع handlers/files.py)."""
+    if subject_type == SUBJECT_FRENCH:
+        yes_text, no_text = BTN_TRANSLATE_YES_FRENCH, BTN_TRANSLATE_NO_FRENCH
+    else:
+        yes_text, no_text = BTN_TRANSLATE_YES, BTN_TRANSLATE_NO
     kb = [
-        [types.InlineKeyboardButton(text=BTN_TRANSLATE_YES, callback_data="translate_choice_yes")],
-        [types.InlineKeyboardButton(text=BTN_TRANSLATE_NO, callback_data="translate_choice_no")],
+        [types.InlineKeyboardButton(text=yes_text, callback_data="translate_choice_yes")],
+        [types.InlineKeyboardButton(text=no_text, callback_data="translate_choice_no")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
