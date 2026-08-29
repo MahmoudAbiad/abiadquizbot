@@ -18,7 +18,7 @@ from constants import (
     MSG_SUPER_PROCESSING_ALERT, SUCCESS_MEDIA_RECEIVED, PAGES_PER_QUIZ_RATIO,
     MAX_FILE_QUIZZES_LIMIT, MIN_QUIZZES_PER_FILE, MSG_MAX_QUIZZES_REACHED,
     MSG_ENGLISH_CONTENT_DETECTED, SUBJECT_ENGLISH, SUBJECT_OTHER,
-    MSG_FRENCH_CONTENT_DETECTED, SUBJECT_FRENCH,
+    MSG_FRENCH_CONTENT_DETECTED, SUBJECT_FRENCH, MSG_DETECTING_CONTENT,
     QUESTION_TYPE_GENERAL, DIFFICULTY_MEDIUM, MSG_QUIZ_TYPE_PROMPT,
     MAX_DOC_SIZE, MAX_FILE_WEB_UPLOAD_SIZE, MAX_FILE_WEB_UPLOAD_PAGES,
     MAX_IMAGE_WEB_UPLOAD_COUNT, BTN_OPEN_UPLOAD_PAGE, MSG_REDIRECT_TO_WEB_UPLOAD,
@@ -275,6 +275,22 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     file_paths = data.get("file_paths", []) or []
     pure_text = data.get("pure_text")
 
+    # 🆕 رسالة حالة "جار التعرف على المحتوى" قبل استدعاء classify_subject (فحص فعلي عبر
+    # Gemini قد يستغرق بضع ثوانٍ خصوصاً للملفات الكبيرة/الألبومات)، حتى لا يظن الطالب أن
+    # طلبه عالق. نلتقط رسالة الحالة هذه (status_target) ونعتمدها كهدف تعديل موحّد (edit=True)
+    # لكل الشاشات التالية بدل إرسال رسالة منفصلة لكل خطوة - reply_target.answer() ترسل رسالة
+    # بوت جديدة قابلة للتعديل لاحقاً بأمان حتى لو كان reply_target أصلاً رسالة المستخدم نفسه.
+    if edit:
+        try:
+            # 🩹 reply_markup=None صراحة لإخفاء أزرار الشاشة السابقة (فلاتر الكاش مثلاً) أثناء
+            # الفحص - تفادياً لضغطة طالب على زر قديم بينما classify_subject لسا قيد التنفيذ.
+            await reply_target.edit_text(MSG_DETECTING_CONTENT, reply_markup=None)
+        except Exception:
+            pass
+        status_target = reply_target
+    else:
+        status_target = await reply_target.answer(MSG_DETECTING_CONTENT)
+
     # 🆕 مستندات الأوفيس (.docx/.pptx/.txt) بحاجة استخراج نص أولاً قبل أي فحص لغوي، لأن
     # classify_subject يفحص فقط PDF/صور مباشرة أو نصاً صريحاً - وليس ملفات أوفيس خام.
     # نستخرج النص هنا مبكراً (عملية محلية خفيفة، بلا أي استدعاء AI) ونخزّنه بحالة الـ FSM
@@ -321,14 +337,11 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
             else MSG_FRENCH_CONTENT_DETECTED
         )
         translation_keyboard = get_translation_choice_keyboard(classification.subject)
-        if edit:
-            await reply_target.edit_text(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
-        else:
-            await reply_target.answer(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
+        await status_target.edit_text(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
         return
 
     await state.update_data(english_mode=None)
-    await _show_quiz_options_screen(reply_target, state, edit=edit)
+    await _show_quiz_options_screen(status_target, state, edit=True)
 
 async def _render_cache_decision_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
     """
