@@ -18,6 +18,7 @@ from constants import (
     MSG_SUPER_PROCESSING_ALERT, SUCCESS_MEDIA_RECEIVED, PAGES_PER_QUIZ_RATIO,
     MAX_FILE_QUIZZES_LIMIT, MIN_QUIZZES_PER_FILE, MSG_MAX_QUIZZES_REACHED,
     MSG_ENGLISH_CONTENT_DETECTED, SUBJECT_ENGLISH, SUBJECT_OTHER,
+    MSG_FRENCH_CONTENT_DETECTED, SUBJECT_FRENCH,
     QUESTION_TYPE_GENERAL, DIFFICULTY_MEDIUM, MSG_QUIZ_TYPE_PROMPT,
     MAX_DOC_SIZE, MAX_FILE_WEB_UPLOAD_SIZE, MAX_FILE_WEB_UPLOAD_PAGES,
     MAX_IMAGE_WEB_UPLOAD_COUNT, BTN_OPEN_UPLOAD_PAGE, MSG_REDIRECT_TO_WEB_UPLOAD,
@@ -311,12 +312,19 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
         difficulty=DIFFICULTY_MEDIUM,
     )
 
-    if classification.subject == SUBJECT_ENGLISH:
+    # 🆕 الإنجليزي والفرنسي يعاملان بنفس التدفق بالضبط (شاشة اختيار "مترجمة/بدون ترجمة")
+    # - الفارق الوحيد هو نص رسالة الاكتشاف ونصوص أزرار الكيبورد (راجع get_translation_choice_keyboard).
+    if classification.subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
         await state.set_state(QuizState.waiting_for_translation_choice)
+        detected_msg = (
+            MSG_ENGLISH_CONTENT_DETECTED if classification.subject == SUBJECT_ENGLISH
+            else MSG_FRENCH_CONTENT_DETECTED
+        )
+        translation_keyboard = get_translation_choice_keyboard(classification.subject)
         if edit:
-            await reply_target.edit_text(MSG_ENGLISH_CONTENT_DETECTED, parse_mode="HTML", reply_markup=get_translation_choice_keyboard())
+            await reply_target.edit_text(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
         else:
-            await reply_target.answer(MSG_ENGLISH_CONTENT_DETECTED, parse_mode="HTML", reply_markup=get_translation_choice_keyboard())
+            await reply_target.answer(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
         return
 
     await state.update_data(english_mode=None)
@@ -558,23 +566,31 @@ async def _apply_translation_choice(reply_target: types.Message, state: FSMConte
 
 @router.callback_query(QuizState.waiting_for_translation_choice, F.data == "translate_choice_yes")
 async def handle_translate_choice_yes(call: types.CallbackQuery, state: FSMContext) -> None:
-    """الطالب اختار الأسئلة مترجمة (إنجليزي + عربي)"""
+    """الطالب اختار الأسئلة مترجمة (إنجليزي/فرنسي + عربي)"""
     try:
         await _apply_translation_choice(call.message, state, "translated", edit=True)
     except Exception as exc:
         log_error(logger, f"Translation choice (yes) failed: {exc}", exception=exc)
-        await call.message.answer("❌ تعذر تنفيذ الاختيار، حاول مجدداً.", reply_markup=get_translation_choice_keyboard())
+        data = await state.get_data()
+        await call.message.answer(
+            "❌ تعذر تنفيذ الاختيار، حاول مجدداً.",
+            reply_markup=get_translation_choice_keyboard(data.get("subject_type", SUBJECT_ENGLISH)),
+        )
     finally:
         await call.answer()
 
 @router.callback_query(QuizState.waiting_for_translation_choice, F.data == "translate_choice_no")
 async def handle_translate_choice_no(call: types.CallbackQuery, state: FSMContext) -> None:
-    """الطالب اختار الأسئلة إنجليزية فقط بدون ترجمة"""
+    """الطالب اختار الأسئلة بلغتها الأصلية فقط (إنجليزي أو فرنسي) بدون ترجمة"""
     try:
         await _apply_translation_choice(call.message, state, "plain", edit=True)
     except Exception as exc:
         log_error(logger, f"Translation choice (no) failed: {exc}", exception=exc)
-        await call.message.answer("❌ تعذر تنفيذ الاختيار، حاول مجدداً.", reply_markup=get_translation_choice_keyboard())
+        data = await state.get_data()
+        await call.message.answer(
+            "❌ تعذر تنفيذ الاختيار، حاول مجدداً.",
+            reply_markup=get_translation_choice_keyboard(data.get("subject_type", SUBJECT_ENGLISH)),
+        )
     finally:
         await call.answer()
 

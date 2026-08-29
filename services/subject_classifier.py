@@ -14,10 +14,10 @@ MODULE: Unified Subject Classifier (الفحص الموحّد لتصنيف ال�
 
 بعد التوحيد: استدعاء واحد فقط، مبكراً، يرجع تصنيفاً منظّماً (Structured Output
 عبر response_schema بنفس نمط QuizResponse بـ helpers/gemini_helper.py):
-- subject: "math" | "english" | "other"
+- subject: "math" | "english" | "french" | "other"
 - suggested_types: قائمة 2-4 اقتراحات AI لنوع الأسئلة (تُملأ فقط لو
-  subject == "other"؛ لمادتي الرياضيات والإنجليزي الأنواع ثابتة مسبقاً
-  بـ constants.QUESTION_TYPE_OPTIONS ولا حاجة لاقتراح AI لهما).
+  subject == "other"؛ لمواد الرياضيات والإنجليزي والفرنسي الأنواع ثابتة مسبقاً
+  بـ constants.QUESTION_TYPE_OPTIONS ولا حاجة لاقتراح AI لها).
 
 النتيجة تُخزَّن بحالة الـ FSM (state.update_data) من قبل الجهة المستدعية
 (handlers/files.py) وتُعاد قراءتها لاحقاً بـ services/quiz_service.py بدل
@@ -52,6 +52,7 @@ from constants import (
     MATH_DETECTION_MODEL,
     MATH_DETECTION_TIMEOUT,
     SUBJECT_ENGLISH,
+    SUBJECT_FRENCH,
     SUBJECT_MATH,
     SUBJECT_OTHER,
     SYSTEM_PROMPT_CLASSIFY_SUBJECT,
@@ -66,7 +67,8 @@ API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") i
 # الذاكرة الناتج عن إنشاء genai.Client() جديد بكل استدعاء على المسار الساخن.
 _GEMINI_CLIENTS: List[genai.Client] = [genai.Client(api_key=key) for key in API_KEYS]
 
-_VALID_SUBJECTS = {SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_OTHER}
+# 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
+_VALID_SUBJECTS = {SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH, SUBJECT_OTHER}
 
 # 🆕 نفس حد helpers.gemini_helper.INLINE_DATA_SIZE_THRESHOLD (15MB): إرسال الملف كاملاً
 # Inline ضمن الطلب لو كان بهذا الحجم أو أقل (أسرع، بدون Round-trip رفع منفصل)، وإلا

@@ -56,6 +56,9 @@ from constants import (
     SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS,
     SYSTEM_PROMPT_GENERATE_ENGLISH_PLAIN_QUESTIONS,
     SYSTEM_PROMPT_GENERATE_ENGLISH_TRANSLATED_QUESTIONS,
+    SYSTEM_PROMPT_GENERATE_FRENCH_PLAIN_QUESTIONS,
+    SYSTEM_PROMPT_GENERATE_FRENCH_TRANSLATED_QUESTIONS,
+    SUBJECT_FRENCH,
     MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
 )
 from logger import get_logger, log_error, log_info, log_warning
@@ -775,6 +778,7 @@ async def generate_quiz_smart(
     previous_questions: Optional[List[Dict[str, Any]]] = None,
     is_math_mode: bool = False,
     english_mode: Optional[str] = None,
+    content_language: Optional[str] = None,
     difficulty: Optional[str] = None,
     question_type: Optional[str] = None,
     custom_question_type_text: Optional[str] = None,
@@ -786,9 +790,13 @@ async def generate_quiz_smart(
     is_math_mode: عندما تكون True (بعد التصنيف الموحّد عبر services.subject_classifier)،
     يُستبدل موجّه التوليد بنسخة LaTeX المخصصة لـ"نمط الكويز المصوّر" بدل الموجّه العادي.
 
-    english_mode: عندما يكون "translated" أو "plain" (بعد اكتشاف محتوى إنجليزي واختيار
-    الطالب عبر handlers/files.py)، يُستبدل موجّه التوليد بالنسخة الإنجليزية المناسبة. يُتجاهل
-    كلياً إذا كان is_math_mode=True (الأولوية دائماً لنمط الكويز المصوّر الرياضي).
+    english_mode: عندما يكون "translated" أو "plain" (بعد اكتشاف محتوى إنجليزي/فرنسي واختيار
+    الطالب عبر handlers/files.py)، يُستبدل موجّه التوليد بالنسخة المناسبة. يُتجاهل كلياً إذا
+    كان is_math_mode=True (الأولوية دائماً لنمط الكويز المصوّر الرياضي).
+
+    content_language: قيمة SUBJECT_ENGLISH أو SUBJECT_FRENCH (أو None لأي مادة أخرى) - تُحدَّد
+    مع english_mode أعلاه أي موجّهات التوليد الأربعة (إنجليزي مترجم/عادي أو فرنسي مترجم/عادي)
+    يُستخدم فعلياً.
 
     🆕 difficulty / question_type / custom_question_type_text: تُحقن كنصوص تعليمات إضافية
     ({difficulty_instruction} و{question_type_instruction}) بكل الموجّهات الأربعة على حد
@@ -803,9 +811,15 @@ async def generate_quiz_smart(
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
 
     try:
-        # 🆕 اختيار الموجّه المناسب حسب الأولوية: رياضي (LaTeX) > إنجليزي (مترجم/عادي) > قياسي
+        # 🆕 اختيار الموجّه المناسب حسب الأولوية: رياضي (LaTeX) > فرنسي (مترجم/عادي) >
+        # إنجليزي (مترجم/عادي) > قياسي. content_language يميّز بين الموجّهين الفرنسيين
+        # والإنجليزيين لأن english_mode ("translated"/"plain") وحده لا يكفي للتفريق بينهما.
         if is_math_mode:
             source_prompt = SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS
+        elif content_language == SUBJECT_FRENCH and english_mode == "translated":
+            source_prompt = SYSTEM_PROMPT_GENERATE_FRENCH_TRANSLATED_QUESTIONS
+        elif content_language == SUBJECT_FRENCH and english_mode == "plain":
+            source_prompt = SYSTEM_PROMPT_GENERATE_FRENCH_PLAIN_QUESTIONS
         elif english_mode == "translated":
             source_prompt = SYSTEM_PROMPT_GENERATE_ENGLISH_TRANSLATED_QUESTIONS
         elif english_mode == "plain":

@@ -155,6 +155,34 @@
   #loadingState, #errorState { text-align: center; padding: 60px 10px; font-size: 14px; color: var(--tg-theme-hint-color, #888); }
   #formState { display: none; }
   .char-counter { font-size: 11px; color: var(--tg-theme-hint-color, #999); text-align: left; margin-top: 3px; }
+
+  /* ==================== شريط الرموز الرياضية الجاهزة ==================== */
+  .symbol-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    background: var(--tg-theme-bg-color, #ffffff);
+    padding: 8px 14px;
+    margin: 0 -14px;
+    border-bottom: 1px solid rgba(128,128,128,0.25);
+    -webkit-overflow-scrolling: touch;
+  }
+  .symbol-toolbar::-webkit-scrollbar { height: 3px; }
+  .symbol-toolbar button {
+    flex: 0 0 auto;
+    min-width: 34px;
+    padding: 7px 10px;
+    font-size: 15px;
+    border-radius: 9px;
+    border: 1px solid rgba(128,128,128,0.3);
+    background: var(--tg-theme-secondary-bg-color, #f2f2f2);
+    color: var(--tg-theme-text-color, #111111);
+    cursor: pointer;
+  }
+  .symbol-toolbar button:active { background: var(--tg-theme-button-color, #2ea6ff); color: #fff; }
 </style>
 </head>
 <body>
@@ -163,6 +191,30 @@
 <div id="errorState" style="display:none;"></div>
 
 <div id="formState">
+  <div class="symbol-toolbar" id="symbolToolbar">
+    <button type="button" data-before="$" data-after="$" title="صيغة رياضية">$..$</button>
+    <button type="button" data-before="\frac{" data-after="}{}" title="كسر">a/b</button>
+    <button type="button" data-before="\sqrt{" data-after="}" title="جذر تربيعي">√</button>
+    <button type="button" data-before="^{" data-after="}" title="أس (قوة)">x²</button>
+    <button type="button" data-before="_{" data-after="}" title="دليل سفلي">xₙ</button>
+    <button type="button" data-before="\pi" data-after="" title="باي">π</button>
+    <button type="button" data-before="\theta" data-after="" title="ثيتا">θ</button>
+    <button type="button" data-before="\alpha" data-after="" title="ألفا">α</button>
+    <button type="button" data-before="\beta" data-after="" title="بيتا">β</button>
+    <button type="button" data-before="\leq" data-after="" title="أصغر أو يساوي">≤</button>
+    <button type="button" data-before="\geq" data-after="" title="أكبر أو يساوي">≥</button>
+    <button type="button" data-before="\neq" data-after="" title="لا يساوي">≠</button>
+    <button type="button" data-before="\pm" data-after="" title="زائد أو ناقص">±</button>
+    <button type="button" data-before="\times" data-after="" title="ضرب">×</button>
+    <button type="button" data-before="\div" data-after="" title="قسمة">÷</button>
+    <button type="button" data-before="\infty" data-after="" title="لا نهاية">∞</button>
+    <button type="button" data-before="^{\circ}" data-after="" title="درجة">°</button>
+    <button type="button" data-before="\sum_{" data-after="}^{}" title="مجموع (سيغما)">Σ</button>
+    <button type="button" data-before="\int_{" data-after="}^{}" title="تكامل">∫</button>
+    <button type="button" data-before="\rightarrow" data-after="" title="سهم">→</button>
+  </div>
+  <div class="hint" style="margin-top:6px;">👆 اضغط داخل أي حقل تريد الكتابة فيه (السؤال، إجابة، خلية جدول أو مصفوفة)، ثم اختر الرمز من الشريط فوق ليُدرَج مكان المؤشر مباشرة.</div>
+
   <h1>🌐 محرر سؤال الرياضيات</h1>
   <div class="hint">عدّل النص أدناه (يمكنك ترك رموز <code>$...$</code> كما هي لصياغة رياضية صحيحة) وشاهد المعاينة الحية، ثم اضغط حفظ.</div>
 
@@ -228,6 +280,52 @@ const tableEditor = document.getElementById("tableEditor");
 const matricesContainer = document.getElementById("matricesContainer");
 const addMatrixBtn = document.getElementById("addMatrixBtn");
 const fullPreview = document.getElementById("fullPreview");
+const symbolToolbar = document.getElementById("symbolToolbar");
+
+// ==================== شريط الرموز الرياضية الجاهزة ====================
+// نتتبع آخر حقل نص كان مركّزاً عليه المستخدم (سؤال/إجابة/خلية جدول/خلية مصفوفة -
+// كلها <textarea> أو <input type="text">) عبر تفويض حدث focus على مستوى document
+// بمرحلة الالتقاط (capture:true) لأن focus لا "يفقاع" (bubble) بشكل طبيعي. هيك
+// الشريط يشتغل مع أي حقل موجود حالياً أو يُنشأ لاحقاً ديناميكياً (صفوف/أعمدة جديدة)
+// من غير ما نربط مستمعاً يدوياً بكل حقل عالحدة.
+let lastFocusedInput = questionInput;
+document.addEventListener("focus", (e) => {
+  const t = e.target;
+  if (t && (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && t.type === "text"))) {
+    lastFocusedInput = t;
+  }
+}, true);
+
+function insertSnippet(el, before, after) {
+  if (!el) return;
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? el.value.length;
+  const selected = el.value.slice(start, end);
+  el.value = el.value.slice(0, start) + before + selected + after + el.value.slice(end);
+  // لو كان في نص محدَّد (Selection)، نحط المؤشر بعد كل شي (نهاية الإدراج).
+  // لو ما كان في تحديد، نحط المؤشر مباشرة بعد "before" - أي داخل القوس الأول
+  // مباشرة لرموز زي \frac{ }{} أو \sqrt{ } جاهز يكتب فيها القيمة على طول.
+  const caretPos = selected ? start + before.length + selected.length + after.length : start + before.length;
+  el.focus();
+  el.setSelectionRange(caretPos, caretPos);
+  // .value = لا يُطلق حدث input تلقائياً - لازم نطلقه يدوياً حتى تشتغل نفس مستمعات
+  // المعاينة الحية/مزامنة حالة الجدول والمصفوفات المربوطة أصلاً بكل حقل.
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+if (symbolToolbar) {
+  // preventDefault على mousedown (مش click) يمنع الحقل النشط من فقدان التركيز
+  // والتحديد (Selection) قبل ما نوصل لحدث click - بدونها كان الإدراج دايماً رح
+  // يروح آخر النص بدل مكان المؤشر الفعلي.
+  symbolToolbar.addEventListener("mousedown", (e) => {
+    if (e.target.closest("button[data-before]")) e.preventDefault();
+  });
+  symbolToolbar.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-before]");
+    if (!btn) return;
+    insertSnippet(lastFocusedInput, btn.dataset.before || "", btn.dataset.after || "");
+  });
+}
 
 let LIMITS = {
   max_question_len: 2000, max_option_len: 500, max_cell_len: 60,
