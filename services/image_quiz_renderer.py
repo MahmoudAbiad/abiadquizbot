@@ -78,6 +78,11 @@ TABLE_BOTTOM_GAP_PX = 26
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
 _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 _MATH_SPAN_RE = re.compile(r"\$[^$]+\$")
+# 🛠️ FIX: حروف تحكّم ASCII خام (form-feed \x0c، tab \x09، إلخ) قد تتسرّب لنص السؤال/
+# الخيارات لو نجا JSON تالف (backslash غير مُهرَّب بشكل صحيح) من مرحلة التوليد - matplotlib
+# mathtext لا يرمي استثناءً لحرف تحكّم غير معروف (يستبدله بصمت برمز/صندوق فارغ)، فلا يكفي
+# الاعتماد على try/except في _sanitize_line_for_mathtext وحده لاكتشاف هذه الحالة تحديداً.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 _MATH_PARSER = MathTextParser("agg")
 _FONT_CACHE: Dict[Any, fm.FontProperties] = {}
@@ -159,7 +164,9 @@ def _measure_line_height_px(text: str, font_prop: fm.FontProperties, fallback_px
         return fallback_px
     try:
         r = _MATH_PARSER.parse(text, dpi=DPI, prop=font_prop)
-        measured = (r.height + r.depth) * 1.2
+        # 🛠️ FIX: رفعنا هامش الأمان من 1.2 إلى 1.3 لتقليل حالات "overflow detected,
+        # extending canvas" الملحوظة حتى مع أسطر LaTeX سليمة تماماً (كسور/جذور مرتفعة).
+        measured = (r.height + r.depth) * 1.3
         return max(measured, fallback_px)
     except Exception:
         return fallback_px
@@ -227,11 +234,17 @@ def _wrap_and_shape(text: str, is_ar: bool, max_width_px: float, font_prop: fm.F
 def _sanitize_line_for_mathtext(line: str) -> str:
     """يتحقق أن matplotlib قادر فعلاً على تفسير أي صيغة LaTeX موجودة بالسطر قبل رسمه؛
     لو فشل (رمز LaTeX غير مدعوم أرسله النموذج)، يجرّد علامات $ ويعرض السطر كنص عادي
-    بدل تعطيل توليد الصورة بأكملها."""
+    بدل تعطيل توليد الصورة بأكملها.
+
+    🛠️ FIX: نتحقق أولاً من وجود حروف تحكّم خام (راجع _CONTROL_CHARS_RE) لأن mathtext
+    لا يرمي استثناءً لحرف تحكّم غير معروف (ينجح التحليل ويستبدله بصمت بصندوق فارغ) -
+    فبدون هذا الفحص كانت هذه الحالة تحديداً تفلت من try/except أدناه بالكامل."""
+    if _CONTROL_CHARS_RE.search(line):
+        return _CONTROL_CHARS_RE.sub("", line).replace("$", "")
     if "$" not in line:
         return line
     try:
-        _MATH_PARSER.parse(line, dpi=100)
+        _MATH_PARSER.parse(line, dpi=DPI)
         return line
     except Exception:
         return line.replace("$", "")
