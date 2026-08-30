@@ -1,5 +1,6 @@
 # services/quiz_engine.py
 import asyncio
+import hashlib
 import json
 import uuid
 from typing import Dict, Any, Tuple, List, Optional
@@ -12,6 +13,17 @@ from services.latex_text import latex_to_plain
 from supabase_helper import _is_valid_uuid, save_question_image_url, upload_quiz_question_image
 
 logger = get_logger(__name__)
+
+
+def _question_image_object_path(quiz_id: Optional[str], idx: int, q: Dict[str, Any]) -> str:
+    """ينشئ مسار صورة فريد لكل نسخة من السؤال، حتى لو نفس السؤال كتب مرة ثانية؛ هذا
+    يمنع Telegram من إعادة استخدام الصورة القديمة نفسها لأن عنوان URL يظل ثابتاً."""
+    if quiz_id and _is_valid_uuid(quiz_id):
+        payload = json.dumps(q, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+        return f"{quiz_id}/{idx}-{digest}.png"
+    return f"tmp/{uuid.uuid4().hex}.png"
+
 
 def prepare_question_payload(q: Dict[str, Any], idx: int, total: int) -> Tuple[str, List[str], str, bool]:
     """
@@ -49,7 +61,7 @@ async def _send_math_image_question(chat_id: int, user_id: int, q: Dict[str, Any
     image_bytes = None
     if not image_url:
         image_bytes = await asyncio.to_thread(render_question_image, q, idx, total, is_ar)
-        object_path = f"{quiz_id}/{idx}.png" if quiz_id and _is_valid_uuid(quiz_id) else f"tmp/{uuid.uuid4().hex}.png"
+        object_path = _question_image_object_path(quiz_id, idx, q)
         image_url = await upload_quiz_question_image(image_bytes, object_path)
         if image_url and quiz_id and _is_valid_uuid(quiz_id):
             q["image_url"] = image_url  # يبقى بالذاكرة طوال الجلسة الحالية أيضاً
