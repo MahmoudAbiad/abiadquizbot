@@ -408,7 +408,15 @@ async def apply_question_edit_and_resume(
         return False, "❌ انتهت جلسة التعديل، أرسل النقطة على السؤال مرة أخرى."
 
     quiz_id = data.get("quiz_id")
-    saved = await update_quiz_question(quiz_id, question_index, question, user_id) if quiz_id else None
+    # 🧹 إبطال أي صورة قديمة مخزنة للسؤال المعدّل، لأن أسئلة الرياضيات تُرسم كصورة
+    # ويجب إعادة رسمها من البيانات الجديدة بعد كل تعديل، وإلا سيستمر Telegram في
+    # إظهار النسخة القديمة من `image_url` داخل نفس الجلسة أو حتى في السجل المركزي.
+    normalized_question = dict(question)
+    normalized_question.pop("image_url", None)
+    normalized_question.pop("rendered_image_url", None)
+    normalized_question.pop("cached_image_url", None)
+
+    saved = await update_quiz_question(quiz_id, question_index, normalized_question, user_id) if quiz_id else None
     if saved is None:
         await state.set_state(QuizState.answering_quiz)
         return False, "⛔ لا تملك صلاحية تعديل هذا الكويز. يمكن لمالكه أو الأدمن فقط تعديله."
@@ -424,7 +432,7 @@ async def apply_question_edit_and_resume(
         "database_updated": True,
     }))
     questions = list(questions)
-    questions[question_index] = question
+    questions[question_index] = normalized_question
     await state.update_data(questions=questions, current_index=question_index)
     await state.set_state(QuizState.answering_quiz)
     await send_question_by_ids(chat_id, user_id, state)
@@ -514,7 +522,8 @@ async def save_question_edit_from_web(
     question["matrices"] = matrices or []
     # 🆕 نفس مبدأ التعديل النصي: إبطال الصورة المولَّدة سابقاً حتى يُعاد رسمها من
     # القيم الجديدة عند إعادة عرض السؤال (راجع send_question_by_ids → send_quiz_poll).
-    question.pop("image_url", None)
+    for stale_key in ("image_url", "rendered_image_url", "cached_image_url"):
+        question.pop(stale_key, None)
 
     return await apply_question_edit_and_resume(chat_id, user_id, state, question_index, question, "web_full_edit")
 
