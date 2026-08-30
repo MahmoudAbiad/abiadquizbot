@@ -30,12 +30,18 @@ google-genai SDK مباشرة لقراءة الملفات/الصور بشكل أ
 ==============================================================================
 """
 
+import re
 import time
 from typing import Dict, List, Optional
 
 from logger import get_logger, log_error
 
 logger = get_logger(__name__)
+
+# 🔒 صيغة اسم موديل مسموحة: حروف/أرقام/نقطة/شرطة/شرطة سفلية/سلاش فقط (يطابق صيغة كل
+# أسماء الموديلات الحقيقية بكل الشركات المدعومة) - يمنع أي أسطر جديدة أو رموز تحكّم قد
+# تُفسد سطور الـ logs أو تُرسل كباراميتر مشوّه لطلبات Gemini/Groq/OpenAI الفعلية.
+_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
 
 CACHE_TTL_SECONDS = 30
 
@@ -146,8 +152,10 @@ async def get_groq_fast_model(force_refresh: bool = False) -> Dict:
 
 
 async def add_model(slot: str, provider: str, model_name: str) -> Optional[Dict]:
-    """إضافة موديل جديد لسلسلة (slot) - عبر RPC ai_model_add (ترتيب تلقائي بآخر القائمة)."""
-    if slot not in VALID_SLOTS or provider not in VALID_PROVIDERS or not (model_name or "").strip():
+    """إضافة موديل جديد لسلسلة (slot) - عبر RPC ai_model_add (ترتيب تلقائي بآخر القائمة).
+    🔒 يرفض أي اسم لا يطابق _MODEL_NAME_PATTERN (يمنع أسطر جديدة/رموز تحكّم/نص فارغ)."""
+    model_name = (model_name or "").strip()
+    if slot not in VALID_SLOTS or provider not in VALID_PROVIDERS or not _MODEL_NAME_PATTERN.match(model_name):
         return None
 
     from supabase_helper import supabase
@@ -155,7 +163,7 @@ async def add_model(slot: str, provider: str, model_name: str) -> Optional[Dict]
     try:
         rpc_response = await supabase.rpc(
             "ai_model_add",
-            {"p_slot": slot, "p_provider": provider, "p_model_name": model_name.strip()},
+            {"p_slot": slot, "p_provider": provider, "p_model_name": model_name},
         ).execute()
         invalidate_cache(slot)
         rows = rpc_response.data or []

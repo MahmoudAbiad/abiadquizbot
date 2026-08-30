@@ -7,6 +7,7 @@
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
+from html import escape as html_escape
 
 from keyboards import (
     get_ai_control_keyboard,
@@ -133,6 +134,19 @@ async def move_down(call: types.CallbackQuery):
 async def toggle(call: types.CallbackQuery):
     remainder = call.data.removeprefix("admin_ai_toggle_")
     model_id_str, slot = remainder.split("_", 1)
+
+    # 🔒 نفس حماية الحذف: لا تسمح بتعطيل آخر موديل مفعّل الوحيد بالسلسلة (يمنع تعطّل
+    # التوليد بالكامل بضغطة خاطئة - يبقى دائماً موديل واحد فعّال على الأقل).
+    models = await get_all_models(slot, force_refresh=True)
+    enabled_models = [m for m in models if m.get("is_enabled")]
+    target = next((m for m in models if str(m["id"]) == model_id_str), None)
+    if target and target.get("is_enabled") and len(enabled_models) <= 1:
+        await call.answer(
+            "❌ ما فيك تعطّل آخر موديل مفعّل بهذه السلسلة - فعّل بديل أولاً.",
+            show_alert=True,
+        )
+        return
+
     result = await toggle_model(int(model_id_str), slot)
     if result is None:
         await call.answer("❌ تعذّر تعديل حالة الموديل.", show_alert=True)
@@ -249,10 +263,11 @@ async def process_new_model_name(msg: types.Message, state: FSMContext):
 
     if result is None:
         await msg.answer(
-            "❌ تعذّرت الإضافة (ربما مضاف مسبقاً بنفس الاسم والشركة). حاول مجدداً.",
+            "❌ تعذّرت الإضافة - إما الاسم يحتوي رموز غير مسموحة (يُسمح فقط بحروف/أرقام/نقطة/"
+            "شرطة/سلاش)، أو مضاف مسبقاً بنفس الاسم والشركة. حاول مجدداً:",
             reply_markup=get_ai_cancel_keyboard(slot),
         )
         return
 
-    await msg.answer(f"✅ تمت إضافة <code>{model_name}</code> بنجاح.", parse_mode="HTML")
+    await msg.answer(f"✅ تمت إضافة <code>{html_escape(model_name)}</code> بنجاح.", parse_mode="HTML")
     await _render_slot_screen(msg, slot)
