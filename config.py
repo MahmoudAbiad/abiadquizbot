@@ -40,6 +40,7 @@ class QuizState(StatesGroup):
     # 🆕 waiting_for_generation_confirm أُزيلت: شاشة التأكيد صارت مدمجة داخل waiting_for_count
     # نفسها (خطوة واحدة بدل خطوتين - راجع handlers/files.py get_question_count_keyboard).
     waiting_for_translation_choice = State()  # 🆕 اختيار "مترجمة/بدون ترجمة" عند اكتشاف محتوى إنجليزي
+    waiting_for_quiz_extraction_choice = State()  # 🆕 اختيار "كما هي/حل بالذكاء الاصطناعي" عند اكتشاف اختبار جاهز محلول
     waiting_for_quiz_options = State()        # 🆕 شاشة اختيار نوع الأسئلة + الصعوبة (رسالة واحدة، تحديثات متتالية)
     waiting_for_custom_question_type = State()  # 🆕 استقبال تفضيل نوع الأسئلة النصي الحر من الطالب
     waiting_for_audio_confirm = State()     # 🆕 انتظار تأكيد الطالب (إقرار الحقوق + المدة والتكلفة) قبل خصم أي نقاط أو بدء التفريغ الفعلي

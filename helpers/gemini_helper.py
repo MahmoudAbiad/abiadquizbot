@@ -801,6 +801,7 @@ async def generate_quiz_smart(
     difficulty: Optional[str] = None,
     question_type: Optional[str] = None,
     custom_question_type_text: Optional[str] = None,
+    quiz_extraction_instruction: Optional[str] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
@@ -821,6 +822,12 @@ async def generate_quiz_smart(
     ({difficulty_instruction} و{question_type_instruction}) بكل الموجّهات الأربعة على حد
     سواء، بغض النظر عن المسار (رياضي/إنجليزي/عادي) - راجع _resolve_difficulty_instruction
     و_resolve_question_type_instruction أعلاه لمنطق التحويل.
+
+    🆕 quiz_extraction_instruction: نص جاهز (يُبنى بـ services/quiz_service.py عبر
+    resolve_quiz_extraction_instruction) يُلحَق بنهاية الموجّه الأساسي المختار فقط عندما
+    يكون المحتوى اختباراً جاهزاً (subject_type=quiz_solved/quiz_unsolved) - يحوّل مهمة
+    النموذج من "توليد أسئلة جديدة" إلى "استخراج أسئلة موجودة أصلاً بالمستند" (مع اعتماد
+    إجاباتها كما هي، أو حلّها بالذكاء الاصطناعي، حسب اختيار الطالب). None لأي مادة أخرى.
 
     🆕 يُنفَّذ الآن كل التوليد الفعلي (ملفات أو نص) عبر سلسلة أولوية النماذج الكاملة
     (MODELS_CASCADE) مع Round-Robin على المفاتيح، دون أي تغيير على توقيع أو سلوك هذه
@@ -855,6 +862,13 @@ async def generate_quiz_smart(
             "{question_type_instruction}",
             _resolve_question_type_instruction(question_type, custom_question_type_text),
         )
+
+        # 🆕 اختبار جاهز (محلول/غير محلول): تُلحَق تعليمة الاستخراج الخاصة بنهاية الموجّه
+        # الأساسي (بغض النظر عن مادته) - تحوّل المهمة من "توليد" إلى "استخراج" كما هي أو
+        # حلّها بالذكاء الاصطناعي. لا تأثير إطلاقاً على أي مادة أخرى (تبقى None فتُتجاهل).
+        # ملاحظة: {count} داخل هذا النص يُستبدل سوا مع باقي الموجّه بنفس السطر بالأسفل.
+        if quiz_extraction_instruction:
+            base_prompt_template += quiz_extraction_instruction
 
         # حقن الأسئلة السابقة لمنع التكرار
         if previous_questions:

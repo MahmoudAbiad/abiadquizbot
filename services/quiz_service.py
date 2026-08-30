@@ -8,6 +8,9 @@ from constants import (
     MAX_LIMIT_PAGES, MAX_LIMIT_QUESTIONS, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS,
     SUBJECT_MATH, SUBJECT_OTHER, SUBJECT_ENGLISH, SUBJECT_FRENCH, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
     QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM, QUESTION_TYPE_OPTIONS,
+    # 🆕 اختبار محلول/غير محلول
+    SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
+    QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
 )
 from gemini_helper import generate_quiz_smart
 from logger import get_logger, log_error
@@ -100,14 +103,22 @@ async def refund_user_on_failure(user_id: int, data: Dict[str, Any]) -> None:
 
 def build_question_type_label(
     subject_type: str, question_type: str, custom_text: Optional[str] = None,
-    suggested_types: Optional[List[str]] = None,
+    suggested_types: Optional[List[str]] = None, extraction_mode: Optional[str] = None,
 ) -> str:
     """
     🆕 يبني نص التسمية العربية القصيرة المخزّنة بعمود quizzes.question_type_label -
     تُعرض للطالب بجانب كل كويز مخزّن بالكاش (راجع migration_quiz_options.sql).
     يدعم أيضاً أنواع "other_<index>" (اقتراحات AI الديناميكية للمواد غير المصنّفة -
     راجع keyboards.get_quiz_type_keyboard) بقراءة النص الفعلي من suggested_types.
+
+    🆕 extraction_mode: لمادتي quiz_solved/quiz_unsolved (اختبار جاهز) لا معنى لـ
+    question_type أصلاً (لا شاشة نوع/صعوبة تُعرض لهما - راجع handlers/files.py)، فتُبنى
+    التسمية هنا من طريقة الاستخراج المختارة بدلاً من ذلك (كما هي / حل بالذكاء الاصطناعي).
     """
+    if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        return QUIZ_EXTRACTION_MODE_LABELS_AR.get(
+            extraction_mode or QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR[QUIZ_EXTRACTION_MODE_AI_SOLVE]
+        )
     if question_type == QUESTION_TYPE_CUSTOM and custom_text:
         return custom_text.strip()[:80]
     if question_type.startswith("other_") and suggested_types:
@@ -121,6 +132,21 @@ def build_question_type_label(
         if value == question_type:
             return label
     return "🔀 متنوع (بدون تخصيص)"
+
+
+def resolve_quiz_extraction_instruction(subject_type: str, extraction_mode: Optional[str]) -> Optional[str]:
+    """
+    🆕 يحوّل subject_type/extraction_mode إلى نص التعليمة الخاصة المُحقنة بنهاية موجّه
+    التوليد (helpers/gemini_helper.py) عندما يكون المحتوى اختباراً جاهزاً (محلول/غير
+    محلول) - راجع constants.QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS. None لأي مادة أخرى
+    (لا تعديل على سلوك التوليد الاعتيادي إطلاقاً).
+    """
+    if subject_type not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        return None
+    # 🆕 fail-safe: اختبار غير محلول دائماً ai_solve (لا خيار آخر أصلاً)، واختبار محلول بلا
+    # extraction_mode مخزّن (حالة غير متوقعة) يُعامل أيضاً كـ ai_solve أماناً بدل نص فارغ.
+    mode = extraction_mode or QUIZ_EXTRACTION_MODE_AI_SOLVE
+    return QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS.get(mode)
 
 
 def resolve_generation_question_type_text(
@@ -235,6 +261,13 @@ async def execute_quiz_generation_workflow(
         )
         difficulty = data.get("difficulty", DIFFICULTY_MEDIUM)
 
+        # 2.8 🆕 اختبار محلول/غير محلول: طريقة الاستخراج المختارة (كما هي / حل بالذكاء
+        #     الاصطناعي) محفوظة مسبقاً بحالة الـ FSM (handlers/files.py، إما من اختيار
+        #     الطالب الصريح لـ quiz_solved، أو مباشرة لـ quiz_unsolved بلا تخيير). None لأي
+        #     مادة أخرى - لا تأثير على سلوك التوليد الاعتيادي إطلاقاً.
+        quiz_extraction_mode = data.get("quiz_extraction_mode")
+        quiz_extraction_instruction = resolve_quiz_extraction_instruction(subject_type, quiz_extraction_mode)
+
         # 3. استدعى محرك AI
         quiz_data = await generate_quiz_smart(
             file_paths=file_paths if is_media else None,
@@ -250,6 +283,7 @@ async def execute_quiz_generation_workflow(
             difficulty=difficulty,
             question_type=question_type,
             custom_question_type_text=custom_question_type_text,
+            quiz_extraction_instruction=quiz_extraction_instruction,
         )
 
         if not quiz_data:
@@ -279,7 +313,10 @@ async def execute_quiz_generation_workflow(
                 is_math_quiz=is_math_mode,
                 subject_type=subject_type,
                 question_type=question_type,
-                question_type_label=build_question_type_label(subject_type, question_type, custom_question_type_text, suggested_types),
+                question_type_label=build_question_type_label(
+                    subject_type, question_type, custom_question_type_text, suggested_types,
+                    extraction_mode=quiz_extraction_mode,
+                ),
                 difficulty=difficulty,
             )
 

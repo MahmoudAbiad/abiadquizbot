@@ -54,6 +54,8 @@ from constants import (
     SUBJECT_FRENCH,
     SUBJECT_MATH,
     SUBJECT_OTHER,
+    SUBJECT_QUIZ_SOLVED,
+    SUBJECT_QUIZ_UNSOLVED,
     SYSTEM_PROMPT_CLASSIFY_SUBJECT,
 )
 from logger import get_logger, log_warning
@@ -68,7 +70,9 @@ API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") i
 _GEMINI_CLIENTS: List[genai.Client] = [genai.Client(api_key=key) for key in API_KEYS]
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
-_VALID_SUBJECTS = {SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH, SUBJECT_OTHER}
+_VALID_SUBJECTS = {
+    SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH, SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED, SUBJECT_OTHER,
+}
 
 # 🆕 نفس حد helpers.gemini_helper.INLINE_DATA_SIZE_THRESHOLD (15MB): إرسال الملف كاملاً
 # Inline ضمن الطلب لو كان بهذا الحجم أو أقل (أسرع، بدون Round-trip رفع منفصل)، وإلا
@@ -85,8 +89,11 @@ class SubjectClassification(BaseModel):
     # استخدام Literal بدل str+description بيضمن القيمة من مستوى الـ schema نفسه
     # (تعليمة صريحة وملزمة للنموذج) بدل الاعتماد فقط على نص وصفي حر قد يُنسى تحديثه
     # بالمستقبل لو أُضيفت مادة جديدة.
-    subject: Literal["math", "english", "french", "other"] = Field(
-        description="one of: math, english, french, other"
+    # 🆕 quiz_solved/quiz_unsolved أُضيفا بنفس منطق SUBJECT_FRENCH أعلاه (راجع البُقشة
+    # التوضيحية أعلى BUGFIX 🩹 بهذا الملف): Literal صريح يضمن القيمة من مستوى الـ
+    # schema نفسه المُرسل فعلياً لـ Gemini، لا يكفي تحديث SYSTEM_PROMPT_CLASSIFY_SUBJECT وحده.
+    subject: Literal["math", "english", "french", "quiz_solved", "quiz_unsolved", "other"] = Field(
+        description="one of: math, english, french, quiz_solved, quiz_unsolved, other"
     )
     suggested_types: List[str] = Field(default_factory=list, max_length=4)
 
