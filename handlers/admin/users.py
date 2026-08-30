@@ -755,10 +755,12 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
                 f"───────────────────"
             )
 
-            kb.append([types.InlineKeyboardButton(
-                text=f"🎯 تجربة #{idx}: {title[:22]}",
-                callback_data=f"afb_try_{quiz_id}"
-            )])
+            kb.append([
+                types.InlineKeyboardButton(text=f"🎯 تجربة #{idx}: {title[:18]}", callback_data=f"afb_try_{quiz_id}"),
+                # 🆕 حذف نهائي مباشر من هنا - الراوتر مقيّد بـ IsAdminFilter أصلاً فالأدمن
+                # مصرَّح له دائماً (راجع services/quiz_permissions.py/handlers/quiz_delete.py).
+                types.InlineKeyboardButton(text="🗑 حذف", callback_data=f"qdel_{quiz_id}"),
+            ])
 
         nav_row = []
         if page > 1:

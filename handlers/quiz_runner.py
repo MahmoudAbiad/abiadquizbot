@@ -24,6 +24,7 @@ from keyboards import (
 )
 from logger import get_logger, log_error, log_info, log_warning
 from services.latex_text import latex_to_plain
+from services.quiz_permissions import can_edit_quiz
 from handlers.audio import _build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لاستئناف الكويز من خلفية (محرر أسئلة الرياضيات عبر الويب)
 from supabase_helper import (
     list_favorite_quizzes,
@@ -39,6 +40,7 @@ from supabase_helper import (
     complete_quiz_attempt,
     mark_quiz_attempt_stopped,
     update_quiz_question,
+    get_quiz_creator_id,
     _is_valid_uuid
 )
 from services.quiz_engine import send_quiz_poll
@@ -225,7 +227,12 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
 
     # التحقق من صحة المعرف لإظهار لوحة التقييم بشكل آمن
     if quiz_id and _is_valid_uuid(quiz_id):
-        keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id)
+        # 🆕 جلب creator_id لهذا الكويز لإظهار زر "حذف الكويز نهائياً" فقط للأدمن أو
+        # لمالكه الفعلي على شاشة النتيجة (المكان الأكثر ظهوراً للكويز للطالب).
+        from supabase_helper import admin_get_quiz_by_id  # استيراد محلي لتفادي دورة استيراد
+        quiz_row = await admin_get_quiz_by_id(quiz_id)
+        creator_id = quiz_row.get("creator_id") if quiz_row else None
+        keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, viewer_id=user_id, creator_id=creator_id)
         result_text += "\n\n⭐ <b>كيف تقيم هذا الكويز؟</b> تقييمك المباشر يساعد الدفعة على فرز الكويزات الممتازة وتصفية الرديئة تلقائياً!"
     else:
         keyboard = get_quiz_result_keyboard(quiz_id=quiz_id)
@@ -474,6 +481,15 @@ async def fetch_question_for_edit_web(chat_id: int, user_id: int, quiz_id: str, 
     waiting_for_question_edit_choice (الحالة التي تدخلها request_question_edit فور
     الرد بنقطة)، وأن quiz_id/question_index مطابقان تماماً لما خزّنته تلك الدالة -
     لا نثق بأي قيمة قادمة من الصفحة نفسها بمعزل عن جلسة FSM الفعلية.
+
+    🩹 إصلاح خلل حقيقي: مسار التعديل النصي العادي (غير الرياضيات) يتحقق دائماً من
+    صلاحية "المالك أو الأدمن" (can_edit_quiz) عند الحفظ الفعلي عبر update_quiz_question
+    بـ apply_question_edit_and_resume، بينما محرر الرياضيات الكامل هنا كان يكتفي فقط
+    بصحة جلسة FSM (الطالب الجالس فعلياً يحل هذا الكويز بالذات الآن) بدون أي تحقق من
+    creator_id/الأدمن على الإطلاق - أي طالب يحل كويزاً رياضياً *مشتركاً* من غيره كان
+    يقدر يفتح المحرر ويشاهد بيانات السؤال (حتى لو الحفظ لاحقاً كان سيُرفض بصمت من
+    طبقة أعمق). نفس فحص can_edit_quiz المستخدم بمسار الحذف/التعديل العادي مُضاف هنا
+    الآن مبكراً - بنفس طريقة get_quiz_creator_id الخفيفة (بدون جلب quiz_data الثقيل).
     """
     state = _build_state_for_chat(chat_id, user_id)
     current_state = await state.get_state()
@@ -487,6 +503,10 @@ async def fetch_question_for_edit_web(chat_id: int, user_id: int, quiz_id: str, 
         return None
     question = questions[question_index]
     if not question.get("is_math"):
+        return None
+    creator_id = await get_quiz_creator_id(quiz_id)
+    if not can_edit_quiz(user_id, creator_id):
+        log_warning(logger, f"Rejected math question fetch by user {user_id} for quiz {quiz_id} (not owner/admin)")
         return None
     return question
 
@@ -519,6 +539,17 @@ async def save_question_edit_from_web(
     original = questions[question_index]
     if not original.get("is_math"):
         return False, "❌ هذا المحرر متاح فقط لأسئلة الرياضيات المصوّرة."
+
+    # 🩹 إصلاح خلل حقيقي: نفس فحص can_edit_quiz (مالك الكويز أو الأدمن) المطبَّق
+    # مسبقاً بمسار التعديل النصي العادي (عبر update_quiz_question بنهاية
+    # apply_question_edit_and_resume تحت) - مُضاف هنا الآن أيضاً بشكل مبكر وصريح
+    # قبل أي معالجة إضافية (بدل الاعتماد فقط على الفحص المتأخر بتلك الدالة نهاية
+    # هذا المسار)، برسالة رفض مطابقة تماماً لرسالة المسار العادي.
+    creator_id = await get_quiz_creator_id(quiz_id)
+    if not can_edit_quiz(user_id, creator_id):
+        log_warning(logger, f"Rejected math question save by user {user_id} for quiz {quiz_id} (not owner/admin)")
+        return False, "⛔ لا تملك صلاحية تعديل هذا الكويز. يمكن لمالكه أو الأدمن فقط تعديله."
+
     original_options = original.get("options") or []
     if len(options) != len(original_options):
         return False, "❌ عدد الإجابات يجب أن يبقى كما هو (لا يمكن إضافة أو حذف إجابة من هذا المحرر)."

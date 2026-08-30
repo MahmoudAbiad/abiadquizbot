@@ -16,8 +16,21 @@ from constants import (
 from settings_helper import get_setting
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
+from services.quiz_permissions import can_delete_quiz
 
 logger = get_logger(__name__)
+
+
+def get_delete_quiz_button_row(quiz_id: str, viewer_id=None, creator_id=None) -> list:
+    """🆕 صف زر "🗑 حذف الكويز نهائياً" - يُستخدم من أي شاشة يظهر فيها كويز.
+    يُرجع صفاً فارغاً [] (بدل الزر) إذا لم يكن viewer_id مصرَّحاً له (ليس الأدمن
+    ولا مالك الكويز) - راجع services/quiz_permissions.py لمنطق الصلاحية الكامل.
+    التحقق هنا يتحكم فقط بـ"ظهور" الزر؛ نفس الصلاحية تُعاد فحصها من جديد عند
+    الضغط الفعلي (handlers/quiz_delete.py) لأن أي مستخدم يقدر تقنياً يرسل أي
+    callback_data حتى لو لم يظهر له الزر أصلاً."""
+    if not quiz_id or not can_delete_quiz(viewer_id, creator_id):
+        return []
+    return [[types.InlineKeyboardButton(text="🗑 حذف الكويز نهائياً", callback_data=f"qdel_{quiz_id}")]]
 
 # ==================== لوحات التحكم والملاحة العامة ====================
 
@@ -97,7 +110,7 @@ def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> 
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_quiz_result_keyboard(quiz_id: str = None) -> types.InlineKeyboardMarkup:
+def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
     # 🆕 إعادة تنظيم بصري: تجميع الإجراءات المترابطة بصف واحد (2 بجنب بعض)
     # بدل صف مستقل لكل زر - يقلل عدد الصفوف من 9 إلى 6 ويخلي الشاشة أخف.
     kb = [
@@ -115,6 +128,9 @@ def get_quiz_result_keyboard(quiz_id: str = None) -> types.InlineKeyboardMarkup:
         # 🆕 ما في ولا زر متعلق بالنشر/الإخفاء هون - القرار كله صار تحت لوحة
         # الشرف نفسها (راجع get_leaderboard_keyboard)، هون بس زر الدخول إلها.
         kb.append([types.InlineKeyboardButton(text="🏆 عرض لوحة الشرف", callback_data=f"leaderboard_{quiz_id}")])
+
+    # 🆕 زر "حذف الكويز نهائياً" - يظهر فقط للأدمن أو لمالك الكويز الفعلي.
+    kb.extend(get_delete_quiz_button_row(quiz_id, viewer_id, creator_id))
 
     kb.append([types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="quiz_home")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -358,7 +374,7 @@ def get_document_export_keyboard() -> types.InlineKeyboardMarkup:
 
 def get_multiple_quizzes_keyboard(
     all_quizzes: list, filtered_quizzes: list, items: int, is_album: bool, show_generate_btn: bool = True,
-    filter_type: str = "all", filter_difficulty: str = "all",
+    filter_type: str = "all", filter_difficulty: str = "all", viewer_id=None,
 ) -> types.InlineKeyboardMarkup:
     """
     توليد أزرار ذكية لعرض الكويزات المتوفرة للملف الواحد مع إحصائيات تقييم مجتمع الطلاب.
@@ -367,6 +383,9 @@ def get_multiple_quizzes_keyboard(
     🆕 filtered_quizzes: الكويزات بعد تطبيق الفلتر الحالي (هي فقط اللي تُعرض كأزرار تشغيل).
     🆕 صفوف الفلترة (نوع/صعوبة) تُعرض فقط لو فيه أكثر من قيمة واحدة فعلياً موجودة بين
     الكويزات المخزّنة - لتفادي ازدحام الأزرار لما تكون كلها بنفس التركيبة.
+
+    🆕 viewer_id: معرّف الطالب الحالي - يُستخدم لإظهار زر "🗑 حذف نهائياً" بجانب كل
+    كويز مخزّن فقط للأدمن أو لمالك ذلك الكويز تحديداً (creator_id لكل كويز على حدة).
 
     🩹 items/is_album: يُحسب سعر كل كويز مخزّن **حسب عدد أسئلته الفعلي الخاص فيه** (بدل
     سعر واحد ثابت مأخوذ من أول كويز بالقائمة وتطبيقه على الجميع - كان يسبب حجب طلاب
@@ -426,6 +445,9 @@ def get_multiple_quizzes_keyboard(
         quiz_cost = calculate_cached_points_cost(items, q_count, is_album)
         btn_text = f"{icon} {type_label} | {diff_label} | {q_count} سؤال ({quiz_cost:.2f}💎) | 👍{likes} 👎{dislikes}"
         kb.append([types.InlineKeyboardButton(text=btn_text, callback_data=f"use_multi_{q['id']}")])
+        # 🆕 زر حذف مستقل تحت كل كويز على حدة (بيظهر بس للأدمن أو لمالك هذا الكويز
+        # تحديداً - creator_id يوصل الآن ضمن كل صف من get_file_quizzes).
+        kb.extend(get_delete_quiz_button_row(q['id'], viewer_id, q.get('creator_id')))
     
     if show_generate_btn:
         kb.append([types.InlineKeyboardButton(text="🆕 توليد كويز جديد كلياً (تكلفة كاملة)", callback_data="cache_action_no")])
@@ -435,11 +457,11 @@ def get_multiple_quizzes_keyboard(
     kb.append([types.InlineKeyboardButton(text="❌ إلغاء الطلب والتراجع", callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None) -> types.InlineKeyboardMarkup:
+def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
     """لوحة نتيجة الاختبار الكاملة + صف تقييم الكويز المركزي مضاف فوقها.
     🆕 صف التقييم مدمج (لايك/دِسلايك جنب بعض) وزر الملاحظة تحته مباشرة،
     فتصير 6 صفوف إجمالاً بدل 9 - أخف بصرياً وأسهل مسحاً بالعين."""
-    base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id)
+    base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id, viewer_id=viewer_id, creator_id=creator_id)
     kb = list(base_kb.inline_keyboard)
     kb.insert(0, [
         types.InlineKeyboardButton(text="👍 عجبتني الأسئلة", callback_data=f"rate_like_{file_quiz_id}"),
@@ -495,18 +517,23 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
     kb.append([types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_favorite_details_keyboard(favorite_id: str, section_id: str = None) -> types.InlineKeyboardMarkup:
+def get_favorite_details_keyboard(favorite_id: str, section_id: str = None, quiz_id=None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
     """تعتمد زر رجوع ذكي يعيد الطالب لنفس القسم الدراسي بدلاً من تشتيته"""
     back_target = f"fav_sec_view_{section_id}" if section_id else "favorites_menu"
     kb = [
         [types.InlineKeyboardButton(text="▶️ بدء الاختبار الآن", callback_data=f"fav_open_{favorite_id}")],
         [types.InlineKeyboardButton(text="📁 تحميل الكويز (Word/PDF)", callback_data=f"fav_export_menu_{favorite_id}")],
-        [types.InlineKeyboardButton(text="🗑️ حذف الكويز", callback_data=f"fav_del_{favorite_id}")],
-        [
-            types.InlineKeyboardButton(text="🔙 رجوع", callback_data=back_target),
-            types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="favorites_back")
-        ]
+        # 🩹 توضيح التسمية: هذا الزر يزيل الكويز من مفضلتك الشخصية فقط (لا يمسه أحد
+        # غيرك)، بخلاف زر "حذف نهائياً" تحته - المخصص للأدمن/مالك الكويز فعلياً - الذي
+        # يحذفه من كل مكان (الكاش، مفضلات كل الطلاب، التصويتات، لوحة المتصدرين...).
+        [types.InlineKeyboardButton(text="🗑️ إزالة من مفضلتي فقط", callback_data=f"fav_del_{favorite_id}")],
     ]
+    # 🆕 زر "حذف الكويز نهائياً" - يظهر فقط للأدمن أو لمالك الكويز الفعلي.
+    kb.extend(get_delete_quiz_button_row(quiz_id, viewer_id, creator_id))
+    kb.append([
+        types.InlineKeyboardButton(text="🔙 رجوع", callback_data=back_target),
+        types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="favorites_back")
+    ])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_sections_list_keyboard(sections: list) -> types.InlineKeyboardMarkup:

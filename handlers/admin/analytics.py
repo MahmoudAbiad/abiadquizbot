@@ -163,7 +163,7 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
         quizzes = await admin_get_today_quizzes()
         
         if not quizzes:
-            await call.answer("📭 لم يتم توليد أي كويزات جديدة اليوم حتى الآن.", show_alert=True)
+            await call.answer("📭 لم يتم توليد أي كويزات خلال آخر 24 ساعة.", show_alert=True)
             return
 
         total = len(quizzes)
@@ -195,10 +195,12 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
                 f"───────────────────"
             )
 
-            kb.append([types.InlineKeyboardButton(
-                text=f"🎯 تجربة #{idx}: {title[:25]}",
-                callback_data=f"afb_try_{quiz_id}"
-            )])
+            kb.append([
+                types.InlineKeyboardButton(text=f"🎯 تجربة #{idx}: {title[:20]}", callback_data=f"afb_try_{quiz_id}"),
+                # 🆕 حذف نهائي مباشر من هنا - الراوتر مقيّد بـ IsAdminFilter أصلاً فالأدمن
+                # مصرَّح له دائماً (راجع services/quiz_permissions.py/handlers/quiz_delete.py).
+                types.InlineKeyboardButton(text="🗑 حذف", callback_data=f"qdel_{quiz_id}"),
+            ])
 
         nav_row = []
         if page > 1:
@@ -211,7 +213,7 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
         kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
 
         text = (
-            f"🎯 <b>الكويزات المُولدة اليوم (الصفحة {page}/{total_pages})</b>\n"
+            f"🎯 <b>الكويزات المُولدة خلال آخر 24 ساعة (الصفحة {page}/{total_pages})</b>\n"
             f"👥 الإجمالي: <code>{total}</code> كويز\n"
             f"───────────────────\n\n" +
             "\n".join(report_lines)

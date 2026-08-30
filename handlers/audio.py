@@ -62,9 +62,21 @@ async def _current_user(message: types.Message, user: Any = None) -> Dict[str, A
     )
 
 
-async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float) -> None:
+async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float, action: str = "audio_transcription") -> None:
     balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
     deficit = max(0.0, required - balance)
+
+    # 🆕 تتبع تحليلي: نفس حدث "insufficient_balance_blocked" المُسجَّل بـ handlers/files.py
+    # (راجع التعليق هناك) - نفس منطق اعتماد user_info["user_id"] بدل message.from_user
+    # لأن message هون غالباً رسالة البوت نفسها وليست رسالة الطالب.
+    tracked_user_id = user_info.get("user_id")
+    if tracked_user_id:
+        asyncio.create_task(log_usage_event(tracked_user_id, "insufficient_balance_blocked", {
+            "action": action, "required_points": required, "current_balance": balance,
+            "deficit_points": deficit, "free_points": float(user_info.get("free_points") or 0),
+            "paid_points": float(user_info.get("paid_points") or 0),
+        }))
+
     contact = ADMIN_CONTACT.lstrip("@")
     keyboard = types.InlineKeyboardMarkup(
         inline_keyboard=[
@@ -828,6 +840,16 @@ async def process_web_uploaded_audio(
                 await status_msg.delete()
             except Exception:
                 pass
+            # 🆕 تتبع تحليلي: نفس حدث "insufficient_balance_blocked" المستخدم بباقي مسارات
+            # الحجب (راجع _insufficient_balance أعلى الملف) - هالمسار تحديداً (رفع محاضرة
+            # عبر صفحة الويب) ما كان يمر أصلاً عبر تلك الدالة المشتركة (رسالة مختلفة/بدون
+            # زر شحن) فكان النشاط هون غير مُتتبَّع إطلاقاً قبل هالإضافة.
+            deficit = max(0.0, cost - balance)
+            asyncio.create_task(log_usage_event(user_id, "insufficient_balance_blocked", {
+                "action": "audio_transcription_web", "required_points": cost, "current_balance": balance,
+                "deficit_points": deficit, "free_points": float(user_info.get("free_points") or 0),
+                "paid_points": float(user_info.get("paid_points") or 0),
+            }))
             await bot.send_message(
                 chat_id,
                 f"❌ رصيدك الحالي لا يكفي لتفريغ هذه المحاضرة.\n"

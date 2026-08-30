@@ -286,7 +286,7 @@ async def get_file_quizzes(file_hash: str) -> list:
     for attempt in range(2):
         try:
             res = await supabase.table("quizzes").select(
-                "id, likes, dislikes, score, quiz_data, is_math_quiz, "
+                "id, creator_id, likes, dislikes, score, quiz_data, is_math_quiz, "
                 "subject_type, question_type, question_type_label, difficulty"
             ).eq("file_hash", file_hash).order("score", desc=True).execute()
             return res.data or []
@@ -397,6 +397,22 @@ async def save_question_image_url(quiz_id: str, question_index: int, image_url: 
             await supabase.table("quizzes").update({"quiz_data": quiz_data}).eq("id", quiz_id).execute()
     except Exception as e:
         log_warning(logger, f"Could not cache question image URL for quiz {quiz_id}: {e}")
+
+
+async def get_quiz_creator_id(quiz_id: str) -> Optional[int]:
+    """جلب creator_id فقط (بدون quiz_data الثقيل) لكويز معيّن - يُستخدم لفحص صلاحية
+    المالك/الأدمن مبكراً (مثلاً بمحرر أسئلة الرياضيات عبر الويب - راجع
+    handlers/quiz_runner.py::fetch_question_for_edit_web/save_question_edit_from_web)
+    قبل أي معالجة إضافية، بدل الاكتفاء بالفحص المتأخر داخل update_quiz_question."""
+    if not _is_valid_uuid(quiz_id):
+        return None
+    try:
+        res = await supabase.table("quizzes").select("creator_id").eq("id", quiz_id).limit(1).execute()
+        return res.data[0].get("creator_id") if res.data else None
+    except Exception as e:
+        log_error(logger, f"Error fetching creator_id for quiz {quiz_id}: {e}")
+        return None
+
 
 async def update_quiz_question(
     quiz_id: str, question_index: int, question: Dict[str, Any], editor_id: int
@@ -602,7 +618,12 @@ async def get_favorite_quiz(user_id: int, favorite_id: str) -> Optional[Dict[str
                 "favorite_id": row["favorite_id"],
                 "title": row["custom_title"] or quiz_info.get("source_title"),
                 "quiz_data": quiz_info.get("quiz_data"),
-                "section_id": row["section_id"]
+                "section_id": row["section_id"],
+                # 🆕 quiz_id/creator_id: مأخوذان مباشرة من quizzes(*) (مُحمَّلة أصلاً بهذا
+                # الاستعلام) - يُستخدمان لإظهار زر "حذف الكويز نهائياً" فقط للأدمن أو
+                # لمالك الكويز الفعلي (راجع services/quiz_permissions.py).
+                "quiz_id": quiz_info.get("id"),
+                "creator_id": quiz_info.get("creator_id"),
             }
         return None
     except Exception as e:
@@ -698,7 +719,7 @@ async def admin_get_quiz_board_position(file_hash: Optional[str], quiz_id: str) 
 async def admin_get_quiz_by_id(quiz_id: str) -> Optional[Dict[str, Any]]:
     """🆕 جلب بيانات كويز واحد كاملة من الجدول المركزي (تُستخدم لتجربة الكويز من لوحة الإدارة)."""
     try:
-        res = await supabase.table("quizzes").select("id, source_title, quiz_data, file_hash").eq("id", quiz_id).limit(1).execute()
+        res = await supabase.table("quizzes").select("id, source_title, quiz_data, file_hash, creator_id").eq("id", quiz_id).limit(1).execute()
         return res.data[0] if res.data else None
     except Exception as e:
         log_error(logger, f"Error fetching quiz {quiz_id}: {e}")
@@ -1431,14 +1452,14 @@ async def admin_get_today_active_users() -> List[Dict[str, Any]]:
 
 
 async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
-    """جلب الكويزات التي تم توليدها اليوم فعلياً (اليوم التقويمي بتوقيت سوريا: من منتصف الليل حتى الآن)."""
+    """جلب الكويزات المُولَّدة خلال آخر 24 ساعة (نافذة متحركة من اللحظة الحالية للخلف)
+    وليس اليوم التقويمي منذ منتصف الليل - كي لا يُفقَد أي نشاط حصل قبل الساعة 12
+    صباحاً بتوقيت سوريا (كان يُستثنى بالكامل بالمنطق السابق رغم كونه حديثاً فعلياً)."""
     try:
-        syria_tz = datetime.timezone(datetime.timedelta(hours=3))
-        now_syria = datetime.datetime.now(syria_tz)
-        start_of_today_syria = now_syria.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_of_today_utc = start_of_today_syria.astimezone(datetime.timezone.utc).isoformat()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        start_of_today_utc = (now_utc - datetime.timedelta(hours=24)).isoformat()
 
-        # 1. جلب كويزات اليوم الحالي فقط بتوقيت سوريا (باستثناء الآدمن، أسوة ببقية دوال التحليلات)
+        # 1. جلب كويزات آخر 24 ساعة (باستثناء الآدمن، أسوة ببقية دوال التحليلات)
         query = supabase.table("quizzes") \
             .select("id, source_title, created_at, creator_id") \
             .gte("created_at", start_of_today_utc)

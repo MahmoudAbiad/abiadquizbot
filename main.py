@@ -24,7 +24,8 @@ from handlers import (
     sharing_router,
     leaderboard_router,
     export_router,
-    audio_router
+    audio_router,
+    quiz_delete_router,
 )
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
 
@@ -67,6 +68,7 @@ def main():
         favorites_router,
         leaderboard_router,
         export_router,  # 👈 تصدير الكويز إلى Word/PDF
+        quiz_delete_router,  # 🆕 زر "حذف الكويز نهائياً" العام (أي شاشة يظهر فيها كويز)
     )
     
     webhook_url = os.getenv("WEBHOOK_URL")
