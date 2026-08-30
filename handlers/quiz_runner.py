@@ -59,6 +59,18 @@ QUIZ_EDIT_STATES = (
     QuizState.waiting_for_answer_edit_text,
 )
 
+_STALE_QUESTION_CACHE_KEYS = ("image_url", "rendered_image_url", "cached_image_url")
+
+
+def _sanitize_question_for_render(question: Optional[dict]) -> dict:
+    """يزيل أي بيانات صورة/كاش قديمة عن سؤال رياضي بحيث يعاد رسمه من البيانات الجديدة."""
+    if not isinstance(question, dict):
+        return {}
+    cleaned = dict(question)
+    for key in _STALE_QUESTION_CACHE_KEYS:
+        cleaned.pop(key, None)
+    return cleaned
+
 # 🩹 نفس حالات الكويز النشط + None: تُستخدم حصراً لهاندلرات ويزارد "حفظ في المفضلة"
 # لأن state يُصفَّر إلى None عند اكتمال الكويز (_handle_quiz_completion) قبل أن
 # يصل المستخدم لصفحة النتيجة، وزر "⭐ حفظ في المفضلة" يظهر هناك تحديداً.
@@ -139,7 +151,9 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
             return
 
         # 2. تجهيز وإرسال السؤال الحالي
-        q = questions[idx]
+        q = _sanitize_question_for_render(questions[idx])
+        questions[idx] = q
+        await state.update_data(questions=questions)
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
             [
@@ -411,10 +425,7 @@ async def apply_question_edit_and_resume(
     # 🧹 إبطال أي صورة قديمة مخزنة للسؤال المعدّل، لأن أسئلة الرياضيات تُرسم كصورة
     # ويجب إعادة رسمها من البيانات الجديدة بعد كل تعديل، وإلا سيستمر Telegram في
     # إظهار النسخة القديمة من `image_url` داخل نفس الجلسة أو حتى في السجل المركزي.
-    normalized_question = dict(question)
-    normalized_question.pop("image_url", None)
-    normalized_question.pop("rendered_image_url", None)
-    normalized_question.pop("cached_image_url", None)
+    normalized_question = _sanitize_question_for_render(question)
 
     saved = await update_quiz_question(quiz_id, question_index, normalized_question, user_id) if quiz_id else None
     if saved is None:
@@ -522,7 +533,7 @@ async def save_question_edit_from_web(
     question["matrices"] = matrices or []
     # 🆕 نفس مبدأ التعديل النصي: إبطال الصورة المولَّدة سابقاً حتى يُعاد رسمها من
     # القيم الجديدة عند إعادة عرض السؤال (راجع send_question_by_ids → send_quiz_poll).
-    for stale_key in ("image_url", "rendered_image_url", "cached_image_url"):
+    for stale_key in _STALE_QUESTION_CACHE_KEYS:
         question.pop(stale_key, None)
 
     return await apply_question_edit_and_resume(chat_id, user_id, state, question_index, question, "web_full_edit")
