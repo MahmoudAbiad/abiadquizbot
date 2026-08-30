@@ -576,14 +576,15 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         ],
         [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
-        [types.InlineKeyboardButton(text="⚙️ إعدادات النقاط", callback_data="admin_settings_menu")],
+        [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKeyboardMarkup:
-    """لوحة إعدادات النقاط: زر تعديل لكل إعداد + رجوع."""
+    """لوحة إعدادات النقاط: زر تعديل لكل إعداد + رجوع (أصبحت قسماً فرعياً ضمن لوحة
+    التحكم بالذكاء الاصطناعي - راجع get_ai_control_keyboard)."""
     kb = []
     for key, label in labels.items():
         value = settings.get(key)
@@ -592,7 +593,62 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
             text=f"{label}: {value_text}",
             callback_data=f"admin_setting_edit_{key}"
         )])
-    kb.append([types.InlineKeyboardButton(text="🏠 رجوع للوحة الرئيسية", callback_data="admin_main_menu")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للتحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+# ==================== 🆕 AI Models Control Panel Keyboards ====================
+
+def get_ai_control_keyboard() -> types.InlineKeyboardMarkup:
+    """اللوحة الرئيسية للتحكم بالذكاء الاصطناعي: نقطة الدخول لكل الأقسام الفرعية
+    (سلسلة التوليد، موديل الفحص السريع، موديل Groq السريع، إعدادات النقاط)."""
+    kb = [
+        [types.InlineKeyboardButton(text="🧠 سلسلة توليد الأسئلة (Cascade)", callback_data="admin_ai_slot_cascade")],
+        [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
+        [types.InlineKeyboardButton(text="⚡ موديل Groq السريع", callback_data="admin_ai_slot_groq_fast")],
+        [types.InlineKeyboardButton(text="⚙️ إعدادات النقاط", callback_data="admin_settings_menu")],
+        [types.InlineKeyboardButton(text="🏠 رجوع للوحة الرئيسية", callback_data="admin_main_menu")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_ai_slot_keyboard(slot: str, models: list) -> types.InlineKeyboardMarkup:
+    """قائمة موديلات slot معيّن بالترتيب: كل صف = زر تفاصيل/إدارة لموديل واحد
+    (▲/▼ لإعادة الترتيب، ✅/🚫 للتفعيل، 🗑 للحذف)، بالإضافة لزر "➕ إضافة موديل" ورجوع."""
+    kb = []
+    total = len(models)
+    for index, model in enumerate(models):
+        status_icon = "✅" if model.get("is_enabled") else "🚫"
+        provider = model.get("provider", "?")
+        label = f"{status_icon} #{index + 1} [{provider}] {model.get('model_name')}"
+        kb.append([types.InlineKeyboardButton(text=label, callback_data=f"admin_ai_model_{model['id']}")])
+        nav_row = []
+        if index > 0:
+            nav_row.append(types.InlineKeyboardButton(text="⬆️", callback_data=f"admin_ai_move_up_{model['id']}_{slot}"))
+        if index < total - 1:
+            nav_row.append(types.InlineKeyboardButton(text="⬇️", callback_data=f"admin_ai_move_down_{model['id']}_{slot}"))
+        toggle_text = "🚫 تعطيل" if model.get("is_enabled") else "✅ تفعيل"
+        nav_row.append(types.InlineKeyboardButton(text=toggle_text, callback_data=f"admin_ai_toggle_{model['id']}_{slot}"))
+        nav_row.append(types.InlineKeyboardButton(text="🗑 حذف", callback_data=f"admin_ai_delete_{model['id']}_{slot}"))
+        kb.append(nav_row)
+    kb.append([types.InlineKeyboardButton(text="➕ إضافة موديل جديد", callback_data=f"admin_ai_add_{slot}")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data="admin_ai_menu")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_ai_provider_choice_keyboard(slot: str) -> types.InlineKeyboardMarkup:
+    """اختيار الشركة (Provider) عند إضافة موديل جديد لسلسلة معيّنة."""
+    kb = [
+        [types.InlineKeyboardButton(text="🟦 Gemini (Google)", callback_data=f"admin_ai_provider_gemini_{slot}")],
+        [types.InlineKeyboardButton(text="🟩 Groq", callback_data=f"admin_ai_provider_groq_{slot}")],
+        [types.InlineKeyboardButton(text="⚪ OpenAI", callback_data=f"admin_ai_provider_openai_{slot}")],
+        [types.InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"admin_ai_slot_{slot}")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_ai_cancel_keyboard(slot: str) -> types.InlineKeyboardMarkup:
+    kb = [[types.InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"admin_ai_slot_{slot}")]]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_user_actions_keyboard(user_id: int) -> types.InlineKeyboardMarkup:

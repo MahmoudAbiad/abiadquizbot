@@ -25,8 +25,9 @@ import fitz
 from google import genai
 from google.genai import types
 
-from constants import MATH_DETECTION_MODEL, MATH_DETECTION_TEXT_SAMPLE_CHARS, MATH_DETECTION_TIMEOUT
+from constants import MATH_DETECTION_TEXT_SAMPLE_CHARS, MATH_DETECTION_TIMEOUT
 from logger import get_logger, log_warning
+from ai_models_helper import get_detection_model
 
 logger = get_logger(__name__)
 
@@ -112,11 +113,15 @@ async def classify_yes_no(contents: list, *, caller: str = "detection") -> bool:
     """
     if not API_KEYS:
         return False
+    # 🆕 اسم الموديل صار ديناميكياً من لوحة تحكم الأدمن (slot="detection") بدل ثابت
+    # بالكود - راجع helpers/ai_models_helper.py. مقيّد حالياً بمزوّد Gemini فقط (الوحيد
+    # المدعوم فعلياً لقراءة الصور/الملفات multimodal بهذا المسار).
+    detection_model = (await get_detection_model())["model_name"]
     for client in _GEMINI_CLIENTS:
         try:
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
-                    model=MATH_DETECTION_MODEL,
+                    model=detection_model,
                     contents=contents,
                     config=types.GenerateContentConfig(
                         thinking_config=types.ThinkingConfig(thinking_level="low"),

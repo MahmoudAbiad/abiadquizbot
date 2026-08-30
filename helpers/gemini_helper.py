@@ -64,6 +64,7 @@ from constants import (
 from logger import get_logger, log_error, log_info, log_warning
 from supabase_helper import get_cached_quiz
 from utils import calculate_file_hash, safe_file_cleanup
+from ai_models_helper import get_cascade_models, get_groq_fast_model
 
 # ==============================================================================
 # CONFIGURATION & GLOBAL STATE
@@ -91,20 +92,26 @@ _GROQ_CLIENT: Optional[AsyncGroq] = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_
 # ==============================================================================
 # 🆕 MODEL WATERFALL CASCADE + PER-(KEY, MODEL) ROUND-ROBIN STATE
 # ==============================================================================
-# AI-NOTE: سلسلة أولوية النماذج. 🩹 gemini-3.7-flash (الأحدث) كان أول النموذج بالسلسلة
-# سابقاً، لكن لوغز 2026-08-26 أظهرت إنو كل حالات 503 UNAVAILABLE (ازدحام Google نفسه،
-# مش خطأ بكودنا) صارت حصراً عليه - غالباً لأنه أحدث نموذج وعليه ضغط طلبات أكبر بكتير من
-# البقية حالياً. تم تنزيله لموقع ثانٍ (يبقى مجرّباً كخيار احتياطي إضافي بنفس مستوى حد
-# التوكنز) وترقية gemini-3.6-flash ليكون الأساسي - يطابق فعلياً GEMINI_PRIMARY_MODEL
-# المُعرَّف بـ constants.py (كان معرَّفاً هناك من زمان بس ما كان مستخدَماً فعلياً هون).
-# الحلقة الخارجية بمنطق التنفيذ تستنفد كل المفاتيح على النموذج الحالي قبل النزول للنموذج
-# التالي بالسلسلة.
-MODELS_CASCADE: List[str] = [
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-]
+# 🆕 سلسلة أولوية النماذج لم تعد ثابتة بالكود - انتقلت لجدول ai_model_slots بسوبا بيس
+# (slot="cascade") وتُدار الآن مباشرة من لوحة تحكم الأدمن (handlers/admin/ai_control.py)
+# دون أي حاجة لتعديل الكود أو إعادة نشر البوت: إعادة ترتيب، تفعيل/تعطيل، إضافة/حذف موديل.
+# راجع helpers/ai_models_helper.py::get_cascade_models للتفاصيل والكاش وخط الأمان الافتراضي
+# (نفس القيم الأربعة اللي كانت هون ثابتة سابقاً، مزروعة بالجدول كقيم أولية).
+# الحلقة الخارجية بمنطق التنفيذ (_execute_cascade) تستنفد كل المفاتيح على النموذج الحالي
+# قبل النزول للنموذج التالي بالسلسلة، بنفس الترتيب المُخزَّن بـ display_order.
+async def _get_models_cascade() -> List[str]:
+    """يرجع أسماء الموديلات المفعّلة بسلسلة الـ cascade بالترتيب (مزوّد Gemini فقط - راجع
+    ملاحظة helpers/ai_models_helper.py أعلى الملف حول القيود الحالية على المزوّدين الآخرين)."""
+    entries = await get_cascade_models()
+    gemini_models = [e["model_name"] for e in entries if e.get("provider") == "gemini"]
+    if not gemini_models:
+        log_warning(logger, "No enabled Gemini models in cascade slot; falling back to gemini-3.5-flash-lite")
+        return ["gemini-3.5-flash-lite"]
+    non_gemini = [e for e in entries if e.get("provider") != "gemini"]
+    if non_gemini:
+        skipped = ", ".join(f"{e.get('provider')}:{e.get('model_name')}" for e in non_gemini)
+        log_warning(logger, f"Skipping non-Gemini cascade entries (no SDK integration wired yet): {skipped}")
+    return gemini_models
 
 # AI-NOTE: تتبّع دقيق لكل زوج (فهرس المفتاح، اسم النموذج) على حدة - بدل حظر المفتاح
 # بالكامل عبر كل النماذج، هيك حظر مفتاح على نموذج مُعيّن (بسبب حصته انتهت مثلاً) لا يمنعه
@@ -273,8 +280,9 @@ async def _execute_cascade(
 
     key_order = _round_robin_key_order()
     last_exc: Optional[Exception] = None
+    models_cascade = await _get_models_cascade()
 
-    for model in MODELS_CASCADE:
+    for model in models_cascade:
         for key_index in key_order:
             if _is_model_key_blocked(key_index, model):
                 continue
@@ -584,7 +592,8 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
     if len(chunk_paths) != 3:
         return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
 
-    top_model = MODELS_CASCADE[0]
+    models_cascade = await _get_models_cascade()
+    top_model = models_cascade[0]
     key_indices = (_available_keys_for_model(top_model) or list(range(len(API_KEYS))))[:3]
     if len(key_indices) < 3:
         return None
@@ -640,7 +649,8 @@ async def _generate_super_images(
     if len(chunks) < 2:
         return await _generate_regular(file_paths, prompt_template.replace("{count}", str(count)))
 
-    top_model = MODELS_CASCADE[0]
+    models_cascade = await _get_models_cascade()
+    top_model = models_cascade[0]
     key_indices = (_available_keys_for_model(top_model) or list(range(len(API_KEYS))))[:len(chunks)]
     if len(key_indices) < len(chunks):
         return None
@@ -703,9 +713,11 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
         formatted_prompt = prompt.replace("{option_count}", str(OPTION_COUNT))
         formatted_content = f"{formatted_prompt}\n\n{json_schema_instruction}\n\n[المحتوى التعليمي]:\n{pure_text}"
 
+        # 🆕 اسم الموديل صار ديناميكياً من لوحة التحكم (slot="groq_fast") بدل ثابت بالكود.
+        groq_model = (await get_groq_fast_model())["model_name"]
         response = await asyncio.wait_for(
             client.chat.completions.create(
-                model="openai/gpt-oss-120b",
+                model=groq_model,
                 messages=[{"role": "user", "content": formatted_content}],
                 response_format={"type": "json_object"},
                 temperature=0.7,
