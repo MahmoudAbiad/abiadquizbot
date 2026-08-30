@@ -20,205 +20,365 @@
   window.__mathliveReady = true;
 </script>
 <style>
+  :root {
+    --accent: var(--tg-theme-button-color, #4C6FFF);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+    --accent-soft-strong: color-mix(in srgb, var(--accent) 20%, transparent);
+    --card-bg: var(--tg-theme-secondary-bg-color, #f5f6f9);
+    --page-bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #111111);
+    --hint: var(--tg-theme-hint-color, #888888);
+    --border: rgba(120,128,150,0.22);
+    --ok: #1e9e56;
+    --ok-soft: #e6f7ec;
+    --danger: #e0524f;
+  }
   * { box-sizing: border-box; }
   body {
     font-family: -apple-system, "Segoe UI", Tahoma, sans-serif;
-    background: var(--tg-theme-bg-color, #ffffff);
-    color: var(--tg-theme-text-color, #111111);
+    background: var(--page-bg);
+    color: var(--text);
     margin: 0;
-    padding: 16px 14px 90px;
+    padding: 14px 14px 118px;
+    -webkit-tap-highlight-color: transparent;
   }
-  h1 { font-size: 17px; margin: 0 0 4px; }
-  h2 { font-size: 14px; margin: 18px 0 8px; color: var(--tg-theme-text-color, #111111); }
+
+  /* ==================== ترويسة الصفحة ==================== */
+  .page-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .page-head-icon {
+    flex: 0 0 auto;
+    width: 42px; height: 42px;
+    border-radius: 13px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #7b5cff));
+    box-shadow: 0 4px 14px var(--accent-soft-strong);
+  }
+  h1 { font-size: 16.5px; margin: 0 0 3px; font-weight: 700; }
+  .page-head .hint { margin-bottom: 0; }
+
+  h2 {
+    font-size: 13.5px;
+    margin: 0 0 10px;
+    color: var(--text);
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
   .hint {
-    font-size: 12.5px;
-    color: var(--tg-theme-hint-color, #888888);
+    font-size: 12px;
+    color: var(--hint);
     margin-bottom: 14px;
-    line-height: 1.5;
+    line-height: 1.55;
   }
   .section {
-    border: 1px solid rgba(128,128,128,0.22);
-    border-radius: 12px;
-    padding: 12px;
-    margin-bottom: 14px;
+    position: relative;
+    background: var(--page-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 14px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 0 rgba(20,20,30,0.02);
+  }
+  .section.preview-section {
+    background: linear-gradient(180deg, var(--accent-soft), transparent 65%);
+    border-color: var(--accent-soft-strong);
   }
   label.field-label {
     display: block;
-    font-size: 12.5px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 700;
     margin-bottom: 5px;
-    color: var(--tg-theme-hint-color, #888888);
+    color: var(--hint);
   }
   textarea, input[type="text"] {
     width: 100%;
-    border: 1px solid rgba(128,128,128,0.35);
-    border-radius: 10px;
-    padding: 9px 10px;
+    border: 1.5px solid var(--border);
+    border-radius: 11px;
+    padding: 9px 11px;
     font-size: 14px;
     font-family: inherit;
-    color: var(--tg-theme-text-color, #111111);
-    background: var(--tg-theme-secondary-bg-color, #f7f7f7);
+    color: var(--text);
+    background: var(--card-bg);
     resize: vertical;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  textarea:focus, input[type="text"]:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   textarea { min-height: 54px; }
-  .option-block { margin-bottom: 14px; }
+
+  /* ==================== الإجابات ==================== */
+  .option-block {
+    margin-bottom: 12px;
+    padding: 10px 10px 8px;
+    border-radius: 13px;
+    background: var(--card-bg);
+    border: 1.5px solid transparent;
+  }
+  .option-block.is-correct { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--card-bg)); }
   .option-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 5px;
+    margin-bottom: 6px;
+  }
+  .option-badge-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: var(--accent-soft-strong);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 800;
+    margin-left: 6px;
   }
   .correct-badge {
     font-size: 11px;
-    background: #e6f7ec;
-    color: #1e7d3a;
-    padding: 2px 8px;
+    background: var(--ok-soft);
+    color: var(--ok);
+    padding: 3px 9px;
     border-radius: 20px;
-    font-weight: 600;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
   }
+
+  /* ==================== المعاينة الحية ==================== */
   .preview-box {
-    margin-top: 6px;
-    background: var(--tg-theme-secondary-bg-color, #f2f2f2);
-    border-radius: 8px;
-    padding: 8px 10px;
+    margin-top: 4px;
+    background: var(--page-bg);
+    border: 1px solid var(--accent-soft-strong);
+    border-radius: 12px;
+    padding: 12px 13px;
     font-size: 13.5px;
-    min-height: 20px;
-    line-height: 1.9;
+    min-height: 22px;
+    line-height: 2;
     word-break: break-word;
   }
-  .preview-box:empty::before { content: "المعاينة هون..."; color: var(--tg-theme-hint-color, #999); }
+  .preview-box:empty::before { content: "المعاينة هون..."; color: var(--hint); }
+  .preview-note {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 600;
+    margin-top: 8px;
+  }
+
   .toggle-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
     font-size: 13.5px;
+    font-weight: 600;
     cursor: pointer;
     user-select: none;
   }
-  .toggle-row input { width: 17px; height: 17px; }
+  .toggle-row input { width: 18px; height: 18px; accent-color: var(--accent); }
+
   table.grid-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
   table.grid-table td, table.grid-table th { padding: 3px; vertical-align: middle; }
-  .grid-btns { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+  .grid-btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
   .small-btn {
     font-size: 12.5px;
-    padding: 6px 12px;
+    font-weight: 600;
+    padding: 7px 14px;
     border-radius: 20px;
-    border: 1px solid var(--tg-theme-button-color, #2ea6ff);
-    color: var(--tg-theme-button-color, #2ea6ff);
-    background: transparent;
+    border: 1.5px solid var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
     cursor: pointer;
+    transition: transform .1s ease;
   }
-  .small-btn:disabled { opacity: 0.4; cursor: default; }
+  .small-btn:active { transform: scale(0.96); }
+  .small-btn:disabled { opacity: 0.35; cursor: default; }
+
   .matrix-card {
-    border: 1px dashed rgba(128,128,128,0.35);
-    border-radius: 10px;
-    padding: 10px;
+    border: 1.5px dashed var(--border);
+    border-radius: 14px;
+    padding: 12px;
     margin-bottom: 12px;
+    background: var(--card-bg);
   }
-  .matrix-top-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
-  .matrix-top-row input[type="text"] { flex: 1; }
+  .matrix-top-row { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
+  .matrix-top-row input[type="text"] { flex: 1; background: var(--page-bg); }
+
   select {
-    border: 1px solid rgba(128,128,128,0.35);
+    border: 1.5px solid var(--border);
     border-radius: 10px;
-    padding: 8px;
+    padding: 8px 10px;
     font-size: 13px;
-    background: var(--tg-theme-secondary-bg-color, #f7f7f7);
-    color: var(--tg-theme-text-color, #111111);
+    font-weight: 600;
+    background: var(--page-bg);
+    color: var(--text);
   }
   .remove-x {
     background: none;
     border: none;
-    color: #e05252;
+    color: var(--danger);
     font-size: 18px;
     cursor: pointer;
     line-height: 1;
     padding: 4px 8px;
+    border-radius: 8px;
+    transition: background .12s ease;
   }
+  .remove-x:active { background: rgba(224,82,79,0.14); }
+
+  /* ==================== الشريط السفلي الثابت ==================== */
   .footer-bar {
     position: fixed;
     bottom: 0; left: 0; right: 0;
-    background: var(--tg-theme-bg-color, #ffffff);
-    border-top: 1px solid rgba(128,128,128,0.2);
-    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, transparent, var(--page-bg) 22%);
+    backdrop-filter: blur(6px);
+    padding: 14px 14px calc(10px + env(safe-area-inset-bottom));
+  }
+  .footer-hint {
+    font-size: 10.5px;
+    color: var(--hint);
+    text-align: center;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    line-height: 1.5;
   }
   .save-btn {
     width: 100%;
-    padding: 12px;
-    border-radius: 12px;
+    padding: 13px;
+    border-radius: 14px;
     border: none;
-    background: var(--tg-theme-button-color, #2ea6ff);
-    color: var(--tg-theme-button-text-color, #ffffff);
+    background: var(--accent);
+    color: var(--accent-text);
     font-size: 15px;
-    font-weight: 600;
+    font-weight: 700;
     cursor: pointer;
+    box-shadow: 0 6px 16px var(--accent-soft-strong);
+    transition: transform .1s ease, opacity .15s ease;
   }
-  .save-btn:disabled { opacity: 0.55; }
-  .status-text { font-size: 12.5px; text-align: center; margin-top: 8px; min-height: 16px; }
-  .status-text.error { color: #d32f2f; }
-  .status-text.ok { color: #1e7d3a; }
-  #loadingState, #errorState { text-align: center; padding: 60px 10px; font-size: 14px; color: var(--tg-theme-hint-color, #888); }
+  .save-btn:active { transform: scale(0.985); }
+  .save-btn:disabled { opacity: 0.55; box-shadow: none; }
+  .status-text { font-size: 12.5px; text-align: center; margin-top: 9px; min-height: 16px; font-weight: 600; }
+  .status-text.error { color: var(--danger); }
+  .status-text.ok { color: var(--ok); }
+
+  /* ==================== حالتا التحميل والخطأ ==================== */
+  #loadingState, #errorState {
+    text-align: center;
+    padding: 90px 20px;
+    font-size: 14px;
+    color: var(--hint);
+  }
+  .spinner {
+    width: 34px; height: 34px;
+    margin: 0 auto 14px;
+    border-radius: 50%;
+    border: 3px solid var(--accent-soft-strong);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #errorState { color: var(--danger); font-weight: 600; line-height: 1.7; }
   #formState { display: none; }
 
   /* ==================== 🆕 حقول الرياضيات البصرية (MathLive) ==================== */
   math-field {
     display: block;
     width: 100%;
-    border: 1px solid rgba(128,128,128,0.35);
-    border-radius: 10px;
+    border: 1.5px solid var(--border);
+    border-radius: 11px;
     padding: 8px 10px;
     font-size: 16px;
-    background: var(--tg-theme-secondary-bg-color, #f7f7f7);
-    --primary-color: var(--tg-theme-button-color, #2ea6ff);
+    background: var(--page-bg);
+    --primary-color: var(--accent);
   }
   math-field.mf-compact { min-width: 64px; font-size: 14px; padding: 6px 8px; }
+  math-field.mf-full { background: var(--page-bg); }
 
   /* ==================== 🆕 حقل قابل للتبديل: نص عادي ⟷ معادلة بصرية ==================== */
-  .mtf-row { display: flex; align-items: flex-start; gap: 6px; }
+  /* مفتاح مقسوم لجزئين (Segmented control) - "Abc" و"∑" ظاهرين سوا دايماً، والجزء
+     الفعّال حالياً يتلوّن بلون التمييز؛ أوضح بكتير من زر واحد بيبدّل شكله عند الضغط. */
+  .mtf-row { display: flex; align-items: flex-start; gap: 7px; }
   .mtf-row .mtf-slot { flex: 1; min-width: 0; }
   .mtf-toggle {
     flex: 0 0 auto;
-    width: 34px; height: 34px;
-    border-radius: 8px;
-    border: 1px solid rgba(128,128,128,0.3);
-    background: var(--tg-theme-secondary-bg-color, #f2f2f2);
-    font-size: 15px;
-    cursor: pointer;
+    display: flex;
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--card-bg);
   }
-  .mtf-wrap.compact .mtf-toggle { width: 30px; height: 30px; font-size: 13px; }
-  .mtf-hint { font-size: 10.5px; color: var(--tg-theme-hint-color, #999); margin-top: 3px; }
+  .mtf-toggle button {
+    border: none;
+    background: transparent;
+    color: var(--hint);
+    font-size: 13px;
+    font-weight: 700;
+    padding: 8px 9px;
+    cursor: pointer;
+    line-height: 1;
+  }
+  .mtf-toggle button.active { background: var(--accent); color: var(--accent-text); }
+  .mtf-wrap.compact .mtf-toggle button { padding: 7px 8px; font-size: 12px; }
+  .mtf-hint { font-size: 10.5px; color: var(--hint); margin-top: 4px; }
 
   /* ==================== 🆕 أجزاء (Segments) نص السؤال ==================== */
-  .segment-row { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px; }
+  .segment-row { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 9px; }
   .segment-tag {
     flex: 0 0 auto;
-    width: 30px; height: 30px;
+    width: 32px; height: 32px;
     display: flex; align-items: center; justify-content: center;
-    border-radius: 8px;
-    background: var(--tg-theme-secondary-bg-color, #f2f2f2);
+    border-radius: 9px;
+    background: var(--card-bg);
     font-size: 13px;
+    font-weight: 700;
+    color: var(--hint);
   }
+  .segment-row.is-math .segment-tag { background: var(--accent-soft-strong); color: var(--accent); }
   .segment-row > input[type="text"] { flex: 1; }
   .segment-row > math-field { flex: 1; }
-  .add-segment-btns { display: flex; gap: 8px; margin-top: 6px; }
-  .segments-counter { font-size: 11px; color: var(--tg-theme-hint-color, #999); text-align: left; margin-top: 4px; }
+  .add-segment-btns { display: flex; gap: 8px; margin-top: 4px; }
+  .segments-counter { font-size: 11px; color: var(--hint); text-align: left; margin-top: 6px; }
 </style>
 </head>
 <body>
 
-<div id="loadingState">⏳ جارٍ تحميل السؤال...</div>
+<div id="loadingState"><div class="spinner"></div>جارٍ تحميل السؤال...</div>
 <div id="errorState" style="display:none;"></div>
 
 <div id="formState">
-  <h1>🌐 محرر سؤال الرياضيات</h1>
-  <div class="hint">اكتب النص العادي بشكل طبيعي، ولإضافة رياضيات اضغط "➕ معادلة" وبتقدر تبني الصيغة بصرياً (كسر، جذر، أس...) وشوفها مرسومة فعلياً وإنت عم تكتب.</div>
+  <div class="page-head">
+    <div class="page-head-icon">🌐</div>
+    <div>
+      <h1>محرر سؤال الرياضيات</h1>
+      <div class="hint">اكتب النص العادي بشكل طبيعي، ولإضافة رياضيات اضغط "➕ معادلة" وبتقدر تبني الصيغة بصرياً (كسر، جذر، أس...) وشوفها مرسومة فعلياً وإنت عم تكتب.</div>
+    </div>
+  </div>
 
-  <div class="section">
-    <h2 style="margin-top:0;">🔎 معاينة السؤال الكامل</h2>
+  <div class="section preview-section">
+    <h2>🔎 معاينة السؤال الكامل</h2>
     <div class="preview-box" id="fullPreview"></div>
+    <div class="preview-note">✨ هاي معاينة تقريبية فقط - الصورة النهائية بتُرسم من جديد بشكل احترافي بعد الحفظ.</div>
   </div>
 
   <div class="section">
-    <label class="field-label">نص السؤال</label>
+    <h2>📝 نص السؤال</h2>
     <div id="segmentsContainer"></div>
     <div class="add-segment-btns">
       <button type="button" class="small-btn" id="addTextSegmentBtn">➕ نص</button>
@@ -228,20 +388,20 @@
   </div>
 
   <div class="section" id="optionsSection">
-    <h2 style="margin-top:0;">الإجابات</h2>
+    <h2>✅ الإجابات</h2>
     <div id="optionsContainer"></div>
   </div>
 
   <div class="section">
     <div class="toggle-row" id="tableToggleRow">
       <input type="checkbox" id="tableToggle">
-      <span>هذا السؤال يحتوي جدول بيانات</span>
+      <span>📊 هذا السؤال يحتوي جدول بيانات</span>
     </div>
     <div id="tableEditor" style="display:none;"></div>
   </div>
 
   <div class="section">
-    <h2 style="margin-top:0;">المصفوفات</h2>
+    <h2>🔢 المصفوفات</h2>
     <div id="matricesContainer"></div>
     <div class="grid-btns">
       <button type="button" class="small-btn" id="addMatrixBtn">➕ أضف مصفوفة</button>
@@ -250,6 +410,7 @@
 </div>
 
 <div class="footer-bar" id="footerBar" style="display:none;">
+  <div class="footer-hint">🖼️ بعد الحفظ رح تُرسم صورة السؤال من جديد تلقائياً، وبتكمل الاختبار من نفس مكانك.</div>
   <button class="save-btn" id="saveBtn">💾 حفظ التعديلات</button>
   <div class="status-text" id="statusText"></div>
 </div>
@@ -355,7 +516,7 @@ function parseIntoSegments(text) {
 
 function createSegmentField(type, value) {
   const row = document.createElement("div");
-  row.className = "segment-row";
+  row.className = "segment-row" + (type === "math" ? " is-math" : "");
 
   const tag = document.createElement("span");
   tag.className = "segment-tag";
@@ -433,13 +594,25 @@ function createMathToggleField(rawValue, opts) {
   wrap.className = "mtf-wrap" + (compact ? " compact" : "");
   const row = document.createElement("div");
   row.className = "mtf-row";
-  const toggleBtn = document.createElement("button");
-  toggleBtn.type = "button";
-  toggleBtn.title = "بدّل بين نص عادي ومعادلة";
-  toggleBtn.className = "mtf-toggle";
+
+  // 🩹 UX: بدل زر واحد بيبدّل شكله (∑ ⟷ abc) عند كل ضغطة - وكان ممكن يلخبط المستخدم
+  // لأنه ما بيوضّح مسبقاً وين رح ينتقل - صرنا نعرض الخيارين "Abc" و"∑" سوا دايماً
+  // جنب بعض، والخيار الفعّال حالياً يتلوّن بوضوح. أوضح بصرياً وأسهل بالفهم من أول نظرة.
+  const toggleWrap = document.createElement("div");
+  toggleWrap.className = "mtf-toggle";
+  toggleWrap.title = "بدّل بين نص عادي ومعادلة";
+  const textBtn = document.createElement("button");
+  textBtn.type = "button";
+  textBtn.textContent = "Abc";
+  const mathBtn = document.createElement("button");
+  mathBtn.type = "button";
+  mathBtn.textContent = "∑";
+  toggleWrap.appendChild(textBtn);
+  toggleWrap.appendChild(mathBtn);
+
   const slot = document.createElement("div");
   slot.className = "mtf-slot";
-  row.appendChild(toggleBtn);
+  row.appendChild(toggleWrap);
   row.appendChild(slot);
   wrap.appendChild(row);
 
@@ -454,22 +627,25 @@ function createMathToggleField(rawValue, opts) {
       field.value = state.value;
       field.className = compact ? "mf-compact" : "mf-full";
       field.addEventListener("input", () => { state.value = field.value; debouncedPreview(); });
-      toggleBtn.textContent = "∑";
     } else {
       field = document.createElement(compact ? "input" : "textarea");
       if (compact) { field.type = "text"; } else { field.rows = 2; }
       field.value = state.value;
       if (maxLen) field.maxLength = maxLen;
       field.addEventListener("input", () => { state.value = field.value; debouncedPreview(); });
-      toggleBtn.textContent = "abc";
     }
     slot.appendChild(field);
+    textBtn.classList.toggle("active", !state.isMath);
+    mathBtn.classList.toggle("active", state.isMath);
   }
-  toggleBtn.addEventListener("click", () => {
-    state.isMath = !state.isMath;
+  function switchTo(isMath) {
+    if (state.isMath === isMath) return;
+    state.isMath = isMath;
     renderField();
     debouncedPreview();
-  });
+  }
+  textBtn.addEventListener("click", () => switchTo(false));
+  mathBtn.addEventListener("click", () => switchTo(true));
   renderField();
 
   return {
@@ -528,18 +704,25 @@ function showError(msg) {
   errorState.textContent = "⚠️ " + msg;
 }
 
+// 🩹 مؤشر ضياع اتصال أثناء استخدام الصفحة (مش بس عند التحميل الأول) - يفيد لأن
+// محرر الرياضيات (MathLive/KaTeX) والحفظ نفسه يعتمدون كلهم على الإنترنت.
+window.addEventListener("offline", () => {
+  statusText.className = "status-text error";
+  statusText.textContent = "⚠️ الاتصال بالإنترنت مقطوع حالياً.";
+});
+
 // ==================== الإجابات ====================
 let optionFields = [];
 function buildOptions(options) {
   optionsContainer.innerHTML = "";
   optionFields = [];
   options.forEach((opt, idx) => {
-    const block = document.createElement("div");
-    block.className = "option-block";
     const isCorrect = correctOptionId === idx;
+    const block = document.createElement("div");
+    block.className = "option-block" + (isCorrect ? " is-correct" : "");
     const header = document.createElement("div");
     header.className = "option-header";
-    header.innerHTML = `<label class="field-label" style="margin:0;">الإجابة ${idx + 1}</label>${isCorrect ? '<span class="correct-badge">✅ الإجابة الصحيحة</span>' : ""}`;
+    header.innerHTML = `<label class="field-label" style="margin:0;"><span class="option-badge-num">${idx + 1}</span>الإجابة ${idx + 1}</label>${isCorrect ? '<span class="correct-badge">✅ الإجابة الصحيحة</span>' : ""}`;
     block.appendChild(header);
     const field = createMathToggleField(opt, { maxLen: LIMITS.max_option_len, compact: false });
     block.appendChild(field.el);
@@ -637,6 +820,14 @@ function renderTableGrid() {
 
 function getTablePayload() {
   if (!tableToggle.checked || !tableFields.headers.length) return null;
+  // 🩹 FIX: جدول مفعّل بالمفتاح لكن بلا أي محتوى فعلي بأي خلية (مثال: المستخدم فعّل
+  // "يحتوي جدول" بالخطأ أو غيّر رأيه بدون إطفاء المفتاح) كان يُرسل كما هو للخادم،
+  // وينتهي برسم مربع جدول فارغ داخل صورة السؤال بعد الحفظ. نتجاهله الآن هون مباشرة
+  // (بدل الاعتماد فقط على الفلترة المطابقة بـ services/image_quiz_renderer.py).
+  const hasContent =
+    tableFields.headers.some((f) => !f.isEmpty()) ||
+    tableFields.rows.some((row) => row.some((f) => !f.isEmpty()));
+  if (!hasContent) return null;
   return {
     headers: tableFields.headers.map((f) => f.getRaw()),
     rows: tableFields.rows.map((row) => row.map((f) => f.getRaw())),
@@ -770,11 +961,19 @@ function addMatrixCard(m) {
 }
 
 function getMatricesPayload() {
-  return matrixCards.map((c) => ({
-    label: c.labelInput.value,
-    bracket: c.bracketSelect.value,
-    rows: c.rows.map((row) => row.map((f) => f.getRaw())),
-  }));
+  // 🩹 FIX: كانت النسخة القديمة ترجع كل بطاقات المصفوفات بلا استثناء، حتى لو ضلت
+  // بكامل خلاياها فارغة (الحالة الافتراضية عند الضغط على "➕ أضف مصفوفة" بدون تعبئة
+  // شيء) - وهاي كانت بتُرسل للخادم وتُرسم كصندوق مصفوفة فارغ داخل صورة السؤال بعد
+  // الحفظ. صرنا نستبعد أي صف كل خلاياه فارغة، ثم نستبعد المصفوفة كلها لو ما ضل فيها
+  // صفوف - نفس منطق الفلترة بالضبط بـ services/image_quiz_renderer.py::_prepare_matrices.
+  return matrixCards
+    .map((c) => {
+      const rows = c.rows
+        .filter((row) => row.some((f) => !f.isEmpty()))
+        .map((row) => row.map((f) => f.getRaw()));
+      return { label: c.labelInput.value, bracket: c.bracketSelect.value, rows };
+    })
+    .filter((m) => m.rows.length > 0);
 }
 
 // ==================== المعاينة الحية (KaTeX - للقراءة فقط) ====================
@@ -811,8 +1010,10 @@ function updatePreview() {
     html += "</table>";
   }
 
+  // getMatricesPayload() صارت ترجع فقط مصفوفات فيها محتوى فعلي (راجع الفلترة داخلها) -
+  // ما عاد في داعي لأي فحص إضافي هون قبل عرضها بالمعاينة.
   getMatricesPayload().forEach((m) => {
-    if (m.rows.some((row) => row.length)) html += `<div style="margin-top:10px;">${matrixToLatex(m)}</div>`;
+    html += `<div style="margin-top:10px;">${matrixToLatex(m)}</div>`;
   });
 
   fullPreview.innerHTML = html;

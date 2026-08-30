@@ -279,6 +279,12 @@ def _prepare_table(table: Any, is_ar: bool, max_width_px: float) -> Optional[Dic
     ncols = len(headers) if headers else (len(rows[0]) if rows else 0)
     if ncols == 0:
         return None
+    # 🩹 FIX: جدول "فارغ فعلياً" (كل الخلايا نصوص فارغة - مثلاً المستخدم فعّل مفتاح
+    # "يحتوي جدول" بمحرر الويب لكن ما عبّى ولا خلية) كان يمر من هون بلا فلترة، وينتهي
+    # برسم مربع جدول فارغ تماماً داخل الصورة النهائية بعد الحفظ. نتجاهله بالكامل هون
+    # (نفس مبدأ فلترة المصفوفات الفارغة تحت في _prepare_matrices).
+    if not any(cell for cell in headers) and not any(cell for row in rows for cell in row):
+        return None
     # توحيد عدد أعمدة كل صف مع رأس الجدول (حماية من صفوف ناقصة/زائدة يرجعها النموذج)
     rows = [(row + [""] * ncols)[:ncols] for row in rows]
 
@@ -373,7 +379,12 @@ def _prepare_matrices(matrices: Any, is_ar: bool) -> Optional[List[Dict[str, Any
     prepared: List[Dict[str, Any]] = []
     for m in matrices:
         rows = [[str(c).strip() for c in (row or [])] for row in (m.get("rows") or [])]
-        rows = [r for r in rows if r]
+        # 🩹 FIX: كانت الفلترة تستبعد فقط الصفوف الفارغة هيكلياً (`[]`)، لا الصفوف
+        # اللي كل خلاياها نصوص فارغة (مثلاً ["", ""] - القيمة الافتراضية عند إضافة
+        # بطاقة مصفوفة جديدة من محرر الويب بدون تعبئتها). كانت النتيجة: مصفوفة فارغة
+        # بالكامل تمر وتُرسم كصندوق فارغ داخل صورة السؤال بعد الحفظ. نستبعد الآن أي
+        # صف لا يحتوي محتوى فعلي بأي خلية منه، ثم نتجاهل المصفوفة كلها لو صارت بلا صفوف.
+        rows = [r for r in rows if any(cell for cell in r)]
         if not rows:
             continue
         ncols = max(len(r) for r in rows)
