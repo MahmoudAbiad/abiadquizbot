@@ -23,13 +23,17 @@ from constants import (
     MAX_DOC_SIZE, MAX_FILE_WEB_UPLOAD_SIZE, MAX_FILE_WEB_UPLOAD_PAGES,
     MAX_IMAGE_WEB_UPLOAD_COUNT, BTN_OPEN_UPLOAD_PAGE, MSG_REDIRECT_TO_WEB_UPLOAD,
     WEBAPP_PUBLIC_BASE_URL,
+    # 🆕 اختبار محلول/غير محلول (SUBJECT_QUIZ_SOLVED/SUBJECT_QUIZ_UNSOLVED)
+    SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
+    QUIZ_EXTRACTION_MODE_AS_IS, QUIZ_EXTRACTION_MODE_AI_SOLVE,
+    MSG_QUIZ_SOLVED_DETECTED, MSG_QUIZ_UNSOLVED_DETECTED,
 )
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from keyboards import (
     get_multiple_quizzes_keyboard, get_question_count_keyboard,
     get_translation_choice_keyboard, get_quiz_type_keyboard,
-    get_web_upload_redirect_keyboard,
+    get_web_upload_redirect_keyboard, get_quiz_extraction_choice_keyboard,
 )
 from logger import get_logger, log_error
 from supabase_helper import (
@@ -61,6 +65,7 @@ PENDING_REQUEST_STATES = (
     QuizState.waiting_for_translation_choice,
     QuizState.waiting_for_quiz_options,       # 🆕
     QuizState.waiting_for_custom_question_type,  # 🆕
+    QuizState.waiting_for_quiz_extraction_choice,  # 🆕 اختيار "كما هي/حل بالذكاء الاصطناعي"
 )
 
 def _cancel_keyboard() -> types.InlineKeyboardMarkup:
@@ -202,6 +207,7 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     question_type_label = build_question_type_label(
         data.get("subject_type", "other"), data.get("question_type", QUESTION_TYPE_GENERAL),
         data.get("custom_question_type_text"), data.get("suggested_question_types", []),
+        extraction_mode=data.get("quiz_extraction_mode"),
     )
 
     text = f"{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
@@ -328,6 +334,32 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
         difficulty=DIFFICULTY_MEDIUM,
     )
 
+    # 🆕 اختبار جاهز (محلول/غير محلول): لهما أولوية تدفق مستقلة عن باقي المواد - لا شاشة
+    # ترجمة ولا شاشة نوع/صعوبة أسئلة (لا معنى لهما هنا: المهمة استخراج أسئلة موجودة فعلياً
+    # بالمستند وليست توليد أسئلة جديدة بنوع/صعوبة مختارين). راجع دستور الميزة بالأسفل.
+    if classification.subject == SUBJECT_QUIZ_SOLVED:
+        # 🆕 اختبار محلول: يُخيَّر الطالب بين اعتماد الإجابات المدوّنة بالمستند كما هي، أو
+        # تجاهلها وحل الاختبار بالذكاء الاصطناعي بدلاً منها (راجع handle_quiz_extract_choice
+        # بالأسفل لمتابعة التدفق بعد اختياره).
+        await state.update_data(english_mode=None)
+        await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
+        await status_target.edit_text(
+            MSG_QUIZ_SOLVED_DETECTED, parse_mode="HTML", reply_markup=get_quiz_extraction_choice_keyboard()
+        )
+        return
+
+    if classification.subject == SUBJECT_QUIZ_UNSOLVED:
+        # 🆕 اختبار غير محلول: لا تخيير إطلاقاً (لا توجد إجابات أصلاً لاعتمادها) - ينتقل
+        # الطالب مباشرة لشاشة تأكيد خصم النقاط (شاشة عدد الأسئلة)، مع دمج رسالة التنويه
+        # بأن الحل سيكون بالذكاء الاصطناعي ضمن نفس نص تلك الشاشة (بدل رسالة منفصلة).
+        await state.update_data(
+            english_mode=None,
+            quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE,
+            count_prompt_text=f"{MSG_QUIZ_UNSOLVED_DETECTED}\n\n{data.get('count_prompt_text', '')}",
+        )
+        await _show_question_count_screen(status_target, state, edit=True)
+        return
+
     # 🆕 الإنجليزي والفرنسي يعاملان بنفس التدفق بالضبط (شاشة اختيار "مترجمة/بدون ترجمة")
     # - الفارق الوحيد هو نص رسالة الاكتشاف ونصوص أزرار الكيبورد (راجع get_translation_choice_keyboard).
     if classification.subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
@@ -340,7 +372,7 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
         await status_target.edit_text(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
         return
 
-    await state.update_data(english_mode=None)
+    await state.update_data(english_mode=None, quiz_extraction_mode=None)
     await _show_quiz_options_screen(status_target, state, edit=True)
 
 async def _render_cache_decision_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
@@ -603,6 +635,41 @@ async def handle_translate_choice_no(call: types.CallbackQuery, state: FSMContex
         await call.message.answer(
             "❌ تعذر تنفيذ الاختيار، حاول مجدداً.",
             reply_markup=get_translation_choice_keyboard(data.get("subject_type", SUBJECT_ENGLISH)),
+        )
+    finally:
+        await call.answer()
+
+# ==================== 🆕 معالجات اختيار طريقة استخراج "اختبار محلول" ====================
+
+async def _apply_quiz_extraction_choice(call: types.CallbackQuery, state: FSMContext, extraction_mode: str) -> None:
+    """يحفظ اختيار الطالب (كما هي/حل بالذكاء الاصطناعي) بالحالة، ثم ينتقل مباشرة لشاشة
+    تأكيد خصم النقاط (عدد الأسئلة) - بدون المرور بشاشة نوع/صعوبة الأسئلة (لا معنى لها هنا،
+    راجع التعليق الأصلي بـ _ask_question_count)."""
+    await state.update_data(quiz_extraction_mode=extraction_mode)
+    await _show_question_count_screen(call.message, state, edit=True)
+
+@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_extract_as_is")
+async def handle_quiz_extract_as_is(call: types.CallbackQuery, state: FSMContext) -> None:
+    """الطالب اختار اعتماد الأجوبة المدوّنة بالمستند كما هي دون حلّها بالذكاء الاصطناعي."""
+    try:
+        await _apply_quiz_extraction_choice(call, state, QUIZ_EXTRACTION_MODE_AS_IS)
+    except Exception as exc:
+        log_error(logger, f"Quiz extraction choice (as_is) failed: {exc}", exception=exc)
+        await call.message.answer(
+            "❌ تعذر تنفيذ الاختيار، حاول مجدداً.", reply_markup=get_quiz_extraction_choice_keyboard(),
+        )
+    finally:
+        await call.answer()
+
+@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_extract_ai_solve")
+async def handle_quiz_extract_ai_solve(call: types.CallbackQuery, state: FSMContext) -> None:
+    """الطالب اختار تجاهل أجوبة المستند وحلّ الاختبار بالذكاء الاصطناعي بدلاً منها."""
+    try:
+        await _apply_quiz_extraction_choice(call, state, QUIZ_EXTRACTION_MODE_AI_SOLVE)
+    except Exception as exc:
+        log_error(logger, f"Quiz extraction choice (ai_solve) failed: {exc}", exception=exc)
+        await call.message.answer(
+            "❌ تعذر تنفيذ الاختيار، حاول مجدداً.", reply_markup=get_quiz_extraction_choice_keyboard(),
         )
     finally:
         await call.answer()

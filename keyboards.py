@@ -3,6 +3,7 @@ from constants import (
     OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL, BTN_CANCEL_REQUEST,
     BTN_TRANSLATE_YES, BTN_TRANSLATE_NO,
     BTN_TRANSLATE_YES_FRENCH, BTN_TRANSLATE_NO_FRENCH,
+    BTN_QUIZ_EXTRACT_AS_IS, BTN_QUIZ_EXTRACT_AI_SOLVE,
     QUESTION_TYPE_OPTIONS, QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM,
     DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE, DIFFICULTY_LABELS_AR,
     BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_BACK_TO_TYPE_SCREEN,
@@ -278,6 +279,18 @@ def get_translation_choice_keyboard(subject_type: str = SUBJECT_ENGLISH) -> type
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+# 🆕 لوحة اختيار طريقة استخراج "اختبار محلول" (subject=quiz_solved): اعتماد الأجوبة
+# المدوّنة بالمستند كما هي، أو تجاهلها وحلّ الاختبار بالذكاء الاصطناعي بدلاً منها.
+# لا تُعرض إطلاقاً لـ quiz_unsolved (لا يوجد أجوبة أصلاً لاعتمادها - راجع handlers/files.py).
+def get_quiz_extraction_choice_keyboard() -> types.InlineKeyboardMarkup:
+    kb = [
+        [types.InlineKeyboardButton(text=BTN_QUIZ_EXTRACT_AS_IS, callback_data="quiz_extract_as_is")],
+        [types.InlineKeyboardButton(text=BTN_QUIZ_EXTRACT_AI_SOLVE, callback_data="quiz_extract_ai_solve")],
+        [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 def get_cancel_upload_keyboard() -> types.InlineKeyboardMarkup:
     """زر التراجع النظيف لإلغاء طلبات معالجة الملفات أو النصوص المباشرة المعلقة"""
