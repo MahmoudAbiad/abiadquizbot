@@ -8,6 +8,17 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<!-- 🆕 MathLive: مكوّن <math-field> - محرر رياضيات بصري حقيقي (WYSIWYG)، المستخدم
+     بيكتب/يضغط أزرار ولوحة مفاتيح رياضية فبيشوف الرياضيات مرسومة فعلياً (كسر حقيقي،
+     أس فوقي...) - ما بيشوف أي كود LaTeX ولا رمز $ إطلاقاً بأي وقت. راجع توثيق
+     المشروع (mathlive.io) - طريقة esm.run هي الموصى فيها رسمياً من نفس المكتبة
+     لدعم jsdelivr CDN (بدل ملف dist/mathlive.min.js القديم). KaTeX أعلاه يبقى
+     مستخدم بس للمعاينة النهائية للسؤال الكامل (نص للقراءة فقط)، مش للتحرير. -->
+<script type="module">
+  import { MathfieldElement } from "https://esm.run/mathlive";
+  MathfieldElement.mathVirtualKeyboardPolicy = "auto";
+  window.__mathliveReady = true;
+</script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -50,7 +61,7 @@
     resize: vertical;
   }
   textarea { min-height: 54px; }
-  .option-block { margin-bottom: 12px; }
+  .option-block { margin-bottom: 14px; }
   .option-header {
     display: flex;
     align-items: center;
@@ -72,7 +83,7 @@
     padding: 8px 10px;
     font-size: 13.5px;
     min-height: 20px;
-    line-height: 1.7;
+    line-height: 1.9;
     word-break: break-word;
   }
   .preview-box:empty::before { content: "المعاينة هون..."; color: var(--tg-theme-hint-color, #999); }
@@ -86,14 +97,7 @@
   }
   .toggle-row input { width: 17px; height: 17px; }
   table.grid-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  table.grid-table td, table.grid-table th { padding: 3px; }
-  table.grid-table input {
-    width: 100%;
-    min-width: 46px;
-    text-align: center;
-    padding: 6px 4px;
-    font-size: 13px;
-  }
+  table.grid-table td, table.grid-table th { padding: 3px; vertical-align: middle; }
   .grid-btns { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
   .small-btn {
     font-size: 12.5px;
@@ -104,14 +108,14 @@
     background: transparent;
     cursor: pointer;
   }
-  .small-btn.danger { border-color: #e05252; color: #e05252; }
+  .small-btn:disabled { opacity: 0.4; cursor: default; }
   .matrix-card {
     border: 1px dashed rgba(128,128,128,0.35);
     border-radius: 10px;
     padding: 10px;
     margin-bottom: 12px;
   }
-  .matrix-top-row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .matrix-top-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
   .matrix-top-row input[type="text"] { flex: 1; }
   select {
     border: 1px solid rgba(128,128,128,0.35);
@@ -154,35 +158,49 @@
   .status-text.ok { color: #1e7d3a; }
   #loadingState, #errorState { text-align: center; padding: 60px 10px; font-size: 14px; color: var(--tg-theme-hint-color, #888); }
   #formState { display: none; }
-  .char-counter { font-size: 11px; color: var(--tg-theme-hint-color, #999); text-align: left; margin-top: 3px; }
 
-  /* ==================== شريط الرموز الرياضية الجاهزة ==================== */
-  .symbol-toolbar {
-    position: sticky;
-    top: 0;
-    z-index: 20;
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    background: var(--tg-theme-bg-color, #ffffff);
-    padding: 8px 14px;
-    margin: 0 -14px;
-    border-bottom: 1px solid rgba(128,128,128,0.25);
-    -webkit-overflow-scrolling: touch;
+  /* ==================== 🆕 حقول الرياضيات البصرية (MathLive) ==================== */
+  math-field {
+    display: block;
+    width: 100%;
+    border: 1px solid rgba(128,128,128,0.35);
+    border-radius: 10px;
+    padding: 8px 10px;
+    font-size: 16px;
+    background: var(--tg-theme-secondary-bg-color, #f7f7f7);
+    --primary-color: var(--tg-theme-button-color, #2ea6ff);
   }
-  .symbol-toolbar::-webkit-scrollbar { height: 3px; }
-  .symbol-toolbar button {
+  math-field.mf-compact { min-width: 64px; font-size: 14px; padding: 6px 8px; }
+
+  /* ==================== 🆕 حقل قابل للتبديل: نص عادي ⟷ معادلة بصرية ==================== */
+  .mtf-row { display: flex; align-items: flex-start; gap: 6px; }
+  .mtf-row .mtf-slot { flex: 1; min-width: 0; }
+  .mtf-toggle {
     flex: 0 0 auto;
-    min-width: 34px;
-    padding: 7px 10px;
-    font-size: 15px;
-    border-radius: 9px;
+    width: 34px; height: 34px;
+    border-radius: 8px;
     border: 1px solid rgba(128,128,128,0.3);
     background: var(--tg-theme-secondary-bg-color, #f2f2f2);
-    color: var(--tg-theme-text-color, #111111);
+    font-size: 15px;
     cursor: pointer;
   }
-  .symbol-toolbar button:active { background: var(--tg-theme-button-color, #2ea6ff); color: #fff; }
+  .mtf-wrap.compact .mtf-toggle { width: 30px; height: 30px; font-size: 13px; }
+  .mtf-hint { font-size: 10.5px; color: var(--tg-theme-hint-color, #999); margin-top: 3px; }
+
+  /* ==================== 🆕 أجزاء (Segments) نص السؤال ==================== */
+  .segment-row { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px; }
+  .segment-tag {
+    flex: 0 0 auto;
+    width: 30px; height: 30px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 8px;
+    background: var(--tg-theme-secondary-bg-color, #f2f2f2);
+    font-size: 13px;
+  }
+  .segment-row > input[type="text"] { flex: 1; }
+  .segment-row > math-field { flex: 1; }
+  .add-segment-btns { display: flex; gap: 8px; margin-top: 6px; }
+  .segments-counter { font-size: 11px; color: var(--tg-theme-hint-color, #999); text-align: left; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -191,42 +209,22 @@
 <div id="errorState" style="display:none;"></div>
 
 <div id="formState">
-  <div class="symbol-toolbar" id="symbolToolbar">
-    <button type="button" data-before="$" data-after="$" title="صيغة رياضية">$..$</button>
-    <button type="button" data-before="\frac{" data-after="}{}" title="كسر">a/b</button>
-    <button type="button" data-before="\sqrt{" data-after="}" title="جذر تربيعي">√</button>
-    <button type="button" data-before="^{" data-after="}" title="أس (قوة)">x²</button>
-    <button type="button" data-before="_{" data-after="}" title="دليل سفلي">xₙ</button>
-    <button type="button" data-before="\pi" data-after="" title="باي">π</button>
-    <button type="button" data-before="\theta" data-after="" title="ثيتا">θ</button>
-    <button type="button" data-before="\alpha" data-after="" title="ألفا">α</button>
-    <button type="button" data-before="\beta" data-after="" title="بيتا">β</button>
-    <button type="button" data-before="\leq" data-after="" title="أصغر أو يساوي">≤</button>
-    <button type="button" data-before="\geq" data-after="" title="أكبر أو يساوي">≥</button>
-    <button type="button" data-before="\neq" data-after="" title="لا يساوي">≠</button>
-    <button type="button" data-before="\pm" data-after="" title="زائد أو ناقص">±</button>
-    <button type="button" data-before="\times" data-after="" title="ضرب">×</button>
-    <button type="button" data-before="\div" data-after="" title="قسمة">÷</button>
-    <button type="button" data-before="\infty" data-after="" title="لا نهاية">∞</button>
-    <button type="button" data-before="^{\circ}" data-after="" title="درجة">°</button>
-    <button type="button" data-before="\sum_{" data-after="}^{}" title="مجموع (سيغما)">Σ</button>
-    <button type="button" data-before="\int_{" data-after="}^{}" title="تكامل">∫</button>
-    <button type="button" data-before="\rightarrow" data-after="" title="سهم">→</button>
-  </div>
-  <div class="hint" style="margin-top:6px;">👆 اضغط داخل أي حقل تريد الكتابة فيه (السؤال، إجابة، خلية جدول أو مصفوفة)، ثم اختر الرمز من الشريط فوق ليُدرَج مكان المؤشر مباشرة.</div>
-
   <h1>🌐 محرر سؤال الرياضيات</h1>
-  <div class="hint">عدّل النص أدناه (يمكنك ترك رموز <code>$...$</code> كما هي لصياغة رياضية صحيحة) وشاهد المعاينة الحية، ثم اضغط حفظ.</div>
+  <div class="hint">اكتب النص العادي بشكل طبيعي، ولإضافة رياضيات اضغط "➕ معادلة" وبتقدر تبني الصيغة بصرياً (كسر، جذر، أس...) وشوفها مرسومة فعلياً وإنت عم تكتب.</div>
 
   <div class="section">
-    <h2 style="margin-top:0;">🔎 معاينة حية</h2>
+    <h2 style="margin-top:0;">🔎 معاينة السؤال الكامل</h2>
     <div class="preview-box" id="fullPreview"></div>
   </div>
 
   <div class="section">
     <label class="field-label">نص السؤال</label>
-    <textarea id="questionInput" rows="3"></textarea>
-    <div class="char-counter" id="questionCounter"></div>
+    <div id="segmentsContainer"></div>
+    <div class="add-segment-btns">
+      <button type="button" class="small-btn" id="addTextSegmentBtn">➕ نص</button>
+      <button type="button" class="small-btn" id="addMathSegmentBtn">➕ معادلة</button>
+    </div>
+    <div class="segments-counter" id="questionCounter"></div>
   </div>
 
   <div class="section" id="optionsSection">
@@ -272,60 +270,16 @@ const footerBar = document.getElementById("footerBar");
 const statusText = document.getElementById("statusText");
 const saveBtn = document.getElementById("saveBtn");
 
-const questionInput = document.getElementById("questionInput");
+const segmentsContainer = document.getElementById("segmentsContainer");
 const questionCounter = document.getElementById("questionCounter");
+const addTextSegmentBtn = document.getElementById("addTextSegmentBtn");
+const addMathSegmentBtn = document.getElementById("addMathSegmentBtn");
 const optionsContainer = document.getElementById("optionsContainer");
 const tableToggle = document.getElementById("tableToggle");
 const tableEditor = document.getElementById("tableEditor");
 const matricesContainer = document.getElementById("matricesContainer");
 const addMatrixBtn = document.getElementById("addMatrixBtn");
 const fullPreview = document.getElementById("fullPreview");
-const symbolToolbar = document.getElementById("symbolToolbar");
-
-// ==================== شريط الرموز الرياضية الجاهزة ====================
-// نتتبع آخر حقل نص كان مركّزاً عليه المستخدم (سؤال/إجابة/خلية جدول/خلية مصفوفة -
-// كلها <textarea> أو <input type="text">) عبر تفويض حدث focus على مستوى document
-// بمرحلة الالتقاط (capture:true) لأن focus لا "يفقاع" (bubble) بشكل طبيعي. هيك
-// الشريط يشتغل مع أي حقل موجود حالياً أو يُنشأ لاحقاً ديناميكياً (صفوف/أعمدة جديدة)
-// من غير ما نربط مستمعاً يدوياً بكل حقل عالحدة.
-let lastFocusedInput = questionInput;
-document.addEventListener("focus", (e) => {
-  const t = e.target;
-  if (t && (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && t.type === "text"))) {
-    lastFocusedInput = t;
-  }
-}, true);
-
-function insertSnippet(el, before, after) {
-  if (!el) return;
-  const start = el.selectionStart ?? el.value.length;
-  const end = el.selectionEnd ?? el.value.length;
-  const selected = el.value.slice(start, end);
-  el.value = el.value.slice(0, start) + before + selected + after + el.value.slice(end);
-  // لو كان في نص محدَّد (Selection)، نحط المؤشر بعد كل شي (نهاية الإدراج).
-  // لو ما كان في تحديد، نحط المؤشر مباشرة بعد "before" - أي داخل القوس الأول
-  // مباشرة لرموز زي \frac{ }{} أو \sqrt{ } جاهز يكتب فيها القيمة على طول.
-  const caretPos = selected ? start + before.length + selected.length + after.length : start + before.length;
-  el.focus();
-  el.setSelectionRange(caretPos, caretPos);
-  // .value = لا يُطلق حدث input تلقائياً - لازم نطلقه يدوياً حتى تشتغل نفس مستمعات
-  // المعاينة الحية/مزامنة حالة الجدول والمصفوفات المربوطة أصلاً بكل حقل.
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
-if (symbolToolbar) {
-  // preventDefault على mousedown (مش click) يمنع الحقل النشط من فقدان التركيز
-  // والتحديد (Selection) قبل ما نوصل لحدث click - بدونها كان الإدراج دايماً رح
-  // يروح آخر النص بدل مكان المؤشر الفعلي.
-  symbolToolbar.addEventListener("mousedown", (e) => {
-    if (e.target.closest("button[data-before]")) e.preventDefault();
-  });
-  symbolToolbar.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-before]");
-    if (!btn) return;
-    insertSnippet(lastFocusedInput, btn.dataset.before || "", btn.dataset.after || "");
-  });
-}
 
 let LIMITS = {
   max_question_len: 2000, max_option_len: 500, max_cell_len: 60,
@@ -333,8 +287,177 @@ let LIMITS = {
   max_matrices: 4, max_matrix_rows: 6, max_matrix_cols: 6,
 };
 let correctOptionId = null;
-let tableState = { headers: [], rows: [] };
-let matricesState = [];
+
+// ==================== أدوات مساعدة عامة ====================
+function escapeHtml(str) {
+  // لازم نغطي " كمان (مو بس &<>) لأن الناتج بينحقن جوا value="..." بعدة أماكن،
+  // ورموز الرياضيات كتير بتحوي " (إنش) بشكل طبيعي.
+  return String(str).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function waitForMathLive(timeoutMs) {
+  if (window.__mathliveReady && customElements.get("math-field")) return Promise.resolve(true);
+  return Promise.race([
+    customElements.whenDefined("math-field").then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
+// كل الحقول (نص السؤال، الإجابات، خلايا الجدول/المصفوفات) بترسل حدث "input" نفسه
+// بعد أي تغيير - هالدالة موصولة فيهم كلهم لتحديث المعاينة الحية بشكل موحّد.
+let previewTimer = null;
+function debouncedPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(updatePreview, 250);
+}
+
+// ==================== 🆕 أجزاء نص السؤال (نص عادي / معادلة) ====================
+// بدل صندوق نص واحد فيه كود LaTeX مختلط بالعربي، نص السؤال هون عبارة عن قائمة
+// "أجزاء" مرتبة: جزء نص عادي (input عادي) أو جزء معادلة (math-field بصري). المستخدم
+// بيضيف جزء جزء بالترتيب اللي بدو ياه يقرأ فيه الجملة. عند الحفظ، منلزّق الأجزاء
+// وراء بعض ومنحيط أجزاء المعادلات بعلامتي $...$ تلقائياً (نفس الصيغة اللي يفهمها
+// محرك الرسم بالبوت) - المستخدم ما بيكتب ولا يشوف $ إطلاقاً.
+let questionSegments = [];
+
+function parseIntoSegments(text) {
+  const segments = [];
+  const re = /\$(.+?)\$/gs;
+  let lastIndex = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > lastIndex) segments.push({ type: "text", value: text.slice(lastIndex, m.index) });
+    segments.push({ type: "math", value: m[1] });
+    lastIndex = re.lastIndex;
+  }
+  if (lastIndex < text.length) segments.push({ type: "text", value: text.slice(lastIndex) });
+  if (segments.length === 0) segments.push({ type: "text", value: "" });
+  return segments;
+}
+
+function createSegmentField(type, value) {
+  const row = document.createElement("div");
+  row.className = "segment-row";
+
+  const tag = document.createElement("span");
+  tag.className = "segment-tag";
+  tag.textContent = type === "math" ? "∑" : "abc";
+  row.appendChild(tag);
+
+  let field;
+  if (type === "math") {
+    field = document.createElement("math-field");
+    field.value = value;
+    field.className = "mf-full";
+  } else {
+    field = document.createElement("input");
+    field.type = "text";
+    field.value = value;
+    field.placeholder = "اكتب نص عادي هون...";
+  }
+  field.addEventListener("input", debouncedPreview);
+  row.appendChild(field);
+
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "remove-x";
+  removeBtn.textContent = "✕";
+  row.appendChild(removeBtn);
+
+  const seg = { type, field, row, getValue() { return field.value || ""; } };
+  removeBtn.addEventListener("click", () => {
+    if (questionSegments.length <= 1) return; // لازم يضل جزء واحد ع الأقل
+    questionSegments = questionSegments.filter((s) => s !== seg);
+    row.remove();
+    updatePreview();
+  });
+  return seg;
+}
+
+function addSegment(type, value, focus) {
+  const seg = createSegmentField(type, value);
+  questionSegments.push(seg);
+  segmentsContainer.appendChild(seg.row);
+  if (focus) setTimeout(() => seg.field.focus(), 50);
+  return seg;
+}
+
+function buildQuestionSegments(text) {
+  segmentsContainer.innerHTML = "";
+  questionSegments = [];
+  parseIntoSegments(text).forEach((s) => addSegment(s.type, s.value, false));
+}
+
+function getQuestionRawText() {
+  return questionSegments.map((s) => (s.type === "math" ? "$" + s.getValue() + "$" : s.getValue())).join("");
+}
+
+addTextSegmentBtn.addEventListener("click", () => { addSegment("text", "", true); updatePreview(); });
+addMathSegmentBtn.addEventListener("click", () => { addSegment("math", "", true); updatePreview(); });
+
+// ==================== 🆕 حقل قابل للتبديل: نص عادي ⟷ معادلة بصرية ====================
+// يُستخدم للإجابات وخلايا الجدول/المصفوفات - غالباً تعبير رياضي بحت (زي "$x=6$")
+// لكن أحياناً نص عادي بحت (زي عنوان عمود "الفئة") فمنسيب زر تبديل صغير بدل ما
+// نفرض معادلة دايماً. نفس مبدأ الأجزاء أعلاه: ما في $ ولا LaTeX ظاهر للمستخدم أبداً.
+function parseWholeMathToggle(raw) {
+  const trimmed = (raw || "").trim();
+  const m = trimmed.match(/^\$(.+)\$$/s);
+  if (m) return { isMath: true, value: m[1] };
+  return { isMath: false, value: raw || "" };
+}
+
+function createMathToggleField(rawValue, opts) {
+  opts = opts || {};
+  const compact = !!opts.compact;
+  const maxLen = opts.maxLen;
+
+  const wrap = document.createElement("div");
+  wrap.className = "mtf-wrap" + (compact ? " compact" : "");
+  const row = document.createElement("div");
+  row.className = "mtf-row";
+  const toggleBtn = document.createElement("button");
+  toggleBtn.type = "button";
+  toggleBtn.title = "بدّل بين نص عادي ومعادلة";
+  toggleBtn.className = "mtf-toggle";
+  const slot = document.createElement("div");
+  slot.className = "mtf-slot";
+  row.appendChild(toggleBtn);
+  row.appendChild(slot);
+  wrap.appendChild(row);
+
+  const parsed = parseWholeMathToggle(rawValue);
+  const state = { isMath: parsed.isMath, value: parsed.value };
+
+  function renderField() {
+    slot.innerHTML = "";
+    let field;
+    if (state.isMath) {
+      field = document.createElement("math-field");
+      field.value = state.value;
+      field.className = compact ? "mf-compact" : "mf-full";
+      field.addEventListener("input", () => { state.value = field.value; debouncedPreview(); });
+      toggleBtn.textContent = "∑";
+    } else {
+      field = document.createElement(compact ? "input" : "textarea");
+      if (compact) { field.type = "text"; } else { field.rows = 2; }
+      field.value = state.value;
+      if (maxLen) field.maxLength = maxLen;
+      field.addEventListener("input", () => { state.value = field.value; debouncedPreview(); });
+      toggleBtn.textContent = "abc";
+    }
+    slot.appendChild(field);
+  }
+  toggleBtn.addEventListener("click", () => {
+    state.isMath = !state.isMath;
+    renderField();
+    debouncedPreview();
+  });
+  renderField();
+
+  return {
+    el: wrap,
+    getRaw() { return state.isMath ? ("$" + state.value + "$") : state.value; },
+    isEmpty() { return !state.value || !String(state.value).trim(); },
+  };
+}
 
 // ==================== تحميل بيانات السؤال ====================
 if (!quizId || Number.isNaN(questionIndex)) {
@@ -345,6 +468,12 @@ if (!quizId || Number.isNaN(questionIndex)) {
 
 async function loadQuestion() {
   try {
+    const mathliveOk = await waitForMathLive(4000);
+    if (!mathliveOk) {
+      showError("تعذر تحميل محرر الرياضيات (مشكلة اتصال بالإنترنت) - أعد تحميل الصفحة وحاول من جديد.");
+      return;
+    }
+
     const res = await fetch("/api/question-edit/fetch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -358,18 +487,11 @@ async function loadQuestion() {
     const data = await res.json();
     LIMITS = data.limits || LIMITS;
     correctOptionId = data.correct_option_id;
-    tableState = data.table && (data.table.headers || data.table.rows)
-      ? { headers: data.table.headers || [], rows: data.table.rows || [] }
-      : { headers: [], rows: [] };
-    matricesState = (data.matrices || []).map((m) => ({
-      label: m.label || "", bracket: m.bracket || "square", rows: m.rows || [["", ""], ["", ""]],
-    }));
 
-    questionInput.value = data.question || "";
-    questionInput.maxLength = LIMITS.max_question_len;
+    buildQuestionSegments(data.question || "");
     buildOptions(data.options || []);
-    buildTableEditor();
-    buildMatrices();
+    buildTableEditor(data.table);
+    buildMatrices(data.matrices || []);
     updatePreview();
 
     loadingState.style.display = "none";
@@ -386,304 +508,335 @@ function showError(msg) {
   errorState.textContent = "⚠️ " + msg;
 }
 
-// ==================== بناء الإجابات (عدد ثابت) ====================
+// ==================== الإجابات ====================
+let optionFields = [];
 function buildOptions(options) {
   optionsContainer.innerHTML = "";
+  optionFields = [];
   options.forEach((opt, idx) => {
     const block = document.createElement("div");
     block.className = "option-block";
     const isCorrect = correctOptionId === idx;
-    block.innerHTML = `
-      <div class="option-header">
-        <label class="field-label" style="margin:0;">الإجابة ${idx + 1}</label>
-        ${isCorrect ? '<span class="correct-badge">✅ الإجابة الصحيحة</span>' : ""}
-      </div>
-      <textarea rows="2" data-option-index="${idx}" maxlength="${LIMITS.max_option_len}">${escapeHtmlAttr(opt)}</textarea>
-    `;
+    const header = document.createElement("div");
+    header.className = "option-header";
+    header.innerHTML = `<label class="field-label" style="margin:0;">الإجابة ${idx + 1}</label>${isCorrect ? '<span class="correct-badge">✅ الإجابة الصحيحة</span>' : ""}`;
+    block.appendChild(header);
+    const field = createMathToggleField(opt, { maxLen: LIMITS.max_option_len, compact: false });
+    block.appendChild(field.el);
     optionsContainer.appendChild(block);
-  });
-  optionsContainer.querySelectorAll("textarea").forEach((el) => {
-    el.addEventListener("input", debouncedPreview);
+    optionFields.push(field);
   });
 }
-
-function getOptionValues() {
-  return Array.from(optionsContainer.querySelectorAll("textarea")).map((el) => el.value);
-}
+function getOptionValues() { return optionFields.map((f) => f.getRaw()); }
 
 // ==================== محرر الجدول ====================
-function buildTableEditor() {
-  const hasTable = tableState.headers.length > 0 || tableState.rows.length > 0;
+let tableFields = { headers: [], rows: [] };
+
+function buildTableEditor(table) {
+  const hasTable = !!(table && ((table.headers && table.headers.length) || (table.rows && table.rows.length)));
   tableToggle.checked = hasTable;
+  const src = hasTable ? table : { headers: ["", ""], rows: [["", ""]] };
+  tableFields = {
+    headers: src.headers.map((h) => createMathToggleField(h, { compact: true, maxLen: LIMITS.max_cell_len })),
+    rows: src.rows.map((row) => row.map((c) => createMathToggleField(c, { compact: true, maxLen: LIMITS.max_cell_len }))),
+  };
   tableEditor.style.display = hasTable ? "block" : "none";
-  if (!hasTable) {
-    tableState = { headers: ["", ""], rows: [["", ""]] };
-  }
   renderTableGrid();
 }
 
 tableToggle.addEventListener("change", () => {
   tableEditor.style.display = tableToggle.checked ? "block" : "none";
-  if (tableToggle.checked && tableState.headers.length === 0) {
-    tableState = { headers: ["", ""], rows: [["", ""]] };
-    renderTableGrid();
-  }
   updatePreview();
 });
 
-function renderTableGrid() {
-  syncTableStateFromDom(); // نحافظ على القيم المكتوبة قبل إعادة الرسم (إضافة/حذف صف أو عمود)
-  const cols = tableState.headers.length;
-  let html = '<table class="grid-table"><thead><tr>';
-  for (let c = 0; c < cols; c++) {
-    html += `<th><input type="text" data-th="${c}" maxlength="${LIMITS.max_cell_len}" value="${escapeHtmlAttr(tableState.headers[c] || "")}" placeholder="عنوان ${c + 1}"></th>`;
-  }
-  html += '<th></th></tr></thead><tbody>';
-  tableState.rows.forEach((row, r) => {
-    html += "<tr>";
-    for (let c = 0; c < cols; c++) {
-      html += `<td><input type="text" data-tr="${r}" data-tc="${c}" maxlength="${LIMITS.max_cell_len}" value="${escapeHtmlAttr(row[c] || "")}"></td>`;
-    }
-    html += `<td><button type="button" class="remove-x" data-remove-row="${r}">✕</button></td></tr>`;
-  });
-  html += "</tbody></table>";
-  html += `<div class="grid-btns">
-    <button type="button" class="small-btn" id="addTableRow">➕ صف</button>
-    <button type="button" class="small-btn" id="addTableCol">➕ عمود</button>
-  </div>`;
-  tableEditor.innerHTML = html;
+function newCellField() { return createMathToggleField("", { compact: true, maxLen: LIMITS.max_cell_len }); }
 
-  tableEditor.querySelectorAll("input").forEach((el) => el.addEventListener("input", debouncedPreview));
-  tableEditor.querySelectorAll("[data-remove-row]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const r = parseInt(btn.dataset.removeRow, 10);
-      syncTableStateFromDom();
-      tableState.rows.splice(r, 1);
+function renderTableGrid() {
+  tableEditor.innerHTML = "";
+  const cols = tableFields.headers.length;
+
+  const table = document.createElement("table");
+  table.className = "grid-table";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (let c = 0; c < cols; c++) {
+    const th = document.createElement("th");
+    th.appendChild(tableFields.headers[c].el);
+    headRow.appendChild(th);
+  }
+  headRow.appendChild(document.createElement("th"));
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  tableFields.rows.forEach((rowFields, r) => {
+    const tr = document.createElement("tr");
+    rowFields.forEach((f) => {
+      const td = document.createElement("td");
+      td.appendChild(f.el);
+      tr.appendChild(td);
+    });
+    const tdBtn = document.createElement("td");
+    const rmBtn = document.createElement("button");
+    rmBtn.type = "button"; rmBtn.className = "remove-x"; rmBtn.textContent = "✕";
+    rmBtn.addEventListener("click", () => {
+      tableFields.rows.splice(r, 1);
       renderTableGrid();
       updatePreview();
     });
+    tdBtn.appendChild(rmBtn);
+    tr.appendChild(tdBtn);
+    tbody.appendChild(tr);
   });
-  const addRowBtn = document.getElementById("addTableRow");
-  const addColBtn = document.getElementById("addTableCol");
-  if (addRowBtn) addRowBtn.addEventListener("click", () => {
-    syncTableStateFromDom();
-    if (tableState.rows.length >= LIMITS.max_table_rows) return;
-    tableState.rows.push(new Array(tableState.headers.length).fill(""));
+  table.appendChild(tbody);
+  tableEditor.appendChild(table);
+
+  const btnRow = document.createElement("div");
+  btnRow.className = "grid-btns";
+  const addRowBtn = document.createElement("button");
+  addRowBtn.type = "button"; addRowBtn.className = "small-btn"; addRowBtn.textContent = "➕ صف";
+  addRowBtn.disabled = tableFields.rows.length >= LIMITS.max_table_rows;
+  addRowBtn.addEventListener("click", () => {
+    if (tableFields.rows.length >= LIMITS.max_table_rows) return;
+    tableFields.rows.push(tableFields.headers.map(() => newCellField()));
     renderTableGrid();
   });
-  if (addColBtn) addColBtn.addEventListener("click", () => {
-    syncTableStateFromDom();
-    if (tableState.headers.length >= LIMITS.max_table_cols) return;
-    tableState.headers.push("");
-    tableState.rows.forEach((row) => row.push(""));
+  const addColBtn = document.createElement("button");
+  addColBtn.type = "button"; addColBtn.className = "small-btn"; addColBtn.textContent = "➕ عمود";
+  addColBtn.disabled = tableFields.headers.length >= LIMITS.max_table_cols;
+  addColBtn.addEventListener("click", () => {
+    if (tableFields.headers.length >= LIMITS.max_table_cols) return;
+    tableFields.headers.push(newCellField());
+    tableFields.rows.forEach((row) => row.push(newCellField()));
     renderTableGrid();
   });
+  btnRow.appendChild(addRowBtn);
+  btnRow.appendChild(addColBtn);
+  tableEditor.appendChild(btnRow);
 }
 
-function syncTableStateFromDom() {
-  const headerInputs = tableEditor.querySelectorAll("[data-th]");
-  if (headerInputs.length) {
-    headerInputs.forEach((el) => { tableState.headers[parseInt(el.dataset.th, 10)] = el.value; });
-  }
-  const cellInputs = tableEditor.querySelectorAll("[data-tr]");
-  cellInputs.forEach((el) => {
-    const r = parseInt(el.dataset.tr, 10), c = parseInt(el.dataset.tc, 10);
-    if (tableState.rows[r]) tableState.rows[r][c] = el.value;
-  });
+function getTablePayload() {
+  if (!tableToggle.checked || !tableFields.headers.length) return null;
+  return {
+    headers: tableFields.headers.map((f) => f.getRaw()),
+    rows: tableFields.rows.map((row) => row.map((f) => f.getRaw())),
+  };
 }
 
 // ==================== محرر المصفوفات ====================
-function buildMatrices() {
+let matrixCards = [];
+
+function buildMatrices(matricesData) {
   matricesContainer.innerHTML = "";
-  matricesState.forEach((m, idx) => renderMatrixCard(m, idx));
-  addMatrixBtn.disabled = matricesState.length >= LIMITS.max_matrices;
+  matrixCards = [];
+  (matricesData || []).forEach((m) => addMatrixCard(m));
+  addMatrixBtn.disabled = matrixCards.length >= LIMITS.max_matrices;
 }
 
 addMatrixBtn.addEventListener("click", () => {
-  if (matricesState.length >= LIMITS.max_matrices) return;
-  matricesState.push({ label: "", bracket: "square", rows: [["", ""], ["", ""]] });
-  buildMatrices();
+  if (matrixCards.length >= LIMITS.max_matrices) return;
+  addMatrixCard({ label: "", bracket: "square", rows: [["", ""], ["", ""]] });
+  addMatrixBtn.disabled = matrixCards.length >= LIMITS.max_matrices;
   updatePreview();
 });
 
-function renderMatrixCard(m, idx) {
+function addMatrixCard(m) {
   const card = document.createElement("div");
   card.className = "matrix-card";
-  card.dataset.matrixIndex = idx;
 
   const topRow = document.createElement("div");
   topRow.className = "matrix-top-row";
-  topRow.innerHTML = `
-    <input type="text" placeholder="تسمية اختيارية مثل A =" data-mlabel maxlength="${LIMITS.max_cell_len}" value="${escapeHtmlAttr(m.label)}">
-    <select data-mbracket>
-      <option value="square" ${m.bracket === "square" ? "selected" : ""}>قوس مربع [ ]</option>
-      <option value="round" ${m.bracket === "round" ? "selected" : ""}>قوس دائري ( )</option>
-      <option value="bar" ${m.bracket === "bar" ? "selected" : ""}>محدّد | |</option>
-    </select>
-    <button type="button" class="remove-x" data-remove-matrix>✕</button>
+
+  // 🆕 التسمية (مثل "A =") نص عادي دايماً - مش تعبير رياضي بذاته، فما بتحتاج تبديل.
+  const labelInput = document.createElement("input");
+  labelInput.type = "text";
+  labelInput.value = m.label || "";
+  labelInput.placeholder = "تسمية اختيارية مثل A =";
+  labelInput.maxLength = LIMITS.max_cell_len;
+  labelInput.addEventListener("input", debouncedPreview);
+
+  const bracketSelect = document.createElement("select");
+  bracketSelect.innerHTML = `
+    <option value="square">قوس مربع [ ]</option>
+    <option value="round">قوس دائري ( )</option>
+    <option value="bar">محدّد | |</option>
   `;
+  bracketSelect.value = m.bracket || "square";
+  bracketSelect.addEventListener("change", debouncedPreview);
+
+  const removeCardBtn = document.createElement("button");
+  removeCardBtn.type = "button"; removeCardBtn.className = "remove-x"; removeCardBtn.textContent = "✕";
+
+  topRow.appendChild(labelInput);
+  topRow.appendChild(bracketSelect);
+  topRow.appendChild(removeCardBtn);
   card.appendChild(topRow);
 
   const gridWrap = document.createElement("div");
-  gridWrap.innerHTML = matrixGridHtml(m);
   card.appendChild(gridWrap);
 
-  matricesContainer.appendChild(card);
-
-  topRow.querySelector("[data-mlabel]").addEventListener("input", (e) => { m.label = e.target.value; debouncedPreview(); });
-  topRow.querySelector("[data-mbracket]").addEventListener("change", (e) => { m.bracket = e.target.value; debouncedPreview(); });
-  topRow.querySelector("[data-remove-matrix]").addEventListener("click", () => {
-    matricesState.splice(idx, 1);
-    buildMatrices();
-    updatePreview();
-  });
-
-  bindMatrixGridEvents(card, m, idx);
-}
-
-function matrixGridHtml(m) {
-  const cols = m.rows[0] ? m.rows[0].length : 2;
-  let html = '<table class="grid-table"><tbody>';
-  m.rows.forEach((row, r) => {
-    html += "<tr>";
-    for (let c = 0; c < cols; c++) {
-      html += `<td><input type="text" data-mr="${r}" data-mc="${c}" maxlength="${LIMITS.max_cell_len}" value="${escapeHtmlAttr(row[c] || "")}"></td>`;
-    }
-    html += `<td><button type="button" class="remove-x" data-remove-mrow="${r}">✕</button></td></tr>`;
-  });
-  html += "</tbody></table>";
-  html += `<div class="grid-btns">
-    <button type="button" class="small-btn" data-add-mrow>➕ صف</button>
-    <button type="button" class="small-btn" data-add-mcol>➕ عمود</button>
-    ${m.rows.length > 1 ? '' : ''}
-  </div>`;
-  return html;
-}
-
-function bindMatrixGridEvents(card, m, idx) {
-  const rerender = () => {
-    const gridWrap = card.children[1];
-    gridWrap.innerHTML = matrixGridHtml(m);
-    bindMatrixGridEvents(card, m, idx);
-    updatePreview();
+  const cardObj = {
+    labelInput,
+    bracketSelect,
+    rows: (m.rows && m.rows.length ? m.rows : [["", ""], ["", ""]]).map((row) =>
+      row.map((c) => createMathToggleField(c, { compact: true, maxLen: LIMITS.max_cell_len }))
+    ),
   };
-  card.querySelectorAll("[data-mr]").forEach((el) => {
-    el.addEventListener("input", () => {
-      const r = parseInt(el.dataset.mr, 10), c = parseInt(el.dataset.mc, 10);
-      m.rows[r][c] = el.value;
-      debouncedPreview();
+
+  function renderGrid() {
+    gridWrap.innerHTML = "";
+    const table = document.createElement("table");
+    table.className = "grid-table";
+    const tbody = document.createElement("tbody");
+    cardObj.rows.forEach((rowFields, r) => {
+      const tr = document.createElement("tr");
+      rowFields.forEach((f) => {
+        const td = document.createElement("td");
+        td.appendChild(f.el);
+        tr.appendChild(td);
+      });
+      const tdBtn = document.createElement("td");
+      const rmBtn = document.createElement("button");
+      rmBtn.type = "button"; rmBtn.className = "remove-x"; rmBtn.textContent = "✕";
+      rmBtn.addEventListener("click", () => {
+        if (cardObj.rows.length <= 1) return;
+        cardObj.rows.splice(r, 1);
+        renderGrid();
+        updatePreview();
+      });
+      tdBtn.appendChild(rmBtn);
+      tr.appendChild(tdBtn);
+      tbody.appendChild(tr);
     });
-  });
-  card.querySelectorAll("[data-remove-mrow]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      if (m.rows.length <= 1) return;
-      m.rows.splice(parseInt(btn.dataset.removeMrow, 10), 1);
-      rerender();
+    table.appendChild(tbody);
+    gridWrap.appendChild(table);
+
+    const btnRow = document.createElement("div");
+    btnRow.className = "grid-btns";
+    const addRowBtn = document.createElement("button");
+    addRowBtn.type = "button"; addRowBtn.className = "small-btn"; addRowBtn.textContent = "➕ صف";
+    addRowBtn.disabled = cardObj.rows.length >= LIMITS.max_matrix_rows;
+    addRowBtn.addEventListener("click", () => {
+      if (cardObj.rows.length >= LIMITS.max_matrix_rows) return;
+      const cols = cardObj.rows[0] ? cardObj.rows[0].length : 2;
+      const newRow = [];
+      for (let c = 0; c < cols; c++) newRow.push(newCellField());
+      cardObj.rows.push(newRow);
+      renderGrid();
     });
+    const addColBtn = document.createElement("button");
+    addColBtn.type = "button"; addColBtn.className = "small-btn"; addColBtn.textContent = "➕ عمود";
+    addColBtn.disabled = !!(cardObj.rows[0] && cardObj.rows[0].length >= LIMITS.max_matrix_cols);
+    addColBtn.addEventListener("click", () => {
+      if (cardObj.rows[0] && cardObj.rows[0].length >= LIMITS.max_matrix_cols) return;
+      cardObj.rows.forEach((row) => row.push(newCellField()));
+      renderGrid();
+    });
+    btnRow.appendChild(addRowBtn);
+    btnRow.appendChild(addColBtn);
+    gridWrap.appendChild(btnRow);
+  }
+  renderGrid();
+
+  removeCardBtn.addEventListener("click", () => {
+    matrixCards = matrixCards.filter((c) => c !== cardObj);
+    card.remove();
+    addMatrixBtn.disabled = matrixCards.length >= LIMITS.max_matrices;
+    updatePreview();
   });
-  const addRowBtn = card.querySelector("[data-add-mrow]");
-  const addColBtn = card.querySelector("[data-add-mcol]");
-  if (addRowBtn) addRowBtn.addEventListener("click", () => {
-    if (m.rows.length >= LIMITS.max_matrix_rows) return;
-    m.rows.push(new Array(m.rows[0].length).fill(""));
-    rerender();
-  });
-  if (addColBtn) addColBtn.addEventListener("click", () => {
-    if (m.rows[0].length >= LIMITS.max_matrix_cols) return;
-    m.rows.forEach((row) => row.push(""));
-    rerender();
-  });
+
+  matricesContainer.appendChild(card);
+  matrixCards.push(cardObj);
 }
 
-// ==================== المعاينة الحية (KaTeX) ====================
-let previewTimer = null;
-function debouncedPreview() {
-  clearTimeout(previewTimer);
-  previewTimer = setTimeout(updatePreview, 250);
+function getMatricesPayload() {
+  return matrixCards.map((c) => ({
+    label: c.labelInput.value,
+    bracket: c.bracketSelect.value,
+    rows: c.rows.map((row) => row.map((f) => f.getRaw())),
+  }));
 }
-questionInput.addEventListener("input", () => {
-  questionCounter.textContent = `${questionInput.value.length} / ${LIMITS.max_question_len}`;
-  debouncedPreview();
-});
+
+// ==================== المعاينة الحية (KaTeX - للقراءة فقط) ====================
+function stripMathWrap(raw) {
+  const m = (raw || "").trim().match(/^\$(.+)\$$/s);
+  return m ? m[1] : (raw || "");
+}
 
 const BRACKET_ENV = { square: "bmatrix", round: "pmatrix", bar: "vmatrix" };
-
 function matrixToLatex(m) {
-  // 🆕 escapeHtml هون ضروري (زي html.escape() المستخدم بجانب البوت بتلغرام - نفس
-  // المبدأ بالضبط) لأن الناتج بينحقن لاحقاً كـ innerHTML مباشرة: بدونه، أي "<" أو
-  // "&" بمحتوى خلية يكتبها المستخدم بينكسر كـ HTML خام (self-XSS بمتصفحه هو نفسه)
-  // بدل ما يظهر كنص حرفي داخل $...$. escapeHtml ما بيلمس "$" ولا "\" فرموز LaTeX
-  // (\begin, \\, إلخ) تضل سليمة لـ KaTeX بعد فك الـ entities من المتصفح.
-  const body = m.rows.map((row) => row.map((cell) => escapeHtml(cell || "")).join(" & ")).join(" \\\\ ");
+  // نطرح أي $..$ محيطة بكل خلية (لو المستخدم فعّل وضع معادلة لها) قبل تجميعها جوا
+  // بيئة المصفوفة الواحدة - هي أصلاً بمنطقة رياضيات هون، فما بنحتاج نلفها بـ $ تانية.
+  const body = m.rows.map((row) => row.map((cell) => escapeHtml(stripMathWrap(cell))).join(" & ")).join(" \\\\ ");
   const env = BRACKET_ENV[m.bracket] || "bmatrix";
   const label = m.label ? escapeHtml(m.label) + " " : "";
   return `${label}$\\begin{${env}}${body}\\end{${env}}$`;
 }
 
 function updatePreview() {
-  const qText = questionInput.value || "";
+  const qText = getQuestionRawText();
   const options = getOptionValues();
   let html = `<div style="margin-bottom:8px;"><b>س:</b> ${escapeHtml(qText)}</div>`;
   options.forEach((opt, idx) => {
     html += `<div>${idx + 1}. ${escapeHtml(opt)}</div>`;
   });
 
-  if (tableToggle.checked) {
-    syncTableStateFromDom();
-    if (tableState.headers.length) {
-      html += '<table style="margin-top:10px;border-collapse:collapse;width:100%;">';
-      html += "<tr>" + tableState.headers.map((h) => `<th style="border:1px solid #ccc;padding:4px;font-size:12px;">${escapeHtml(h)}</th>`).join("") + "</tr>";
-      tableState.rows.forEach((row) => {
-        html += "<tr>" + row.map((c) => `<td style="border:1px solid #ccc;padding:4px;font-size:12px;text-align:center;">${escapeHtml(c)}</td>`).join("") + "</tr>";
-      });
-      html += "</table>";
-    }
+  const tablePayload = getTablePayload();
+  if (tablePayload) {
+    html += '<table style="margin-top:10px;border-collapse:collapse;width:100%;">';
+    html += "<tr>" + tablePayload.headers.map((h) => `<th style="border:1px solid #ccc;padding:4px;font-size:12px;">${escapeHtml(h)}</th>`).join("") + "</tr>";
+    tablePayload.rows.forEach((row) => {
+      html += "<tr>" + row.map((c) => `<td style="border:1px solid #ccc;padding:4px;font-size:12px;text-align:center;">${escapeHtml(c)}</td>`).join("") + "</tr>";
+    });
+    html += "</table>";
   }
 
-  matricesState.forEach((m) => {
-    html += `<div style="margin-top:10px;">${matrixToLatex(m)}</div>`;
+  getMatricesPayload().forEach((m) => {
+    if (m.rows.some((row) => row.length)) html += `<div style="margin-top:10px;">${matrixToLatex(m)}</div>`;
   });
 
   fullPreview.innerHTML = html;
+  questionCounter.textContent = `${qText.length} / ${LIMITS.max_question_len}`;
   try {
     renderMathInElement(fullPreview, {
       delimiters: [{ left: "$", right: "$", display: false }],
       throwOnError: false,
     });
-  } catch (e) { /* أي خطأ صياغة LaTeX من المستخدم لا يجب أن يكسر الصفحة - نتجاهله بصمت هون فقط للمعاينة */ }
+  } catch (e) { /* أي خطأ صياغة لا يجب أن يكسر الصفحة - نتجاهله بصمت هون فقط للمعاينة */ }
 }
-
-function escapeHtml(str) {
-  // 🆕 لازم نغطي " كمان (مو بس &<>) لأن الناتج بينحقن جوا value="..." بعدة أماكن
-  // (خيارات الجدول/المصفوفات) - ورموز الرياضيات كتير بتحوي " (إنش) أو '" (قدم/إنش)
-  // بشكل طبيعي، فبدون تغطيتها بتنكسر بنية الـ HTML لأي مستخدم يكتب رمز زاوية أو قياس.
-  return String(str).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-function escapeHtmlAttr(str) { return escapeHtml(str || ""); }
 
 // ==================== الحفظ ====================
 saveBtn.addEventListener("click", async () => {
   statusText.className = "status-text";
   statusText.textContent = "";
 
-  const questionText = questionInput.value.trim();
-  const options = getOptionValues().map((o) => o.trim());
-
-  if (!questionText) {
+  const questionRaw = getQuestionRawText();
+  const questionHasContent = questionSegments.some((s) => s.getValue() && s.getValue().trim());
+  if (!questionHasContent) {
     statusText.className = "status-text error";
     statusText.textContent = "⚠️ نص السؤال لا يمكن أن يكون فارغاً.";
     return;
   }
-  if (options.some((o) => !o)) {
+  if (questionRaw.length > LIMITS.max_question_len) {
+    statusText.className = "status-text error";
+    statusText.textContent = `⚠️ نص السؤال طويل جداً (الحد ${LIMITS.max_question_len} حرف).`;
+    return;
+  }
+  if (optionFields.some((f) => f.isEmpty())) {
     statusText.className = "status-text error";
     statusText.textContent = "⚠️ لا يمكن ترك أي إجابة فارغة.";
     return;
   }
 
-  syncTableStateFromDom();
-  const tablePayload = tableToggle.checked && tableState.headers.length
-    ? { headers: tableState.headers, rows: tableState.rows }
-    : null;
+  const payload = {
+    init_data: tg.initData,
+    quiz_id: quizId,
+    question_index: questionIndex,
+    question: questionRaw,
+    options: getOptionValues(),
+    table: getTablePayload(),
+    matrices: getMatricesPayload(),
+  };
 
   saveBtn.disabled = true;
   statusText.textContent = "⏳ جارٍ الحفظ...";
@@ -691,15 +844,7 @@ saveBtn.addEventListener("click", async () => {
     const res = await fetch("/api/question-edit/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        init_data: tg.initData,
-        quiz_id: quizId,
-        question_index: questionIndex,
-        question: questionText,
-        options,
-        table: tablePayload,
-        matrices: matricesState,
-      }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
