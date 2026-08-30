@@ -132,11 +132,18 @@ MATRIX_COLOR = "#1a1a1a"
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
 _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 _MATH_SPAN_RE = re.compile(r"\$[^$]+\$")
-# 🛠️ FIX: حروف تحكّم ASCII خام (form-feed \x0c، tab \x09، إلخ) قد تتسرّب لنص السؤال/
-# الخيارات لو نجا JSON تالف (backslash غير مُهرَّب بشكل صحيح) من مرحلة التوليد - matplotlib
-# mathtext لا يرمي استثناءً لحرف تحكّم غير معروف (يستبدله بصمت برمز/صندوق فارغ)، فلا يكفي
-# الاعتماد على try/except في _sanitize_line_for_mathtext وحده لاكتشاف هذه الحالة تحديداً.
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# 🛠️ FIX (خط دفاع ثانٍ): حروف تحكّم ASCII خام (backspace \x08، form-feed \x0c،
+# carriage-return \x0d، tab \x09، إلخ) قد تتسرّب لنص السؤال/الخيارات لو نجا JSON تالف
+# (backslash غير مُهرَّب بشكل صحيح من طرف Gemini/Groq - راجع _repair_json_backslashes
+# و_parse_structured_gemini_response بـ helpers/gemini_helper.py حيث الإصلاح الفعلي
+# للسبب الجذري) من مرحلة التوليد. matplotlib mathtext لا يرمي استثناءً لحرف تحكّم غير
+# معروف (يستبدله بصمت برمز/صندوق فارغ)، فلا يكفي الاعتماد على try/except في
+# _sanitize_line_for_mathtext وحده لاكتشاف هذه الحالة تحديداً.
+# 🛠️ FIX 2: كان النطاق السابق يستثني \x09 (tab، ناتج \t من \text \theta \times...)
+# و\x0d (CR، ناتج \r من \rightarrow \rho...) رغم إشارة الكومنت الأصلي لهما صراحة كمثال -
+# أُضيفا الآن فعلياً. \x0a (LF) وحدها تبقى مستثناة عمداً لأن لها استخدام شرعي موثَّق
+# (فاصل سطر حقيقي بين السؤال بالإنجليزية/الفرنسية وترجمته العربية - راجع constants.py).
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f]")
 
 _MATH_PARSER = MathTextParser("agg")
 _FONT_CACHE: Dict[Any, fm.FontProperties] = {}

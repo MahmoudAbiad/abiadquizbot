@@ -75,9 +75,72 @@ logger = get_logger(__name__)
 
 # AI-NOTE: يتم تحميل مفاتيح Gemini كقائمة وتتبع المفاتيح المعطلة مؤقتاً في ذاكرة السيرفر
 API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") if key.strip()]
-# 🛠️ FIX: يطابق أي backslash غير متبوع بحرف escape شرعي بمعيار JSON (" \ / b f n r t u)
-# - يُستخدم لترميم استجابات Groq الخام قبل json.loads() (راجع _generate_text_quiz).
-_JSON_BACKSLASH_REPAIR_RE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+# 🛠️ FIX (أخطر من الإصدار السابق المبني على regex وحيد): ترميم backslash خام غير
+# مُهرَّب بشكل صحيح داخل نص JSON قادم من نموذج AI (Groq أو Gemini) قبل json.loads().
+#
+# المشكلة الأصلية: regex السابق (`\\(?!["\\/bfnrtu])`) كان يرمّم فقط الـ backslash
+# المتبوع بحرف *غير* معروف كـ escape شرعي بمعيار JSON (زي \s بـ \sqrt، \a بـ \alpha) -
+# وهي الحالة اللي ترمي استثناء "Invalid \escape" فيسقط json.loads() بالكامل (ملحوظ
+# ومُعالَج مسبقاً). لكنها كانت **تتجاهل تماماً** الحالة الأخطر: backslash متبوع بحرف
+# *هو فعلاً* escape شرعي (b/f/n/r/t) - زي \bar \big \beta، \frac \forall، \neq \nabla
+# \nu \notin، \rho \rightarrow، \tan \text \theta \times - وهاي الحالة **لا ترمي أي
+# استثناء إطلاقاً**؛ json.loads() ينجح "بصمت" لكنه يُفسّر \b كـ backspace و\f كـ
+# form-feed و\r كـ carriage-return و\t كـ tab، فيبتلع الحرف اللي بعد الـ backslash
+# ويترك الباقي فقط (\bar{d} → BACKSPACE+"ar{d}"، \text{...} → TAB+"ext{...}") - وهذا
+# بالضبط توقيع الخلل المُشاهَد فعلياً بصور الكويزات الرياضية (راجع HISTORY_LOG.md).
+# بما أن معظم رموز LaTeX الرياضية المدعومة رسمياً (راجع constants.py) تبدأ تحديداً
+# بأحد هذي الأحرف الخمسة (b/f/n/r/t)، فهذا كان يعني أن نجاح/فشل تهريب كل رمز كان
+# متروكاً بالكامل لتخمين النموذج نفسه (Gemini/Groq) - أحياناً يضاعف الـ backslash
+# صح (\\frac) وأحياناً لأ (\frac)، دون أي شبكة أمان فعلية من جهتنا.
+#
+# الاستثناء الوحيد المتعمَّد: \n (سطر جديد) *لها* استخدام شرعي موثَّق بهذا المشروع -
+# الفاصل بين نص السؤال بالإنجليزية وترجمته العربية بنمط "English + ترجمة عربية"
+# (راجع MSG رقم 1ب بموجّهات constants.py: "...بفاصل سطر حقيقي (\n)..."). لذلك \n
+# تحديداً تُرمَّم فقط لو الحرف اللي بعدها مباشرة حرف لاتيني (يعني على الأغلب بداية
+# أمر LaTeX زي \neq \nabla \nu \notin)، وتبقى كما هي لو الحرف اللي بعدها عربي/رقم/
+# مسافة/نهاية النص (على الأغلب فاصل سطر حقيقي مقصود).
+_JSON_LEGAL_ALWAYS_ESCAPES = ('"', "\\", "/", "u")  # هذي فقط تبقى كما هي دائماً
+_JSON_AMBIGUOUS_ESCAPE_LETTERS = ("b", "f", "r", "t")  # لا استخدام شرعي معروف بهذا المشروع
+
+
+def _repair_json_backslashes(text: str) -> str:
+    """يمرّ على النص حرفاً حرفاً (بدل regex وحيد) ليرمّم أي backslash قد يُفسَّر خطأً
+    كـ escape sequence شرعي بمعيار JSON بينما هو فعلياً بداية أمر LaTeX من نموذج AI لم
+    يُضاعِف الـ backslash بشكل صحيح. آمن على أي نص لا يحوي LaTeX إطلاقاً - يرجعه دون
+    أي تغيير فعلي."""
+    if "\\" not in text:
+        return text
+    out: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch != "\\" or i + 1 >= n:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = text[i + 1]
+        if nxt in _JSON_LEGAL_ALWAYS_ESCAPES:
+            out.append(text[i:i + 2])
+            i += 2
+        elif nxt in _JSON_AMBIGUOUS_ESCAPE_LETTERS:
+            out.append("\\\\")  # backslash حرفي مضاعف - نترك nxt ليُكتب بالتكرار التالي
+            i += 1
+        elif nxt == "n":
+            after = text[i + 2] if i + 2 < n else ""
+            if after and after.isascii() and after.isalpha():
+                out.append("\\\\")
+                i += 1
+            else:
+                out.append(text[i:i + 2])
+                i += 2
+        else:
+            # حرف غير معروف إطلاقاً كـ escape شرعي بمعيار JSON (\s \a \p \g \d \l...) -
+            # نضاعف الـ backslash لمنع استثناء "Invalid \escape" بـ json.loads()
+            out.append("\\\\")
+            i += 1
+    return "".join(out)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
@@ -332,6 +395,42 @@ async def _execute_cascade(
 # ==============================================================================
 # 🆕 GENERIC CASCADE EXECUTION HELPERS (REUSABLE ACROSS FEATURES)
 # ==============================================================================
+def _parse_structured_gemini_response(response: Any, response_schema: type, model: str) -> Any:
+    """يحوّل استجابة Gemini المُهيكلة (JSON Schema) إلى كائن Pydantic، مع تفضيل صريح
+    لنص JSON الخام (response.text) + _repair_json_backslashes قبل json.loads()، بدل
+    الاعتماد المباشر على response.parsed الجاهز من الـ SDK.
+
+    🛠️ FIX (السبب الجذري - راجع HISTORY_LOG.md): كان الافتراض السابق أن response_schema
+    (توليد مُقيَّد بمخطط) يضمن تهريب JSON سليم دائماً بغض النظر عن محتوى الـ backslash -
+    وهذا **غير صحيح فعلياً**. التوليد المُقيَّد يضمن فقط أن الناتج **صحيح نحوياً** كـ JSON
+    (valid syntax)، لا أن النموذج ينوي فعلياً كل escape sequence يكتبها: \\bar{d} بنص
+    JSON صحيح نحوياً (لأن \\b escape شرعي بمعيار JSON)، لكنها تُفهم كـ backspace + "ar{d}"
+    وليس "\\bar{d}" الحرفية المقصودة - وهذا بالضبط سبب ظهور "S_{ar{d}}" بدل "S_{\\bar{d}}"
+    و"ext{...}" بدل "\\text{...}" بصور الكويزات الرياضية رغم استخدام response_schema.
+    الـ SDK يبني response.parsed داخلياً من نفس نص JSON الخام (response.text) عبر
+    json.loads() قياسي - فالخلل موجود بأي الحالتين؛ الفرق أن الاعتماد على response.text
+    يفتح لنا نافذة لتطبيق _repair_json_backslashes **قبل** الـ parsing، وهو غير ممكن لو
+    اكتفينا بـ response.parsed الجاهز (الضرر يكون قد وقع فعلاً داخل الـ SDK).
+
+    عند فشل هذا المسار (نص غير متاح، أو JSON تالف حتى بعد الترميم)، نرجع لـ response.parsed
+    كخط دفاع أخير بدل إسقاط الاستجابة بالكامل."""
+    raw_text = getattr(response, "text", None)
+    if raw_text:
+        try:
+            repaired = _repair_json_backslashes(raw_text)
+            return response_schema(**json.loads(repaired))
+        except Exception as exc:
+            log_warning(
+                logger,
+                f"{model}: raw-text structured parse failed after backslash repair "
+                f"({exc}); falling back to SDK response.parsed",
+            )
+    parsed = getattr(response, "parsed", None)
+    if parsed is None:
+        raise ValueError(f"{model} returned no structured content")
+    return parsed
+
+
 async def generate_structured_with_cascade(
     contents: List[Any],
     response_schema: type,
@@ -360,10 +459,9 @@ async def generate_structured_with_cascade(
             ),
             timeout=AI_REQUEST_TIMEOUT,
         )
-        if response.parsed is None:
-            raise ValueError(f"{model} returned no structured content")
+        parsed = _parse_structured_gemini_response(response, response_schema, model)
         token_count = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0
-        return response.parsed, int(token_count)
+        return parsed, int(token_count)
 
     return await _execute_cascade(_attempt)
 
@@ -553,9 +651,10 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[Tuple
                 ),
                 timeout=AI_REQUEST_TIMEOUT,
             )
-            if not response.parsed or not hasattr(response.parsed, "questions"):
+            parsed = _parse_structured_gemini_response(response, QuizResponse, model)
+            if not hasattr(parsed, "questions"):
                 raise ValueError("Gemini returned no structured questions")
-            questions = [question.model_dump() for question in response.parsed.questions]
+            questions = [question.model_dump() for question in parsed.questions]
             token_count = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0
             return questions, int(token_count)
         finally:
@@ -586,9 +685,10 @@ async def _generate_single_attempt(
             ),
             timeout=AI_REQUEST_TIMEOUT,
         )
-        if not response.parsed or not hasattr(response.parsed, "questions"):
+        parsed = _parse_structured_gemini_response(response, QuizResponse, model)
+        if not hasattr(parsed, "questions"):
             raise ValueError("Gemini returned no structured questions")
-        questions = [question.model_dump() for question in response.parsed.questions]
+        questions = [question.model_dump() for question in parsed.questions]
         token_count = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0
         log_info(logger, f"✅ Cascade success (super pdf/images): provider=gemini model={model} key_index={key_index}")
         return questions, int(token_count)
@@ -748,11 +848,9 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
         )
         raw_content = response.choices[0].message.content
         # 🛠️ FIX (Defense in Depth): نموذجات Groq أحياناً تكتب backslash خام داخل نص JSON
-        # (مثلاً مسار ويندوز أو أمر LaTeX متسرّب) بدل تهريبه بشكل صحيح (\\ بدل \) - وهذا
-        # يجعل json.loads يُفسِّر \f \t \n \r \b كحروف تحكّم صامتة (تلف بصمت) أو يرمي
-        # استثناء "Invalid \escape" لأي حرف آخر. نُرمِّم أي backslash غير متبوع بحرف
-        # escape شرعي في JSON قبل التحليل، بدل تركه يتلف البيانات أو يُسقط الاستجابة كلها.
-        raw_content = _JSON_BACKSLASH_REPAIR_RE.sub(r"\\\\", raw_content)
+        # (أمر LaTeX متسرّب زي \frac \text \bar) بدل تهريبه بشكل صحيح (\\ بدل \) - راجع
+        # _repair_json_backslashes أعلى الملف للتفاصيل الكاملة لماذا regex وحيد لم يكن كافياً.
+        raw_content = _repair_json_backslashes(raw_content)
         parsed = QuizResponse(**json.loads(raw_content))
         log_info(logger, f"✅ Cascade success: provider=groq model={groq_model}")
         return [question.model_dump() for question in parsed.questions]
@@ -897,17 +995,17 @@ async def generate_quiz_smart(
         if pure_text:
             # 🛠️ FIX: نمط الكويز المصوّر الرياضي (is_math_mode) يُوجَّه مباشرة لمسار Gemini
             # (generate_structured_with_cascade + response_schema) ولا يمر إطلاقاً بمسار
-            # Groq السريع (_generate_text_quiz). السبب: Groq يُستدعى بـ
-            # response_format={"type": "json_object"} ثم يُحلَّل ناتجه بـ json.loads() يدوياً،
-            # ونموذج gpt-oss-120b لا يُهرِّب الـ backslash بشكل صحيح داخل نصوص LaTeX
-            # (يكتب \frac بدل \\frac). قواعد تهريب JSON الرسمية تُفسِّر \f و\t و\n و\r و\b
-            # كحروف تحكّم صامتة (form-feed/tab/newline...) فتُبتلع بصمت - وهذا بالضبط
-            # سبب ظهور "⍰rac"/"⍰ext" بدل \frac/\text داخل صور الكويزات الرياضية (رموز
-            # LaTeX تبدأ بحرف escape شرعي بـ JSON زي \frac \text \theta \times \beta \neq
-            # تتلف بصمت، بينما \sqrt \alpha \pi \sum ... تُسبب استثناء JSON كامل فيُعاد
-            # التوليد تلقائياً عبر Gemini - ولهذا كانت المشكلة تظهر جزئياً فقط). مسار Gemini
-            # (response_schema=QuizResponse) يستخدم توليداً مُقيَّداً يضمن تهريب JSON سليم
-            # دائماً، بغض النظر عن محتوى الـ backslash داخل النص.
+            # Groq السريع (_generate_text_quiz)، لأن Groq أقل موثوقية عموماً بمهام LaTeX
+            # الدقيقة. لكن ⚠️ مسار Gemini (response_schema=QuizResponse) **لا يضمن تهريب
+            # JSON سليم فعلياً** رغم الافتراض القديم هنا - التوليد المُقيَّد بمخطط يضمن فقط
+            # أن الناتج *صحيح نحوياً* كـ JSON (valid syntax)، لا أن كل \bar \text \frac
+            # \theta \times \beta \neq (تبدأ بحرف escape شرعي بمعيار JSON: b/f/n/r/t) قد
+            # ضُوعف الـ backslash فيها بشكل صحيح من طرف النموذج - فتُبتلع بصمت (\bar{d} →
+            # backspace + "ar{d}") تماماً بنفس آلية عطل Groq الموصوفة، وبدون رمي أي استثناء
+            # يسمح بإعادة المحاولة. كلا مسارَي Groq وGemini يمرّان الآن إلزامياً عبر
+            # _repair_json_backslashes/_parse_structured_gemini_response قبل أي json.loads()
+            # فعلي - راجعهما لتفاصيل الإصلاح الكامل (لم يعد الاعتماد كافياً على response.parsed
+            # الجاهز من الـ SDK وحده).
             if is_math_mode:
                 return await _generate_text_quiz_with_gemini(pure_text, prompt)
             questions = await _generate_text_quiz(pure_text, prompt, english_mode=english_mode)
