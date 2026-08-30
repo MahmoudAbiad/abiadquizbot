@@ -259,6 +259,26 @@ const tg = window.Telegram.WebApp;
 tg.ready();
 tg.expand();
 
+// 🆕 التعامل مع زر "Back" (زر أندرويد النظامي أو سهم تلغرام): افتراضياً تلغرام
+// بيسكر الـ Mini App كاملة عند أي ضغطة Back ما إلها معالج مسجَّل. المطلوب هون:
+// لو كيبورد MathLive الرياضي ظاهر حالياً، الضغطة الأولى تسكره بس (نفس سلوك كيبورد
+// الجوال العادي)، وبعدها إذا ضغط تاني (والكيبورد مقفول) فعلاً يسكر الصفحة. راجع
+// mathlive.io/mathfield/guides/virtual-keyboard: الكيبورد singleton واحد مشترك
+// لكل الحقول، متاح تلقائياً عالـ window بعد تحميل المكتبة (window.mathVirtualKeyboard).
+if (tg.BackButton) {
+  tg.BackButton.show();
+  tg.BackButton.onClick(() => {
+    const vk = window.mathVirtualKeyboard;
+    if (vk && vk.visible) {
+      vk.hide();
+      // منع الحقل من إعادة فتح الكيبورد فوراً بسبب بقائه مركّزاً عليه (focus)
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    } else {
+      tg.close();
+    }
+  });
+}
+
 const params = new URLSearchParams(window.location.search);
 const quizId = params.get("quiz_id") || "";
 const questionIndex = parseInt(params.get("question_index"), 10);
