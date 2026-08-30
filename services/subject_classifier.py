@@ -50,6 +50,8 @@ from pydantic import BaseModel, Field
 
 from constants import (
     MATH_DETECTION_TIMEOUT,
+    MAX_QUESTIONS_TO_GENERATE,
+    MIN_QUESTIONS_TO_GENERATE,
     SUBJECT_ENGLISH,
     SUBJECT_FRENCH,
     SUBJECT_MATH,
@@ -96,6 +98,17 @@ class SubjectClassification(BaseModel):
         description="one of: math, english, french, quiz_solved, quiz_unsolved, other"
     )
     suggested_types: List[str] = Field(default_factory=list, max_length=4)
+    # 🆕 تقدير آلي لعدد الأسئلة الفعلي الموجود بالمستند - يُملأ فقط عندما subject يساوي
+    # quiz_solved أو quiz_unsolved (اختبار جاهز الصياغة أصلاً)، ويُستخدم لاحقاً لعرض شاشة
+    # تأكيد عدد/تكلفة جاهزة بدل تخيير الطالب بأزرار عدد عشوائية (5/10/15/20) لا علاقة لها
+    # بالعدد الحقيقي بمستند اختبار جاهز أصلاً. راجع handlers/files.py._show_question_count_screen.
+    question_count: Optional[int] = Field(
+        default=None,
+        description=(
+            "approximate count of actual questions found in the document; only set when "
+            "subject is quiz_solved or quiz_unsolved, otherwise null"
+        ),
+    )
 
 
 def _fallback() -> SubjectClassification:
@@ -114,7 +127,21 @@ def _normalize(result: Optional[SubjectClassification]) -> SubjectClassification
     suggested = [s.strip() for s in (result.suggested_types or []) if s and s.strip()][:4]
     if subject != SUBJECT_OTHER:
         suggested = []
-    return SubjectClassification(subject=subject, suggested_types=suggested)
+
+    # 🆕 question_count منطقي فقط لاختبار جاهز (محلول/غير محلول) - لأي مادة أخرى يبقى null
+    # حتى لو أرجع النموذج قيمة عن طريق الخطأ. القيمة المُرجَعة تُقيَّد ضمن نفس مجال العدد
+    # المسموح للتوليد (VALID_QUESTIONS_RANGE) لتفادي رقم شاذ (صفر/سالب/ضخم جداً) يصل لاحقاً
+    # لحساب التكلفة أو موجّه التوليد بدون أي تحقق آخر بمنتصف الطريق.
+    question_count: Optional[int] = None
+    if subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        try:
+            raw_count = int(result.question_count) if result.question_count else None
+        except (TypeError, ValueError):
+            raw_count = None
+        if raw_count is not None:
+            question_count = max(MIN_QUESTIONS_TO_GENERATE, min(raw_count, MAX_QUESTIONS_TO_GENERATE))
+
+    return SubjectClassification(subject=subject, suggested_types=suggested, question_count=question_count)
 
 
 def _read_bytes_sync(path: str) -> bytes:
