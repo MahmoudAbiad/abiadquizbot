@@ -419,7 +419,14 @@ async def update_quiz_question(
         quiz_data = res.data[0].get("quiz_data") or []
         if not 0 <= question_index < len(quiz_data):
             return False
-        quiz_data[question_index] = question
+        normalized_question = dict(question)
+        for stale_key in ("image_url", "rendered_image_url", "cached_image_url"):
+            normalized_question.pop(stale_key, None)
+        if "table" in normalized_question and not normalized_question.get("table"):
+            normalized_question.pop("table", None)
+        if "matrices" in normalized_question and normalized_question.get("matrices") is None:
+            normalized_question["matrices"] = []
+        quiz_data[question_index] = normalized_question
         await supabase.table("quizzes").update({"quiz_data": quiz_data}).eq("id", quiz_id).execute()
         return True
     except Exception as e:
