@@ -297,6 +297,17 @@ async def _execute_cascade(
                     return result
                 except Exception as exc:
                     last_exc = exc
+                    # 🩹 إصلاح خلل حقيقي: FileNotFoundError خطأ محلي (ملف حُذف من القرص من
+                    # جهتنا) لا علاقة له إطلاقاً بحالة مفتاح/موديل Gemini الفعلية. معاملته
+                    # كفشل عادي كانت تحظر كل زوج (مفتاح، موديل) لدقيقة كاملة (نفس منطق أي
+                    # خطأ "آخر غير متوقع" بـ _mark_model_key_failure) رغم أنه سيتكرر حتماً
+                    # على كل الأزواج التالية بما إن الملف نفسه مفقود لا محالة - هذا كان
+                    # يُفشّل أي طلب آخر (حتى لطالب مختلف كلياً) خلال تلك الدقيقة بلا أي
+                    # محاولة فعلية ("no available (key, model) pairs" باللوغز). نوقف
+                    # الـ cascade فوراً هنا بدل حظر أي زوج أو تجربة باقي المفاتيح/الموديلات.
+                    if isinstance(exc, FileNotFoundError):
+                        log_error(logger, f"Local file missing during Gemini upload attempt (not a key/model issue, aborting cascade without penalizing keys): {exc}")
+                        return None
                     if _is_overload_error(exc) and attempt < OVERLOAD_RETRY_ATTEMPTS:
                         delay = OVERLOAD_RETRY_BASE_DELAY * (attempt + 1)
                         log_warning(

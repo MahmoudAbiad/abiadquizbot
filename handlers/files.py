@@ -853,8 +853,23 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
     2) الخصم الفعلي وتنفيذ التوليد (كان handle_confirm_quiz_generation سابقاً)
     كل ذلك بضغطة واحدة أخيرة على نفس الشاشة التي عرضت السعر مسبقاً - يطابق الخطة
     الأصلية: "خيارات مسعّرة مسبقاً ... وزر (ابدأ التوليد) بنهاية القائمة".
+
+    🩹 إصلاح خلل حقيقي (سبب مباشر لخطأ "is not a valid file path" عبر كل المفاتيح/
+    الموديلات دفعة واحدة باللوغز): ضغطة مزدوجة سريعة على هذا الزر (شائعة على الموبايل،
+    خصوصاً إن الرسالة ما تختفي فوراً) كانت تُشغّل هذا المعالج مرتين بالتوازي لنفس الطالب
+    على نفس ملفات state.file_paths. أول تنفيذ ينتهي (نجاحاً أو فشلاً) كان يحذف الملفات
+    عبر finally بالأسفل، بينما التنفيذ الثاني لسا يرفعها فعلياً لـ Gemini بمنتصف الـ
+    cascade - يفشل فوراً بخطأ "is not a valid file path" عبر كل زوج (مفتاح، موديل).
+    processing_users/processing_users_lock (معرّفين مسبقاً بأعلى الملف) كانا مُعدّين
+    لمنع بالضبط هذا التداخل لكن لم يُستخدما فعلياً بأي معالج - القفل هون يفعّلهما.
     """
     await call.answer()
+    user_id = call.from_user.id
+    async with processing_users_lock:
+        if user_id in processing_users:
+            await call.message.answer("⏳ طلبك قيد المعالجة بالفعل، الرجاء الانتظار حتى ينتهي قبل الضغط مجدداً.")
+            return
+        processing_users.add(user_id)
     try:
         data = await state.get_data()
         count = int(data.get("selected_question_count") or 0)
@@ -948,6 +963,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         await state.set_state(None)
         await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً.")
     finally:
+        processing_users.discard(user_id)
         for path in (await state.get_data()).get("file_paths", []):
             safe_file_cleanup(path)
 
