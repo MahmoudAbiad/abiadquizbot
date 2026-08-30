@@ -163,10 +163,23 @@ def get_quiz_exit_confirmation_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+# 🆕 زر تراجع موحّد لكل شاشات تعديل سؤال أثناء حل الكويز - يعيد المستخدم لحالة
+# answering_quiz ويتابع الاختبار بشكل طبيعي بدل تجمّد الحالة لو رد بالنقطة بالخطأ
+# أو غيّر رأيه ولا يريد التعديل فعلياً (راجع cancel_question_edit في quiz_runner.py).
+BTN_CANCEL_QUESTION_EDIT = "🔙 تراجع ومتابعة الاختبار"
+
+def get_cancel_edit_keyboard() -> types.InlineKeyboardMarkup:
+    """كيبورد تراجع مستقل - يُستخدم برسائل انتظار النص الحر (نص سؤال/إجابة معدّلة)
+    التي لم يكن لها أي زر سابقاً."""
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=BTN_CANCEL_QUESTION_EDIT, callback_data="cancel_question_edit")],
+    ])
+
 def get_question_edit_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="✏️ تعديل نص السؤال", callback_data="edit_question_text")],
         [types.InlineKeyboardButton(text="📝 تعديل أحد الإجابات", callback_data="edit_question_answer")],
+        [types.InlineKeyboardButton(text=BTN_CANCEL_QUESTION_EDIT, callback_data="cancel_question_edit")],
     ])
 
 def get_answer_edit_keyboard(options: list) -> types.InlineKeyboardMarkup:
@@ -174,14 +187,17 @@ def get_answer_edit_keyboard(options: list) -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text=f"{index + 1}. {str(option)[:45]}", callback_data=f"edit_answer_{index}")]
         for index, option in enumerate(options)
     ]
+    rows.append([types.InlineKeyboardButton(text=BTN_CANCEL_QUESTION_EDIT, callback_data="cancel_question_edit")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 def get_math_question_edit_keyboard(url: str) -> types.InlineKeyboardMarkup:
     """🆕 زر WebApp يفتح محرر أسئلة الرياضيات الكامل (webapp/question_edit.html) -
-    نص + إجابات + جدول + مصفوفات بمعاينة LaTeX حية، بدل التعديل النصي المجزّأ."""
-    return types.InlineKeyboardMarkup(inline_keyboard=[[
-        types.InlineKeyboardButton(text=BTN_OPEN_QUESTION_EDIT_PAGE, web_app=types.WebAppInfo(url=url)),
-    ]])
+    نص + إجابات + جدول + مصفوفات بمعاينة LaTeX حية، بدل التعديل النصي المجزّأ.
+    + زر تراجع بجانبه لمن رد بالنقطة بالخطأ ولا يريد فتح المحرر أصلاً."""
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=BTN_OPEN_QUESTION_EDIT_PAGE, web_app=types.WebAppInfo(url=url))],
+        [types.InlineKeyboardButton(text=BTN_CANCEL_QUESTION_EDIT, callback_data="cancel_question_edit")],
+    ])
 
 def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineKeyboardMarkup:
     """نسخة احتياطية بسيطة (بدون أسعار) - تُستخدم فقط كـ reply_markup لرسائل الخطأ
