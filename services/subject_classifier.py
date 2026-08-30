@@ -109,6 +109,19 @@ class SubjectClassification(BaseModel):
             "subject is quiz_solved or quiz_unsolved, otherwise null"
         ),
     )
+    # 🆕 المادة العلمية الفعلية للمحتوى، بمعزل عن كونه اختباراً جاهزاً أم لا - تُملأ فقط
+    # عندما subject يساوي quiz_solved أو quiz_unsolved (عندها subject نفسه يصف "شكل"
+    # المحتوى فقط لا مادته العلمية - راجع SYSTEM_PROMPT_CLASSIFY_SUBJECT). تُستخدم لاحقاً
+    # (services/quiz_service.py) لتفعيل نمط الكويز المصوّر LaTeX أو موجّه اللغة الصحيح حتى
+    # للاختبارات الجاهزة، بدل معاملتها جميعاً كمادة "عامة" دائماً بغض النظر عن مضمونها
+    # الفعلي. null لأي subject آخر (math/english/french/other تحمل مادتها أصلاً بقيمة subject نفسها).
+    content_subject: Optional[Literal["math", "english", "french", "other"]] = Field(
+        default=None,
+        description=(
+            "the actual academic subject of the content (math/english/french/other), filled "
+            "only when subject is quiz_solved or quiz_unsolved, otherwise null"
+        ),
+    )
 
 
 def _fallback() -> SubjectClassification:
@@ -141,7 +154,20 @@ def _normalize(result: Optional[SubjectClassification]) -> SubjectClassification
         if raw_count is not None:
             question_count = max(MIN_QUESTIONS_TO_GENERATE, min(raw_count, MAX_QUESTIONS_TO_GENERATE))
 
-    return SubjectClassification(subject=subject, suggested_types=suggested, question_count=question_count)
+    # 🆕 content_subject منطقي فقط لاختبار جاهز (محلول/غير محلول) - لأي subject آخر يبقى
+    # null دائماً (مادته العلمية محمولة أصلاً بقيمة subject نفسها). قيمة غير متوقعة راجعة
+    # من النموذج تُعامَل كـ "other" أماناً (نفس منطق subject أعلاه) بدل تعطيل الفحص بالكامل.
+    content_subject: Optional[str] = None
+    if subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        raw_content_subject = (result.content_subject or "").strip().lower() if result.content_subject else ""
+        if raw_content_subject in (SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH, SUBJECT_OTHER):
+            content_subject = raw_content_subject
+        else:
+            content_subject = SUBJECT_OTHER
+
+    return SubjectClassification(
+        subject=subject, suggested_types=suggested, question_count=question_count, content_subject=content_subject,
+    )
 
 
 def _read_bytes_sync(path: str) -> bytes:

@@ -316,6 +316,38 @@ async def _show_quiz_options_screen(reply_target: types.Message, state: FSMConte
         await reply_target.answer(MSG_QUIZ_TYPE_PROMPT, parse_mode="HTML", reply_markup=keyboard)
 
 
+async def _proceed_to_quiz_solved_screen(reply_target: types.Message, state: FSMContext, edit: bool = True) -> None:
+    """
+    🆕 اختبار محلول: يُخيَّر الطالب بين اعتماد الإجابات المدوّنة بالمستند كما هي، أو تجاهلها
+    وحل الاختبار بالذكاء الاصطناعي بدلاً منها (راجع handle_quiz_extract_choice بالأسفل
+    لمتابعة التدفق بعد اختياره). مستخرجة كدالة مستقلة لأنها تُستدعى من نقطتين: مباشرة من
+    _ask_question_count (اختبار غير لغوي)، أو من _apply_translation_choice بعد اختيار
+    الطالب لاختبار محلول بمادة إنجليزي/فرنسي - english_mode المختار يبقى محفوظاً بالحالة
+    من نقطة الاستدعاء الثانية ولا يُلمس هنا إطلاقاً.
+    """
+    await state.update_data(quiz_detection_notice=None)
+    await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
+    keyboard = get_quiz_extraction_choice_keyboard()
+    if edit:
+        await reply_target.edit_text(MSG_QUIZ_SOLVED_DETECTED, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await reply_target.answer(MSG_QUIZ_SOLVED_DETECTED, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def _proceed_to_quiz_unsolved_screen(reply_target: types.Message, state: FSMContext, edit: bool = True) -> None:
+    """
+    🆕 اختبار غير محلول: لا تخيير إطلاقاً (لا توجد إجابات أصلاً لاعتمادها) - ينتقل الطالب
+    مباشرة لشاشة تأكيد خصم النقاط (شاشة عدد الأسئلة)، مع حفظ رسالة التنويه بأن الحل سيكون
+    بالذكاء الاصطناعي لتُدمج هناك بنص العدد المرصود وتكلفته. مستخرجة كدالة مستقلة لنفس سبب
+    _proceed_to_quiz_solved_screen أعلاه (راجعها).
+    """
+    await state.update_data(
+        quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE,
+        quiz_detection_notice=MSG_QUIZ_UNSOLVED_DETECTED,
+    )
+    await _show_question_count_screen(reply_target, state, edit=edit)
+
+
 async def _ask_question_count(reply_target: types.Message, state: FSMContext, count_prompt_text: str, edit: bool = False) -> None:
     """
     🆕 نقطة موحّدة تبدأ سلسلة الشاشات التالية للاستقبال (استقبال وسائط جديدة، استقبال نص
@@ -376,6 +408,11 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     # يبقى صالحاً لو ضغط الطالب "متابعة" مباشرة بدون أي تخصيص).
     await state.update_data(
         subject_type=classification.subject,
+        # 🆕 المادة العلمية الفعلية للمحتوى عندما يكون اختباراً جاهزاً (محلول/غير محلول) -
+        # None لأي subject آخر. تُقرأ لاحقاً بـ services/quiz_service.py لتفعيل نمط الكويز
+        # المصوّر LaTeX أو موجّه اللغة الصحيح حتى للاختبارات الجاهزة (راجع التصنيف الموحّد
+        # بـ services/subject_classifier.py لتفاصيل الحقل نفسه).
+        content_subject_type=classification.content_subject,
         suggested_question_types=classification.suggested_types,
         question_type=QUESTION_TYPE_GENERAL,
         custom_question_type_text=None,
@@ -383,8 +420,8 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     )
 
     # 🆕 اختبار جاهز (محلول/غير محلول): لهما أولوية تدفق مستقلة عن باقي المواد - لا شاشة
-    # ترجمة ولا شاشة نوع/صعوبة أسئلة (لا معنى لهما هنا: المهمة استخراج أسئلة موجودة فعلياً
-    # بالمستند وليست توليد أسئلة جديدة بنوع/صعوبة مختارين). راجع دستور الميزة بالأسفل.
+    # نوع/صعوبة أسئلة (لا معنى لها هنا: المهمة استخراج أسئلة موجودة فعلياً بالمستند وليست
+    # توليد أسئلة جديدة بنوع/صعوبة مختارين). راجع دستور الميزة بالأسفل.
     if classification.subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
         # 🆕 نُخزّن العدد التقريبي المرصود آلياً (classification.question_count) بالحالة
         # فور معرفته، بغض النظر عن مسار الشاشات اللاحق (تخيير محلول/انتقال مباشر لغير
@@ -394,27 +431,29 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
         detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
         await state.update_data(detected_question_count=detected_count)
 
-    if classification.subject == SUBJECT_QUIZ_SOLVED:
-        # 🆕 اختبار محلول: يُخيَّر الطالب بين اعتماد الإجابات المدوّنة بالمستند كما هي، أو
-        # تجاهلها وحل الاختبار بالذكاء الاصطناعي بدلاً منها (راجع handle_quiz_extract_choice
-        # بالأسفل لمتابعة التدفق بعد اختياره).
-        await state.update_data(english_mode=None, quiz_detection_notice=None)
-        await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
-        await status_target.edit_text(
-            MSG_QUIZ_SOLVED_DETECTED, parse_mode="HTML", reply_markup=get_quiz_extraction_choice_keyboard()
-        )
-        return
+        # 🆕 اختبار جاهز بمادة إنجليزي/فرنسي (content_subject - راجع services/subject_classifier.py):
+        # نعرض شاشة اختيار "مترجمة/بدون ترجمة" أولاً (نفس شاشة المواد العادية بالأسفل)
+        # قبل الانتقال لمسار الاختبار الجاهز - القرار يُخزَّن بـ english_mode ويُقرأ لاحقاً
+        # بـ services/quiz_service.py (effective_subject/content_language). بعد اختيار
+        # الطالب، _apply_translation_choice يكمل تلقائياً لمسار الاختبار الجاهز الصحيح
+        # (محلول/غير محلول) بدل شاشة نوع الأسئلة العادية.
+        if classification.content_subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
+            await state.update_data(quiz_detection_notice=None)
+            await state.set_state(QuizState.waiting_for_translation_choice)
+            detected_msg = (
+                MSG_ENGLISH_CONTENT_DETECTED if classification.content_subject == SUBJECT_ENGLISH
+                else MSG_FRENCH_CONTENT_DETECTED
+            )
+            translation_keyboard = get_translation_choice_keyboard(classification.content_subject)
+            await status_target.edit_text(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
+            return
 
-    if classification.subject == SUBJECT_QUIZ_UNSOLVED:
-        # 🆕 اختبار غير محلول: لا تخيير إطلاقاً (لا توجد إجابات أصلاً لاعتمادها) - ينتقل
-        # الطالب مباشرة لشاشة تأكيد خصم النقاط (شاشة عدد الأسئلة)، مع حفظ رسالة التنويه
-        # بأن الحل سيكون بالذكاء الاصطناعي لتُدمج هناك بنص العدد المرصود وتكلفته.
-        await state.update_data(
-            english_mode=None,
-            quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE,
-            quiz_detection_notice=MSG_QUIZ_UNSOLVED_DETECTED,
-        )
-        await _show_question_count_screen(status_target, state, edit=True)
+        # مادة أخرى غير لغوية (رياضيات/عام) - لا شاشة ترجمة، ننتقل مباشرة لمسار الاختبار الجاهز.
+        await state.update_data(english_mode=None)
+        if classification.subject == SUBJECT_QUIZ_SOLVED:
+            await _proceed_to_quiz_solved_screen(status_target, state, edit=True)
+        else:
+            await _proceed_to_quiz_unsolved_screen(status_target, state, edit=True)
         return
 
     # 🆕 الإنجليزي والفرنسي يعاملان بنفس التدفق بالضبط (شاشة اختيار "مترجمة/بدون ترجمة")
@@ -667,10 +706,24 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
 # ==================== 🆕 معالجات اختيار "مترجمة/بدون ترجمة" للمحتوى الإنجليزي ====================
 
 async def _apply_translation_choice(reply_target: types.Message, state: FSMContext, english_mode: str, edit: bool) -> None:
-    """يحفظ اختيار الطالب (مترجمة/بدون ترجمة) بالحالة، ثم ينتقل لشاشة نوع/صعوبة الأسئلة
-    (قوائم "قواعد/قراءة/اختبار عام" الخاصة بمادة الإنجليزي - راجع QUESTION_TYPE_OPTIONS)."""
+    """
+    يحفظ اختيار الطالب (مترجمة/بدون ترجمة) بالحالة، ثم يكمل التدفق الصحيح حسب subject_type:
+    - مادة عادية (إنجليزي/فرنسي): شاشة نوع/صعوبة الأسئلة كالسابق (قوائم "قواعد/قراءة/اختبار
+      عام" الخاصة بمادة الإنجليزي - راجع QUESTION_TYPE_OPTIONS).
+    - 🆕 اختبار جاهز (محلول/غير محلول) بمادة إنجليزي/فرنسي (شاشة الترجمة هذه عُرضت له من
+      _ask_question_count قبل مسار الاختبار الجاهز مباشرة): يكمل لمسار الاختبار الجاهز
+      الصحيح (تخيير طريقة الاستخراج للمحلول، أو مباشرة شاشة العدد لغير المحلول) بدل شاشة
+      نوع الأسئلة العادية التي لا معنى لها لاختبار جاهز أصلاً.
+    """
     await state.update_data(english_mode=english_mode)
-    await _show_quiz_options_screen(reply_target, state, edit=edit)
+    data = await state.get_data()
+    subject_type = data.get("subject_type")
+    if subject_type == SUBJECT_QUIZ_SOLVED:
+        await _proceed_to_quiz_solved_screen(reply_target, state, edit=edit)
+    elif subject_type == SUBJECT_QUIZ_UNSOLVED:
+        await _proceed_to_quiz_unsolved_screen(reply_target, state, edit=edit)
+    else:
+        await _show_quiz_options_screen(reply_target, state, edit=edit)
 
 @router.callback_query(QuizState.waiting_for_translation_choice, F.data == "translate_choice_yes")
 async def handle_translate_choice_yes(call: types.CallbackQuery, state: FSMContext) -> None:
@@ -682,7 +735,7 @@ async def handle_translate_choice_yes(call: types.CallbackQuery, state: FSMConte
         data = await state.get_data()
         await call.message.answer(
             "❌ تعذر تنفيذ الاختيار، حاول مجدداً.",
-            reply_markup=get_translation_choice_keyboard(data.get("subject_type", SUBJECT_ENGLISH)),
+            reply_markup=get_translation_choice_keyboard(data.get("content_subject_type") or data.get("subject_type", SUBJECT_ENGLISH)),
         )
     finally:
         await call.answer()
@@ -697,7 +750,7 @@ async def handle_translate_choice_no(call: types.CallbackQuery, state: FSMContex
         data = await state.get_data()
         await call.message.answer(
             "❌ تعذر تنفيذ الاختيار، حاول مجدداً.",
-            reply_markup=get_translation_choice_keyboard(data.get("subject_type", SUBJECT_ENGLISH)),
+            reply_markup=get_translation_choice_keyboard(data.get("content_subject_type") or data.get("subject_type", SUBJECT_ENGLISH)),
         )
     finally:
         await call.answer()

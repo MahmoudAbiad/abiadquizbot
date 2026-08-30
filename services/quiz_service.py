@@ -237,18 +237,45 @@ async def execute_quiz_generation_workflow(
         #     المحتوى من جديد هنا (كما كان math_detector يفعل سابقاً على مساره الخاص)،
         #     نقرأ النتيجة الجاهزة مباشرة. فشل آمن: تخلّف subject_type يُعامل كـ "other".
         subject_type = data.get("subject_type", SUBJECT_OTHER)
-        is_math_mode = subject_type == SUBJECT_MATH
+
+        # 🆕 المادة العلمية الفعلية للمحتوى (رياضيات/إنجليزي/فرنسي/عام) بمعزل عن "شكل"
+        # المحتوى (اختبار جاهز أم لا). لاختبار جاهز (quiz_solved/quiz_unsolved) كان
+        # subject_type وحده لا يحمل أي معلومة عن مادته العلمية (كان يُعامَل دائماً كمادة
+        # "عامة" بلا LaTeX ولا خيار ترجمة، حتى لو كان اختباراً رياضياً أو بلغة أجنبية
+        # فعلياً) - content_subject_type (services/subject_classifier.py، مصنَّف بنفس
+        # استدعاء التصنيف الموحّد الأولي، بلا أي فحص إضافي) يسد هذه الفجوة. effective_subject
+        # هو المادة التي تُبنى عليها فعلياً قرارات المعالجة أدناه (LaTeX/ترجمة): مادة الاختبار
+        # الجاهز الفعلية لو توفرت، وإلا subject_type نفسه كالسابق تماماً (لا تغيير لأي مادة
+        # عادية أخرى).
+        content_subject_type = data.get("content_subject_type")
+        if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and content_subject_type:
+            effective_subject = content_subject_type
+        else:
+            effective_subject = subject_type
+        is_math_mode = effective_subject == SUBJECT_MATH
 
         # 2.6 نمط الترجمة (اختيار الطالب "مترجمة/بدون ترجمة" عند اكتشاف محتوى إنجليزي فور
         #     الاستقبال في handlers/files.py، محفوظ مسبقاً بحالة الـ FSM). يُتجاهل إذا كان
         #     المحتوى رياضياً (is_math_mode) لأن نمط الكويز المصوّر LaTeX له موجّه خاص به
         #     منفصل تماماً ولا يدعم الترجمة المزدوجة داخل نفس الحقل.
-        english_mode = None if is_math_mode else data.get("english_mode")
+        # 🆕 اختبار جاهز بمادة إنجليزي/فرنسي (effective_subject من content_subject_type أعلاه):
+        #     لا شاشة تخيير "مترجمة/بدون ترجمة" أصلاً بهذا المسار (راجع handlers/files.py -
+        #     يذهب مباشرة لتخيير طريقة الاستخراج بدلها)، فنعتمد "plain" افتراضياً (نقل
+        #     الأسئلة بلغتها الأصلية دون ترجمة إجبارية) بدل الموجّه العام الذي لا يعرف
+        #     أصلاً أنه إنجليزي/فرنسي.
+        if is_math_mode:
+            english_mode = None
+        elif effective_subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH) and subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+            english_mode = data.get("english_mode") or "plain"
+        else:
+            english_mode = data.get("english_mode")
 
         # 2.65 🆕 لغة المحتوى المكتشفة (إنجليزي/فرنسي) - تُستخدم مع english_mode أعلاه
         #      باختيار موجّه التوليد الصحيح (services/gemini_helper.py). None لأي مادة
-        #      أخرى (رياضيات/عام) لأن نمط الترجمة أصلاً لا يُعرض لها.
-        content_language = subject_type if subject_type in (SUBJECT_ENGLISH, SUBJECT_FRENCH) else None
+        #      أخرى (رياضيات/عام) لأن نمط الترجمة أصلاً لا يُعرض لها. مبنية على
+        #      effective_subject (لا subject_type مباشرة) ليشمل اختبار جاهز بمادة
+        #      إنجليزي/فرنسي أيضاً (راجع التعليق أعلى is_math_mode).
+        content_language = effective_subject if effective_subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH) else None
 
         # 2.7 🆕 نوع الأسئلة والصعوبة المختاران من الطالب عبر شاشة الخيارات
         #     (handlers/quiz_options.py). قيمة question_type قد تكون: قيمة ثابتة من
