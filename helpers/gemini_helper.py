@@ -289,7 +289,12 @@ async def _execute_cascade(
             client = _GEMINI_CLIENTS[key_index]
             for attempt in range(OVERLOAD_RETRY_ATTEMPTS + 1):
                 try:
-                    return await attempt_fn(client, key_index, model)
+                    result = await attempt_fn(client, key_index, model)
+                    # 🆕 سطر تأكيد وحيد عند النجاح - يوضّح بالـ logs مباشرة (بدون الرجوع
+                    # لقاعدة البيانات) إن السلسلة الديناميكية (ai_model_slots) هي فعلاً
+                    # اللي حُكّمت هون: أي موديل نجح، بأي ترتيب، وبأي مفتاح.
+                    log_info(logger, f"✅ Cascade success: provider=gemini model={model} key_index={key_index}")
+                    return result
                 except Exception as exc:
                     last_exc = exc
                     if _is_overload_error(exc) and attempt < OVERLOAD_RETRY_ATTEMPTS:
@@ -573,6 +578,7 @@ async def _generate_single_attempt(
             raise ValueError("Gemini returned no structured questions")
         questions = [question.model_dump() for question in response.parsed.questions]
         token_count = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0
+        log_info(logger, f"✅ Cascade success (super pdf/images): provider=gemini model={model} key_index={key_index}")
         return questions, int(token_count)
     except Exception as exc:
         _mark_model_key_failure(key_index, model, exc)
@@ -732,6 +738,7 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
         # escape شرعي في JSON قبل التحليل، بدل تركه يتلف البيانات أو يُسقط الاستجابة كلها.
         raw_content = _JSON_BACKSLASH_REPAIR_RE.sub(r"\\\\", raw_content)
         parsed = QuizResponse(**json.loads(raw_content))
+        log_info(logger, f"✅ Cascade success: provider=groq model={groq_model}")
         return [question.model_dump() for question in parsed.questions]
     except Exception as exc:
         log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
