@@ -198,7 +198,15 @@
   `cachefilter_type_`, `cachefilter_diff_`, `cache_action_no`, `use_multi_`,
   `cancel_upload_request`, `publish_score_`, `hide_score_`, `leaderboard_`,
   `admin_recent_errors` (exact match), `admin_referrals_`, `admin_ref_detail_`
-  (آخر ثلاثة من دمج تتبع الأخطاء/الإحالات — راجع `HISTORY_LOG.md` [2026-08-27]).
+  (آخر ثلاثة من دمج تتبع الأخطاء/الإحالات — راجع `HISTORY_LOG.md` [2026-08-27]),
+  `cancel_question_edit` (exact match، زر تراجع تعديل سؤال أثناء الكويز — راجع
+  `HISTORY_LOG.md` [2026-08-30]).
+- **⚠️ ملاحظة على فحص التصادم أعلاه:** الـ regex الحالي (`[^)]*F\.data`) لا يلتقط
+  ديكوريتورات فيها `StateFilter(...)` أو أي استدعاء آخر بأقواس متداخلة *قبل* `F.data`
+  ضمن نفس `@router.callback_query(...)` (القوس الأول يقفل الـ character class مبكراً)
+  - مثال حقيقي: `@router.callback_query(StateFilter(*QUIZ_EDIT_STATES), F.data == "cancel_question_edit")`
+  لا يظهر أصلاً بنتائج الفحص. تحقّق يدوياً بـ `grep` مباشر لأي `callback_data` جديد
+  بدل الاعتماد على السكربت وحده لو الديكوريتور بهالشكل.
 - **قبل تسجيل أي معالج callback جديد:** شغّل هالفحص للتأكد من عدم وجود تصادم بادئات
   (استبدل المسار حسب الحاجة):
   ```python

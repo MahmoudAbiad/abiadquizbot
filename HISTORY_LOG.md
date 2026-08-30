@@ -408,3 +408,39 @@
 
 **⚠️ لم يُختبر هذا الدمج فعلياً على بيئة تشغيل حقيقية بعد** (فقط `py_compile` + فحص
 نصي للتعارضات) — بنفس تحذير "حالة الاختبار الحالية" أعلى الملف.
+
+---
+
+## [2026-08-30] إصلاح: كويز متجمّد بعد الرد بنقطة "." بدون نية تعديل فعلي
+
+**المشكلة:** الرد بنقطة (`.`) على Poll السؤال الجاري (سواء عادي أو رياضيات مصوّرة)
+ينقل حالة FSM من `answering_quiz` إلى إحدى `QUIZ_EDIT_STATES`
+(`waiting_for_question_edit_choice` / `waiting_for_answer_edit_choice` /
+`waiting_for_question_edit_text` / `waiting_for_answer_edit_text`). أزرار التحكم
+الأساسية بالكويز (التالي/تلميح/إنهاء) مقيّدة حصراً بـ `ACTIVE_QUIZ_STATES`، فما إن
+يدخل الطالب مسار التعديل - بقصد أو بالخطأ - تتوقف كل هالأزرار عن الاستجابة تماماً
+بلا أي مخرج سوى إتمام تعديل فعلي (أو مغادرة/استئناف الكويز من قائمة أخرى). الـ Poll
+نفسه يبقى قابلاً للإجابة طوال الوقت (`handle_poll_answer` بدون `StateFilter`) لكن
+باقي التفاعل معطّل بالكامل.
+
+**الإصلاح (`keyboards.py`, `handlers/quiz_runner.py`):**
+- زر جديد "🔙 تراجع ومتابعة الاختبار" (`callback_data="cancel_question_edit"`) أُضيف
+  إلى:
+  - `get_question_edit_keyboard()` (شاشة اختيار نص السؤال/الإجابة).
+  - `get_answer_edit_keyboard()` (شاشة اختيار أي إجابة بالتحديد).
+  - `get_math_question_edit_keyboard()` (شاشة فتح محرر الرياضيات الكامل عبر WebApp).
+  - كيبورد مستقل جديد `get_cancel_edit_keyboard()` أُرفق أيضاً برسائل "أرسل النص
+    الجديد" (`waiting_for_question_edit_text` / `waiting_for_answer_edit_text`) التي
+    لم يكن فيها أي زر أصلاً.
+- هاندلر جديد `cancel_question_edit` (`StateFilter(*QUIZ_EDIT_STATES)`) يعيد الحالة
+  مباشرة إلى `answering_quiz` بدون أي تعديل فعلي على السؤال، ويزيل كيبورد رسالة
+  التعديل، ويؤكد للطالب أنه يقدر يكمل اختباره بشكل طبيعي.
+- **فحص التصادم:** `cancel_question_edit` (exact match) جديد كلياً، تحقّق يدوي بـ
+  `grep` (سكربت الفحص الآلي بـ `CURRENT_STATE.md` لا يلتقط هذا الديكوريتور تحديداً
+  بسبب أقواس `StateFilter(...)` المتداخلة - وثّقت هذا القصور بنفس الملف).
+- `python3 -m py_compile` على الملفين المعدَّلين نجح بدون أخطاء.
+
+**⚠️ لم يُختبر هذا الإصلاح فعلياً على بيئة تشغيل حقيقية بعد** (فقط `py_compile` +
+مراجعة يدوية للمنطق).
+
+**الملفات المعدّلة:** `keyboards.py`، `handlers/quiz_runner.py`، `CURRENT_STATE.md`

@@ -21,6 +21,7 @@ from keyboards import (
     get_question_edit_keyboard,
     get_answer_edit_keyboard,
     get_math_question_edit_keyboard,
+    get_cancel_edit_keyboard,
 )
 from logger import get_logger, log_error, log_info, log_warning
 from services.latex_text import latex_to_plain
@@ -358,6 +359,7 @@ async def request_question_text_edit(call: types.CallbackQuery, state: FSMContex
         "👇 النص الحالي (اضغط عليه لنسخه، ثم عدّل ما تريد وأرسله):\n"
         f"<code>{html.escape(current_text)}</code>",
         parse_mode="HTML",
+        reply_markup=get_cancel_edit_keyboard(),
     )
     await call.answer()
 
@@ -398,11 +400,37 @@ async def select_answer_to_edit(call: types.CallbackQuery, state: FSMContext):
             "👇 النص الحالي (اضغط عليه لنسخه، ثم عدّل ما تريد وأرسله):\n"
             f"<code>{html.escape(current_answer_text)}</code>",
             parse_mode="HTML",
+            reply_markup=get_cancel_edit_keyboard(),
         )
         await call.answer()
     except Exception as e:
         log_error(logger, f"Error selecting answer to edit: {e}", exception=e)
         await call.answer("❌ تعذر اختيار الإجابة للتعديل.", show_alert=True)
+
+
+@router.callback_query(StateFilter(*QUIZ_EDIT_STATES), F.data == "cancel_question_edit")
+async def cancel_question_edit(call: types.CallbackQuery, state: FSMContext) -> None:
+    """
+    🩹 إصلاح خلل حقيقي: قبل هذا الهاندلر، أي دخول لمسار تعديل سؤال (حتى لو بالخطأ -
+    مثلاً رد المستخدم بنقطة "." على سؤال رياضيات أو سؤال عادي بغرض آخر) كان بلا مخرج:
+    الحالة تنتقل لإحدى QUIZ_EDIT_STATES، وأزرار الكويز الأساسية (التالي/تلميح/إنهاء)
+    مقيّدة بـ ACTIVE_QUIZ_STATES فقط فتتوقف عن الاستجابة، فيبدو الكويز "متجمّداً" لحين
+    إتمام تعديل فعلي أو مغادرة المحادثة تماماً. هذا الزر يعيد الحالة لـ answering_quiz
+    مباشرة دون أي تعديل، فيتابع الطالب اختباره بشكل طبيعي (سؤال الـ Poll نفسه لم
+    يُمس ولا يزال قابلاً للإجابة عليه، وأزرار التحكم أسفله تعمل من جديد فوراً).
+    """
+    try:
+        await state.update_data(edit_question_index=None, edit_option_index=None)
+        await state.set_state(QuizState.answering_quiz)
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await call.message.answer("↩️ تم التراجع، يمكنك متابعة اختبارك بشكل طبيعي.")
+    except Exception as e:
+        log_error(logger, f"Error in cancel_question_edit: {e}", exception=e)
+    finally:
+        await call.answer()
 
 
 async def apply_question_edit_and_resume(
