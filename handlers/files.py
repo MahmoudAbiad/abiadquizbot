@@ -111,9 +111,25 @@ async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> 
         applied_points = float(user_info.get("free_points") or 0)
         await message.answer(f"☀️ تم تجديد رصيدك اليومي إلى <b>{applied_points:.0f} نقطة مجانية</b>.", parse_mode="HTML")
 
-async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float) -> None:
+async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float, action: str = "unknown") -> None:
     balance = float(user_info.get("points") or 0)
     deficit = max(0.0, required - balance)
+
+    # 🆕 تتبع تحليلي: تسجيل كل مرة يُعترَض فيها إجراء الطالب بسبب رصيد غير كافٍ،
+    # مع توضيح نوع الإجراء المحجوب وعدد النقاط الفاصلة بالضبط (deficit) - يسمح لاحقاً
+    # بمعرفة كم طالب يوصل لهالحاجز فعلياً وبكم نقطة بالمتوسط، لتقييم التسعير/نقاط
+    # التجديد المجاني. نأخذ user_id من user_info["user_id"] وليس message.from_user -
+    # لأن message هون غالباً call.message (رسالة البوت نفسه بالأزرار) وليس رسالة
+    # الطالب. asyncio.create_task حتى ما يأخر رد الطالب أبداً (نفس نمط باقي أحداث
+    # log_usage_event بهالملف).
+    tracked_user_id = user_info.get("user_id")
+    if tracked_user_id:
+        asyncio.create_task(log_usage_event(tracked_user_id, "insufficient_balance_blocked", {
+            "action": action, "required_points": required, "current_balance": balance,
+            "deficit_points": deficit, "free_points": float(user_info.get("free_points") or 0),
+            "paid_points": float(user_info.get("paid_points") or 0),
+        }))
+
     daily_renewal_points = await get_setting("daily_renewal_points")
     contact = ADMIN_CONTACT.lstrip("@")
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]])
@@ -416,12 +432,17 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     await state.update_data(english_mode=None, quiz_extraction_mode=None)
     await _show_quiz_options_screen(status_target, state, edit=True)
 
-async def _render_cache_decision_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
+async def _render_cache_decision_screen(reply_target: types.Message, state: FSMContext, edit: bool = False, viewer_id: Optional[int] = None) -> None:
     """
     🆕 يعرض/يحدّث شاشة "قرار الكاش" (الكويزات المخزّنة + أزرار الفلترة) اعتماداً على
     available_quizzes وقيم الفلتر الحالية (cache_filter_type/cache_filter_difficulty)
     المخزّنة بحالة الـ FSM. تُستدعى مرة أولى من _finalize_media_processing (edit=False)،
     وبعدها من معالجات الفلترة أدناه مع كل ضغطة فلتر (edit=True، بنفس الرسالة).
+
+    🆕 viewer_id: معرّف الطالب الفعلي الحالي (وليس reply_target.from_user.id، لأنه بمسار
+    التعديل reply_target هي رسالة البوت نفسه لا الطالب) - يُمرَّر لإظهار زر حذف كل كويز
+    فقط للأدمن أو لمالكه الفعلي، مطابقةً لنفس نمط resolved_user_id بـ
+    _finalize_media_processing تحت.
     """
     data = await state.get_data()
     all_quizzes = data.get("available_quizzes", [])
@@ -445,6 +466,7 @@ async def _render_cache_decision_screen(reply_target: types.Message, state: FSMC
     keyboard = get_multiple_quizzes_keyboard(
         all_quizzes, filtered_quizzes, data.get("items_count", 1), bool(data.get("is_album")),
         show_generate_btn=show_generate_btn, filter_type=filter_type, filter_difficulty=filter_difficulty,
+        viewer_id=viewer_id,
     )
     msg_text = f"💡 <b>ملاحظة ذكية: تم العثور على ({len(all_quizzes)}) كويز جاهز مخزن لهذا الملف مسبقاً!</b>\n\n"
     if filter_type != "all" or filter_difficulty != "all":
@@ -463,7 +485,7 @@ async def handle_cache_filter_type(call: types.CallbackQuery, state: FSMContext)
     value = call.data.replace("cachefilter_type_", "", 1)
     await state.update_data(cache_filter_type=value)
     try:
-        await _render_cache_decision_screen(call.message, state, edit=True)
+        await _render_cache_decision_screen(call.message, state, edit=True, viewer_id=call.from_user.id)
     except Exception:
         pass  # "message is not modified" لو نفس الفلتر ضُغط مرتين متتاليتين - آمن التجاهل
     await call.answer()
@@ -475,7 +497,7 @@ async def handle_cache_filter_difficulty(call: types.CallbackQuery, state: FSMCo
     value = call.data.replace("cachefilter_diff_", "", 1)
     await state.update_data(cache_filter_difficulty=value)
     try:
-        await _render_cache_decision_screen(call.message, state, edit=True)
+        await _render_cache_decision_screen(call.message, state, edit=True, viewer_id=call.from_user.id)
     except Exception:
         pass
     await call.answer()
@@ -521,7 +543,7 @@ async def _finalize_media_processing(
                 cache_filter_type="all", cache_filter_difficulty="all",
             )
             await state.set_state(QuizState.waiting_for_cache_decision)
-            await _render_cache_decision_screen(message, state, edit=False)
+            await _render_cache_decision_screen(message, state, edit=False, viewer_id=resolved_user_id)
             return
 
         await state.update_data(**common_state)
@@ -742,12 +764,12 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
         )
 
         if float(user_info["points"]) < cost:
-            await _insufficient_balance(call.message, user_info, cost)
+            await _insufficient_balance(call.message, user_info, cost, action="cached_quiz_use")
             return
             
         remaining = await update_user_stats(call.from_user.id, cost, len(selected_quiz["quiz_data"]))
         if remaining is None:
-            await _insufficient_balance(call.message, await _current_user(call.message, call.from_user), cost)
+            await _insufficient_balance(call.message, await _current_user(call.message, call.from_user), cost, action="cached_quiz_use")
             return
             
         asyncio.create_task(log_usage_event(call.from_user.id, "cached_quiz_used", {
@@ -878,6 +900,21 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await call.message.answer(f"❌ {error}")
             return
 
+        # 🩹 إصلاح خلل حقيقي (السبب الفعلي لأخطاء "no such file"/"is not a valid file
+        # path" بلوغز الإنتاج): كان القفل على processing_file_quiz يُفعَّل متأخراً جداً -
+        # بعد فحص سقف التركيبة (get_file_quizzes)، حساب التكلفة، جلب/خصم الرصيد
+        # (_current_user وupdate_user_stats - نداءات شبكة فعلية لـ Supabase قد تاخد
+        # ثواني تحت الضغط)، حذف رسالة الشاشة، وإرسال رسالة "جاري المعالجة". طوال هالنافذة
+        # (رُصدت عملياً بعشرات الثواني باللوغز) كانت الحالة لسا waiting_for_count - عضو
+        # PENDING_REQUEST_STATES - فلو الطالب أرسل ملف جديد بهالأثناء، handle_media كان
+        # يفسّرها "استبدال طلب معلّق" ويحذف نفس ملفات state.file_paths يلي هالمعالج قرأها
+        # بأول سطر فوق (data محلية، ما بتنعاد قراءتها) وبينوي يرفعها لاحقاً لـ Gemini -
+        # فيفشل التوليد بالكامل بمجرد ما يوصلها. نقل القفل هون - فوراً بعد التحقق من صحة
+        # العدد وقبل أي await آخر - يسكّر النافذة الفعلية بالكامل بدل ما يسكّرها متأخراً
+        # بعد كل هالنداءات البطيئة. (راجع أيضاً استرجاع الحالة على مسارات الخروج المبكر
+        # تحت - وإلا الطالب بيعلق بحالة processing_file_quiz بدون أي توليد فعلي شغال).
+        await state.set_state(QuizState.processing_file_quiz)
+
         items = int(data.get("items_count") or 1)
         is_album = bool(data.get("is_album"))
         file_hash = data.get("file_hash")
@@ -907,7 +944,11 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         user_info = await _current_user(call.message, call.from_user)
 
         if float(user_info["points"]) < cost or await update_user_stats(call.from_user.id, cost, count) is None:
-            await _insufficient_balance(call.message, user_info, cost)
+            # 🩹 لسا ما بدأنا الخصم/التوليد فعلياً - نرجّع الحالة لـ waiting_for_count
+            # (بدل ما تضل عالقة بـ processing_file_quiz بلا أي توليد شغال فعلياً) حتى
+            # يقدر الطالب يلغي الطلب أو يستبدله بملف جديد عادي.
+            await state.set_state(QuizState.waiting_for_count)
+            await _insufficient_balance(call.message, user_info, cost, action="quiz_generation")
             return
 
         asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generation_requested", {
@@ -923,13 +964,8 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
 
         status_msg = await call.message.answer(MSG_PROCESSING)
 
-        # 🩹 إصلاح خلل حقيقي: كانت الحالة تضل waiting_for_count (وهي جوا PENDING_REQUEST_STATES)
-        # طوال مدة execute_quiz_generation_workflow (يلي ممكن تاخد دقايق طويلة لما Gemini يكون
-        # overloaded). فلو الطالب أرسل نفس الملف/صورة مرة ثانية بهالأثناء (توقعاً إنو الطلب الأول
-        # ضاع)، handle_media كان يفسّرها كـ"استبدال طلب معلّق" ويحذف ملفات الطلب الأول من الديسك
-        # وهي لسا قيد الرفع الفعلي لـ Gemini - يفشل التوليد بالكامل بخطأ "not a valid file path"
-        # عبر كل المفاتيح/الموديلات بالـ cascade. قفل الحالة هون يمنع هالتضارب.
-        await state.set_state(QuizState.processing_file_quiz)
+        # (ملاحظة: قفل processing_file_quiz صار يُفعَّل فوراً بأول الدالة فوق - راجع
+        # التعليق هناك - قبل أي await بطيء، وليس هون بعد الخصم والحذف والإرسال).
 
         # 🩹 UX: Gemini بيصير أحياناً overloaded لدقائق طويلة (شفنا حالات وصلت ~20 دقيقة
         # باللوغز) وMSG_PROCESSING بيوعد بـ"ثوانٍ معدودة" فقط - هالفجوة كانت تدفع الطالب

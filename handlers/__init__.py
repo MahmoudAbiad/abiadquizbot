@@ -13,6 +13,7 @@ from handlers.sharing import router as sharing_router
 from handlers.leaderboard import router as leaderboard_router
 from handlers.export import export_router
 from handlers.audio import audio_router
+from handlers.quiz_delete import router as quiz_delete_router
 
 __all__ = [
     "start_router", 
@@ -24,5 +25,6 @@ __all__ = [
     "sharing_router",
     "leaderboard_router",
     "export_router",
-    "audio_router"
+    "audio_router",
+    "quiz_delete_router",
 ]

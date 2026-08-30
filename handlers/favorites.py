@@ -240,7 +240,11 @@ async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
         )
         
         # تمرير الـ section_id لزر الرجوع الذكي ليعود الطالب لنفس المجلد بدلاً من تشتيته
-        keyboard = get_favorite_details_keyboard(fid, section_id=section_id)
+        keyboard = get_favorite_details_keyboard(
+            fid, section_id=section_id,
+            quiz_id=favorite.get("quiz_id"), viewer_id=call.from_user.id,
+            creator_id=favorite.get("creator_id"),
+        )
         await call.message.edit_text(details_text, reply_markup=keyboard, parse_mode="HTML")
         
     except Exception as e:
