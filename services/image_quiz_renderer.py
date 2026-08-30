@@ -21,20 +21,57 @@ MODULE: Image Quiz Renderer (نمط الكويز المصوّر LaTeX)
    معه تلقائياً كوحدة LTR واحدة ضمن السطر العربي).
 ==============================================================================
 """
+import asyncio
 import io
 import os
 import re
+import threading
 from typing import Any, Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.font_manager as fm
-import matplotlib.pyplot as plt
+# 🩹 FIX (memory-leak): استبدلنا matplotlib.pyplot بالواجهة الكائنية المباشرة
+# (Figure + FigureCanvasAgg). render_question_image يُستدعى عبر asyncio.to_thread
+# من quiz_engine.py و export_service.py - أي أن طلاب مختلفين يمكن أن يرسموا صورًا
+# على خيوط OS منفصلة بنفس اللحظة. pyplot يحتفظ بسجل عام واحد غير آمن للخيوط
+# (matplotlib._pylab_helpers.Gcf) لكل الأشكال المفتوحة؛ تداخل نداءات plt.figure()/
+# plt.close() من خيوط متزامنة عليه قد يترك أشكالًا (مع كامل بيانات الـ Canvas الخام)
+# عالقة بالذاكرة رغم استدعاء plt.close(). الحل: Figure/FigureCanvasAgg كائنات محلية
+# بالكامل، لا ترتبط بأي سجل عام، وتُحرَّر تلقائيًا بمجرد خروج الدالة.
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.mathtext import MathTextParser
+# 🩹 FIX: كانت هذي الأشكال (Rectangle/Arc) تُستدعى عبر plt.Rectangle /
+# plt.matplotlib.patches.Arc (مجرد أسماء صفوف، لا علاقة لها بحالة pyplot العامة)
+# - نستوردها مباشرة الآن بعد إزالة الاعتماد على pyplot بالكامل.
+from matplotlib.patches import Rectangle, Arc
 
 from logger import get_logger, log_warning
 
 logger = get_logger(__name__)
+
+# 🩹 FIX: كان يُضبط بكل نداء عبر plt.rcParams["mathtext.fontset"] = "cm" داخل
+# render_question_image - قيمة ثابتة دائمًا بهذا المشروع، فنضبطها مرة واحدة هنا
+# عند تحميل الموديول بدل كتابة متكررة على قاموس rcParams العام (غير ضرورية،
+# وغير آمنة نظريًا لو نُفِّذت من خيوط متزامنة).
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+# 🩹 FIX (memory-leak): سقف تزامن صريح لعمليات الرسم. كل صورة تستهلك ذاكرة حقيقية
+# (canvas RGBA + قياسات mathtext) طوال مدة رسمها؛ بدون هذا السقف، عدد غير محدود
+# من الطلاب يفتحون سؤالًا رياضيًا بنفس اللحظة (أو عدة تصديرات كويز متزامنة) يعني
+# ذروة ذاكرة غير متوقعة. عدّل الرقم حسب نتائج اختبار الحمل الفعلي على حاوية 512MB.
+RENDER_SEMAPHORE = asyncio.Semaphore(3)
+
+# 🩹 FIX (correctness + memory-leak): اكتُشف بالاختبار الفعلي تحت تزامن حقيقي (threads
+# نظامية منفصلة، وليس asyncio فقط) أن _MATH_PARSER (المبني على pyparsing) يرمي
+# ParseException عشوائيًا أو يُنتج صورًا تالفة عند استدعائه من أكثر من thread بنفس
+# اللحظة - matplotlib mathtext غير آمن أصلاً للتزامن الحقيقي بين خيوط OS، بغض النظر
+# عن مشكلة pyplot/Gcf المذكورة أعلاه. RENDER_SEMAPHORE يحدّ عدد الرسومات المتزامنة
+# لـ 3 لأسباب الذاكرة، لكنه لا يمنع تزامنها فعليًا فيما بينها - لذلك نضيف قفلًا
+# صريحًا يُسلسل الدخول الفعلي لمحرك mathtext بالكامل (قياس + رسم)، مما يمنع كلا
+# الفشل الصامت (صور تالفة تُرسل للطلاب) والتراكم غير الآمن بذاكرة pyplot معًا.
+_RENDER_LOCK = threading.Lock()
 
 _BIDI_AVAILABLE = True
 try:
@@ -341,10 +378,10 @@ def _draw_table(ax, table_data: Dict[str, Any], x_left: float, y_top: float,
         for col_idx in range(ncols):
             cx = col_x_starts[col_idx]
             if bg:
-                ax.add_patch(plt.Rectangle((cx, y - row_h), col_w, row_h,
+                ax.add_patch(Rectangle((cx, y - row_h), col_w, row_h,
                                             facecolor=bg, edgecolor=TABLE_BORDER_COLOR, linewidth=0.8))
             else:
-                ax.add_patch(plt.Rectangle((cx, y - row_h), col_w, row_h,
+                ax.add_patch(Rectangle((cx, y - row_h), col_w, row_h,
                                             facecolor="none", edgecolor=TABLE_BORDER_COLOR, linewidth=0.8))
             lines = lines_per_cell[col_idx] if col_idx < len(lines_per_cell) else [""]
             cell_center_x = cx + col_w / 2
@@ -431,9 +468,9 @@ def _draw_bracket_pair(ax, x_left: float, x_right: float, y_top: float, y_bottom
         height = y_top - y_bottom
         # قوس دائري (نصف قطر أفقي صغير) يعطي شكل "(" و ")" مفتوح للداخل
         rx = MATRIX_BRACKET_CAP_PX
-        left_arc = plt.matplotlib.patches.Arc((x_left + rx, (y_top + y_bottom) / 2), 2 * rx, height,
+        left_arc = Arc((x_left + rx, (y_top + y_bottom) / 2), 2 * rx, height,
                                                angle=0, theta1=100, theta2=260, color=color, linewidth=lw)
-        right_arc = plt.matplotlib.patches.Arc((x_right - rx, (y_top + y_bottom) / 2), 2 * rx, height,
+        right_arc = Arc((x_right - rx, (y_top + y_bottom) / 2), 2 * rx, height,
                                                 angle=0, theta1=280, theta2=80, color=color, linewidth=lw)
         ax.add_patch(left_arc)
         ax.add_patch(right_arc)
@@ -506,13 +543,19 @@ def _draw_matrices(ax, matrices_data: List[Dict[str, Any]], x_left: float, y_top
 
 # ==================== الرسم الفعلي ====================
 def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
+    """غلاف رقيق يُسلسل كل استدعاء عبر _RENDER_LOCK (راجع تعليق _RENDER_LOCK أعلاه) -
+    ضروري لأن هذه الدالة تُستدعى من asyncio.to_thread على خيوط OS منفصلة فعليًا،
+    ومحرك mathtext الداخلي غير آمن للتزامن الحقيقي بينها."""
+    with _RENDER_LOCK:
+        return _render_question_image_impl(question, idx, total, is_ar)
+
+
+def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
     """
     يرسم صورة PNG واحدة تحوي نص السؤال (idx+1 من total) وكل الخيارات، مع دعم LaTeX
     للمعادلات المضمّنة بعلامتي $...$ ودعم عربي RTL كامل. يُستدعى دائماً عبر
     asyncio.to_thread من services/quiz_engine.py لأنه عملية رسم CPU-bound متزامنة.
     """
-    plt.rcParams["mathtext.fontset"] = "cm"
-
     question_text = str(question.get("question", "")).strip()
     options = [str(o).strip() for o in (question.get("options") or [])]
     letters = letters_for(is_ar, len(options))
@@ -588,7 +631,11 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     )
     height_px = max(height_px, 380)
 
-    fig = plt.figure(figsize=(FIG_WIDTH_PX / DPI, height_px / DPI), dpi=DPI)
+    # 🩹 FIX (memory-leak): Figure محلي بالكامل (بدل plt.figure()) - لا يُسجَّل بأي
+    # سجل عام، فهو آمن للاستدعاء من خيوط متزامنة عبر asyncio.to_thread، ويُحرَّر
+    # تلقائيًا بمجرد خروج الدالة دون الحاجة لإغلاق صريح.
+    fig = Figure(figsize=(FIG_WIDTH_PX / DPI, height_px / DPI), dpi=DPI)
+    canvas = FigureCanvasAgg(fig)
     fig.patch.set_facecolor("#ffffff")
     ax = fig.add_axes((0, 0, 1, 1))
     ax.axis("off")
@@ -596,7 +643,7 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
     ax.set_ylim(0, height_px)
 
     # شريط العنوان العلوي
-    ax.add_patch(plt.Rectangle((0, height_px - HEADER_HEIGHT_PX), FIG_WIDTH_PX, HEADER_HEIGHT_PX,
+    ax.add_patch(Rectangle((0, height_px - HEADER_HEIGHT_PX), FIG_WIDTH_PX, HEADER_HEIGHT_PX,
                                 facecolor="#4C6FFF", edgecolor="none"))
     header_text = f"السؤال {idx + 1} من {total}" if is_ar else f"Question {idx + 1} of {total}"
     header_text = _shape_line(header_text)
@@ -653,9 +700,26 @@ def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar:
         ax.set_ylim(bottom_y, height_px)
 
     buf = io.BytesIO()
-    try:
-        fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
-    finally:
-        plt.close(fig)
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
     buf.seek(0)
-    return buf.getvalue()
+    png_bytes = buf.getvalue()
+    # 🩹 FIX (memory-leak): لا حاجة لـ plt.close(fig) - fig/canvas/ax محليون
+    # بالكامل بلا أي مرجع خارجي (لا يوجد سجل عام يمسكهم كما في pyplot)، يُحرَّرون
+    # فور خروج الدالة (refcount=0). del صريح هنا يُسرّع تحرير الـ buffers الكبيرة
+    # (canvas RGBA) قبل أي عملية لاحقة على نفس الـ thread.
+    del fig, canvas, ax, buf
+    return png_bytes
+
+
+# 🆕 FIX (memory-leak): غلاف async يفرض RENDER_SEMAPHORE قبل تنفيذ عملية الرسم
+# الثقيلة (CPU-bound) على thread منفصل، ويعيد أي صفحات ذاكرة محرَّرة فعليًا لنظام
+# التشغيل بعدها مباشرة (glibc malloc لا يعيدها تلقائيًا في الغالب - راجع mem_utils.py).
+# استخدم هذه الدالة بدل استدعاء asyncio.to_thread(render_question_image, ...) مباشرة
+# من أي مكان بالمشروع (services/quiz_engine.py و services/export_service.py عبر
+# handlers/export.py).
+async def render_question_image_async(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
+    async with RENDER_SEMAPHORE:
+        result = await asyncio.to_thread(render_question_image, question, idx, total, is_ar)
+    from mem_utils import release_memory_to_os
+    release_memory_to_os()
+    return result

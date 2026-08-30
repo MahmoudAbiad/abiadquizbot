@@ -50,6 +50,16 @@ logger = get_logger(__name__)
 
 # ==================== Background Tasks ====================
 
+# 🩹 FIX (memory-leak): سقف تزامن صريح لمعالجة تحديثات Telegram. الـ webhook كان
+# يُطلق asyncio.create_task(process_update_safely(update)) بلا أي حد أقصى - أي
+# انفجار حركة (طلاب كثر يستخدمون البوت بنفس اللحظة، أو حتى إعادة إرسال من تيليجرام)
+# يُنتج عددًا غير محدود من الـ tasks المتزامنة، كل واحدة قد تستدعي رسم صور، توليد
+# PDF/Word، أو طلب Gemini - وكلها عمليات تستهلك ذاكرة فعلية أثناء التنفيذ. هذا
+# السقف يحوّل الذروة من "غير محدودة" إلى رقم صريح مضبوط حسب اختبار الحمل الفعلي.
+UPDATE_CONCURRENCY_LIMIT = 15
+_update_semaphore = asyncio.Semaphore(UPDATE_CONCURRENCY_LIMIT)
+
+
 async def process_update_safely(update: Update):
     """
     معالجة التحديث الخاص بـ Telegram في الخلفية مع التقاط الأخطاء
@@ -63,16 +73,17 @@ async def process_update_safely(update: Update):
     استبدل الاتصال الميت تلقائياً) كافية عملياً لأغلب حالات انقطاع Redis العابرة
     (راجع نفس الإصلاح بـ config.py::redis_client لتقليل تكرارها من الأساس).
     """
-    try:
-        await dp.feed_update(bot, update)
-    except (RedisConnectionError, RedisTimeoutError) as e:
-        logger.warning(f"Transient Redis connection error processing update, retrying once: {e}")
+    async with _update_semaphore:
         try:
             await dp.feed_update(bot, update)
-        except Exception as retry_exc:
-            logger.error(f"Error processing update after retry: {retry_exc}", exc_info=True)
-    except Exception as e:
-        logger.error(f"Error processing update in background task: {e}", exc_info=True)
+        except (RedisConnectionError, RedisTimeoutError) as e:
+            logger.warning(f"Transient Redis connection error processing update, retrying once: {e}")
+            try:
+                await dp.feed_update(bot, update)
+            except Exception as retry_exc:
+                logger.error(f"Error processing update after retry: {retry_exc}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error processing update in background task: {e}", exc_info=True)
 
 
 async def scheduled_analytics_batch_loop():
@@ -119,6 +130,12 @@ async def lifespan(app: FastAPI):
     """
     # [حدث الـ Startup]: يتم تنفيذه عند إقلاع السيرفر
     try:
+        # 🩹 FIX (memory-leak): uvicorn.run("webhook_server:app", ...) ينشئ حلقة
+        # أحداث خاصة به منفصلة عن main.py، لذا يجب تطبيق سقف ThreadPoolExecutor هنا
+        # أيضًا لنمط الـ webhook (راجع main.py::configure_thread_pool للتفاصيل).
+        from main import configure_thread_pool
+        configure_thread_pool()
+
         # تنظيف وجرف مجلد التحميلات بالكامل عند إقلاع السيرفر على Railway
         import shutil
         if os.path.exists("downloads"):

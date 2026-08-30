@@ -6,6 +6,7 @@ Supports both Webhook (Railway/Srv) and Polling modes.
 import sys
 import os
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 import logging
 import sentry_sdk
@@ -43,6 +44,16 @@ logging.getLogger("hpack").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = get_logger(__name__)
+
+# 🩹 FIX (memory-leak): الحجم الافتراضي لـ ThreadPoolExecutor المستخدم من
+# asyncio.to_thread هو min(32, cpu_count + 4) - رقم عالٍ جدًا لحاوية 512MB، خاصة
+# أن كل thread قد يُشغّل رسم matplotlib أو معالجة fitz بنفس اللحظة. نقلّصه لسقف
+# صريح أكثر أمانًا. (يُستدعى أيضًا من webhook_server.py::lifespan لنمط الـ webhook
+# لأن uvicorn.run ينشئ حلقة أحداث خاصة به منفصلة عن هذه الدالة).
+def configure_thread_pool(max_workers: int = 4) -> None:
+    loop = asyncio.get_event_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=max_workers))
+
 
 def main():
     # 0. 🐞 تتبع الأخطاء: يغطي كل أنواع الـ Update (رسائل/أزرار/إجابات استفتاء...) ويُسجَّل
@@ -85,6 +96,7 @@ def main():
         
         async def polling_main():
             try:
+                configure_thread_pool()
                 try:
                     await bot.delete_webhook(drop_pending_updates=True)
                 except Exception:

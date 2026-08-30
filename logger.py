@@ -7,6 +7,7 @@ import logging
 import os
 import sys  # 👈 إضافة sys لتحديد القنوات الصريحة
 from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 from typing import Optional
 
 # Create logs directory if it doesn't exist
@@ -19,7 +20,7 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Create log file name with date
-log_file = os.path.join(LOGS_DIR, f"bot_{datetime.now().strftime('%Y-%m-%d')}.log")
+log_file = os.path.join(LOGS_DIR, "bot.log")
 
 # 1. فلتر لمنع الرسائل ذات المستوى WARNING فما فوق من الذهاب لـ stdout
 class MaxLevelFilter(logging.Filter):
@@ -36,7 +37,12 @@ stderr_handler = logging.StreamHandler(sys.stderr)
 stderr_handler.setLevel(logging.WARNING)
 
 # 4. Handler للملف (يحفظ كل المستويات)
-file_handler = logging.FileHandler(log_file, encoding='utf-8')
+# 🩹 FIX: كان FileHandler عاديًا باسم ملف يحوي التاريخ - يفتح ملفًا جديدًا كل يوم
+# بدون حذف القديم أبدًا، فيتراكم على القرص إلى ما لا نهاية. TimedRotatingFileHandler
+# يدوّر تلقائيًا كل منتصف ليل ويحتفظ بآخر 7 نسخ فقط (backupCount=7) ويحذف الباقي.
+file_handler = TimedRotatingFileHandler(
+    log_file, when="midnight", backupCount=7, encoding="utf-8"
+)
 
 # Configure root logger with UTF-8 encoding
 logging.basicConfig(

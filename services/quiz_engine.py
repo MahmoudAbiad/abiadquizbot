@@ -8,7 +8,10 @@ from config import bot, redis_client
 from aiogram import types
 
 from logger import get_logger, log_warning
-from services.image_quiz_renderer import render_question_image, looks_arabic, letters_for
+# 🩹 FIX (memory-leak): render_question_image_async يفرض RENDER_SEMAPHORE (سقف
+# تزامن الرسم) بدل استدعاء asyncio.to_thread(render_question_image, ...) مباشرة -
+# راجع services/image_quiz_renderer.py للتفاصيل.
+from services.image_quiz_renderer import render_question_image_async, looks_arabic, letters_for
 from services.latex_text import latex_to_plain
 from supabase_helper import _is_valid_uuid, save_question_image_url, upload_quiz_question_image
 
@@ -60,7 +63,7 @@ async def _send_math_image_question(chat_id: int, user_id: int, q: Dict[str, Any
     image_url = q.get("image_url")
     image_bytes = None
     if not image_url:
-        image_bytes = await asyncio.to_thread(render_question_image, q, idx, total, is_ar)
+        image_bytes = await render_question_image_async(q, idx, total, is_ar)
         object_path = _question_image_object_path(quiz_id, idx, q)
         image_url = await upload_quiz_question_image(image_bytes, object_path)
         if image_url and quiz_id and _is_valid_uuid(quiz_id):
@@ -74,12 +77,12 @@ async def _send_math_image_question(chat_id: int, user_id: int, q: Dict[str, Any
         else:
             # فشل الرفع لسبب ما (مثال: الباكت غير مُهيّأ) - نرسل الصورة مباشرة كملف بدل رابط
             if image_bytes is None:
-                image_bytes = await asyncio.to_thread(render_question_image, q, idx, total, is_ar)
+                image_bytes = await render_question_image_async(q, idx, total, is_ar)
             await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption)
     except Exception as exc:
         log_warning(logger, f"Failed sending math question image, retrying with raw bytes: {exc}")
         if image_bytes is None:
-            image_bytes = await asyncio.to_thread(render_question_image, q, idx, total, is_ar)
+            image_bytes = await render_question_image_async(q, idx, total, is_ar)
         await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption)
 
     poll_question = "اختر الإجابة الصحيحة بالاعتماد على الصورة أعلاه 👆" if is_ar else "Choose the correct answer based on the image above 👆"
