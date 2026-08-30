@@ -27,6 +27,7 @@ from constants import (
     SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
     QUIZ_EXTRACTION_MODE_AS_IS, QUIZ_EXTRACTION_MODE_AI_SOLVE,
     MSG_QUIZ_SOLVED_DETECTED, MSG_QUIZ_UNSOLVED_DETECTED,
+    MSG_QUIZ_DETECTED_COUNT_TEMPLATE, MAX_QUESTIONS_TO_GENERATE,
 )
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
@@ -34,6 +35,7 @@ from keyboards import (
     get_multiple_quizzes_keyboard, get_question_count_keyboard,
     get_translation_choice_keyboard, get_quiz_type_keyboard,
     get_web_upload_redirect_keyboard, get_quiz_extraction_choice_keyboard,
+    get_quiz_detected_count_keyboard,
 )
 from logger import get_logger, log_error
 from supabase_helper import (
@@ -181,6 +183,10 @@ async def process_album_background(message: types.Message, state: FSMContext):
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
 DEFAULT_COUNT_SUGGESTIONS = [5, 10, 15, 20]
+# 🆕 يُستخدم فقط كشبكة أمان لو تعذّر على classify_subject رصد عدد تقريبي فعلي لأسئلة
+# اختبار جاهز (quiz_solved/quiz_unsolved) - راجع detected_question_count بالأسفل. ليس
+# قيمة مقترحة تُعرض للطالب كخيار عادي كباقي DEFAULT_COUNT_SUGGESTIONS.
+DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK = 10
 
 
 async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[int], state: FSMContext, target_for_send: Optional[types.Message] = None) -> None:
@@ -214,7 +220,14 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     if mode == "Super-Processing":
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
-    keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
+    # 🆕 اختبار جاهز (محلول/غير محلول): لا معنى لأزرار عدد جاهزة عشوائية (5/10/15/20) هنا -
+    # العدد محدَّد فعلياً بالمستند نفسه وتم رصده تلقائياً (راجع _show_question_count_screen
+    # أدناه). كيبورد مخصص بزر تعديل يدوي (لو الرصد غير دقيق) + زر بدء الاستخراج فقط.
+    subject_type = data.get("subject_type")
+    if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        keyboard = get_quiz_detected_count_keyboard(selected_count)
+    else:
+        keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
 
     if message_id:
         try:
@@ -240,8 +253,27 @@ async def _show_question_count_screen(reply_target: types.Message, state: FSMCon
     🆕 الخطوة الأخيرة المشتركة: عرض شاشة عدد الأسئلة المدمجة (اختيار + تكلفة + بدء
     التوليد بضغطة واحدة أخيرة، بدل شاشتين منفصلتين كما كان سابقاً). count_prompt_text
     مخزَّن مسبقاً بالحالة (وُضع هناك من _ask_question_count عند نقطة الدخول الأصلية).
+
+    🆕 اختبار جاهز (محلول/غير محلول): لا نسأل الطالب "كم سؤالاً تريد؟" (لا معنى له - عدد
+    الأسئلة محدَّد فعلياً بالمستند نفسه وليس اختياراً حراً). بدلاً من ذلك نستخدم العدد
+    التقريبي المرصود آلياً (detected_question_count، وُضع بالحالة من classify_subject عبر
+    handlers/files.py._ask_question_count) كعدد افتراضي مباشر لحساب التكلفة، ونعرض نص
+    "رصدنا ما يقارب N سؤال" بدل نص السؤال المعتاد - راجع get_quiz_detected_count_keyboard
+    بـ keyboards.py للكيبورد المصاحب (بدون أزرار عدد جاهزة).
     """
-    await state.update_data(selected_question_count=DEFAULT_COUNT_SUGGESTIONS[1], count_screen_message_id=None)
+    data = await state.get_data()
+    subject_type = data.get("subject_type")
+    if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        detected_count = int(data.get("detected_question_count") or DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK)
+        notice = data.get("quiz_detection_notice")
+        count_text = MSG_QUIZ_DETECTED_COUNT_TEMPLATE.format(count=detected_count)
+        await state.update_data(
+            selected_question_count=detected_count,
+            count_screen_message_id=None,
+            count_prompt_text=f"{notice}\n\n{count_text}" if notice else count_text,
+        )
+    else:
+        await state.update_data(selected_question_count=DEFAULT_COUNT_SUGGESTIONS[1], count_screen_message_id=None)
     await state.set_state(QuizState.waiting_for_count)
     if edit:
         await _render_question_count_screen(reply_target.bot, reply_target.chat.id, reply_target.message_id, state, target_for_send=reply_target)
@@ -337,11 +369,20 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     # 🆕 اختبار جاهز (محلول/غير محلول): لهما أولوية تدفق مستقلة عن باقي المواد - لا شاشة
     # ترجمة ولا شاشة نوع/صعوبة أسئلة (لا معنى لهما هنا: المهمة استخراج أسئلة موجودة فعلياً
     # بالمستند وليست توليد أسئلة جديدة بنوع/صعوبة مختارين). راجع دستور الميزة بالأسفل.
+    if classification.subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        # 🆕 نُخزّن العدد التقريبي المرصود آلياً (classification.question_count) بالحالة
+        # فور معرفته، بغض النظر عن مسار الشاشات اللاحق (تخيير محلول/انتقال مباشر لغير
+        # محلول) - كلاهما ينتهي عند _show_question_count_screen التي تقرأه لاحقاً بدل
+        # سؤال الطالب "كم سؤالاً تريد؟" بأزرار عدد عشوائية (راجع التعليق هناك).
+        detected_count = classification.question_count or DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
+        detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
+        await state.update_data(detected_question_count=detected_count)
+
     if classification.subject == SUBJECT_QUIZ_SOLVED:
         # 🆕 اختبار محلول: يُخيَّر الطالب بين اعتماد الإجابات المدوّنة بالمستند كما هي، أو
         # تجاهلها وحل الاختبار بالذكاء الاصطناعي بدلاً منها (راجع handle_quiz_extract_choice
         # بالأسفل لمتابعة التدفق بعد اختياره).
-        await state.update_data(english_mode=None)
+        await state.update_data(english_mode=None, quiz_detection_notice=None)
         await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
         await status_target.edit_text(
             MSG_QUIZ_SOLVED_DETECTED, parse_mode="HTML", reply_markup=get_quiz_extraction_choice_keyboard()
@@ -350,12 +391,12 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
 
     if classification.subject == SUBJECT_QUIZ_UNSOLVED:
         # 🆕 اختبار غير محلول: لا تخيير إطلاقاً (لا توجد إجابات أصلاً لاعتمادها) - ينتقل
-        # الطالب مباشرة لشاشة تأكيد خصم النقاط (شاشة عدد الأسئلة)، مع دمج رسالة التنويه
-        # بأن الحل سيكون بالذكاء الاصطناعي ضمن نفس نص تلك الشاشة (بدل رسالة منفصلة).
+        # الطالب مباشرة لشاشة تأكيد خصم النقاط (شاشة عدد الأسئلة)، مع حفظ رسالة التنويه
+        # بأن الحل سيكون بالذكاء الاصطناعي لتُدمج هناك بنص العدد المرصود وتكلفته.
         await state.update_data(
             english_mode=None,
             quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE,
-            count_prompt_text=f"{MSG_QUIZ_UNSOLVED_DETECTED}\n\n{data.get('count_prompt_text', '')}",
+            quiz_detection_notice=MSG_QUIZ_UNSOLVED_DETECTED,
         )
         await _show_question_count_screen(status_target, state, edit=True)
         return
