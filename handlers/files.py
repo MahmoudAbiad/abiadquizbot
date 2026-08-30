@@ -882,7 +882,13 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         is_album = bool(data.get("is_album"))
         file_hash = data.get("file_hash")
 
-        if file_hash:
+        subject_type_for_limit = data.get("subject_type", "other")
+        # 🆕 إلغاء سقف عدد الكويزات (MAX_FILE_QUIZZES_LIMIT) لنوع "اختبار" (استخراج اختبار
+        # جاهز محلول/غير محلول - SUBJECT_QUIZ_SOLVED/SUBJECT_QUIZ_UNSOLVED): هذا السقف
+        # مصمَّم أصلاً لتنويع الكويزات المولَّدة بالذكاء الاصطناعي من نفس الملف (تجنّب
+        # تكرار نفس المحتوى بلا داعٍ)، بينما هنا كل استخراج ينقل محتوى اختبار حقيقي محدَّد
+        # مسبقاً بالمستند نفسه - لا معنى لتحديد عدد مرات استخراجه.
+        if file_hash and subject_type_for_limit not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
             # 🆕 نفس فحص سقف التركيبة، مُعاد هنا كخط دفاع أخير مباشرة قبل الخصم (قد يكون
             # طالب آخر ولّد كويزاً بنفس التركيبة بين عرض الشاشة والضغط على "ابدأ التوليد").
             current_quizzes = await get_file_quizzes(file_hash)
