@@ -5,6 +5,7 @@ from .users import router as users_router
 from .analytics import router as analytics_router
 from .feedbacks import router as feedbacks_router
 from .settings import router as settings_router
+from .ai_control import router as ai_control_router
 
 router = Router()
 router.include_routers(
@@ -12,5 +13,6 @@ router.include_routers(
     users_router,
     analytics_router,
     feedbacks_router,
-    settings_router
+    settings_router,
+    ai_control_router,
 )

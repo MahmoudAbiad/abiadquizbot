@@ -49,7 +49,6 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from constants import (
-    MATH_DETECTION_MODEL,
     MATH_DETECTION_TIMEOUT,
     SUBJECT_ENGLISH,
     SUBJECT_FRENCH,
@@ -59,6 +58,7 @@ from constants import (
 )
 from logger import get_logger, log_warning
 from services.detection_common import IMAGE_EXTENSIONS, build_text_sample
+from ai_models_helper import get_detection_model
 
 logger = get_logger(__name__)
 
@@ -127,11 +127,14 @@ async def _classify(contents: list) -> SubjectClassification:
     """الاستدعاء الفعلي الموحّد - نفس بنية _attempt بـ gemini_helper.py لكن بموديل خفيف ومخرجات منظّمة."""
     if not API_KEYS:
         return _fallback()
+    # 🆕 اسم الموديل صار ديناميكياً من لوحة تحكم الأدمن (slot="detection") - نفس الموديل
+    # المستخدم بفحص الرياضيات السريع بـ services/detection_common.py (سلسلة موحّدة واحدة).
+    detection_model = (await get_detection_model())["model_name"]
     for client in _GEMINI_CLIENTS:
         try:
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
-                    model=MATH_DETECTION_MODEL,
+                    model=detection_model,
                     contents=contents,
                     config=types.GenerateContentConfig(
                         thinking_config=types.ThinkingConfig(thinking_level="low"),
@@ -166,6 +169,9 @@ async def _classify_media(file_paths: List[str]) -> SubjectClassification:
     """
     if not file_paths or not API_KEYS:
         return _fallback()
+
+    # 🆕 اسم الموديل صار ديناميكياً من لوحة تحكم الأدمن (slot="detection").
+    detection_model = (await get_detection_model())["model_name"]
 
     mime_types: List[str] = []
     total_size = 0
@@ -211,7 +217,7 @@ async def _classify_media(file_paths: List[str]) -> SubjectClassification:
 
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
-                    model=MATH_DETECTION_MODEL,
+                    model=detection_model,
                     contents=[SYSTEM_PROMPT_CLASSIFY_SUBJECT, *parts],
                     config=types.GenerateContentConfig(
                         thinking_config=types.ThinkingConfig(thinking_level="low"),

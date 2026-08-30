@@ -43,6 +43,8 @@ class AdminState(StatesGroup):
     waiting_for_direct_message_charge_type = State()
     waiting_for_direct_message_confirm = State()
     waiting_for_setting_edit = State()
+    # 🆕 لوحة التحكم بالذكاء الاصطناعي (handlers/admin/ai_control.py)
+    waiting_for_new_model_name = State()
 
 
 # ==================== الدالات المساعدة ====================
