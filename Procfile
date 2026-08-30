@@ -1,1 +1,1 @@
-web: python main.py
+web: env MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072 python main.py

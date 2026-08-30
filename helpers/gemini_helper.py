@@ -62,6 +62,7 @@ from constants import (
     MSG_PREVIOUS_QUESTIONS_INSTRUCTION,
 )
 from logger import get_logger, log_error, log_info, log_warning
+from mem_utils import release_memory_to_os
 from supabase_helper import get_cached_quiz
 from utils import calculate_file_hash, safe_file_cleanup
 from ai_models_helper import get_cascade_models, get_groq_fast_model
@@ -606,6 +607,10 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
         log_error(logger, "Super processing requires three distinct GEMINI_API_KEYS")
         return None
     chunk_paths = await asyncio.to_thread(split_pdf_into_three_sync, file_path)
+    # 🩹 FIX (memory-leak): fitz (PyMuPDF) يخصّص ذاكرة كبيرة أثناء فتح/تقسيم PDF
+    # ضخم؛ رغم إغلاق المستندات بـ try/finally (وهو صحيح)، glibc لا يعيد هذه
+    # الصفحات لنظام التشغيل تلقائيًا. نجبرها هنا فورًا بعد انتهاء التقسيم.
+    await asyncio.to_thread(release_memory_to_os)
     if len(chunk_paths) != 3:
         return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
 

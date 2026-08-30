@@ -12,6 +12,11 @@ from aiogram.types import BufferedInputFile
 
 from keyboards import get_export_format_keyboard, get_export_style_keyboard
 from logger import get_logger, log_error
+from mem_utils import release_memory_to_os
+# 🩹 FIX (memory-leak): بناء ملف الكويز الكامل يرسم صورة matplotlib لكل سؤال رياضي
+# ضمن نفس نداء to_thread - نلف النداء بـ RENDER_SEMAPHORE (نفس السقف المستخدم أثناء
+# حل الكويز المباشر) لمنع عدة تصديرات متزامنة من مضاعفة ذروة الذاكرة معًا.
+from services.image_quiz_renderer import RENDER_SEMAPHORE
 from services.export_service import (
     ExportError,
     STYLE_CODE_TO_NAME,
@@ -51,14 +56,20 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
     style = STYLE_CODE_TO_NAME.get(style_code, "simple")
     status = await call.message.answer(MSG_GENERATING)
     try:
-        if fmt == "docx":
-            file_bytes = await asyncio.to_thread(build_quiz_docx, title, questions, style)
-            filename = build_export_filename(title, "docx")
-            caption = "📄 تفضّل، ملف Word الخاص بالكويز جاهز."
-        else:
-            file_bytes = await asyncio.to_thread(build_quiz_pdf, title, questions, style)
-            filename = build_export_filename(title, "pdf")
-            caption = "📕 تفضّل، ملف PDF الخاص بالكويز جاهز."
+        # 🩹 FIX (memory-leak): async with RENDER_SEMAPHORE يحدّ عدد عمليات بناء
+        # الملفات (كل واحدة قد تحوي عدة رسومات matplotlib متتالية) المتزامنة فعليًا،
+        # و release_memory_to_os() يعيد صفحات الذاكرة الكبيرة المحرَّرة فعليًا
+        # لنظام التشغيل مباشرة بعد كل بناء (بدل بقائها محجوزة لدى glibc).
+        async with RENDER_SEMAPHORE:
+            if fmt == "docx":
+                file_bytes = await asyncio.to_thread(build_quiz_docx, title, questions, style)
+                filename = build_export_filename(title, "docx")
+                caption = "📄 تفضّل، ملف Word الخاص بالكويز جاهز."
+            else:
+                file_bytes = await asyncio.to_thread(build_quiz_pdf, title, questions, style)
+                filename = build_export_filename(title, "pdf")
+                caption = "📕 تفضّل، ملف PDF الخاص بالكويز جاهز."
+        release_memory_to_os()
 
         document = BufferedInputFile(file_bytes, filename=filename)
         await call.message.answer_document(document=document, caption=caption)
