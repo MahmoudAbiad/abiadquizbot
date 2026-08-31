@@ -583,7 +583,18 @@ async def process_search_user(msg: types.Message, state: FSMContext):
             f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
             f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
         )
-        await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
+        try:
+            await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "BUTTON_USER_PRIVACY_RESTRICTED" in str(e):
+                # خصوصية هذا المستخدم تمنع زر التواصل المباشر (tg://user?id=) — نعيد الإرسال بدونه
+                await msg.answer(
+                    report,
+                    reply_markup=get_admin_user_actions_keyboard(u['user_id'], include_contact_button=False),
+                    parse_mode="HTML"
+                )
+            else:
+                raise
     else:
         await msg.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
     await state.clear()
