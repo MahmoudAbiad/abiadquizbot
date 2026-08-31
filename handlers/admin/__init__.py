@@ -6,6 +6,7 @@ from .analytics import router as analytics_router
 from .feedbacks import router as feedbacks_router
 from .settings import router as settings_router
 from .ai_control import router as ai_control_router
+from .feature_flags import router as feature_flags_router
 
 router = Router()
 router.include_routers(
@@ -15,4 +16,5 @@ router.include_routers(
     feedbacks_router,
     settings_router,
     ai_control_router,
+    feature_flags_router,
 )

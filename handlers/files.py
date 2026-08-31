@@ -47,6 +47,7 @@ from logger import get_logger, log_error, log_warning
 from supabase_helper import (
     check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped,
     reward_referrer_if_eligible, get_classification_lock, submit_classification_vote,
+    has_user_voted_on_classification, is_feature_enabled,
 )
 from r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, short_token_to_hash
@@ -354,12 +355,21 @@ async def _proceed_to_quiz_unsolved_screen(reply_target: types.Message, state: F
     await _show_question_count_screen(reply_target, state, edit=edit)
 
 
-async def _ask_question_count(reply_target: types.Message, state: FSMContext, count_prompt_text: str, edit: bool = False) -> None:
+async def _ask_question_count(
+    reply_target: types.Message, state: FSMContext, count_prompt_text: str, edit: bool = False,
+    user_id: Optional[int] = None,
+) -> None:
     """
     🆕 نقطة موحّدة تبدأ سلسلة الشاشات التالية للاستقبال (استقبال وسائط جديدة، استقبال نص
     مباشر، أو رفض الكاش واختيار توليد كويز جديد): تصنيف موحّد → [ترجمة إن كان إنجليزي] →
     شاشة نوع/صعوبة الأسئلة → شاشة عدد الأسئلة. count_prompt_text يُخزَّن بالحالة ليُستخدم
     بالخطوة الأخيرة (_show_question_count_screen) بعد كل الشاشات الوسيطة.
+
+    🆕 user_id: مُمرَّر صراحة (بدل الاعتماد حصراً على reply_target.from_user.id) لأنه لما
+    تُستدعى هاي الدالة بمسار تعديل رسالة (edit=True من كولباك مثل handle_cache_no)،
+    reply_target تكون رسالة البوت نفسه لا الطالب - نفس نمط resolved_user_id بـ
+    _finalize_media_processing أعلاه. يُستخدم لتحديد هل هذا الطالب صوّت مسبقاً على تصنيف
+    هذا الملف قبل عرض رسالة التحقق المجتمعي.
     """
     await state.update_data(count_prompt_text=count_prompt_text)
     data = await state.get_data()
@@ -431,10 +441,17 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     # قبل أي تفرّع لاحق (اختبار جاهز/ترجمة/نوع أسئلة) لتظهر بكل الحالات بغض النظر عن
     # subject المُكتشف.
     file_hash = data.get("file_hash")
-    if file_hash:
+    if file_hash and await is_feature_enabled("classification_vote_prompt"):
         try:
+            resolved_user_id = user_id if user_id is not None else (
+                reply_target.from_user.id if reply_target.from_user else None
+            )
             already_locked = await get_classification_lock(file_hash)
-            if not already_locked:
+            already_voted = (
+                await has_user_voted_on_classification(file_hash, resolved_user_id)
+                if not already_locked and resolved_user_id else False
+            )
+            if not already_locked and not already_voted:
                 subject_label = CLASSIFICATION_SUBJECT_LABELS_AR.get(classification.subject, classification.subject)
                 await status_target.answer(
                     MSG_CLASSIFICATION_VOTE_PROMPT.format(subject_label=subject_label),
@@ -869,7 +886,8 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
     await _ask_question_count(
         call.message, state,
         "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
-        edit=True
+        edit=True,
+        user_id=call.from_user.id,
     )
     await call.answer()
 

@@ -269,20 +269,9 @@ async def callback_direct_message_prompt(call: types.CallbackQuery, state: FSMCo
     await call.answer()
 
 
-@router.message(AdminState.waiting_for_direct_message_target)
-async def process_direct_message_target(msg: types.Message, state: FSMContext):
-    query = (msg.text or "").strip()
-    if not query:
-        return await msg.answer("⚠️ أرسل آيدي المستخدم أو معرفه.", reply_markup=get_cancel_keyboard())
-
-    users_data = await admin_search_user(query)
-    if not users_data:
-        return await msg.answer(
-            "❌ لم يتم العثور على مستخدم بهذا الآيدي أو المعرف. حاول مجدداً:",
-            reply_markup=get_cancel_keyboard(),
-        )
-
-    user = users_data[0]
+async def _present_direct_message_target(answer, state: FSMContext, user: dict):
+    """يجهّز شاشة (اختيار نوع العملية) لمستخدم مستهدف مُحدَّد مسبقاً.
+    answer: دالة إرسال (msg.answer أو call.message.answer)."""
     target_id = int(user["user_id"])
     username = user.get("username") if user.get("username") and user.get("username") != "Unknown" else "بدون يوزر"
     full_name = " ".join(
@@ -299,7 +288,7 @@ async def process_direct_message_target(msg: types.Message, state: FSMContext):
         ),
     )
     await state.set_state(AdminState.waiting_for_direct_message_mode)
-    await msg.answer(
+    await answer(
         "👤 <b>المستخدم المستهدف</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"┣ الاسم: <b>{html.escape(full_name)}</b>\n"
@@ -312,6 +301,39 @@ async def process_direct_message_target(msg: types.Message, state: FSMContext):
         reply_markup=get_admin_direct_message_mode_keyboard(),
         parse_mode="HTML",
     )
+
+
+@router.message(AdminState.waiting_for_direct_message_target)
+async def process_direct_message_target(msg: types.Message, state: FSMContext):
+    query = (msg.text or "").strip()
+    if not query:
+        return await msg.answer("⚠️ أرسل آيدي المستخدم أو معرفه.", reply_markup=get_cancel_keyboard())
+
+    users_data = await admin_search_user(query)
+    if not users_data:
+        return await msg.answer(
+            "❌ لم يتم العثور على مستخدم بهذا الآيدي أو المعرف. حاول مجدداً:",
+            reply_markup=get_cancel_keyboard(),
+        )
+
+    await _present_direct_message_target(msg.answer, state, users_data[0])
+
+
+@router.callback_query(F.data.startswith("admin_direct_start_"))
+async def callback_direct_start_from_button(call: types.CallbackQuery, state: FSMContext):
+    """زر (تواصل/مراسلة) على بطاقة مستخدم بدون يوزر عام — يدخل مباشرة في تدفق
+    الرسالة المباشرة عبر البوت بدل رابط tg://user?id= الذي قد يُرفض حسب خصوصية المستخدم."""
+    try:
+        target_id = call.data.replace("admin_direct_start_", "", 1)
+        users_data = await admin_search_user(target_id)
+        if not users_data:
+            return await call.answer("❌ لم يتم العثور على هذا المستخدم.", show_alert=True)
+
+        await _present_direct_message_target(call.message.answer, state, users_data[0])
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error in callback_direct_start_from_button: {e}")
+        await call.answer("❌ حدث خطأ أثناء تجهيز الرسالة.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin_direct_mode_"), AdminState.waiting_for_direct_message_mode)
@@ -583,18 +605,11 @@ async def process_search_user(msg: types.Message, state: FSMContext):
             f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
             f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
         )
-        try:
-            await msg.answer(report, reply_markup=get_admin_user_actions_keyboard(u['user_id']), parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "BUTTON_USER_PRIVACY_RESTRICTED" in str(e):
-                # خصوصية هذا المستخدم تمنع زر التواصل المباشر (tg://user?id=) — نعيد الإرسال بدونه
-                await msg.answer(
-                    report,
-                    reply_markup=get_admin_user_actions_keyboard(u['user_id'], include_contact_button=False),
-                    parse_mode="HTML"
-                )
-            else:
-                raise
+        await msg.answer(
+            report,
+            reply_markup=get_admin_user_actions_keyboard(u['user_id'], username=u.get('username')),
+            parse_mode="HTML"
+        )
     else:
         await msg.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
     await state.clear()
