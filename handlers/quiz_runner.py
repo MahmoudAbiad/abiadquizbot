@@ -340,11 +340,27 @@ async def request_question_edit(msg: types.Message, state: FSMContext):
         questions = data.get("questions", [])
         if not 0 <= question_index < len(questions):
             return
+
+        quiz_id = data.get("quiz_id")
+        # 🩹 فحص الصلاحية (مالك الكويز أو الأدمن) الآن مبكراً هون، *قبل* عرض أي واجهة
+        # تعديل (نصية أو محرر الرياضيات) - قبلاً كانت تُعرض واجهة التعديل لأي طالب
+        # يحل الكويز بغض النظر عن ملكيته، ويُكتشف الرفض فقط لاحقاً عند الحفظ الفعلي
+        # (رسالة "⛔ لا تملك صلاحية..." من apply_question_edit_and_resume أو
+        # fetch_question_for_edit_web) - بعد خطوة أو خطوتين إضافيتين (فتح صفحة ويب
+        # حتى بالنسبة لأسئلة الرياضيات). الفحص هنا لا يلغي الفحص اللاحق بتلك الدوال
+        # (يبقى كخط دفاع ثانٍ ضروري لأي مسار لا يمر من هنا، مثل استدعاء API مباشر)،
+        # فقط يمنع عرض واجهة لن تنجح أصلاً. لا نطبّقه لو quiz_id غير موجود أصلاً
+        # (نفس الحالات القديمة بلا quiz_id تبقى بسلوكها المعتاد لاحقاً بمسار الحفظ).
+        if quiz_id:
+            creator_id = await get_quiz_creator_id(quiz_id)
+            if not can_edit_quiz(msg.from_user.id, creator_id):
+                await msg.answer("⛔ لا تملك صلاحية تعديل هذا الكويز. يمكن لمالكه أو الأدمن فقط تعديله.")
+                return
+
         await state.update_data(edit_question_index=question_index)
         await state.set_state(QuizState.waiting_for_question_edit_choice)
 
         question = questions[question_index]
-        quiz_id = data.get("quiz_id")
         # 🆕 لأسئلة الرياضيات المصوّرة (is_math): التعديل النصي البسيط داخل الشات غير
         # كافٍ (السؤال يظهر كصورة، وقد يحتوي جدول/مصفوفة لا يمكن التعبير عنهما بنص
         # عادي). نفتح محرراً كاملاً بصفحة ويب (معاينة LaTeX حية + محرر جدول/مصفوفات)
@@ -524,7 +540,7 @@ async def _save_edited_question(
     await msg.answer(reply_text)
 
 
-async def fetch_question_for_edit_web(chat_id: int, user_id: int, quiz_id: str, question_index: int) -> Optional[dict]:
+async def fetch_question_for_edit_web(chat_id: int, user_id: int, quiz_id: str, question_index: int) -> Tuple[Optional[dict], Optional[str]]:
     """
     🆕 تُستدعى من webhook_server.py (POST /api/question-edit/fetch) للتحقق من صلاحية
     جلسة تعديل سؤال رياضي عبر صفحة الويب، وإرجاع بيانات السؤال الحالية لتعبئة النموذج.
@@ -542,25 +558,34 @@ async def fetch_question_for_edit_web(chat_id: int, user_id: int, quiz_id: str, 
     يقدر يفتح المحرر ويشاهد بيانات السؤال (حتى لو الحفظ لاحقاً كان سيُرفض بصمت من
     طبقة أعمق). نفس فحص can_edit_quiz المستخدم بمسار الحذف/التعديل العادي مُضاف هنا
     الآن مبكراً - بنفس طريقة get_quiz_creator_id الخفيفة (بدون جلب quiz_data الثقيل).
+
+    🩹 إصلاح إضافي: ترجع الآن (question, رسالة الرفض) بدل question فقط - قبلاً كل
+    أسباب الفشل (جلسة منتهية/quiz_id غير مطابق/عدم امتلاك صلاحية) كانت تُرجع None
+    بلا تمييز، فكانت webhook_server.py تعرض نفس الرسالة العامة "الجلسة منتهية، أعد
+    المحاولة" حتى لطالب لا يملك صلاحية الكويز أصلاً - وإعادة المحاولة معه لن تنجح
+    أبداً مهما فعل. الآن حالة "لا صلاحية" ترجع رسالتها الدقيقة الخاصة بها (نفس نص
+    الرسالة المستخدم أصلاً بـ save_question_edit_from_web أدناه لتوحيد الصياغة عبر
+    مساري الجلب/الحفظ)، وبقية حالات الفشل (جلسة/تطابق) ترجع None للرسالة فتعرض
+    الرسالة العامة الافتراضية كما كانت (هي فعلاً السبب الصحيح بتلك الحالات).
     """
     state = _build_state_for_chat(chat_id, user_id)
     current_state = await state.get_state()
     if current_state != QuizState.waiting_for_question_edit_choice:
-        return None
+        return None, None
     data = await state.get_data()
     if data.get("quiz_id") != quiz_id or data.get("edit_question_index") != question_index:
-        return None
+        return None, None
     questions = data.get("questions", [])
     if not 0 <= question_index < len(questions):
-        return None
+        return None, None
     question = questions[question_index]
     if not question.get("is_math"):
-        return None
+        return None, None
     creator_id = await get_quiz_creator_id(quiz_id)
     if not can_edit_quiz(user_id, creator_id):
         log_warning(logger, f"Rejected math question fetch by user {user_id} for quiz {quiz_id} (not owner/admin)")
-        return None
-    return question
+        return None, "⛔ لا تملك صلاحية تعديل هذا الكويز. يمكن لمالكه أو الأدمن فقط تعديله."
+    return question, None
 
 
 async def save_question_edit_from_web(
