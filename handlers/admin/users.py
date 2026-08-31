@@ -730,7 +730,7 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
 
         if not quizzes or total == 0:
             try:
-                await call.answer("📭 هذا الطالب لم يقم بتوليد أي كويزات بعد.", show_alert=True)
+                await call.answer("📭 هذا الطالب لم يُنشئ أو يستخدم من الكاش أي كويز بعد.", show_alert=True)
             except TelegramBadRequest:
                 pass
             return
@@ -747,10 +747,14 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
             time_syria = format_syria_time(q.get("created_at"))
             likes = q.get("likes", 0)
             dislikes = q.get("dislikes", 0)
+            # 🆕 تمييز الكويزات المُستخدمة من الكاش المركزي (لم ينشئها الطالب بنفسه)
+            is_cached = q.get("is_cached", False)
+            cache_tag = " ♻️ <i>(من الكاش)</i>" if is_cached else ""
+            time_label = "🕒 تاريخ الاستخدام" if is_cached else "🕒 تاريخ الإنشاء"
 
             report_lines.append(
-                f"<b>{idx}. {title}</b>\n"
-                f" ┣ 🕒 التاريخ (توقيت سوريا): <code>{time_syria}</code>\n"
+                f"<b>{idx}. {title}</b>{cache_tag}\n"
+                f" ┣ {time_label} (توقيت سوريا): <code>{time_syria}</code>\n"
                 f" ┗ 👍 {likes} | 👎 {dislikes}\n"
                 f"───────────────────"
             )
@@ -773,7 +777,7 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
         kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
 
         text = (
-            f"🎯 <b>الكويزات المُولدة بواسطة الطالب (<code>{target_id}</code>)</b>\n"
+            f"🎯 <b>كويزات الطالب (<code>{target_id}</code>) — المُنشأة والمُستخدمة من الكاش ♻️</b>\n"
             f"📄 الصفحة {page} من أصل {total_pages} (الإجمالي: <code>{total}</code> كويز)\n"
             f"───────────────────\n\n" +
             "\n".join(report_lines)

@@ -511,6 +511,10 @@ MSG_CLASSIFICATION_VOTE_PROMPT = (
 )
 MSG_CLASSIFICATION_VOTE_THANKS_YES = "✅ شكراً لتأكيدك! تم تسجيل رأيك."
 MSG_CLASSIFICATION_VOTE_THANKS_NO = "📩 شكراً لملاحظتك، تم إرسالها للمراجعة."
+# 🆕 نص قصير يستبدل به متن رسالة التصويت نفسها (تعديل حي) بعد اختيار الطالب -
+# بدل ترك النص الطويل الأصلي ظاهراً وفقط عرض تنبيه منبثق (راجع handlers/files.py).
+MSG_CLASSIFICATION_VOTE_EDITED_YES = "✅ شكراً لمشاركتك!"
+MSG_CLASSIFICATION_VOTE_EDITED_NO = "📩 شكراً لمشاركتك! تم إرسال ملاحظتك للمراجعة."
 MSG_CLASSIFICATION_VOTE_ALREADY = "⚠️ لقد قيّمت تصنيف هذا الملف مسبقاً!"
 MSG_CLASSIFICATION_VOTE_ERROR = "❌ تعذر تسجيل تقييمك، حاول لاحقاً."
 MSG_CLASSIFICATION_LOCKED_SUFFIX = "\n\n🔒 <i>تم تثبيت هذا التصنيف نهائياً بمساعدة الطلاب، شكراً لكم!</i>"

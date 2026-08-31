@@ -727,10 +727,29 @@ async def admin_get_quiz_by_id(quiz_id: str) -> Optional[Dict[str, Any]]:
 
 
 async def admin_delete_quiz(quiz_id: str) -> bool:
-    """🆕 حذف كويز بالكامل من الجدول المركزي؛ التصويتات والنقاط وعناصر المفضلة والملاحظات المرتبطة
-    به تُحذف تلقائياً معه (ON DELETE CASCADE) على مستوى قاعدة البيانات."""
+    """🆕 حذف كويز بالكامل من الجدول المركزي.
+
+    ✅ تحقّقنا فعلياً من قيود الـ Foreign Key الحالية بقاعدة بيانات Supabase: الجداول
+    favorite_quizzes وquiz_attempts وquiz_feedbacks وquiz_responses وquiz_scores
+    وquiz_votes كلها مربوطة بـ quizzes.id بقيد ON DELETE CASCADE حقيقي، فتُحذف صفوفها
+    المرتبطة تلقائياً بمجرد حذف صف الكويز بالأسفل - لا حاجة لحذفها يدوياً هنا.
+
+    ⚠️ لكن جدولي التحقق المجتمعي من التصنيف (classification_votes وclassification_locks)
+    مرتبطان بـ file_hash (نص الهاش) وليس بـ quiz_id، ولا يوجد أي قيد FK يربطهم بجدول
+    quizzes أصلاً - فحذف صف الكويز وحده لا يمسحهم إطلاقاً، ويبقون يتيمين بقاعدة البيانات.
+    لذلك: نجلب file_hash لهذا الكويز قبل حذفه، وبعد الحذف نتحقق هل ما زال هناك أي كويز
+    آخر (لطالب مختلف مثلاً) يستخدم نفس الـ file_hash؛ فقط إذا لم يبقَ أي كويز آخر بنفس
+    الهاش (يعني آخر نسخة فعلية منه انحذفت) نحذف تصويتات/تثبيت التصنيف المرتبطة به - حتى
+    لا نمسح تصنيفاً ما زال يخدم كويزات أخرى حقيقية بنفس المحتوى بالخطأ.
+    """
     try:
+        file_hashes = await _get_file_hashes_for_quiz_ids([quiz_id])
+
         await supabase.table("quizzes").delete().eq("id", quiz_id).execute()
+
+        if file_hashes:
+            await _cleanup_classification_for_hashes(file_hashes)
+
         return True
     except Exception as e:
         log_error(logger, f"Error deleting quiz {quiz_id}: {e}")
@@ -805,6 +824,37 @@ async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
         log_error(logger, f"Error saving student feedback on quiz: {e}")
         return False
 
+async def _get_file_hashes_for_quiz_ids(quiz_ids: List[str]) -> List[str]:
+    """🆕 يجلب قائمة file_hash الفريدة لمجموعة IDs كويزات - يُستدعى دائماً *قبل* الحذف
+    الفعلي لتلك الكويزات (بعد الحذف الصفوف تختفي ولا يمكن معرفة الـ hash الخاص بها)."""
+    if not quiz_ids:
+        return []
+    try:
+        hash_rows = await supabase.table("quizzes").select("file_hash").in_("id", quiz_ids).execute()
+        return list({r["file_hash"] for r in (hash_rows.data or []) if r.get("file_hash")})
+    except Exception as e:
+        log_error(logger, f"Error fetching file_hashes for quiz ids before deletion: {e}")
+        return []
+
+
+async def _cleanup_classification_for_hashes(file_hashes: List[str]) -> None:
+    """🆕 لكل file_hash بالقائمة: يتحقق هل بقي أي كويز آخر يستخدمه، وإن لم يبقَ أي كويز
+    (يعني آخر نسخة منه انحذفت للتو) يحذف صفوف classification_votes/classification_locks
+    المرتبطة به. يُستدعى دائماً *بعد* تنفيذ حذف الكويزات فعلياً."""
+    for file_hash in file_hashes:
+        try:
+            remaining = await supabase.table("quizzes") \
+                .select("id", count="exact") \
+                .eq("file_hash", file_hash) \
+                .limit(1) \
+                .execute()
+            if not (remaining.count or 0):
+                await supabase.table("classification_votes").delete().eq("file_hash", file_hash).execute()
+                await supabase.table("classification_locks").delete().eq("file_hash", file_hash).execute()
+        except Exception as e:
+            log_error(logger, f"Error cleaning up classification data for file_hash {file_hash}: {e}")
+
+
 async def _get_safe_to_delete_quiz_ids(threshold: str) -> List[str]:
     """يرجع فقط IDs الكويزات المؤهلة للحذف الفعلي: قديمة + سيئة التقييم،
     وبنفس الوقت ماإلها share_code (مو مشاركة)، مو محفوظة بمفضلة أي مستخدم،
@@ -847,7 +897,12 @@ async def auto_cleanup_bad_quizzes():
         threshold = (datetime.datetime.utcnow() - datetime.timedelta(days=2)).isoformat()
         deletable_ids = await _get_safe_to_delete_quiz_ids(threshold)
         if deletable_ids:
+            # 🆕 نفس منطق تنظيف تصويتات/تثبيت التصنيف اليتيمة المطبَّق بـ admin_delete_quiz
+            # (راجع تعليقها للتفاصيل) - لازم نجلب file_hash *قبل* الحذف الفعلي.
+            file_hashes = await _get_file_hashes_for_quiz_ids(deletable_ids)
             await supabase.table("quizzes").delete().in_("id", deletable_ids).execute()
+            if file_hashes:
+                await _cleanup_classification_for_hashes(file_hashes)
         log_info(logger, f"Automated database garbage cleanup loop executed successfully. Deleted {len(deletable_ids)} quizzes.")
     except Exception as e:
         log_error(logger, f"Error running the background auto cleanup query: {e}")
@@ -1537,24 +1592,86 @@ async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
         return []
 
 
+USER_QUIZZES_FETCH_CAP = 200  # 🆕 سقف جلب كل مصدر (المُنشأة + المُستخدمة من الكاش) قبل الدمج والتصفح محلياً
+
+
 async def admin_get_user_quizzes(creator_id: int, limit: int = 5, offset: int = 0) -> tuple[List[Dict[str, Any]], int]:
-    """جلب الكويزات الخاصة بطالب محدد مرتبة مع التصفح."""
+    """جلب الكويزات الخاصة بطالب محدد مرتبة مع التصفح.
+
+    🆕 تشمل القائمة الآن مصدرين مدموجين:
+      1) الكويزات التي أنشأها الطالب فعلياً (quizzes.creator_id).
+      2) الكويزات التي "استخدمها" الطالب من الكاش المركزي دون أن ينشئها بنفسه
+         (quiz_attempts.source_type == 'cached_file') - أي كويز أنشأه طالب آخر
+         لكن تطابق محتواه مع ملف رفعه هذا الطالب فاستُخدم جاهزاً بدل توليد كويز
+         جديد. كل عنصر من هذا النوع يحمل is_cached=True حتى يُعلَّم بالعرض، وتاريخه
+         هو تاريخ الاستخدام الفعلي (وليس تاريخ إنشاء الكويز الأصلي بواسطة صاحبه).
+    الدمج والترتيب والتصفح تتم محلياً (نفس نمط قائمة الإحالات بملف analytics.py)
+    لأن المصدرين جدولان مختلفان بتوقيتين مختلفين يصعب دمجهما بأمر SQL واحد بسيط.
+    """
     try:
-        count_res = await supabase.table("quizzes") \
+        # 1) الكويزات التي أنشأها الطالب فعلياً
+        owned_count_res = await supabase.table("quizzes") \
             .select("id", count="exact") \
             .eq("creator_id", creator_id) \
             .execute()
-        
-        total = count_res.count or 0
+        owned_total = owned_count_res.count or 0
 
-        res = await supabase.table("quizzes") \
+        owned_res = await supabase.table("quizzes") \
             .select("id, source_title, created_at, likes, dislikes") \
             .eq("creator_id", creator_id) \
             .order("created_at", desc=True) \
-            .range(offset, offset + limit - 1) \
+            .limit(USER_QUIZZES_FETCH_CAP) \
             .execute()
+        owned_items = owned_res.data or []
+        for q in owned_items:
+            q["is_cached"] = False
 
-        return res.data or [], total
+        # 2) الكويزات التي استخدمها الطالب من الكاش المركزي
+        cache_count_res = await supabase.table("quiz_attempts") \
+            .select("id", count="exact") \
+            .eq("user_id", creator_id) \
+            .eq("source_type", "cached_file") \
+            .execute()
+        cache_total = cache_count_res.count or 0
+
+        cache_attempts_res = await supabase.table("quiz_attempts") \
+            .select("quiz_id, started_at") \
+            .eq("user_id", creator_id) \
+            .eq("source_type", "cached_file") \
+            .order("started_at", desc=True) \
+            .limit(USER_QUIZZES_FETCH_CAP) \
+            .execute()
+        cache_attempts = [a for a in (cache_attempts_res.data or []) if a.get("quiz_id")]
+
+        cache_items: List[Dict[str, Any]] = []
+        if cache_attempts:
+            quiz_ids = list({a["quiz_id"] for a in cache_attempts})
+            quizzes_res = await supabase.table("quizzes") \
+                .select("id, source_title, likes, dislikes") \
+                .in_("id", quiz_ids) \
+                .execute()
+            quizzes_map = {q["id"]: q for q in (quizzes_res.data or [])}
+
+            for a in cache_attempts:
+                q = quizzes_map.get(a["quiz_id"])
+                if not q:
+                    continue  # 🩹 الكويز الأصلي حُذف لاحقاً (تنظيف تلقائي دوري) - يُتجاهل بأمان
+                cache_items.append({
+                    "id": q["id"],
+                    "source_title": q.get("source_title"),
+                    "created_at": a.get("started_at"),  # تاريخ الاستخدام الفعلي من هذا الطالب
+                    "likes": q.get("likes", 0),
+                    "dislikes": q.get("dislikes", 0),
+                    "is_cached": True,
+                })
+
+        # 3) دمج المصدرين وترتيبهما تنازلياً حسب التاريخ الفعلي لظهورهما عند الطالب، ثم تصفّح محلي
+        combined = owned_items + cache_items
+        combined.sort(key=lambda q: q.get("created_at") or "", reverse=True)
+
+        total = owned_total + cache_total
+        page_items = combined[offset:offset + limit]
+        return page_items, total
     except Exception as e:
         log_error(logger, f"Error fetching user quizzes for {creator_id}: {e}")
         return [], 0
@@ -1571,7 +1688,12 @@ async def auto_cleanup_old_analytics_data() -> None:
 
         deletable_ids = await _get_safe_to_delete_quiz_ids(three_days_ago)
         if deletable_ids:
+            # 🆕 نفس منطق تنظيف تصويتات/تثبيت التصنيف اليتيمة المطبَّق بـ admin_delete_quiz
+            # (راجع تعليقها للتفاصيل) - لازم نجلب file_hash *قبل* الحذف الفعلي.
+            file_hashes = await _get_file_hashes_for_quiz_ids(deletable_ids)
             await supabase.table("quizzes").delete().in_("id", deletable_ids).execute()
+            if file_hashes:
+                await _cleanup_classification_for_hashes(file_hashes)
 
         log_info(logger, f"Automated database cleanup executed successfully. Deleted {len(deletable_ids)} quizzes.")
     except Exception as e:
