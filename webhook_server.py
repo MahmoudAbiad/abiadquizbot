@@ -540,13 +540,16 @@ async def question_edit_fetch(payload: QuestionEditFetchRequest):
     user_id = user.get("id")
     await _enforce_upload_rate_limit(user_id, "qedit_fetch", QUESTION_EDIT_RATE_LIMIT_MAX_REQUESTS, QUESTION_EDIT_RATE_LIMIT_WINDOW_SECONDS)
 
-    question = await fetch_question_for_edit_web(
+    question, error_message = await fetch_question_for_edit_web(
         chat_id=user_id, user_id=user_id, quiz_id=payload.quiz_id, question_index=payload.question_index,
     )
     if question is None:
+        # 🩹 error_message موجودة فقط لحالة "لا صلاحية" (رسالة دقيقة تشرح السبب
+        # الحقيقي)؛ بقية حالات الفشل (جلسة منتهية/quiz_id غير مطابق) ترجع None
+        # فتُستخدم الرسالة العامة الافتراضية كما كانت - راجع docstring الدالة.
         raise HTTPException(
             status_code=403,
-            detail="جلسة التعديل غير صالحة أو انتهت - ارجع للمحادثة وأرسل النقطة على السؤال من جديد.",
+            detail=error_message or "جلسة التعديل غير صالحة أو انتهت - ارجع للمحادثة وأرسل النقطة على السؤال من جديد.",
         )
 
     return {
