@@ -2,7 +2,6 @@
 from typing import Optional, Dict
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest
 
 from supabase_helper import (
     admin_get_feedbacks_page,
@@ -11,7 +10,7 @@ from supabase_helper import (
     admin_get_quiz_by_id,
     admin_delete_quiz
 )
-from keyboards import get_admin_dashboard_keyboard
+from keyboards import get_admin_dashboard_keyboard, build_contact_button
 from logger import get_logger
 from handlers.quiz_runner import _start_loaded_quiz
 from .dashboard import IsAdminFilter, safe_edit_text
@@ -139,22 +138,13 @@ async def admin_callback_feedback_details(call: types.CallbackQuery):
         )
 
         kb = get_feedback_details_keyboard(feedback_id, quiz_id)
-        # إدراج زر مباشر لمحادثة الطالب في تيليجرام
-        contact_button = [types.InlineKeyboardButton(
-            text=f"💬 مراسلة {student_name}",
-            url=f"tg://user?id={student_id}"
-        )]
-        kb.inline_keyboard.insert(0, contact_button)
+        # إدراج زر مباشر لمراسلة الطالب: رابط t.me/username لو عنده يوزر عام،
+        # وإلا زر يوجّه لتدفق "رسالة مباشرة عبر البوت" (لا يعتمد على خصوصية الطالب إطلاقاً)
+        kb.inline_keyboard.insert(0, [build_contact_button(
+            student_id, student.get("username"), text=f"💬 مراسلة {student_name}"
+        )])
 
-        try:
-            await safe_edit_text(call.message, details, reply_markup=kb)
-        except TelegramBadRequest as e:
-            if "BUTTON_USER_PRIVACY_RESTRICTED" in str(e):
-                # خصوصية هذا الطالب تمنع زر التواصل المباشر — نعرض التفاصيل بدونه
-                kb.inline_keyboard.pop(0)
-                await safe_edit_text(call.message, details, reply_markup=kb)
-            else:
-                raise
+        await safe_edit_text(call.message, details, reply_markup=kb)
     except Exception as e:
         logger.error(f"Error showing feedback details: {e}")
         await call.answer("❌ حدث خطأ أثناء جلب تفاصيل الملاحظة.", show_alert=True)

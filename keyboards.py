@@ -1,3 +1,4 @@
+from typing import Optional
 from aiogram import types
 from constants import (
     OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL, BTN_CANCEL_REQUEST,
@@ -669,6 +670,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
+        [types.InlineKeyboardButton(text="🧪 A/B Tests ومفاتيح التحكم", callback_data="admin_flags_menu")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -743,22 +745,30 @@ def get_ai_cancel_keyboard(slot: str) -> types.InlineKeyboardMarkup:
     kb = [[types.InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"admin_ai_slot_{slot}")]]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_admin_user_actions_keyboard(user_id: int, include_contact_button: bool = True) -> types.InlineKeyboardMarkup:
+def build_contact_button(user_id: int, username: Optional[str] = None, text: str = "💬 تواصل مع الطالب") -> types.InlineKeyboardButton:
+    """
+    زر تواصل مع مستخدم — بدون الاعتماد على tg://user?id= الذي قد يُرفض
+    بخطأ BUTTON_USER_PRIVACY_RESTRICTED حسب إعدادات خصوصية المستخدم.
+    - لو عنده يوزر عام: رابط https://t.me/username عادي (لا يخضع لقيود الخصوصية دي).
+    - لو مفيش يوزر: زر يوجّه لتدفق "رسالة مباشرة عبر البوت" (admin_direct_start_<id>)
+      وهو دايماً شغال طالما المستخدم لم يحظر البوت.
+    """
+    if username and username != "Unknown":
+        clean = username.lstrip("@")
+        return types.InlineKeyboardButton(text=text, url=f"https://t.me/{clean}")
+    return types.InlineKeyboardButton(text=text, callback_data=f"admin_direct_start_{user_id}")
+
+
+def get_admin_user_actions_keyboard(user_id: int, username: Optional[str] = None) -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="💰 شحن رصيد الطالب", callback_data=f"admin_charge_menu_{user_id}")],
         [
             types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}"),
             types.InlineKeyboardButton(text="🎯 كويزات هذا الطالب", callback_data=f"admin_user_quizzes_{user_id}_p_1")
         ],
+        [build_contact_button(user_id, username)],
+        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]
-    if include_contact_button:
-        # 🆕 زر تواصل مباشر: يفتح محادثة الطالب فعلياً على تيليغرام (tg://user?id=)
-        # بدل الاعتماد على معرف يوزر قد لا يكون موجوداً أصلاً.
-        # ⚠️ قد يرفضه تيليجرام بخطأ BUTTON_USER_PRIVACY_RESTRICTED إذا كانت
-        # إعدادات خصوصية المستخدم تمنع الربط المباشر بحسابه عبر الـ ID.
-        # في هذه الحالة يجب إعادة الإرسال مع include_contact_button=False.
-        kb.append([types.InlineKeyboardButton(text="💬 تواصل مع الطالب", url=f"tg://user?id={user_id}")])
-    kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
@@ -809,4 +819,22 @@ def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="📥 تصدير سجل الأحداث CSV", callback_data="admin_export_events")],
         [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+# ==================== 🆕 A/B Tests ومفاتيح التحكم (Feature Flags) ====================
+
+def get_feature_flags_keyboard(flags: dict, registry: dict) -> types.InlineKeyboardMarkup:
+    """لوحة تشغيل/إيقاف مفاتيح التحكم. flags: {key: enabled} (من
+    supabase_helper.get_all_feature_flags), registry: {key: label} (من
+    constants.FEATURE_FLAGS_REGISTRY) - زر واحد لكل مفتاح، يعرض حالته الحالية
+    ويعكسها عند الضغط (نفس نمط ✅/🚫 المستخدم بأزرار موديلات الذكاء الاصطناعي)."""
+    kb = []
+    for key, label in registry.items():
+        enabled = flags.get(key, True)
+        status_icon = "✅" if enabled else "🚫"
+        kb.append([types.InlineKeyboardButton(
+            text=f"{status_icon} {label}",
+            callback_data=f"admin_flag_toggle_{key}"
+        )])
+    kb.append([types.InlineKeyboardButton(text="🏠 رجوع للوحة الرئيسية", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
