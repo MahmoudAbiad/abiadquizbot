@@ -750,6 +750,9 @@ def get_admin_user_actions_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}"),
             types.InlineKeyboardButton(text="🎯 كويزات هذا الطالب", callback_data=f"admin_user_quizzes_{user_id}_p_1")
         ],
+        # 🆕 زر تواصل مباشر: يفتح محادثة الطالب فعلياً على تيليغرام (tg://user?id=)
+        # بدل الاعتماد على معرف يوزر قد لا يكون موجوداً أصلاً.
+        [types.InlineKeyboardButton(text="💬 تواصل مع الطالب", url=f"tg://user?id={user_id}")],
         [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)

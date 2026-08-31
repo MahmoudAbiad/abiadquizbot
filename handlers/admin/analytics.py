@@ -34,6 +34,8 @@ QUIZZES_PAGE_SIZE = 4      # عدد الكويزات المعروضة في ال�
 TODAY_USERS_PAGE_SIZE = 5  # عدد الطلاب النشطين المعروضين في الصفحة الواحدة
 REFERRERS_PAGE_SIZE = 10   # عدد "المُحيلين" المعروضين بصفحة قائمة الإحالات
 REFERRED_PAGE_SIZE = 15    # عدد الأسماء المعروضة بالقائمة المنفردة لكل مُحيل
+RECENT_ERRORS_PAGE_SIZE = 5    # 🆕 عدد الأخطاء المعروضة بالصفحة الواحدة بلوحة "آخر الأخطاء"
+RECENT_ERRORS_FETCH_LIMIT = 100  # 🆕 السقف الأقصى للأخطاء التي تُجلب من قاعدة البيانات دفعة واحدة قبل تصفحها محلياً
 
 EVENT_LABELS = {
     "bot_start": "▶️ تشغيل البوت",
@@ -81,6 +83,21 @@ SOURCE_LABELS = {
     "file": "📄 ملف", "photo": "🖼 صورة", "album": "🖼🖼 ألبوم", "text": "📝 نص مباشر",
     "shared": "🔗 مشترك", "favorite": "⭐ مفضلة", "cached_file": "♻️ كاش", "admin_test": "🛠 تجربة إدارية",
 }
+
+def _format_event_label(event_type: str, metadata: dict) -> str:
+    """🆕 يبني تسمية عربية للحدث، مع دعم أحداث تحتاج قيمة ديناميكية من الـ metadata
+    (بدل تسمية ثابتة بـ EVENT_LABELS). حالياً يُغطّي فقط حدث "رصيد غير كافٍ"
+    (insufficient_balance_blocked) الذي كان يُسجَّل فعلياً بقاعدة البيانات من قبل
+    (راجع handlers/files.py و handlers/audio.py) لكنه كان يظهر هنا كنص الحدث الخام
+    بدون تسمية عربية ولا عرض لعدد النقاط الناقصة (deficit).
+    """
+    if event_type == "insufficient_balance_blocked":
+        meta = metadata or {}
+        deficit = meta.get("deficit_points")
+        deficit_str = f"{float(deficit):.2f}" if deficit is not None else "غير معروف"
+        return f"🚫 لم تكفِ النقاط - عجز مطلوب شحنه: <code>{deficit_str}</code>"
+    return EVENT_LABELS.get(event_type, event_type)
+
 
 def _format_seconds(total_seconds: float) -> str:
     total_seconds = int(total_seconds or 0)
@@ -302,17 +319,35 @@ async def export_usage_events(call: types.CallbackQuery):
         logger.error(f"Error exporting events: {e}")
         await safe_edit_text(call.message, "❌ حدث خطأ أثناء استخراج الملف.", reply_markup=get_analytics_keyboard(7))
 
-# 🐞 6. معالج آخر الأخطاء التي واجهها الطلاب
+# 🐞 6. معالج آخر الأخطاء التي واجهها الطلاب (مُصفّح: 5 أخطاء بكل صفحة)
+# 🆕 يقبل كلا الشكلين: "admin_recent_errors" (الدخول أول مرة = صفحة 1) و
+# "admin_recent_errors_p_<page>" (التنقل بين الصفحات عبر زري السابق/التالي).
 @router.callback_query(F.data == "admin_recent_errors")
+@router.callback_query(F.data.startswith("admin_recent_errors_p_"))
 async def show_recent_errors(call: types.CallbackQuery):
     try:
-        errors = await admin_get_recent_errors(limit=20, days=7)
+        page = 1
+        if call.data.startswith("admin_recent_errors_p_"):
+            try:
+                page = int(call.data.replace("admin_recent_errors_p_", "", 1))
+            except ValueError:
+                page = 1
+
+        # نجلب دفعة أكبر (حتى 100 خطأ من آخر 7 أيام) ثم نصفّحها محلياً بخمسة
+        # بكل صفحة - بنفس نمط التصفح المحلي المستخدم بقائمة الإحالات أعلاه.
+        errors = await admin_get_recent_errors(limit=RECENT_ERRORS_FETCH_LIMIT, days=7)
         if not errors:
             await call.answer("✅ لا توجد أي أخطاء مسجّلة خلال آخر 7 أيام.", show_alert=True)
             return
 
+        total = len(errors)
+        total_pages = max(1, -(-total // RECENT_ERRORS_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * RECENT_ERRORS_PAGE_SIZE
+        page_items = errors[start:start + RECENT_ERRORS_PAGE_SIZE]
+
         report_lines = []
-        for idx, err in enumerate(errors, start=1):
+        for idx, err in enumerate(page_items, start=start + 1):
             meta = err.get("metadata") or {}
             user = err.get("user") or {}
             username_str = f"@{user['username']}" if user.get("username") and user['username'] != "Unknown" else "بدون يوزر"
@@ -327,19 +362,29 @@ async def show_recent_errors(call: types.CallbackQuery):
                 f" ┗ 📝 <code>{msg}</code>\n"
             )
 
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="📥 تصدير كل الأحداث (CSV)", callback_data="admin_export_events")],
-            [types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")],
-            [types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")],
-        ])
+        # 🆕 زر "السابق" (نحو الأخطاء الأقدم) يظهر دائماً بعد الصفحة الأولى، وزر
+        # "التالي" (نحو الأخطاء الأحدث) يظهر فقط بعد التنقل للخلف - أي عندما لا
+        # نكون بآخر صفحة أصلاً.
+        nav_row = []
+        if page < total_pages:
+            nav_row.append(types.InlineKeyboardButton(text="◀️ أخطاء أقدم", callback_data=f"admin_recent_errors_p_{page + 1}"))
+        if page > 1:
+            nav_row.append(types.InlineKeyboardButton(text="أخطاء أحدث ▶️", callback_data=f"admin_recent_errors_p_{page - 1}"))
+
+        kb_rows = []
+        if nav_row:
+            kb_rows.append(nav_row)
+        kb_rows.append([types.InlineKeyboardButton(text="📥 تصدير كل الأحداث (CSV)", callback_data="admin_export_events")])
+        kb_rows.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
+        kb_rows.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
 
         text = (
             f"🐞 <b>آخر الأخطاء التي واجهها الطلاب (آخر 7 أيام)</b>\n"
-            f"عدد الأخطاء المعروضة: <code>{len(errors)}</code>\n"
+            f"إجمالي الأخطاء: <code>{total}</code> | صفحة {page}/{total_pages}\n"
             f"───────────────────\n\n" +
             "\n".join(report_lines)
         )
-        await safe_edit_text(call.message, text, reply_markup=kb)
+        await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb_rows))
         await call.answer()
     except Exception as e:
         logger.error(f"Error rendering recent errors: {e}")
@@ -456,7 +501,7 @@ async def show_user_activity(call: types.CallbackQuery):
         activity = await admin_get_user_activity(target_id)
 
         events_lines = "\n".join(
-            f"┣ {EVENT_LABELS.get(e['event_type'], e['event_type'])} — <code>{format_syria_time(e['created_at'])}</code>"
+            f"┣ {_format_event_label(e['event_type'], e.get('metadata'))} — <code>{format_syria_time(e['created_at'])}</code>"
             for e in activity["recent_events"][:10]
         ) or "┣ لا يوجد نشاط مسجل بعد."
 

@@ -31,7 +31,7 @@ from constants import (
     # 🆕 التحقق المجتمعي من تصنيف المادة (راجع migration_classification_votes.sql)
     CLASSIFICATION_SUBJECT_LABELS_AR, CLASSIFICATION_SUBJECT_CODES_REVERSE,
     CLASSIFICATION_VOTE_THRESHOLD, MSG_CLASSIFICATION_VOTE_PROMPT,
-    MSG_CLASSIFICATION_VOTE_THANKS_YES, MSG_CLASSIFICATION_VOTE_THANKS_NO,
+    MSG_CLASSIFICATION_VOTE_EDITED_YES, MSG_CLASSIFICATION_VOTE_EDITED_NO,
     MSG_CLASSIFICATION_VOTE_ALREADY, MSG_CLASSIFICATION_VOTE_ERROR,
     MSG_CLASSIFICATION_LOCKED_SUFFIX, MSG_CLASSIFICATION_VOTE_ADMIN_ALERT,
 )
@@ -1163,18 +1163,19 @@ async def handle_classification_vote(call: types.CallbackQuery) -> None:
                     file_hash=file_hash, subject_label=subject_label, user_id=call.from_user.id,
                 )
                 asyncio.create_task(_notify_admin_safe(alert_text))
-            await call.answer(MSG_CLASSIFICATION_VOTE_THANKS_NO, show_alert=True)
-        else:
-            await call.answer(MSG_CLASSIFICATION_VOTE_THANKS_YES, show_alert=True)
 
+        # 🆕 تعديل رسالة التصويت نفسها مباشرة (بدل تركها بنصها الطويل الأصلي وعرض
+        # تنبيه منبثق فقط) - تصير رسالة قصيرة "شكراً لمشاركتك!" وتُزال الأزرار منها،
+        # فيشعر الطالب فوراً إنه صوته سُجّل فعلاً بدل رسالة معلّقة بلا تغيير.
+        thanks_text = MSG_CLASSIFICATION_VOTE_EDITED_NO if vote == "no" else MSG_CLASSIFICATION_VOTE_EDITED_YES
         if result.get("locked_now"):
-            try:
-                await call.message.edit_text(
-                    call.message.html_text + MSG_CLASSIFICATION_LOCKED_SUFFIX,
-                    parse_mode="HTML", reply_markup=None,
-                )
-            except Exception:
-                pass
+            thanks_text += MSG_CLASSIFICATION_LOCKED_SUFFIX
+        try:
+            await call.message.edit_text(thanks_text, parse_mode="HTML", reply_markup=None)
+        except Exception:
+            pass  # فشل التعديل (مثال: الرسالة قديمة جداً أو محذوفة) لا يوقف تسجيل الصوت نفسه أعلاه
+
+        await call.answer()
     except Exception as exc:
         log_error(logger, f"Error in handle_classification_vote: {exc}", exception=exc)
         await call.answer(MSG_CLASSIFICATION_VOTE_ERROR, show_alert=True)
