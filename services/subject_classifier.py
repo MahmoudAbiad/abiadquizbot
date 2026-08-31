@@ -63,8 +63,20 @@ from constants import (
 from logger import get_logger, log_warning
 from services.detection_common import IMAGE_EXTENSIONS, build_text_sample
 from ai_models_helper import get_detection_model
+from config import redis_client
+from supabase_helper import get_classification_lock
 
 logger = get_logger(__name__)
+
+# 🆕 (تحسين أداء/تكلفة): كاش تصنيف بمفتاح file_hash - لو نفس الملف بالضبط (نفس الهاش)
+# يُرفع من طالب آخر (أو نفس الطالب مرة ثانية)، مادته العلمية ثابتة منطقياً بغض النظر
+# عن هوية الرافع، فلا داعٍ لإعادة استدعاء Gemini بالكامل من الصفر (زمن استجابة + تكلفة
+# API). Redis (نفس البنية التحتية المستخدمة أصلاً لحالات الـ Poll) بدل جدول Supabase
+# جديد - تخزين مؤقت بحت، لا حاجة لديمومة دائمة أو استعلامات SQL عليه. TTL طويل (7 أيام)
+# لأنه غير مرتبط بزمن انتهاء صلاحية ملفات Gemini Files API (تلك تنتهي خلال ~48 ساعة أصلاً
+# ولا علاقة لها بنتيجة التصنيف المخزَّنة هنا، وهي فقط subject/suggested_types/إلخ نصية).
+CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
+_CLASSIFY_CACHE_PREFIX = "subject_classify:"
 
 API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") if key.strip()]
 # AI-NOTE: عملاء ثابتون لمرة واحدة (نفس منطق detection_common.py) لتفادي تسريب
@@ -122,6 +134,31 @@ class SubjectClassification(BaseModel):
             "only when subject is quiz_solved or quiz_unsolved, otherwise null"
         ),
     )
+
+
+async def _get_cached_classification(file_hash: Optional[str]) -> Optional[SubjectClassification]:
+    """يرجع نتيجة تصنيف محفوظة سابقاً لنفس file_hash إن وُجدت، وإلا None بصمت (أي خطأ
+    اتصال بـ Redis لا يوقف تدفق التصنيف العادي - فشل آمن دائماً)."""
+    if not file_hash:
+        return None
+    try:
+        cached_raw = await redis_client.get(f"{_CLASSIFY_CACHE_PREFIX}{file_hash}")
+        if cached_raw:
+            return SubjectClassification.model_validate_json(cached_raw)
+    except Exception as exc:
+        log_warning(logger, f"[subject_classifier] Cache lookup failed for {file_hash}: {exc}")
+    return None
+
+
+async def _store_cached_classification(file_hash: Optional[str], result: SubjectClassification) -> None:
+    if not file_hash:
+        return
+    try:
+        await redis_client.set(
+            f"{_CLASSIFY_CACHE_PREFIX}{file_hash}", result.model_dump_json(), ex=CLASSIFY_CACHE_TTL_SECONDS,
+        )
+    except Exception as exc:
+        log_warning(logger, f"[subject_classifier] Cache store failed for {file_hash}: {exc}")
 
 
 def _fallback() -> SubjectClassification:
@@ -298,8 +335,17 @@ async def _classify_media(file_paths: List[str]) -> SubjectClassification:
     return _fallback()
 
 
+async def get_pending_classification_snapshot(file_hash: Optional[str]) -> Optional[SubjectClassification]:
+    """🆕 يرجع اللقطة الكاملة (subject + suggested_types + question_count + content_subject)
+    المخزَّنة حالياً بكاش Redis غير المؤكَّد لهذا الملف، إن وُجدت ولا زالت ضمن TTL - وإلا
+    None. تُستخدم من handlers/files.py وقت تسجيل صوت تحقّق (راجع migration_classification_
+    votes.sql) لالتقاط لقطة كاملة تُحفَظ مع التصويت، بدل الاكتفاء بقيمة subject فقط، بحيث
+    لو فاز هذا التصنيف بالتحقق المجتمعي لاحقاً، يُثبَّت بكامل حقوله لا subject فقط."""
+    return await _get_cached_classification(file_hash)
+
+
 async def classify_subject(
-    file_paths: Optional[List[str]], pure_text: Optional[str]
+    file_paths: Optional[List[str]], pure_text: Optional[str], file_hash: Optional[str] = None,
 ) -> SubjectClassification:
     """
     نقطة الدخول الموحّدة: تستدعى مرة واحدة فقط مبكراً من handlers/files.py (بنفس توقيت
@@ -307,12 +353,37 @@ async def classify_subject(
     الـ FSM وتُعاد قراءتها لاحقاً بـ services/quiz_service.py وقت التوليد الفعلي بدل
     إعادة تنفيذ أي فحص إضافي (math_detector/english_detector القديمين لم يعودا يُستدعيان
     على المسار الساخن). أي خطأ غير متوقع يُعتبر تلقائياً subject="other" (فشل آمن).
+
+    🆕 file_hash اختياري (مُمرَّر من handlers/files.py، محسوب مسبقاً لأغراض الكاش أصلاً)
+    - لو وُجدت نتيجة تصنيف محفوظة لنفس الهاش، تُعاد مباشرة بلا أي استدعاء Gemini (نفس
+    الملف بالضبط، مادته العلمية ثابتة بغض النظر عن هوية الرافع أو توقيت الرفع).
+
+    🆕 التحقق المجتمعي (services/supabase_helper.get_classification_lock): تصنيف ثبَّته
+    3 طلاب مختلفين على الأقل (راجع migration_classification_votes.sql) له أولوية مطلقة -
+    يُتحقق منه أولاً حتى قبل كاش Redis أدناه، ولا يُعاد فحصه أبداً بعدها (لا TTL، دائم).
+    كاش Redis (_get_cached_classification) يبقى كما هو لتسريع الاستجابة للملفات التي لم
+    تصل بعد لعتبة التحقق المجتمعي، دون أي تعديل على سلوكه أو مدة صلاحيته.
     """
+    locked = await get_classification_lock(file_hash) if file_hash else None
+    if locked is not None:
+        try:
+            return SubjectClassification.model_validate(locked["classification_data"])
+        except Exception as exc:
+            log_warning(logger, f"[subject_classifier] Failed to parse locked classification for {file_hash}: {exc}")
+            # لا نمنع التدفق العادي لو كانت بيانات التثبيت تالفة لأي سبب - نكمل كالمعتاد (فشل آمن)
+
+    cached = await _get_cached_classification(file_hash)
+    if cached is not None:
+        return cached
     try:
         if pure_text:
-            return await _classify_text(pure_text)
-        if file_paths:
-            return await _classify_media(file_paths)
+            result = await _classify_text(pure_text)
+        elif file_paths:
+            result = await _classify_media(file_paths)
+        else:
+            result = _fallback()
     except Exception as exc:
         log_warning(logger, f"[subject_classifier] Unexpected error during classification, defaulting to 'other': {exc}")
-    return _fallback()
+        result = _fallback()
+    await _store_cached_classification(file_hash, result)
+    return result

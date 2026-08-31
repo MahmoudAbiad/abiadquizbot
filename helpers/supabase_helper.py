@@ -750,6 +750,48 @@ async def submit_quiz_vote(quiz_id: str, user_id: int, vote_type: str) -> bool:
         log_error(logger, f"Error executing quiz atomic vote function: {e}")
         return False
 
+# ==================== 🆕 التحقق المجتمعي من تصنيف المادة ====================
+# راجع migration_classification_votes.sql للمخطط الكامل + services/subject_classifier.py
+# لمنطق قراءة التثبيت أولاً قبل أي كاش Redis أو استدعاء AI جديد.
+
+async def get_classification_lock(file_hash: str) -> Optional[Dict[str, Any]]:
+    """يرجع صف التثبيت الدائم لهذا الملف إن وُجد (تصنيف تحقق منه 3 طلاب مختلفين على
+    الأقل)، وإلا None. فشل الاتصال بـ Supabase لا يوقف تدفق التصنيف العادي - يُعامل
+    كـ"غير مثبّت بعد" فقط، ويكمل classify_subject مساره الطبيعي (فشل آمن)."""
+    if not file_hash:
+        return None
+    try:
+        res = await supabase.table("classification_locks").select(
+            "classification_data"
+        ).eq("file_hash", file_hash).limit(1).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        log_error(logger, f"Error fetching classification lock for {file_hash}: {e}")
+        return None
+
+
+async def submit_classification_vote(
+    file_hash: str, user_id: int, vote: str, subject: str, classification_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """يسجّل صوت طالب واحد ("yes"/"no") على تصنيف مادة ملف معيّن عبر الـ RPC الذرّية
+    (تمنع تكرار نفس المستخدم على نفس الملف وتحسب/تثبّت لحظياً بضربة واحدة، بلا Race
+    Condition لو صوّت عدة طلاب بنفس اللحظة تقريباً). ترجع dict بمفاتيح duplicate/locked_now/
+    yes_count؛ عند أي خطأ اتصال ترجع duplicate=False, locked_now=False (فشل آمن - التصويت
+    لم يُسجَّل لكن التدفق العام للبوت يكمل بدون كسر)."""
+    try:
+        res = await supabase.rpc("vote_on_classification", {
+            "p_file_hash": file_hash,
+            "p_user_id": user_id,
+            "p_vote": vote,
+            "p_subject": subject,
+            "p_classification_data": classification_data,
+        }).execute()
+        return res.data or {"duplicate": False, "locked_now": False, "yes_count": 0}
+    except Exception as e:
+        log_error(logger, f"Error executing classification atomic vote function: {e}")
+        return {"duplicate": False, "locked_now": False, "yes_count": 0}
+
+
 async def save_quiz_feedback(quiz_id: str, user_id: int, comment: str) -> bool:
     """حفظ ملاحظات وإفادات الطلاب الأكاديمية لمراجعتها لاحقاً من قبل الإدارة"""
     try:

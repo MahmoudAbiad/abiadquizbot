@@ -12,11 +12,14 @@ from constants import (
     BTN_AUDIO_CONFIRM_START,
     BTN_OPEN_UPLOAD_PAGE,
     BTN_OPEN_QUESTION_EDIT_PAGE,
+    BTN_CLASSIFICATION_VOTE_YES, BTN_CLASSIFICATION_VOTE_NO,
+    CLASSIFICATION_SUBJECT_CODES,
 )
 from settings_helper import get_setting
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
 from services.quiz_permissions import can_delete_quiz
+from utils import hash_to_short_token
 
 logger = get_logger(__name__)
 
@@ -329,6 +332,21 @@ def get_translation_choice_keyboard(subject_type: str = SUBJECT_ENGLISH) -> type
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+# 🆕 لوحة "هل التصنيف صحيح؟" (التحقق المجتمعي - راجع services/subject_classifier.py +
+# migration_classification_votes.sql). subject يُشفَّر بكود قصير وfile_hash يُضغط عبر
+# utils.hash_to_short_token لأن callback_data محدود بـ 64 بايت من تيليجرام والهاش
+# الأصلي (SHA-256 hex) وحده 64 حرفاً. الطالب لا يحتاج معرفة أي من هذا - قيمتا subject/
+# file_hash تُستخرجان لاحقاً عبر handlers/files.py._decode_classification_vote_callback.
+def get_classification_vote_keyboard(file_hash: str, subject: str) -> types.InlineKeyboardMarkup:
+    token = hash_to_short_token(file_hash)
+    subj_code = CLASSIFICATION_SUBJECT_CODES.get(subject, "o")
+    kb = [[
+        types.InlineKeyboardButton(text=BTN_CLASSIFICATION_VOTE_YES, callback_data=f"cv_y_{subj_code}_{token}"),
+        types.InlineKeyboardButton(text=BTN_CLASSIFICATION_VOTE_NO, callback_data=f"cv_n_{subj_code}_{token}"),
+    ]]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 # 🆕 لوحة اختيار طريقة استخراج "اختبار محلول" (subject=quiz_solved): اعتماد الأجوبة
 # المدوّنة بالمستند كما هي، أو تجاهلها وحلّ الاختبار بالذكاء الاصطناعي بدلاً منها.

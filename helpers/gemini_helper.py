@@ -63,7 +63,6 @@ from constants import (
 )
 from logger import get_logger, log_error, log_info, log_warning
 from mem_utils import release_memory_to_os
-from supabase_helper import get_cached_quiz
 from utils import calculate_file_hash, safe_file_cleanup
 from ai_models_helper import get_cascade_models, get_groq_fast_model
 
@@ -1016,13 +1015,14 @@ async def generate_quiz_smart(
         if not file_paths:
             return None
 
-        # 2. فحص الـ Cache أولاً للحد من استهلاك API
-        cache_key = file_hash or await asyncio.to_thread(_combined_file_hash, file_paths)
-        if not skip_cache:
-            cached = await get_cached_quiz(cache_key)
-            if cached and cached.get("questions_data"):
-                log_info(logger, f"Cache hit for {cache_key}; external generation bypassed")
-                return cached["questions_data"]
+        # 🩹 FIX (تنظيف كود ميت): فحص الكاش القديم بالتركيبة القديمة (subject فقط، بلا
+        # question_type/difficulty) أُزيل من هنا - المستدعي الوحيد الفعلي لهذه الدالة
+        # (services/quiz_service.py) يمرر دائماً skip_cache=True منذ اعتماد منطق الكاش
+        # الحقيقي بالتركيبة الكاملة subject×question_type×difficulty (عبر get_file_quizzes +
+        # combo_quiz_count هناك)، فهذا الفرع لم يكن يُنفَّذ عملياً إطلاقاً. تركه كان يحمل
+        # خطر تفعيله بالخطأ مستقبلاً (يرجع كويزاً بصعوبة/نوع خاطئين لأنه يتجاهل التركيبة
+        # الكاملة). راجع get_cached_quiz بـ helpers/supabase_helper.py لو احتجت الكاش
+        # القديم لاستخدام مستقبلي آخر منفصل عن هذا المسار.
 
         # 3. توجيه الملفات للمسار العادي، أو Super PDF للملفات الضخمة، أو 🆕 Super
         #    Images لألبومات الصور الكبيرة (أكبر من SUPER_IMAGE_BATCH_THRESHOLD -
