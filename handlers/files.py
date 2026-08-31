@@ -9,7 +9,7 @@ from aiogram import F, Router, types
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 
-from config import QuizState, bot, redis_client
+from config import QuizState, bot, redis_client, ADMIN_ID
 from settings_helper import get_setting
 from constants import (
     ADMIN_CONTACT, BTN_CANCEL_REQUEST, ERROR_ALBUM_TOO_LARGE,
@@ -28,6 +28,12 @@ from constants import (
     QUIZ_EXTRACTION_MODE_AS_IS, QUIZ_EXTRACTION_MODE_AI_SOLVE,
     MSG_QUIZ_SOLVED_DETECTED, MSG_QUIZ_UNSOLVED_DETECTED,
     MSG_QUIZ_DETECTED_COUNT_TEMPLATE, MAX_QUESTIONS_TO_GENERATE,
+    # 🆕 التحقق المجتمعي من تصنيف المادة (راجع migration_classification_votes.sql)
+    CLASSIFICATION_SUBJECT_LABELS_AR, CLASSIFICATION_SUBJECT_CODES_REVERSE,
+    CLASSIFICATION_VOTE_THRESHOLD, MSG_CLASSIFICATION_VOTE_PROMPT,
+    MSG_CLASSIFICATION_VOTE_THANKS_YES, MSG_CLASSIFICATION_VOTE_THANKS_NO,
+    MSG_CLASSIFICATION_VOTE_ALREADY, MSG_CLASSIFICATION_VOTE_ERROR,
+    MSG_CLASSIFICATION_LOCKED_SUFFIX, MSG_CLASSIFICATION_VOTE_ADMIN_ALERT,
 )
 from gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
@@ -35,20 +41,20 @@ from keyboards import (
     get_multiple_quizzes_keyboard, get_question_count_keyboard,
     get_translation_choice_keyboard, get_quiz_type_keyboard,
     get_web_upload_redirect_keyboard, get_quiz_extraction_choice_keyboard,
-    get_quiz_detected_count_keyboard,
+    get_quiz_detected_count_keyboard, get_classification_vote_keyboard,
 )
-from logger import get_logger, log_error
+from logger import get_logger, log_error, log_warning
 from supabase_helper import (
     check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped,
-    reward_referrer_if_eligible,
+    reward_referrer_if_eligible, get_classification_lock, submit_classification_vote,
 )
 from r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
-from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup
+from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, short_token_to_hash
 from validators import validate_file_size, validate_question_count
 
 # استيراد الخدمات الجديدة
 from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
-from services.subject_classifier import classify_subject
+from services.subject_classifier import classify_subject, get_pending_classification_snapshot
 from services.quiz_service import (
     determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow,
     combo_quiz_count, build_question_type_label,
@@ -397,7 +403,7 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
     # النتيجة تُخزَّن بحالة الـ FSM وتُعاد قراءتها لاحقاً وقت التوليد الفعلي بدل إعادة
     # الفحص من جديد على نفس المحتوى (راجع execute_quiz_generation_workflow).
     try:
-        classification = await classify_subject(detection_paths, detection_text)
+        classification = await classify_subject(detection_paths, detection_text, file_hash=data.get("file_hash"))
     except Exception as exc:
         log_error(logger, f"Subject classification failed, continuing with standard mode: {exc}")
         from services.subject_classifier import SubjectClassification
@@ -418,6 +424,25 @@ async def _ask_question_count(reply_target: types.Message, state: FSMContext, co
         custom_question_type_text=None,
         difficulty=DIFFICULTY_MEDIUM,
     )
+
+    # 🆕 التحقق المجتمعي من التصنيف (راجع services/subject_classifier.py +
+    # migration_classification_votes.sql): رسالة إضافية منفصلة (لا تستبدل أي شاشة تالية،
+    # ولا تُعرض إن كان الملف مثبّتاً أصلاً - لا حاجة لمزيد من الأصوات ساعتها). تُرسَل هنا
+    # قبل أي تفرّع لاحق (اختبار جاهز/ترجمة/نوع أسئلة) لتظهر بكل الحالات بغض النظر عن
+    # subject المُكتشف.
+    file_hash = data.get("file_hash")
+    if file_hash:
+        try:
+            already_locked = await get_classification_lock(file_hash)
+            if not already_locked:
+                subject_label = CLASSIFICATION_SUBJECT_LABELS_AR.get(classification.subject, classification.subject)
+                await status_target.answer(
+                    MSG_CLASSIFICATION_VOTE_PROMPT.format(subject_label=subject_label),
+                    parse_mode="HTML",
+                    reply_markup=get_classification_vote_keyboard(file_hash, classification.subject),
+                )
+        except Exception as exc:
+            log_warning(logger, f"Could not send classification vote prompt for {file_hash}: {exc}")
 
     # 🆕 اختبار جاهز (محلول/غير محلول): لهما أولوية تدفق مستقلة عن باقي المواد - لا شاشة
     # نوع/صعوبة أسئلة (لا معنى لها هنا: المهمة استخراج أسئلة موجودة فعلياً بالمستند وليست
@@ -1085,6 +1110,83 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
     except Exception as exc:
         log_error(logger, f"Cancel request failed: {exc}", exception=exc)
         await call.answer("❌ تعذر إلغاء الطلب، حاول مجدداً.", show_alert=True)
+
+# ==================== 🆕 التحقق المجتمعي من تصنيف المادة ====================
+# راجع migration_classification_votes.sql + services/subject_classifier.py +
+# keyboards.get_classification_vote_keyboard. بلا أي StateFilter عمداً: رسالة التصويت
+# مستقلة عن أي تدفق FSM، وقد يضغطها الطالب بعد أن يكون انتقل لشاشات لاحقة (أو حتى بعد
+# إنهاء الجلسة بالكامل) - نفس منطق "cancel_upload_request" أعلاه (لا اعتماد على state).
+
+@router.callback_query(F.data.startswith("cv_y_") | F.data.startswith("cv_n_"))
+async def handle_classification_vote(call: types.CallbackQuery) -> None:
+    try:
+        parts = call.data.split("_", 3)
+        # الصيغة: cv_<y|n>_<subj_code>_<token> - راجع keyboards.get_classification_vote_keyboard
+        if len(parts) != 4:
+            await call.answer(MSG_CLASSIFICATION_VOTE_ERROR, show_alert=True)
+            return
+        _, vote_code, subj_code, token = parts
+        subject = CLASSIFICATION_SUBJECT_CODES_REVERSE.get(subj_code)
+        if not subject:
+            await call.answer(MSG_CLASSIFICATION_VOTE_ERROR, show_alert=True)
+            return
+        try:
+            file_hash = short_token_to_hash(token)
+        except Exception:
+            await call.answer(MSG_CLASSIFICATION_VOTE_ERROR, show_alert=True)
+            return
+
+        vote = "yes" if vote_code == "y" else "no"
+        # 🆕 لقطة الـ classification الكاملة (suggested_types/question_count/content_subject)
+        # تُلتقط من كاش Redis غير المؤكَّد إن وُجد (لسا صالح ضمن TTL) لتثبيتها لاحقاً كاملة
+        # لو فاز هذا التصنيف بالتحقق - وإلا (كاش منتهي الصلاحية) نكتفي بـ subject فقط
+        # (فشل آمن: لا يمنع التثبيت، فقط يفقد الحقول الثانوية الإضافية).
+        cached_snapshot = await get_pending_classification_snapshot(file_hash)
+        classification_data = (
+            cached_snapshot.model_dump() if cached_snapshot is not None
+            else {"subject": subject, "suggested_types": [], "question_count": None, "content_subject": None}
+        )
+
+        result = await submit_classification_vote(file_hash, call.from_user.id, vote, subject, classification_data)
+
+        if result.get("duplicate"):
+            await call.answer(MSG_CLASSIFICATION_VOTE_ALREADY, show_alert=True)
+            return
+
+        if vote == "no":
+            # 🆕 بلاغ خطأ تصنيف - تنبيه فوري للأدمن للمراجعة اليدوية (لا يوقف تدفق الطالب،
+            # فشل الإرسال هنا لا يظهر له إطلاقاً - نفس فلسفة asyncio.create_task المستخدمة
+            # لباقي الأحداث غير الحرجة بهذا الملف).
+            if ADMIN_ID:
+                subject_label = CLASSIFICATION_SUBJECT_LABELS_AR.get(subject, subject)
+                alert_text = MSG_CLASSIFICATION_VOTE_ADMIN_ALERT.format(
+                    file_hash=file_hash, subject_label=subject_label, user_id=call.from_user.id,
+                )
+                asyncio.create_task(_notify_admin_safe(alert_text))
+            await call.answer(MSG_CLASSIFICATION_VOTE_THANKS_NO, show_alert=True)
+        else:
+            await call.answer(MSG_CLASSIFICATION_VOTE_THANKS_YES, show_alert=True)
+
+        if result.get("locked_now"):
+            try:
+                await call.message.edit_text(
+                    call.message.html_text + MSG_CLASSIFICATION_LOCKED_SUFFIX,
+                    parse_mode="HTML", reply_markup=None,
+                )
+            except Exception:
+                pass
+    except Exception as exc:
+        log_error(logger, f"Error in handle_classification_vote: {exc}", exception=exc)
+        await call.answer(MSG_CLASSIFICATION_VOTE_ERROR, show_alert=True)
+
+
+async def _notify_admin_safe(text: str) -> None:
+    """إرسال تنبيه للأدمن مع كبت أي خطأ (شبكة/حظر البوت من الأدمن إلخ) - غير حرج بما
+    يكفي لتسجيله فقط بلا أي تأثير على تدفق الطالب الذي أطلق الحدث."""
+    try:
+        await bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+    except Exception as exc:
+        log_warning(logger, f"Could not notify admin: {exc}")
 
 # ==================== 🆕 رفع ملف/ألبوم صور كبير عبر صفحة الويب (Mini App) ====================
 

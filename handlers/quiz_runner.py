@@ -66,13 +66,30 @@ _STALE_QUESTION_CACHE_KEYS = ("image_url", "rendered_image_url", "cached_image_u
 
 
 def _sanitize_question_for_render(question: Optional[dict]) -> dict:
-    """يزيل أي بيانات صورة/كاش قديمة عن سؤال رياضي بحيث يعاد رسمه من البيانات الجديدة."""
+    """يزيل أي بيانات صورة/كاش قديمة عن سؤال رياضي بحيث يعاد رسمه من البيانات الجديدة.
+    تُستخدم فقط بمسارات التعديل الفعلية (سؤال تغيّر محتواه فعلاً) - راجع
+    _prepare_question_for_send تحت لمسار العرض العادي الذي لا يجب أن يُبطل الكاش."""
     if not isinstance(question, dict):
         return {}
     cleaned = dict(question)
     for key in _STALE_QUESTION_CACHE_KEYS:
         cleaned.pop(key, None)
     return cleaned
+
+
+# 🩹 FIX (كان يُبطل كاش الصورة على كل عرض سؤال، بلا داعٍ): send_question_by_ids كانت
+# تمرر كل سؤال عبر _sanitize_question_for_render قبل الإرسال مباشرة - تلك الدالة
+# مصممة أصلاً لمسار التعديل فقط (سؤال تغيّر محتواه فعلياً، فيجب إعادة رسمه). تطبيقها
+# هنا بشكل عام كان يحذف image_url من كل سؤال رياضي في كل مرة يُعرض (بما فيها "التالي"،
+# إعادة تشغيل نفس الكويز quiz_replay، وأخطر من ذلك: كل كويز رياضي مشترك/مفضّل يفتحه
+# طالب جديد عبر رابط عميق - shared["quiz_data"] القادمة من قاعدة البيانات تحمل بالفعل
+# image_url صالحاً محسوباً مسبقاً، لكن كانت تُحذف فوراً هنا فيُعاد الرسم والرفع لـ
+# Supabase من الصفر لكل طالب يفتح نفس الرابط - بالضبط الحالة التي بُني الكاش أصلاً
+# لتفاديها). هذه دالة خفيفة بديلة: نسخة آمنة (تتعامل مع بيانات غير متوقعة) بلا أي
+# حذف - إبطال الكاش الفعلي يبقى محصوراً بمسارات التعديل الصريحة أعلاه، التي تستدعي
+# _sanitize_question_for_render بنفسها قبل حتى كتابة السؤال المعدَّل إلى state.
+def _prepare_question_for_send(question: Optional[dict]) -> dict:
+    return dict(question) if isinstance(question, dict) else {}
 
 # 🩹 نفس حالات الكويز النشط + None: تُستخدم حصراً لهاندلرات ويزارد "حفظ في المفضلة"
 # لأن state يُصفَّر إلى None عند اكتمال الكويز (_handle_quiz_completion) قبل أن
@@ -153,8 +170,9 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
             await _handle_quiz_completion(chat_id, user_id, state, data)
             return
 
-        # 2. تجهيز وإرسال السؤال الحالي
-        q = _sanitize_question_for_render(questions[idx])
+        # 2. تجهيز وإرسال السؤال الحالي (بلا إبطال كاش الصورة - راجع تعليق
+        #    _prepare_question_for_send أعلاه لسبب استبدال _sanitize_question_for_render هنا)
+        q = _prepare_question_for_send(questions[idx])
         questions[idx] = q
         await state.update_data(questions=questions)
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -168,6 +186,12 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
         ])
 
         await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb, quiz_id=data.get('quiz_id'))
+        # 🆕 send_quiz_poll (لسؤال رياضي) قد يملأ q["image_url"] بعد الرسم/الرفع الفعلي -
+        # q هو نفس الكائن المرجعي questions[idx] أعلاه، فنعيد كتابة questions لـ state هنا
+        # لضمان تخزين الرابط الجديد فعلياً (وليس فقط بالذاكرة المحلية لهذه الدالة)، حتى
+        # تستفيد منه إعادة تشغيل هذا الكويز بنفس الجلسة (quiz_replay) بلا إعادة رسم لاحقة.
+        if q.get("image_url"):
+            await state.update_data(questions=questions)
         await state.update_data(is_switching_question=False)
     except Exception as e:
         log_error(logger, f"Error in send_question_by_ids: {e}", exception=e)

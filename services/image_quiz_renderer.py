@@ -707,7 +707,15 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         ax.set_ylim(bottom_y, height_px)
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
+    # 🆕 (تحسين حجم/زمن رفع): pil_kwargs يُمرَّر مباشرة لـ Pillow (backend الحفظ الفعلي
+    # لـ savefig بصيغة PNG) - optimize=True يبحث عن أفضل جدول Huffman/تصفية لكل صورة
+    # (أبطأ قليلاً وقت الحفظ، تأثير مهمل هنا لأن الرسم نفسه أثقل بكثير)، وcompress_level=9
+    # أعلى مستوى ضغط zlib (بلا فقدان جودة - PNG ضغط lossless دائماً، فلا تأثير إطلاقاً
+    # على وضوح النص/الرموز الرياضية). يقلل حجم الملف المرفوع لـ Supabase Storage بشكل
+    # ملموس (صور بخلفية بيضاء بسيطة وألوان محدودة تضغط جيداً جداً)، وبالتالي زمن الرفع
+    # واستهلاك bandwidth دون أي تكلفة CPU إضافية تُذكر مقارنة بالرسم نفسه.
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor(),
+                pil_kwargs={"optimize": True, "compress_level": 9})
     buf.seek(0)
     png_bytes = buf.getvalue()
     # 🩹 FIX (memory-leak): لا حاجة لـ plt.close(fig) - fig/canvas/ax محليون

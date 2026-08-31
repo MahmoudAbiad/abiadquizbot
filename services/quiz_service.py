@@ -13,12 +13,16 @@ from constants import (
     QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
 )
 from gemini_helper import generate_quiz_smart
-from logger import get_logger, log_error
+from logger import get_logger, log_error, log_warning
 from services.file_service import extract_office_text_if_needed
+from services.image_quiz_renderer import render_question_image_async, looks_arabic
+from services.quiz_engine import _question_image_object_path
 from supabase_helper import (
     get_file_quizzes,
     refund_user_points,
     save_file_quiz_multiple,
+    save_question_image_url,
+    upload_quiz_question_image,
     log_usage_event,
 )
 
@@ -29,6 +33,43 @@ logger = get_logger(__name__)
 # ملفات كبيرة بنفس اللحظة ممكن تستهلك الذاكرة/CPU بشكل تراكمي وتُبطئ كل الطلبات المتزامنة.
 # Semaphore(2) يحصر معالجة الملفات الثقيلة بحد أقصى عمليتين متزامنتين فقط.
 _HEAVY_PROCESSING_SEMAPHORE = asyncio.Semaphore(2)
+
+# 🆕 (تحسين تجربة الكويز الرياضي): بدل رسم/رفع صورة كل سؤال رياضي بشكل "كسول" لحظة
+# وصول دوره فعلياً (services/quiz_engine._send_math_image_question - الطالب ينتظر
+# الرسم+الرفع أثناء تقدمه بالكويز، سؤال-سؤال)، نُطلق مهمة خلفية فور نجاح التوليد ترسم
+# وترفع بقية أسئلة الكويز (من السؤال الثاني فصاعداً - الأول يُترك لمساره الفوري الحالي
+# بـ quiz_engine كما هو تماماً، تفادياً لرسمه مرتين بالتزامن) مسبقاً بالتوازي. لا حاجة
+# لسقف تزامن إضافي هنا - render_question_image_async يفرض RENDER_SEMAPHORE (نفس السقف
+# المستخدم بالمسار الفوري) داخلياً، فلا يمكن لهذه المهمة أن تتجاوز حد الذاكرة المسموح
+# حتى لو تزامنت مع طلاب آخرين يفتحون كويزات رياضية بنفس اللحظة.
+async def _prefetch_one_math_image(quiz_id: str, question: Dict[str, Any], idx: int, total: int) -> None:
+    try:
+        is_ar = looks_arabic(str(question.get("question", "")))
+        image_bytes = await render_question_image_async(question, idx, total, is_ar)
+        object_path = _question_image_object_path(quiz_id, idx, question)
+        image_url = await upload_quiz_question_image(image_bytes, object_path)
+        if image_url:
+            question["image_url"] = image_url  # يبقى بالذاكرة طوال الجلسة الحالية أيضاً
+            await save_question_image_url(quiz_id, idx, image_url)
+    except Exception as exc:
+        # فشل مسبق لسؤال واحد لا يوقف تحضير بقية الأسئلة - كل سؤال لسا عنده مسار احتياطي
+        # كامل (رسم فوري) بـ quiz_engine._send_math_image_question لو وصل دوره وما زالت
+        # صورته غير جاهزة.
+        log_warning(logger, f"[quiz_service] Background image prefetch failed for quiz {quiz_id} q{idx}: {exc}")
+
+
+async def _prefetch_math_quiz_images(quiz_id: str, quiz_data: List[Dict[str, Any]]) -> None:
+    total = len(quiz_data)
+    # asyncio.gather (لا حلقة تسلسلية) عشان تتداخل عمليات الرفع (I/O) لسؤال مع رسم السؤال
+    # التالي - render_question_image_async يفرض RENDER_SEMAPHORE (سقف 3) داخلياً بأي حال،
+    # فلا خطر تجاوز ذاكرة حتى مع الإطلاق المتزامن الكامل هنا.
+    tasks = [
+        _prefetch_one_math_image(quiz_id, question, idx, total)
+        for idx, question in enumerate(quiz_data)
+        if idx != 0 and not question.get("image_url")
+    ]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 def determine_execution_mode(items: int, questions: int, cached: bool = False) -> str:
     """تحديد وضع التنفيذ (عادي، متقدم، أو كاش)"""
@@ -356,5 +397,10 @@ async def execute_quiz_generation_workflow(
                 if str(uq["id"]) not in existing_uuids:
                     new_quiz_id = str(uq["id"])
                     break
+
+        # 🆕 راجع تعليق _prefetch_math_quiz_images أعلاه - يشمل فقط كويزات رياضية بمعرّف
+        # UUID صالح فعلياً (بدونه save_question_image_url لن يجد صفاً ليحدّثه لاحقاً).
+        if is_math_mode and new_quiz_id and quiz_data:
+            asyncio.create_task(_prefetch_math_quiz_images(new_quiz_id, quiz_data))
 
         return quiz_data, new_quiz_id, ""

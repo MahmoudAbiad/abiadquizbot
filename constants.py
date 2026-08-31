@@ -472,6 +472,58 @@ MSG_QUIZ_UNSOLVED_DETECTED = (
     "سيتم استخراج أسئلته وحلّه بالكامل بواسطة الذكاء الاصطناعي."
 )
 
+# 🆕 ==================== التحقق المجتمعي من تصنيف المادة ====================
+# راجع migration_classification_votes.sql + services/subject_classifier.py + helpers/
+# supabase_helper.py (get_classification_lock/submit_classification_vote) للتفاصيل الكاملة.
+# فكرة الميزة: تصنيف AI الأول لا يُثبَّت نهائياً بمجرد صدوره - يُعرض للطالب سؤال تحقق
+# بسيط (هل التصنيف صحيح؟)، وبمجرد أن يوافق CLASSIFICATION_VOTE_THRESHOLD طلاب مختلفين
+# على نفس التصنيف لنفس الملف، يُثبَّت دائماً ولا يُعاد فحصه بـ AI مرة أخرى إطلاقاً.
+CLASSIFICATION_VOTE_THRESHOLD = 3
+
+# أكواد قصيرة لقيمة subject داخل callback_data (حد تيليجرام 64 بايت لكامل الحقل، وهاش
+# الملف نفسه بصيغته المضغوطة يأخذ 43 حرفاً منها - راجع utils.hash_to_short_token).
+CLASSIFICATION_SUBJECT_CODES = {
+    SUBJECT_MATH: "m",
+    SUBJECT_ENGLISH: "e",
+    SUBJECT_FRENCH: "f",
+    SUBJECT_QUIZ_SOLVED: "qs",
+    SUBJECT_QUIZ_UNSOLVED: "qu",
+    SUBJECT_OTHER: "o",
+}
+CLASSIFICATION_SUBJECT_CODES_REVERSE = {v: k for k, v in CLASSIFICATION_SUBJECT_CODES.items()}
+
+# نص عرض كل مادة بالعربي - يُستخدم برسالة التحقق وبتنبيه الأدمن عند صوت "لا".
+CLASSIFICATION_SUBJECT_LABELS_AR = {
+    SUBJECT_MATH: "رياضيات",
+    SUBJECT_ENGLISH: "إنجليزي",
+    SUBJECT_FRENCH: "فرنسي",
+    SUBJECT_QUIZ_SOLVED: "اختبار جاهز (محلول)",
+    SUBJECT_QUIZ_UNSOLVED: "اختبار جاهز (غير محلول)",
+    SUBJECT_OTHER: "مادة عامة",
+}
+
+BTN_CLASSIFICATION_VOTE_YES = "✅ نعم، صحيح"
+BTN_CLASSIFICATION_VOTE_NO = "❌ لا، غير صحيح"
+
+MSG_CLASSIFICATION_VOTE_PROMPT = (
+    "🤔 صنّفنا هذا الملف تلقائياً كـ <b>{subject_label}</b>.\n"
+    "هل التصنيف صحيح؟ رأيك يساعدنا نحسّن دقة التصنيف للجميع."
+)
+MSG_CLASSIFICATION_VOTE_THANKS_YES = "✅ شكراً لتأكيدك! تم تسجيل رأيك."
+MSG_CLASSIFICATION_VOTE_THANKS_NO = "📩 شكراً لملاحظتك، تم إرسالها للمراجعة."
+MSG_CLASSIFICATION_VOTE_ALREADY = "⚠️ لقد قيّمت تصنيف هذا الملف مسبقاً!"
+MSG_CLASSIFICATION_VOTE_ERROR = "❌ تعذر تسجيل تقييمك، حاول لاحقاً."
+MSG_CLASSIFICATION_LOCKED_SUFFIX = "\n\n🔒 <i>تم تثبيت هذا التصنيف نهائياً بمساعدة الطلاب، شكراً لكم!</i>"
+
+# {file_hash}/{subject_label}/{yes_count} تُعبَّأ بـ handlers/files.py وقت الإرسال الفعلي للأدمن.
+MSG_CLASSIFICATION_VOTE_ADMIN_ALERT = (
+    "🚩 <b>بلاغ تصنيف خاطئ</b>\n\n"
+    "ملف: <code>{file_hash}</code>\n"
+    "التصنيف الحالي: <b>{subject_label}</b>\n"
+    "بلّغ عنه المستخدم: <code>{user_id}</code>\n\n"
+    "يرجى مراجعة الملف يدوياً."
+)
+
 # 🆕 يُعرض بشاشة تأكيد عدد الأسئلة/التكلفة لاختبار جاهز (محلول أو غير محلول) بدل سؤال
 # الطالب "كم سؤالاً تريد؟" (لا معنى له هنا - عدد الأسئلة محدَّد فعلياً بالمستند نفسه وليس
 # اختياراً حراً كباقي المواد). {count} هو العدد التقريبي المرصود آلياً عبر classify_subject

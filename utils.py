@@ -2,11 +2,27 @@
 Utility functions for file processing and hashing.
 """
 
+import base64
 import os
 import hashlib
 from logger import get_logger, log_error, log_info
 
 logger = get_logger(__name__)
+
+# 🆕 file_hash (SHA-256 hex, 64 حرف) طويل جداً ليُستخدم مباشرة ضمن callback_data
+# (حد تيليجرام 64 بايت للحقل كاملاً). هذا التحويل ذهاب/إياب Base64 URL-Safe يضغطه
+# لـ 43 حرفاً فقط (32 بايت خام) بدون أي فقدان أو حاجة لتخزين وسيط (Redis/DB) لحفظ
+# العلاقة - راجع services/classification_votes.py لاستخدامه الفعلي بأزرار "هل التصنيف
+# صحيح؟". يعمل فقط لهاشات SHA-256 الصحيحة (64 حرف hex)؛ أي شيء آخر يرمي استثناءً.
+def hash_to_short_token(file_hash: str) -> str:
+    raw = bytes.fromhex(file_hash)
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def short_token_to_hash(token: str) -> str:
+    padding = "=" * (-len(token) % 4)
+    raw = base64.urlsafe_b64decode(token + padding)
+    return raw.hex()
 
 def calculate_file_hash(file_path: str) -> str:
     """
