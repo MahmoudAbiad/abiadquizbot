@@ -743,18 +743,22 @@ def get_ai_cancel_keyboard(slot: str) -> types.InlineKeyboardMarkup:
     kb = [[types.InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"admin_ai_slot_{slot}")]]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_admin_user_actions_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+def get_admin_user_actions_keyboard(user_id: int, include_contact_button: bool = True) -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="💰 شحن رصيد الطالب", callback_data=f"admin_charge_menu_{user_id}")],
         [
             types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}"),
             types.InlineKeyboardButton(text="🎯 كويزات هذا الطالب", callback_data=f"admin_user_quizzes_{user_id}_p_1")
         ],
+    ]
+    if include_contact_button:
         # 🆕 زر تواصل مباشر: يفتح محادثة الطالب فعلياً على تيليغرام (tg://user?id=)
         # بدل الاعتماد على معرف يوزر قد لا يكون موجوداً أصلاً.
-        [types.InlineKeyboardButton(text="💬 تواصل مع الطالب", url=f"tg://user?id={user_id}")],
-        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
-    ]
+        # ⚠️ قد يرفضه تيليجرام بخطأ BUTTON_USER_PRIVACY_RESTRICTED إذا كانت
+        # إعدادات خصوصية المستخدم تمنع الربط المباشر بحسابه عبر الـ ID.
+        # في هذه الحالة يجب إعادة الإرسال مع include_contact_button=False.
+        kb.append([types.InlineKeyboardButton(text="💬 تواصل مع الطالب", url=f"tg://user?id={user_id}")])
+    kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
