@@ -37,6 +37,12 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ تعذر حفظ رابط المشاركة حالياً", show_alert=True)
             return
 
+        # 🩹 FIX: save_shared_quiz قد تُعيد كوداً موجوداً مسبقاً لنفس الكويز بدل
+        # الكود المولَّد محلياً أعلاه (لتفادي إبطال روابط قديمة موزَّعة سابقاً -
+        # راجع تعليق الدالة بـ supabase_helper.py). لازم نستخدم القيمة المُرجعة
+        # فعلياً ببناء الرابط وتخزينها بالـ state، وإلا الرابط المعروض للمستخدم
+        # بيصير مختلفاً عن الكود الفعلي المحفوظ بقاعدة البيانات.
+        share_id = saved
         await state.update_data(share_id=share_id)
         bot_info = await bot.get_me()
         
