@@ -23,6 +23,7 @@ MODULE: AI Quiz Generation Helper (Gemini & Groq Integration)
 """
 
 import asyncio
+import contextvars
 import datetime
 import hashlib
 import json
@@ -30,6 +31,7 @@ import mimetypes
 import os
 import random
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
@@ -194,8 +196,36 @@ MODEL_KEY_BLOCK_OVERLOAD_MINUTES = 1
 
 # AI-NOTE: كلمات مفتاحية لتحديد أخطاء الضغط والازدحام في سيرفرات Gemini
 OVERLOAD_ERROR_KEYWORDS = ["overloaded", "unavailable", "503", "internal error", "500"]
-OVERLOAD_RETRY_ATTEMPTS = 2
-OVERLOAD_RETRY_BASE_DELAY = 3
+
+# 🆕 (طلب صريح من المستخدم) بدل إعادة محاولة نفس الزوج (مفتاح، موديل) عدة مرات مع تأخير
+# تصاعدي قبل الانتقال للتالي - كل زوج يُجرَّب مرة واحدة بالضبط. لو غير متاح فوراً (أي خطأ
+# غير FileNotFoundError)، يُحظر فوراً (_mark_model_key_failure) وينتقل الـ cascade فوراً
+# للزوج التالي بلا أي انتظار. هذا يقلّل زمن استجابة الطالب بشكل كبير عند تعطّل موديل ما،
+# على حساب عدم إعطاء نفس الزوج "فرصة ثانية" لازدحام عابر جداً (< ثانية) - مقبول لأن باقي
+# السلسلة (نماذج × مفاتيح أخرى) توفر مسار احتياطي فوري أصلاً.
+# ==============================================================================
+# 🆕 تتبّع بيانات آخر توليد ناجح (للوحة الأدمن: الوقت المستغرق + الموديل المستخدم)
+# ==============================================================================
+# AI-NOTE: ContextVar بدل تمرير القيمة عبر توقيع كل دالة بالسلسلة الطويلة (generate_quiz_smart
+# → _generate_regular/_generate_super_pdf/... → _execute_cascade → _attempt) - كل طلب توليد
+# يُعالَج ضمن asyncio Task مستقل (معالج تيليجرام لكل تحديث)، وContextVar مرتبط بالـ Task
+# الحالي حصراً (نسخة معزولة تلقائياً)، فلا يوجد أي خطر تداخل بيانات بين طلبات متزامنة
+# لطلاب مختلفين. تُقرأ فقط من generate_quiz_smart نفسها بعد انتهاء التوليد (نفس الـ Task).
+_last_model_used_var: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "_last_model_used_var", default=None
+)
+# البيانات النهائية (تشمل مدة التوليد الكاملة) - تُقرأ من خارج هذا الموديول عبر
+# get_last_generation_metadata() بعد عودة generate_quiz_smart مباشرة وبنفس الـ Task.
+_last_generation_metadata_var: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "_last_generation_metadata_var", default=None
+)
+
+
+def get_last_generation_metadata() -> Optional[Dict[str, Any]]:
+    """🆕 يُستدعى من services/quiz_service.py فوراً بعد await generate_quiz_smart(...) بنفس
+    الـ Task - يُرجع {"provider", "model", "duration_seconds"} لآخر توليد ناجح ضمن هذا
+    الـ Task، أو None إذا فشل التوليد بالكامل (لا موديل نجح) أو لم يُستدعَ أي توليد بعد."""
+    return _last_generation_metadata_var.get()
 
 # AI-NOTE: الحد الأقصى لإرسال البيانات مباشرة ضمن الطلب (Inline) دون اللجوء لـ Files API.
 # رفع الملف عبر Files API يضيف Round-trip شبكة وتأخير معالجة، لذا يُفضل تحاشيه في الملفات الصغيرة.
@@ -294,9 +324,26 @@ def _mark_model_key_failure(key_index: int, model: str, error: Exception) -> Non
     message = str(error).lower()
     now = datetime.datetime.now()
     if any(keyword in message for keyword in QUOTA_ERROR_KEYWORDS):
-        blocked_model_keys[(key_index, model)] = now + datetime.timedelta(hours=MODEL_KEY_BLOCK_QUOTA_HOURS)
+        until = now + datetime.timedelta(hours=MODEL_KEY_BLOCK_QUOTA_HOURS)
+        reason = "نفاد الحصة (quota)"
     else:
-        blocked_model_keys[(key_index, model)] = now + datetime.timedelta(minutes=MODEL_KEY_BLOCK_OVERLOAD_MINUTES)
+        until = now + datetime.timedelta(minutes=MODEL_KEY_BLOCK_OVERLOAD_MINUTES)
+        reason = "ازدحام/تعطّل مؤقت (overload)"
+    blocked_model_keys[(key_index, model)] = until
+
+    # 🆕 (طلب صريح من المستخدم) سطر واضح ومميّز بالـ logs الحية (stdout/stderr - تظهر
+    # مباشرة بـ `heroku logs --tail`) عند حظر أي زوج (مفتاح، موديل)، بغض النظر من أي
+    # مسار استُدعيت منه (cascade العادي أو Super PDF/Images). نفاد الحصة أخطر (يُحظر
+    # 24 ساعة) فيُسجَّل كـ log_error ليبرز بوضوح بين رسائل الـ INFO العادية؛ التبريد
+    # القصير (دقيقة واحدة) يُسجَّل كـ log_warning فقط.
+    block_msg = (
+        f"🚫 BLOCKED (key={key_index}, model={model}) — السبب: {reason} — "
+        f"محظور حتى: {until.strftime('%Y-%m-%d %H:%M:%S')} — الخطأ الأصلي: {error}"
+    )
+    if any(keyword in message for keyword in QUOTA_ERROR_KEYWORDS):
+        log_error(logger, block_msg)
+    else:
+        log_warning(logger, block_msg)
 
 
 def _is_overload_error(error: Exception) -> bool:
@@ -334,8 +381,9 @@ async def _execute_cascade(
     - الحلقة الداخلية: تمشي على كل المفاتيح بدءاً من current_key_pointer (Round-Robin).
     - فحص لحظي بالذاكرة (بدون أي تأخير) ضد blocked_model_keys لتفادي أي زوج (مفتاح، نموذج)
       محظور حالياً، والانتقال فوراً للزوج التالي.
-    - عند ازدحام مؤقت (503/...) يُعاد المحاولة على نفس الزوج بعدد محدود من المرات مع تأخير
-      تصاعدي بسيط قبل اعتباره فاشلاً والانتقال للمفتاح التالي.
+    - 🆕 كل زوج (مفتاح، موديل) يُجرَّب مرة واحدة بالضبط - بدون أي إعادة محاولة أو انتظار
+      على نفس الزوج. أي فشل (بما فيه ازدحام 503 مؤقت) يُحظر فوراً وينتقل الـ cascade
+      فوراً للزوج التالي (راجع _mark_model_key_failure لمدة الحظر حسب نوع الخطأ).
     """
     if not API_KEYS:
         log_error(logger, "GEMINI_API_KEYS is not configured")
@@ -350,39 +398,30 @@ async def _execute_cascade(
             if _is_model_key_blocked(key_index, model):
                 continue
             client = _GEMINI_CLIENTS[key_index]
-            for attempt in range(OVERLOAD_RETRY_ATTEMPTS + 1):
-                try:
-                    result = await attempt_fn(client, key_index, model)
-                    # 🆕 سطر تأكيد وحيد عند النجاح - يوضّح بالـ logs مباشرة (بدون الرجوع
-                    # لقاعدة البيانات) إن السلسلة الديناميكية (ai_model_slots) هي فعلاً
-                    # اللي حُكّمت هون: أي موديل نجح، بأي ترتيب، وبأي مفتاح.
-                    log_info(logger, f"✅ Cascade success: provider=gemini model={model} key_index={key_index}")
-                    return result
-                except Exception as exc:
-                    last_exc = exc
-                    # 🩹 إصلاح خلل حقيقي: FileNotFoundError خطأ محلي (ملف حُذف من القرص من
-                    # جهتنا) لا علاقة له إطلاقاً بحالة مفتاح/موديل Gemini الفعلية. معاملته
-                    # كفشل عادي كانت تحظر كل زوج (مفتاح، موديل) لدقيقة كاملة (نفس منطق أي
-                    # خطأ "آخر غير متوقع" بـ _mark_model_key_failure) رغم أنه سيتكرر حتماً
-                    # على كل الأزواج التالية بما إن الملف نفسه مفقود لا محالة - هذا كان
-                    # يُفشّل أي طلب آخر (حتى لطالب مختلف كلياً) خلال تلك الدقيقة بلا أي
-                    # محاولة فعلية ("no available (key, model) pairs" باللوغز). نوقف
-                    # الـ cascade فوراً هنا بدل حظر أي زوج أو تجربة باقي المفاتيح/الموديلات.
-                    if isinstance(exc, FileNotFoundError):
-                        log_error(logger, f"Local file missing during Gemini upload attempt (not a key/model issue, aborting cascade without penalizing keys): {exc}")
-                        return None
-                    if _is_overload_error(exc) and attempt < OVERLOAD_RETRY_ATTEMPTS:
-                        delay = OVERLOAD_RETRY_BASE_DELAY * (attempt + 1)
-                        log_warning(
-                            logger,
-                            f"Gemini key {key_index} (model={model}) overloaded, retrying in {delay}s "
-                            f"(attempt {attempt + 1}/{OVERLOAD_RETRY_ATTEMPTS}): {exc}",
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-                    _mark_model_key_failure(key_index, model, exc)
-                    log_warning(logger, f"Gemini key {key_index} (model={model}) failed: {exc}")
-                    break
+            try:
+                result = await attempt_fn(client, key_index, model)
+                # 🆕 سطر تأكيد وحيد عند النجاح - يوضّح بالـ logs مباشرة (بدون الرجوع
+                # لقاعدة البيانات) إن السلسلة الديناميكية (ai_model_slots) هي فعلاً
+                # اللي حُكّمت هون: أي موديل نجح، بأي ترتيب، وبأي مفتاح.
+                log_info(logger, f"✅ Cascade success: provider=gemini model={model} key_index={key_index}")
+                # 🆕 تسجيل الموديل الفائز لهذا الـ Task الحالي - يُقرأ لاحقاً من
+                # generate_quiz_smart لبناء بيانات التتبع (لوحة الأدمن).
+                _last_model_used_var.set({"provider": "gemini", "model": model, "key_index": key_index})
+                return result
+            except Exception as exc:
+                last_exc = exc
+                # 🩹 إصلاح خلل حقيقي: FileNotFoundError خطأ محلي (ملف حُذف من القرص من
+                # جهتنا) لا علاقة له إطلاقاً بحالة مفتاح/موديل Gemini الفعلية. معاملته
+                # كفشل عادي كانت تحظر كل زوج (مفتاح، موديل) لدقيقة كاملة (نفس منطق أي
+                # خطأ "آخر غير متوقع" بـ _mark_model_key_failure) رغم أنه سيتكرر حتماً
+                # على كل الأزواج التالية بما إن الملف نفسه مفقود لا محالة - هذا كان
+                # يُفشّل أي طلب آخر (حتى لطالب مختلف كلياً) خلال تلك الدقيقة بلا أي
+                # محاولة فعلية ("no available (key, model) pairs" باللوغز). نوقف
+                # الـ cascade فوراً هنا بدل حظر أي زوج أو تجربة باقي المفاتيح/الموديلات.
+                if isinstance(exc, FileNotFoundError):
+                    log_error(logger, f"Local file missing during Gemini upload attempt (not a key/model issue, aborting cascade without penalizing keys): {exc}")
+                    return None
+                _mark_model_key_failure(key_index, model, exc)
 
     if last_exc:
         log_error(logger, f"Model waterfall cascade exhausted across all models/keys: {last_exc}")
@@ -690,6 +729,7 @@ async def _generate_single_attempt(
         questions = [question.model_dump() for question in parsed.questions]
         token_count = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0
         log_info(logger, f"✅ Cascade success (super pdf/images): provider=gemini model={model} key_index={key_index}")
+        _last_model_used_var.set({"provider": "gemini", "model": model, "key_index": key_index})
         return questions, int(token_count)
     except Exception as exc:
         _mark_model_key_failure(key_index, model, exc)
@@ -731,6 +771,10 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
         results = await asyncio.gather(*tasks)
         questions = [question for result, _ in results for question in result]
         total_tokens = sum(tokens for _, tokens in results)
+        # 🆕 كل جزء نُفِّذ بمهمة (Task) منفصلة عبر asyncio.gather - ContextVar لا يتسرّب
+        # تلقائياً من مهمة فرعية لمهمة أصلية، لذا نسجّل الموديل الفائز صراحة هنا (top_model
+        # معروف مسبقاً بهذا النطاق نفسه، نفس الموديل استُخدم لكل الأجزاء الثلاثة).
+        _last_model_used_var.set({"provider": "gemini", "model": top_model, "key_index": None, "mode": "super_pdf"})
         return questions, total_tokens
     finally:
         for chunk_path in chunk_paths:
@@ -789,6 +833,8 @@ async def _generate_super_images(
     results = await asyncio.gather(*tasks)
     questions = [question for result, _ in results for question in result]
     total_tokens = sum(tokens for _, tokens in results)
+    # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول ContextVar وasyncio.gather.
+    _last_model_used_var.set({"provider": "gemini", "model": top_model, "key_index": None, "mode": "super_images"})
     return questions, total_tokens
 
 
@@ -852,6 +898,7 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
         raw_content = _repair_json_backslashes(raw_content)
         parsed = QuizResponse(**json.loads(raw_content))
         log_info(logger, f"✅ Cascade success: provider=groq model={groq_model}")
+        _last_model_used_var.set({"provider": "groq", "model": groq_model, "key_index": None})
         return [question.model_dump() for question in parsed.questions]
     except Exception as exc:
         log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
@@ -949,6 +996,25 @@ async def generate_quiz_smart(
     stop_event = asyncio.Event()
     animation_task = asyncio.create_task(_loading_animation(status_message, stop_event)) if status_message else None
 
+    # 🆕 توقيت التوليد الكامل (يشمل استخراج النص/بناء الطلب/كل الـ cascade) - يُقرأ لاحقاً
+    # عبر get_last_generation_metadata() من services/quiz_service.py لتغذية لوحة الأدمن
+    # الجديدة (وقت توليد كل كويز + الموديل المستخدم). نصفّر الـ ContextVar الخاص بالموديل
+    # الفائز أولاً لضمان عدم قراءة نتيجة توليد سابق بنفس الـ Task لو حصل فشل جزئي هنا.
+    _generation_start_time = time.monotonic()
+    _last_model_used_var.set(None)
+
+    def _finalize(result_questions: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+        """يُستدعى مرة واحدة تماماً قبل كل return فعلي بهذه الدالة (نجاحاً أو فشلاً) -
+        يحسب المدة الكاملة ويحفظ بيانات آخر توليد (موديل + مدة) بـ ContextVar منفصل
+        يبقى صالحاً للقراءة من المستدعي حتى بعد عودة هذه الدالة (نفس الـ Task)."""
+        duration = round(time.monotonic() - _generation_start_time, 2)
+        winner = _last_model_used_var.get()
+        if result_questions and winner:
+            _last_generation_metadata_var.set({**winner, "duration_seconds": duration})
+        else:
+            _last_generation_metadata_var.set(None)
+        return result_questions
+
     try:
         # 🆕 اختيار الموجّه المناسب حسب الأولوية: رياضي (LaTeX) > فرنسي (مترجم/عادي) >
         # إنجليزي (مترجم/عادي) > قياسي. content_language يميّز بين الموجّهين الفرنسيين
@@ -1006,14 +1072,14 @@ async def generate_quiz_smart(
             # فعلي - راجعهما لتفاصيل الإصلاح الكامل (لم يعد الاعتماد كافياً على response.parsed
             # الجاهز من الـ SDK وحده).
             if is_math_mode:
-                return await _generate_text_quiz_with_gemini(pure_text, prompt)
+                return _finalize(await _generate_text_quiz_with_gemini(pure_text, prompt))
             questions = await _generate_text_quiz(pure_text, prompt, english_mode=english_mode)
             if not questions:
                 questions = await _generate_text_quiz_with_gemini(pure_text, prompt)
-            return questions
+            return _finalize(questions)
 
         if not file_paths:
-            return None
+            return _finalize(None)
 
         # 🩹 FIX (تنظيف كود ميت): فحص الكاش القديم بالتركيبة القديمة (subject فقط، بلا
         # question_type/difficulty) أُزيل من هنا - المستدعي الوحيد الفعلي لهذه الدالة
@@ -1041,10 +1107,10 @@ async def generate_quiz_smart(
         else:
             generated = await _generate_regular(file_paths, prompt)
         if not generated:
-            return None
+            return _finalize(None)
 
         questions, total_tokens = generated
-        return questions
+        return _finalize(questions)
 
     finally:
         # IMPORTANT: إيقاف وإلغاء مهمة التحريك بشكل فوري ونظيف في كتلة finally

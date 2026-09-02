@@ -1071,7 +1071,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # execute_quiz_generation_workflow (نجاحاً أو فشلاً) عبر finally.
         heartbeat_task = asyncio.create_task(_run_processing_heartbeat(status_msg))
         try:
-            quiz_data, new_quiz_id, error_code = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
+            quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
         finally:
             heartbeat_task.cancel()
 
@@ -1086,8 +1086,15 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
             return
 
+        # 🆕 (لوحة الأدمن: "📊 سجل توليد الكويزات") - نُرفق بيانات آخر توليد ناجح (الموديل
+        # ومزوّده والمدة الكاملة بالثواني، راجع gemini_helper.get_last_generation_metadata)
+        # ضمن نفس حدث quiz_generated - لا حاجة لجدول/حدث جديد منفصل.
+        generation_meta = generation_meta or {}
         await log_usage_event(call.from_user.id, "quiz_generated", {
-            "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost
+            "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost,
+            "ai_provider": generation_meta.get("provider"),
+            "ai_model": generation_meta.get("model"),
+            "generation_seconds": generation_meta.get("duration_seconds"),
         })
         await reward_referrer_if_eligible(call.from_user.id)
 

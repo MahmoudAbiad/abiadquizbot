@@ -1586,6 +1586,44 @@ async def admin_get_recent_errors(limit: int = 20, days: int = 7) -> List[Dict[s
         return []
 
 
+async def admin_get_quiz_generation_log(limit: int = 200, days: int = 7) -> List[Dict[str, Any]]:
+    """🆕 جلب سجل توليد الكويزات (event_type='quiz_generated') لآخر عدة أيام مع بيانات
+    الطالب - يغذّي لوحة الأدمن الجديدة "📊 سجل توليد الكويزات" (handlers/admin/ai_control.py):
+    لكل كويز مولَّد، الوقت المستغرق (generation_seconds) واسم/مزوّد الموديل المستخدم
+    (ai_model/ai_provider) - كلها مُرفقة أصلاً بـ metadata الحدث من handlers/files.py.
+    نفس نمط admin_get_recent_errors تماماً (تصفح محلي، صفحة الطالب مُرفقة)."""
+    try:
+        since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
+        query = supabase.table("usage_events") \
+            .select("user_id, metadata, created_at") \
+            .eq("event_type", "quiz_generated") \
+            .gte("created_at", since)
+        if ADMIN_ID:
+            query = query.neq("user_id", ADMIN_ID)
+        res = await query.order("created_at", desc=True).limit(limit).execute()
+        rows = res.data or []
+        if not rows:
+            return []
+
+        user_ids = list({r["user_id"] for r in rows if r.get("user_id")})
+        users_map = {}
+        if user_ids:
+            users_res = await supabase.table("users") \
+                .select("user_id, first_name, last_name, username") \
+                .in_("user_id", user_ids) \
+                .execute()
+            users_map = {u["user_id"]: u for u in (users_res.data or [])}
+
+        for r in rows:
+            r["user"] = users_map.get(r.get("user_id"), {})
+            r["time_str"] = format_syria_time(r.get("created_at"), fmt="%I:%M %p (%Y-%m-%d)")
+
+        return rows
+    except Exception as e:
+        log_error(logger, f"Error fetching quiz generation log: {e}")
+        return []
+
+
 async def admin_get_referral_leaderboard(limit: int = 30) -> List[Dict[str, Any]]:
     """
     يبني ترتيب الطلاب الذين أحالوا غيرهم (الأكثر إحالة أولاً)، مع القائمة الكاملة لمن
