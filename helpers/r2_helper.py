@@ -29,7 +29,7 @@ import asyncio
 import datetime
 import os
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import boto3
 from botocore.client import Config

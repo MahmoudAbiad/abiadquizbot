@@ -13,7 +13,7 @@ from constants import (
     QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
 )
 from gemini_helper import generate_quiz_smart, get_last_generation_metadata
-from logger import get_logger, log_error, log_warning
+from logger import get_logger, log_warning
 from services.file_service import extract_office_text_if_needed
 from services.image_quiz_renderer import render_question_image_async, looks_arabic
 from services.quiz_engine import _question_image_object_path
@@ -23,7 +23,6 @@ from supabase_helper import (
     save_file_quiz_multiple,
     save_question_image_url,
     upload_quiz_question_image,
-    log_usage_event,
 )
 
 logger = get_logger(__name__)

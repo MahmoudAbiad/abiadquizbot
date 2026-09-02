@@ -2,12 +2,10 @@
 import asyncio
 import io
 import csv
-import json
 import html
-from typing import Optional, Dict
-from datetime import datetime, timezone, timedelta
-from constants import SYRIA_TZ, USER_QUIZZES_PAGE_SIZE, format_syria_time as _format_syria_time
+from constants import USER_QUIZZES_PAGE_SIZE, format_syria_time as _format_syria_time
 from supabase_helper import admin_get_user_quizzes
+from .admin_utils import sanitize_csv_value
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -71,14 +69,6 @@ async def send_points_notification(target_id: int, amount: int, new_balance: int
         logger.error(f"Could not send notification to user {target_id}: {e}")
 
 
-def sanitize_csv_value(val) -> str:
-    """تأمين القيم لتفادي ثغرة CSV Injection عند فتح التقرير في Excel."""
-    val_str = str(val) if val is not None else ""
-    if val_str.startswith(('=', '+', '-', '@')):
-        return f"'{val_str}"
-    return val_str
-
-
 async def render_users_page(event, page: int = 1):
     """عرض قائمة الطلاب المصفحة مع معالجة آمنة لـ Callbacks."""
     if isinstance(event, types.CallbackQuery):
@@ -108,7 +98,7 @@ async def render_users_page(event, page: int = 1):
     report = f"👥 <b>سجل الطلاب المسجلين ({page} من {total_pages}):</b>\n\n"
     for idx, u in enumerate(page_users, start=start_idx + 1):
         username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
-        joined_time = format_syria_time(u.get('joined_at'))
+        joined_time = _short_syria_time(u.get('joined_at'))
         report += (
             f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
@@ -704,7 +694,7 @@ async def export_all_users(call: types.CallbackQuery):
         writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Joined At"])
         
         for u in users:
-            joined_time_syria = format_syria_time(u.get('joined_at'))
+            joined_time_syria = _short_syria_time(u.get('joined_at'))
             writer.writerow([
                 sanitize_csv_value(u.get('user_id', '')),
                 sanitize_csv_value(u.get('username', 'Unknown')),
@@ -739,8 +729,11 @@ async def export_all_users(call: types.CallbackQuery):
             await call.message.answer("❌ حدث خطأ داخلي أثناء استخراج الملف.", reply_markup=get_admin_dashboard_keyboard())
 
 
-def format_syria_time(iso_str: str) -> str:
-    """تحويل توقيت قاعدة البيانات إلى توقيت سوريا (12 ساعة بتنسيق صباحاً/مساءً)."""
+def _short_syria_time(iso_str: str) -> str:
+    """تحويل توقيت قاعدة البيانات إلى توقيت سوريا (12 ساعة بتنسيق صباحاً/مساءً).
+    🩹 أُعيدت التسمية (كانت format_syria_time) لأنها كانت تُخفي الدالة المستوردة
+    بنفس الاسم من constants.py (توقيع مختلف: (value, fmt)) - خطر باغ صامت لأي
+    استدعاء مستقبلي بهذا الملف يتوقع توقيع constants.py الأصلي."""
     return _format_syria_time(iso_str)
 
 
@@ -770,7 +763,7 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
         for idx, q in enumerate(quizzes, start=offset + 1):
             quiz_id = q["id"]
             title = q.get("source_title") or "كويز بدون عنوان"
-            time_syria = format_syria_time(q.get("created_at"))
+            time_syria = _short_syria_time(q.get("created_at"))
             likes = q.get("likes", 0)
             dislikes = q.get("dislikes", 0)
             # 🆕 تمييز الكويزات المُستخدمة من الكاش المركزي (لم ينشئها الطالب بنفسه)

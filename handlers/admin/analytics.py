@@ -1,4 +1,3 @@
-import asyncio
 import io
 import csv
 import json
@@ -18,9 +17,10 @@ from supabase_helper import (
     admin_get_recent_errors,
     admin_get_referral_leaderboard,
 )
-from keyboards import get_analytics_keyboard, get_admin_dashboard_keyboard
+from keyboards import get_analytics_keyboard
 from logger import get_logger
 from .dashboard import IsAdminFilter
+from .admin_utils import safe_edit_text, sanitize_csv_value
 
 logger = get_logger(__name__)
 router = Router()
@@ -103,16 +103,6 @@ def _format_seconds(total_seconds: float) -> str:
     total_seconds = int(total_seconds or 0)
     minutes, seconds = divmod(total_seconds, 60)
     return f"{minutes} د {seconds} ث" if minutes else f"{seconds} ث"
-
-def sanitize_csv_value(val) -> str:
-    val_str = str(val) if val is not None else ""
-    return f"'{val_str}" if val_str.startswith(('=', '+', '-', '@')) else val_str
-
-async def safe_edit_text(message: types.Message, text: str, reply_markup=None):
-    try:
-        await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    except TelegramBadRequest:
-        pass
 
 # ⚡ 1. معالج عرض الطلاب النشطين خلال الـ 24 ساعة الأخيرة مصفحاً (بتوقيت سوريا)
 @router.callback_query(F.data.startswith("admin_analytics_today"))

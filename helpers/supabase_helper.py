@@ -16,9 +16,9 @@ from supabase import create_async_client
 from logger import get_logger, log_error, log_warning, log_info
 from constants import (
     DEFAULT_FAVORITE_SECTION_TITLE, MAX_FAVORITE_SECTIONS,
-    SYRIA_TZ, to_syria_datetime, format_syria_time,
+    to_syria_datetime, format_syria_time,
 )
-from validators import validate_user_id, validate_points_amount
+from validators import validate_user_id
 from settings_helper import get_setting
 
 dotenv_path = find_dotenv()

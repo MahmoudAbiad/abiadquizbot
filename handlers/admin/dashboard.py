@@ -3,11 +3,11 @@ from aiogram import Router, types, F
 from aiogram.filters import Command, BaseFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.exceptions import TelegramBadRequest
 
 from config import ADMIN_ID
 from keyboards import get_admin_dashboard_keyboard
 from logger import get_logger
+from .admin_utils import safe_edit_text
 
 logger = get_logger(__name__)
 router = Router()
@@ -48,14 +48,6 @@ class AdminState(StatesGroup):
 
 
 # ==================== الدالات المساعدة ====================
-
-async def safe_edit_text(message: types.Message, text: str, reply_markup=None):
-    """تعديل النص بشكل آمن يتفادى أخطاء التكرار في تيليجرام."""
-    try:
-        await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    except TelegramBadRequest:
-        pass
-
 
 async def render_admin_dashboard(event, state: FSMContext = None):
     """عرض لوحة التحكم الرئيسية وتصفير أي حالة معلقة."""
