@@ -231,7 +231,7 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
             previous_score_text += f"\n🏆 أعلى نتيجة مسجلة لك: <b>{highest}</b> من <b>{total}</b>\n"
 
     result_text = (
-        f"🏁 <b>اكتمل الاختبار بنجاح!</b>\n\n"
+        f"{'⏹ <b>تم إيقاف الاختبار.</b>' if stopped_early else '🏁 <b>اكتمل الاختبار بنجاح!</b>'}\n\n"
         f"🎯 نتيجتك الحالية: <b>{score}</b> من <b>{total}</b>\n"
         f"📊 النسبة المئوية: <b>{percentage:.1f}%</b>\n"
         f"{previous_score_text}\n"
