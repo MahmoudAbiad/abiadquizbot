@@ -700,6 +700,7 @@ def get_ai_control_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="🧠 سلسلة توليد الأسئلة (Cascade)", callback_data="admin_ai_slot_cascade")],
         [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
         [types.InlineKeyboardButton(text="⚡ موديل Groq السريع", callback_data="admin_ai_slot_groq_fast")],
+        [types.InlineKeyboardButton(text="📊 سجل توليد الكويزات (الوقت + الموديل)", callback_data="admin_quiz_gen_log")],
         [types.InlineKeyboardButton(text="⚙️ إعدادات النقاط", callback_data="admin_settings_menu")],
         [types.InlineKeyboardButton(text="🏠 رجوع للوحة الرئيسية", callback_data="admin_main_menu")],
     ]

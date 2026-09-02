@@ -12,7 +12,7 @@ from constants import (
     SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
     QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
 )
-from gemini_helper import generate_quiz_smart
+from gemini_helper import generate_quiz_smart, get_last_generation_metadata
 from logger import get_logger, log_error, log_warning
 from services.file_service import extract_office_text_if_needed
 from services.image_quiz_renderer import render_question_image_async, looks_arabic
@@ -234,10 +234,16 @@ async def execute_quiz_generation_workflow(
     data: Dict[str, Any],
     count: int,
     status_message: Any
-) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], str]:
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], str, Optional[Dict[str, Any]]]:
     """
     التدفق التنفيذي المركزي لتوليد الكويز:
     يستخرج النص، يجلب الكويزات السابقة لمنع التكرار، يستدعي الذكاء الاصطناعي، ويحفظ في الكاش.
+
+    🆕 عنصر رابع بالمُخرَج (generation_meta): {"provider", "model", "duration_seconds"} لآخر
+    توليد ناجح (من gemini_helper.get_last_generation_metadata) - None إذا فشل التوليد قبل
+    الوصول لأي موديل، أو إذا رجع مبكراً بسبب "unreadable_office" قبل استدعاء AI أصلاً.
+    يُستخدم من handlers/files.py لتسجيل حدث quiz_generated بمعلومات الموديل والمدة، تغذيةً
+    للوحة الأدمن الجديدة "📊 سجل توليد الكويزات".
     """
     async with _HEAVY_PROCESSING_SEMAPHORE:
         is_media = data.get("input_type") == "media"
@@ -261,7 +267,7 @@ async def execute_quiz_generation_workflow(
                     pure_text = extracted_text
                     is_media = False
                 else:
-                    return None, None, "unreadable_office"
+                    return None, None, "unreadable_office", None
 
         # 2. جلب الأسئلة السابقة لمنع التكرار
         previous_questions = []
@@ -355,7 +361,7 @@ async def execute_quiz_generation_workflow(
         )
 
         if not quiz_data:
-            return None, None, "ai_failed"
+            return None, None, "ai_failed", None
 
         # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
         #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
@@ -403,4 +409,4 @@ async def execute_quiz_generation_workflow(
         if is_math_mode and new_quiz_id and quiz_data:
             asyncio.create_task(_prefetch_math_quiz_images(new_quiz_id, quiz_data))
 
-        return quiz_data, new_quiz_id, ""
+        return quiz_data, new_quiz_id, "", get_last_generation_metadata()

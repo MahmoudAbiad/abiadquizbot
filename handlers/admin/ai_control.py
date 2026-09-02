@@ -27,6 +27,7 @@ from ai_models_helper import (
     PROVIDER_LABELS,
     SLOT_DETECTION,
 )
+from supabase_helper import admin_get_quiz_generation_log
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 
@@ -35,6 +36,11 @@ router = Router()
 
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
+
+# 🆕 لوحة "سجل توليد الكويزات" (وقت التوليد + الموديل المستخدم لكل كويز)
+QUIZ_GEN_LOG_PAGE_SIZE = 6       # عدد الكويزات المعروضة بالصفحة الواحدة
+QUIZ_GEN_LOG_FETCH_LIMIT = 200   # السقف الأقصى المجلوب من قاعدة البيانات دفعة واحدة قبل التصفح المحلي
+QUIZ_GEN_LOG_DAYS = 7            # نطاق الأيام المشمولة بالجلب
 
 
 # ==================== اللوحة الرئيسية ====================
@@ -50,6 +56,7 @@ async def _render_ai_menu(event, state: FSMContext = None):
         "🧠 <b>سلسلة توليد الأسئلة:</b> ترتيب الموديلات، تفعيل/تعطيل، إضافة أو حذف موديل\n"
         "🔍 <b>فحص المحتوى السريع:</b> الموديل المستخدم لفحص الرياضيات وتصنيف المادة\n"
         "⚡ <b>موديل Groq السريع:</b> المسار السريع لتوليد الأسئلة من نص صريح\n"
+        "📊 <b>سجل توليد الكويزات:</b> وقت كل عملية توليد + الموديل المستخدم فيها\n"
         "💰 <b>إعدادات النقاط:</b> نقاط الترحيب/التجديد/الإحالة (كانت لوحة منفصلة سابقاً)"
     )
     reply_markup = get_ai_control_keyboard()
@@ -271,3 +278,80 @@ async def process_new_model_name(msg: types.Message, state: FSMContext):
 
     await msg.answer(f"✅ تمت إضافة <code>{html_escape(model_name)}</code> بنجاح.", parse_mode="HTML")
     await _render_slot_screen(msg, slot)
+
+
+# ==================== 🆕 سجل توليد الكويزات (وقت التوليد + الموديل المستخدم) ====================
+# يقبل كلا الشكلين: "admin_quiz_gen_log" (الدخول أول مرة = صفحة 1) و
+# "admin_quiz_gen_log_p_<page>" (التنقل بين الصفحات) - نفس نمط "🐞 آخر الأخطاء" بـ analytics.py.
+@router.callback_query(F.data == "admin_quiz_gen_log")
+@router.callback_query(F.data.startswith("admin_quiz_gen_log_p_"))
+async def show_quiz_generation_log(call: types.CallbackQuery):
+    try:
+        page = 1
+        if call.data.startswith("admin_quiz_gen_log_p_"):
+            try:
+                page = int(call.data.replace("admin_quiz_gen_log_p_", "", 1))
+            except ValueError:
+                page = 1
+
+        rows = await admin_get_quiz_generation_log(limit=QUIZ_GEN_LOG_FETCH_LIMIT, days=QUIZ_GEN_LOG_DAYS)
+        if not rows:
+            await call.answer(f"✅ لا توجد أي كويزات مولَّدة خلال آخر {QUIZ_GEN_LOG_DAYS} أيام.", show_alert=True)
+            return
+
+        total = len(rows)
+        total_pages = max(1, -(-total // QUIZ_GEN_LOG_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * QUIZ_GEN_LOG_PAGE_SIZE
+        page_items = rows[start:start + QUIZ_GEN_LOG_PAGE_SIZE]
+
+        # 🆕 متوسط زمن التوليد لكل الكويزات المجلوبة (لا فقط الصفحة الحالية) - مؤشر
+        # سريع لصحة أداء الـ cascade عموماً (لو ارتفع فجأة يشير غالباً لازدحام/حظر متكرر).
+        durations = [
+            r.get("metadata", {}).get("generation_seconds")
+            for r in rows if isinstance(r.get("metadata", {}).get("generation_seconds"), (int, float))
+        ]
+        avg_duration = f"{(sum(durations) / len(durations)):.1f}s" if durations else "—"
+
+        report_lines = []
+        for idx, row in enumerate(page_items, start=start + 1):
+            meta = row.get("metadata") or {}
+            user = row.get("user") or {}
+            username_str = f"@{user['username']}" if user.get("username") and user['username'] != "Unknown" else "بدون يوزر"
+            name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "بدون اسم"
+            provider = meta.get("ai_provider") or "؟"
+            model = meta.get("ai_model") or "غير مسجَّل"
+            duration = meta.get("generation_seconds")
+            duration_str = f"{duration:.1f}ث" if isinstance(duration, (int, float)) else "—"
+            q_count = meta.get("questions_generated", "؟")
+
+            report_lines.append(
+                f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{row.get('user_id')}</code>\n"
+                f" ┣ 🤖 <code>[{provider}] {html_escape(str(model))}</code>\n"
+                f" ┣ ⏱ {duration_str} — 🧮 {q_count} سؤال\n"
+                f" ┗ 🕒 <code>{row.get('time_str')}</code>\n"
+            )
+
+        nav_row = []
+        if page < total_pages:
+            nav_row.append(types.InlineKeyboardButton(text="◀️ أقدم", callback_data=f"admin_quiz_gen_log_p_{page + 1}"))
+        if page > 1:
+            nav_row.append(types.InlineKeyboardButton(text="أحدث ▶️", callback_data=f"admin_quiz_gen_log_p_{page - 1}"))
+
+        kb_rows = []
+        if nav_row:
+            kb_rows.append(nav_row)
+        kb_rows.append([types.InlineKeyboardButton(text="🤖 رجوع للتحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")])
+        kb_rows.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+
+        text = (
+            f"📊 <b>سجل توليد الكويزات (آخر {QUIZ_GEN_LOG_DAYS} أيام)</b>\n"
+            f"إجمالي: <code>{total}</code> | متوسط زمن التوليد: <code>{avg_duration}</code> | صفحة {page}/{total_pages}\n"
+            f"───────────────────\n\n" +
+            "\n".join(report_lines)
+        )
+        await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb_rows))
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error rendering quiz generation log: {e}")
+        await call.answer("❌ حدث خطأ أثناء جلب السجل.", show_alert=True)
