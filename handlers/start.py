@@ -9,8 +9,8 @@ from supabase_helper import (
     check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, 
     supabase, log_usage_event, mark_quiz_attempt_stopped
 )
-from logger import get_logger, log_warning, log_info
-from constants import ADMIN_CONTACT, MAX_PDF_PAGES, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
+from logger import get_logger, log_info
+from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 from settings_helper import get_setting
 
 logger = get_logger(__name__)

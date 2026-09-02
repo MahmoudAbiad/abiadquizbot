@@ -16,7 +16,7 @@ from supabase_helper import (
 )
 from keyboards import (
     get_favorites_list_keyboard, get_sections_list_keyboard, 
-    get_favorite_section_keyboard, get_favorite_details_keyboard
+    get_favorite_details_keyboard
 )
 from logger import get_logger, log_error
 

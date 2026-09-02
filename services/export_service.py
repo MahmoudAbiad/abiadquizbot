@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
 from logger import get_logger, log_error
-from services.image_quiz_renderer import render_question_image, looks_arabic
+from services.image_quiz_renderer import render_question_image
 from services.latex_text import latex_to_plain
 
 logger = get_logger(__name__)

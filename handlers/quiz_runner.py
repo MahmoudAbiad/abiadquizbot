@@ -10,7 +10,7 @@ from aiogram.filters import StateFilter
 
 from config import bot, QuizState, redis_client
 from constants import (
-    MSG_QUIZ_STOPPED, MSG_FEEDBACK_PROMPT, MSG_FEEDBACK_SAVED,
+    MSG_FEEDBACK_PROMPT, MSG_FEEDBACK_SAVED,
     WEBAPP_PUBLIC_BASE_URL,
 )
 from keyboards import (
@@ -23,13 +23,12 @@ from keyboards import (
     get_math_question_edit_keyboard,
     get_cancel_edit_keyboard,
 )
-from logger import get_logger, log_error, log_info, log_warning
+from logger import get_logger, log_error, log_warning
 from services.latex_text import latex_to_plain
 from services.quiz_permissions import can_edit_quiz
 from handlers.audio import _build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لاستئناف الكويز من خلفية (محرر أسئلة الرياضيات عبر الويب)
 from supabase_helper import (
     list_favorite_quizzes,
-    update_user_stats,
     save_favorite_quiz,
     list_favorite_sections,
     create_favorite_section,
