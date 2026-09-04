@@ -6,8 +6,13 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 
-from keyboards import get_admin_settings_keyboard, get_cancel_keyboard, get_admin_dashboard_keyboard
-from settings_helper import get_app_settings, update_app_setting, SETTING_LABELS
+from keyboards import (
+    get_admin_settings_keyboard,
+    get_admin_settings_general_keyboard,
+    get_cancel_keyboard,
+    get_admin_dashboard_keyboard,
+)
+from settings_helper import get_app_settings, update_app_setting, SETTING_LABELS, SETTING_MIN_VALUES
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 
@@ -16,6 +21,25 @@ router = Router()
 
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
+
+
+@router.callback_query(F.data == "admin_settings_general")
+async def open_settings_general_menu(call: types.CallbackQuery, state: FSMContext):
+    """قسم الإعدادات العامة: نقاط النظام + مفاتيح التحكم (منفصل عن قسم الذكاء
+    الاصطناعي)."""
+    if state:
+        await state.clear()
+    text = (
+        "⚙️ <b>الإعدادات العامة</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🎯 <b>إعدادات النقاط:</b> نقاط الترحيب/التجديد/الإحالة\n"
+        "🧩 <b>مفاتيح التحكم:</b> تشغيل/إيقاف ميزات محددة"
+    )
+    await safe_edit_text(call.message, text, reply_markup=get_admin_settings_general_keyboard())
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
 
 
 async def _render_settings_menu(event, state: FSMContext = None):
@@ -31,7 +55,8 @@ async def _render_settings_menu(event, state: FSMContext = None):
         "اضغط على أي إعداد لتعديل قيمته. القيمة الجديدة تُطبَّق فوراً على كل الطلاب.\n\n"
         f"🎁 نقاط الترحيب: <code>{settings.get('welcome_points', 0):.0f}</code>\n"
         f"🔄 التجديد اليومي: <code>{settings.get('daily_renewal_points', 0):.0f}</code>\n"
-        f"🤝 مكافأة الإحالة: <code>{settings.get('referral_bonus_points', 0):.0f}</code>"
+        f"🤝 مكافأة الإحالة: <code>{settings.get('referral_bonus_points', 0):.0f}</code>\n"
+        f"🗳 عتبة تثبيت التصنيف: <code>{settings.get('classification_vote_threshold', 0):.0f}</code>"
     )
     reply_markup = get_admin_settings_keyboard(settings, SETTING_LABELS)
 
@@ -62,12 +87,13 @@ async def prompt_setting_edit(call: types.CallbackQuery, state: FSMContext):
     label = SETTING_LABELS[setting_key]
     settings = await get_app_settings()
     current_value = settings.get(setting_key, 0)
+    min_value = SETTING_MIN_VALUES.get(setting_key, 0)
 
     await safe_edit_text(
         call.message,
         f"✍️ <b>تعديل: {label}</b>\n\n"
         f"القيمة الحالية: <code>{current_value:.0f}</code>\n\n"
-        "أرسل القيمة الجديدة (رقم صحيح أو عشري، صفر أو أكثر):",
+        f"أرسل القيمة الجديدة (رقم صحيح أو عشري، {min_value:.0f} أو أكثر):",
         reply_markup=get_cancel_keyboard()
     )
     try:
@@ -94,8 +120,9 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
         await msg.answer("❌ يرجى إرسال رقم صحيح (مثال: 50 أو 25.5).", reply_markup=get_cancel_keyboard())
         return
 
-    if new_value < 0:
-        await msg.answer("❌ لا يمكن أن تكون القيمة سالبة.", reply_markup=get_cancel_keyboard())
+    min_value = SETTING_MIN_VALUES.get(setting_key, 0)
+    if new_value < min_value:
+        await msg.answer(f"❌ القيمة أقل من الحد الأدنى المسموح ({min_value:.0f}).", reply_markup=get_cancel_keyboard())
         return
 
     if new_value > 100000:

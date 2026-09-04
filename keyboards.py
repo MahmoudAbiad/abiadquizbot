@@ -648,37 +648,56 @@ def get_pagination_keyboard(current_page: int, total_pages: int, query: str) -> 
 # ==================== Admin Keyboards ====================
 
 def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
-    """لوحة الإدارة الرئيسية مرتبة حسب نوع العملية."""
+    """لوحة الإدارة الرئيسية: 6 أقسام مجمّعة حسب نوع العملية بدل أزرار متفرقة.
+    كل قسم يفتح قائمة فرعية خاصة به (راجع get_admin_communication_keyboard،
+    get_admin_users_menu_keyboard، get_admin_settings_general_keyboard)."""
     kb = [
-        [
-            types.InlineKeyboardButton(text="✉️ رسالة مخصصة", callback_data="admin_direct_message_prompt"),
-            types.InlineKeyboardButton(text="📢 رسالة جماعية", callback_data="admin_broadcast_prompt"),
-        ],
-
-        [
-            types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt"),
-            types.InlineKeyboardButton(text="👥 استعراض الطلاب", callback_data="admin_users_page_1"),
-        ],
-        [
-            types.InlineKeyboardButton(text="⚡ النشطون اليوم", callback_data="admin_analytics_today"),
-            types.InlineKeyboardButton(text="🎯 كويزات اليوم", callback_data="admin_today_quizzes_p_1"),
-        ],
-        [
-            types.InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin_stats"),
-            types.InlineKeyboardButton(text="📥 تصدير CSV", callback_data="admin_export_users")
-        ],
-        [types.InlineKeyboardButton(text="📈 تحليلات الاستخدام", callback_data="admin_analytics_7")],
+        [types.InlineKeyboardButton(text="💬 التواصل مع الطلاب", callback_data="admin_communication_menu")],
+        [types.InlineKeyboardButton(text="👥 إدارة المستخدمين", callback_data="admin_users_menu")],
+        [types.InlineKeyboardButton(text="📊 التحليلات والإحصائيات", callback_data="admin_stats")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
-        [types.InlineKeyboardButton(text="🧪 A/B Tests ومفاتيح التحكم", callback_data="admin_flags_menu")],
+        [types.InlineKeyboardButton(text="⚙️ الإعدادات العامة", callback_data="admin_settings_general")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
+def get_admin_communication_keyboard() -> types.InlineKeyboardMarkup:
+    """قسم التواصل: رسالة مخصصة لطالب واحد، أو رسالة جماعية لكل الطلاب."""
+    kb = [
+        [types.InlineKeyboardButton(text="✉️ رسالة مخصصة", callback_data="admin_direct_message_prompt")],
+        [types.InlineKeyboardButton(text="📢 رسالة جماعية", callback_data="admin_broadcast_prompt")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_admin_users_menu_keyboard() -> types.InlineKeyboardMarkup:
+    """قسم إدارة المستخدمين: بحث عن طالب، استعراض السجل الكامل مصفحاً، تصدير CSV."""
+    kb = [
+        [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
+        [types.InlineKeyboardButton(text="👥 استعراض الطلاب", callback_data="admin_users_page_1")],
+        [types.InlineKeyboardButton(text="📥 تصدير الكل كـ CSV", callback_data="admin_export_users")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_admin_settings_general_keyboard() -> types.InlineKeyboardMarkup:
+    """قسم الإعدادات العامة: نقاط النظام + مفاتيح التحكم (منفصل تماماً عن قسم الذكاء
+    الاصطناعي، لأنه ما إله علاقة بموديلات التوليد)."""
+    kb = [
+        [types.InlineKeyboardButton(text="🎯 إعدادات النقاط", callback_data="admin_settings_menu")],
+        [types.InlineKeyboardButton(text="🧩 مفاتيح التحكم", callback_data="admin_flags_menu")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKeyboardMarkup:
-    """لوحة إعدادات النقاط: زر تعديل لكل إعداد + رجوع (أصبحت قسماً فرعياً ضمن لوحة
-    التحكم بالذكاء الاصطناعي - راجع get_ai_control_keyboard)."""
+    """لوحة إعدادات النقاط: زر تعديل لكل إعداد + رجوع (قسم فرعي ضمن الإعدادات العامة -
+    راجع get_admin_settings_general_keyboard)."""
     kb = []
     for key, label in labels.items():
         value = settings.get(key)
@@ -687,7 +706,7 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
             text=f"{label}: {value_text}",
             callback_data=f"admin_setting_edit_{key}"
         )])
-    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للتحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للإعدادات العامة", callback_data="admin_settings_general")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -695,14 +714,15 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
 
 def get_ai_control_keyboard() -> types.InlineKeyboardMarkup:
     """اللوحة الرئيسية للتحكم بالذكاء الاصطناعي: نقطة الدخول لكل الأقسام الفرعية
-    (سلسلة التوليد، موديل الفحص السريع، موديل Groq السريع، إعدادات النقاط)."""
+    (سلسلة التوليد، موديل الفحص السريع، موديل Groq السريع، سجل التوليد).
+    ملاحظة: إعدادات النقاط ما عادت هون - انتقلت لقسم "الإعدادات العامة" المستقل
+    (راجع get_admin_settings_general_keyboard) لأنها مالها علاقة بموديلات الذكاء الاصطناعي."""
     kb = [
         [types.InlineKeyboardButton(text="🧠 سلسلة توليد الأسئلة (Cascade)", callback_data="admin_ai_slot_cascade")],
         [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
         [types.InlineKeyboardButton(text="⚡ موديل Groq السريع", callback_data="admin_ai_slot_groq_fast")],
         [types.InlineKeyboardButton(text="📊 سجل توليد الكويزات (الوقت + الموديل)", callback_data="admin_quiz_gen_log")],
-        [types.InlineKeyboardButton(text="⚙️ إعدادات النقاط", callback_data="admin_settings_menu")],
-        [types.InlineKeyboardButton(text="🏠 رجوع للوحة الرئيسية", callback_data="admin_main_menu")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -768,11 +788,13 @@ def get_admin_user_actions_keyboard(user_id: int, username: Optional[str] = None
             types.InlineKeyboardButton(text="🎯 كويزات هذا الطالب", callback_data=f"admin_user_quizzes_{user_id}_p_1")
         ],
         [build_contact_button(user_id, username)],
-        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+    """أزرار شحن الرصيد. الرجوع يوديك لبروفايل نفس الطالب (admin_user_profile_<id>)
+    مش للقائمة الرئيسية، حتى ما يضيع سياق الطالب اللي كنت شغال عليه."""
     kb = [
         [
             types.InlineKeyboardButton(text="➕ 10 نقاط", callback_data=f"admin_charge_quick_10_{user_id}"),
@@ -780,13 +802,13 @@ def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarku
             types.InlineKeyboardButton(text="➕ 100 نقطة", callback_data=f"admin_charge_quick_100_{user_id}")
         ],
         [types.InlineKeyboardButton(text="✍️ إدخال كمية يدوياً", callback_data=f"admin_charge_manual_{user_id}")],
-        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
+        [types.InlineKeyboardButton(text="🔙 رجوع لبيانات الطالب", callback_data=f"admin_user_profile_{user_id}")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
-        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -795,14 +817,14 @@ def get_admin_direct_message_charge_keyboard(user_id: int) -> types.InlineKeyboa
         [types.InlineKeyboardButton(text="🎁 شحن مجاني", callback_data=f"admin_direct_charge_free_{user_id}")],
         [types.InlineKeyboardButton(text="💳 شحن مدفوع", callback_data=f"admin_direct_charge_paid_{user_id}")],
         [types.InlineKeyboardButton(text="⏭️ بدون شحن", callback_data=f"admin_direct_charge_none_{user_id}")],
-        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ])
 
 def get_admin_direct_message_mode_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="✉️ رسالة عادية فقط", callback_data="admin_direct_mode_message")],
         [types.InlineKeyboardButton(text="💰 رسالة مع شحن رصيد", callback_data="admin_direct_mode_charge")],
-        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ])
 
 def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
@@ -813,16 +835,19 @@ def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
     
     kb = [
         period_row,
-        [types.InlineKeyboardButton(text="⚡ النشطون اليوم حصراً", callback_data="admin_analytics_today")],
+        [
+            types.InlineKeyboardButton(text="⚡ النشطون اليوم", callback_data="admin_analytics_today"),
+            types.InlineKeyboardButton(text="🎯 كويزات اليوم", callback_data="admin_today_quizzes_p_1"),
+        ],
         [types.InlineKeyboardButton(text="📅 النشاط اليومي (آخر 14 يوم)", callback_data="admin_analytics_daily")],
         [types.InlineKeyboardButton(text="🐞 آخر الأخطاء", callback_data="admin_recent_errors")],
         [types.InlineKeyboardButton(text="🎯 قائمة الإحالات", callback_data="admin_referrals_1")],
         [types.InlineKeyboardButton(text="📥 تصدير سجل الأحداث CSV", callback_data="admin_export_events")],
-        [types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")]
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-# ==================== 🆕 A/B Tests ومفاتيح التحكم (Feature Flags) ====================
+# ==================== 🆕 مفاتيح التحكم (Feature Flags) ====================
 
 def get_feature_flags_keyboard(flags: dict, registry: dict) -> types.InlineKeyboardMarkup:
     """لوحة تشغيل/إيقاف مفاتيح التحكم. flags: {key: enabled} (من
@@ -837,5 +862,5 @@ def get_feature_flags_keyboard(flags: dict, registry: dict) -> types.InlineKeybo
             text=f"{status_icon} {label}",
             callback_data=f"admin_flag_toggle_{key}"
         )])
-    kb.append([types.InlineKeyboardButton(text="🏠 رجوع للوحة الرئيسية", callback_data="admin_main_menu")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للإعدادات العامة", callback_data="admin_settings_general")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)

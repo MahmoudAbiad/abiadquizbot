@@ -21,11 +21,14 @@ from supabase_helper import (
 )
 from keyboards import (
     get_admin_dashboard_keyboard,
+    get_admin_communication_keyboard,
+    get_admin_users_menu_keyboard,
     get_admin_user_actions_keyboard,
     get_admin_charge_options_keyboard,
     get_admin_direct_message_charge_keyboard,
     get_admin_direct_message_mode_keyboard,
-    get_cancel_keyboard
+    get_cancel_keyboard,
+    get_analytics_keyboard,
 )
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
@@ -121,7 +124,7 @@ async def render_users_page(event, page: int = 1):
         kb.append(nav_buttons)
         
     kb.append([types.InlineKeyboardButton(text="📥 تصدير هذه القائمة كاملة كـ CSV", callback_data="admin_export_users")])
-    kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع لإدارة المستخدمين", callback_data="admin_users_menu")])
     reply_markup = types.InlineKeyboardMarkup(inline_keyboard=kb)
     
     if isinstance(event, types.Message):
@@ -561,10 +564,98 @@ async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext
 
 # ==================== تفاعلات البحث والشحن وتصفح الطلاب ====================
 
+@router.callback_query(F.data == "admin_communication_menu")
+async def open_communication_menu(call: types.CallbackQuery, state: FSMContext):
+    """قسم التواصل: رسالة مخصصة أو جماعية."""
+    if state:
+        await state.clear()
+    text = (
+        "💬 <b>التواصل مع الطلاب</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "✉️ <b>رسالة مخصصة:</b> لطالب واحد، مع إمكانية شحن رصيد معه\n"
+        "📢 <b>رسالة جماعية:</b> تصل لكل الطلاب دفعة وحدة"
+    )
+    await safe_edit_text(call.message, text, reply_markup=get_admin_communication_keyboard())
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "admin_users_menu")
+async def open_users_menu(call: types.CallbackQuery, state: FSMContext):
+    """قسم إدارة المستخدمين: بحث، استعراض، تصدير."""
+    if state:
+        await state.clear()
+    text = (
+        "👥 <b>إدارة المستخدمين</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🔍 ابحث عن طالب محدد بالآيدي أو اليوزر\n"
+        "👥 أو استعرض سجل كل الطلاب مصفحاً\n"
+        "📥 أو صدّر القائمة كاملة كملف CSV"
+    )
+    await safe_edit_text(call.message, text, reply_markup=get_admin_users_menu_keyboard())
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
+
+
 @router.callback_query(F.data.startswith("admin_users_page_"))
 async def admin_callback_users_page(call: types.CallbackQuery):
     page = int(call.data.split("_")[3])
     await render_users_page(call, page=page)
+
+
+def _format_user_profile_report(u: dict) -> str:
+    username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
+    return (
+        "👤 <b>معلومات المستخدم:</b>\n"
+        f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
+        f"┣ 👤 اليوزر: {username_str}\n"
+        f"┣ 📝 الاسم: <b>{u.get('first_name', '')} {u.get('last_name', '')}</b>\n"
+        f"┣ 🎁 النقاط المجانية: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
+        f"┣ 💳 النقاط المدفوعة: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
+        f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
+        f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
+    )
+
+
+async def render_user_profile(event, user_id, banner: str = "") -> bool:
+    """يرسم بروفايل طالب محدد بآيدي معروف مسبقاً (بدون الحاجة لإعادة البحث).
+    قابلة لإعادة الاستدعاء من أي شاشة (بعد الشحن، بعد مراجعة النشاط...) عشان
+    يضل زر "رجوع لبيانات الطالب" شغّال فعلياً بدل ما يقفز عالرئيسية.
+    banner: نص تأكيد اختياري (مثلاً "تم الشحن بنجاح") يظهر فوق البروفايل.
+    ترجع True لو لقيت المستخدم، False لو لأ."""
+    users_data = await admin_search_user(str(user_id))
+    if not users_data:
+        if isinstance(event, types.CallbackQuery):
+            await event.answer("❌ لم يعد هذا المستخدم موجوداً.", show_alert=True)
+        else:
+            await event.answer("❌ لم يعد هذا المستخدم موجوداً.")
+        return False
+
+    u = users_data[0]
+    report = (f"{banner}\n\n" if banner else "") + _format_user_profile_report(u)
+    keyboard = get_admin_user_actions_keyboard(u['user_id'], username=u.get('username'))
+
+    if isinstance(event, types.CallbackQuery):
+        await safe_edit_text(event.message, report, reply_markup=keyboard)
+        try:
+            await event.answer()
+        except TelegramBadRequest:
+            pass
+    else:
+        await event.answer(report, reply_markup=keyboard, parse_mode="HTML")
+    return True
+
+
+@router.callback_query(F.data.startswith("admin_user_profile_"))
+async def callback_user_profile(call: types.CallbackQuery):
+    """رجوع فعلي خطوة وحدة لبيانات طالب محدد (من شاشات الشحن/النشاط...) بدل
+    القفز للقائمة الرئيسية وفقدان سياق الطالب."""
+    user_id = call.data.replace("admin_user_profile_", "", 1)
+    await render_user_profile(call, user_id)
 
 
 @router.callback_query(F.data == "admin_search_prompt")
@@ -581,22 +672,11 @@ async def callback_search_prompt(call: types.CallbackQuery, state: FSMContext):
 async def process_search_user(msg: types.Message, state: FSMContext):
     query = msg.text.strip()
     users_data = await admin_search_user(query)
-    
+
     if users_data:
-        u = users_data[0] 
-        username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
-        report = (
-            "👤 <b>معلومات المستخدم:</b>\n"
-            f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
-            f"┣ 👤 اليوزر: {username_str}\n"
-            f"┣ 📝 الاسم: <b>{u.get('first_name', '')} {u.get('last_name', '')}</b>\n"
-            f"┣ 🎁 النقاط المجانية: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
-            f"┣ 💳 النقاط المدفوعة: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
-            f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
-            f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
-        )
+        u = users_data[0]
         await msg.answer(
-            report,
+            _format_user_profile_report(u),
             reply_markup=get_admin_user_actions_keyboard(u['user_id'], username=u.get('username')),
             parse_mode="HTML"
         )
@@ -623,7 +703,10 @@ async def process_quick_charge(call: types.CallbackQuery):
     
     new_balance = await admin_add_points(target_id, amount)
     if new_balance is not None:
-        await safe_edit_text(call.message, f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard())
+        await render_user_profile(
+            call, target_id,
+            banner=f"✅ <b>تم الشحن بنجاح!</b> الكمية المضافة: <code>+{amount}</code> 🟢"
+        )
         await send_points_notification(target_id, amount, new_balance)
     else:
         try:
@@ -662,7 +745,10 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
     
     new_balance = await admin_add_points(target_id, amount)
     if new_balance is not None:
-        await msg.answer(f"✅ <b>تم الشحن بنجاح!</b>\n\nالمستخدم: <code>{target_id}</code>\nالكمية المضافة: <code>+{amount}</code> 🟢\nالرصيد الجديد: <code>{new_balance}</code> 💰", reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
+        await render_user_profile(
+            msg, target_id,
+            banner=f"✅ <b>تم الشحن بنجاح!</b> الكمية المضافة: <code>+{amount}</code> 🟢"
+        )
         await send_points_notification(target_id, amount, new_balance)
     else:
         await msg.answer("❌ حدث خطأ أثناء الشحن. حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
@@ -671,9 +757,18 @@ async def process_manual_charge(msg: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_stats")
 async def show_db_stats(call: types.CallbackQuery):
+    """قسم التحليلات والإحصائيات: يبدأ بلمحة سريعة (الأرقام العامة) وبعدين
+    أزرار التحليلات المفصّلة (فترات زمنية، النشطون اليوم، الأخطاء، الإحالات...)
+    بنفس الشاشة - بدل ما يكونوا شاشتين منفصلتين متشابهات بالاسم."""
     stats = await admin_get_global_stats()
-    text = f"📊 <b>إحصائيات النظام الحية:</b>\n\n👥 إجمالي الطلاب المسجلين: <code>{stats['total_users']}</code>\n📝 إجمالي الأسئلة المُولدة: <code>{stats['total_questions']}</code>\n"
-    await safe_edit_text(call.message, text, reply_markup=get_admin_dashboard_keyboard())
+    text = (
+        "📊 <b>التحليلات والإحصائيات</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 إجمالي الطلاب المسجلين: <code>{stats['total_users']}</code>\n"
+        f"📝 إجمالي الأسئلة المُولدة: <code>{stats['total_questions']}</code>\n\n"
+        "اختر تقريراً مفصلاً من تحت:"
+    )
+    await safe_edit_text(call.message, text, reply_markup=get_analytics_keyboard(7))
     try:
         await call.answer()
     except TelegramBadRequest:
@@ -793,7 +888,7 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
         if nav_row:
             kb.append(nav_row)
 
-        kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+        kb.append([types.InlineKeyboardButton(text="🔙 رجوع لبيانات الطالب", callback_data=f"admin_user_profile_{target_id}")])
 
         text = (
             f"🎯 <b>كويزات الطالب (<code>{target_id}</code>) — المُنشأة والمُستخدمة من الكاش ♻️</b>\n"

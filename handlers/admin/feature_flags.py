@@ -1,8 +1,10 @@
 # handlers/admin/feature_flags.py
-"""🆕 لوحة "A/B Tests ومفاتيح التحكم": تشغيل/إيقاف أي ميزة مسجَّلة بـ
+"""🆕 لوحة "مفاتيح التحكم": تشغيل/إيقاف أي ميزة مسجَّلة بـ
 constants.FEATURE_FLAGS_REGISTRY مباشرة من تيليجرام بدون أي تعديل كود أو إعادة نشر.
+هذه مفاتيح on/off بسيطة وليست A/B testing حقيقي (ما في تقسيم مستخدمين لمجموعات).
 لإضافة مفتاح جديد مستقبلاً: أضفه بقاموس FEATURE_FLAGS_REGISTRY بـ constants.py فقط -
-يظهر تلقائياً هنا بلا أي تعديل إضافي بهذا الملف."""
+يظهر تلقائياً هنا بلا أي تعديل إضافي بهذا الملف. قسم فرعي ضمن الإعدادات العامة
+(راجع keyboards.get_admin_settings_general_keyboard)."""
 
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
@@ -23,7 +25,7 @@ router.callback_query.filter(IsAdminFilter())
 async def _render_flags_menu(call: types.CallbackQuery) -> None:
     flags = await get_all_feature_flags(FEATURE_FLAGS_REGISTRY)
     text = (
-        "🧪 <b>A/B Tests ومفاتيح التحكم</b>\n"
+        "🧩 <b>مفاتيح التحكم</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "اضغط على أي مفتاح لتشغيله أو إيقافه فوراً لكل الطلاب:\n"
         "✅ = مفعّل حالياً | 🚫 = موقوف حالياً"

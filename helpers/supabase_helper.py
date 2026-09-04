@@ -19,7 +19,7 @@ from constants import (
     to_syria_datetime, format_syria_time,
 )
 from validators import validate_user_id
-from settings_helper import get_setting
+from settings_helper import get_setting, SETTING_MIN_VALUES
 
 dotenv_path = find_dotenv()
 load_dotenv(dotenv_path)
@@ -947,12 +947,19 @@ async def submit_classification_vote(
     yes_count؛ عند أي خطأ اتصال ترجع duplicate=False, locked_now=False (فشل آمن - التصويت
     لم يُسجَّل لكن التدفق العام للبوت يكمل بدون كسر)."""
     try:
+        # 🩹 تُقرأ الآن من app_settings (عبر get_setting) بدل ثابت منفصل بـ constants.py
+        # كان بلا أي ربط فعلي بـ p_threshold الافتراضية بدالة SQL - راجع
+        # migration_classification_vote_threshold_setting.sql. تُمرَّر صراحة هنا فتصبح
+        # app_settings مصدر الحقيقة الوحيد الفعلي، قابلاً للتعديل من لوحة الأدمن مباشرة.
+        threshold = await get_setting("classification_vote_threshold")
+        min_threshold = SETTING_MIN_VALUES.get("classification_vote_threshold", 1)
         res = await supabase.rpc("vote_on_classification", {
             "p_file_hash": file_hash,
             "p_user_id": user_id,
             "p_vote": vote,
             "p_subject": subject,
             "p_classification_data": classification_data,
+            "p_threshold": int(max(threshold, min_threshold)),
         }).execute()
         return res.data or {"duplicate": False, "locked_now": False, "yes_count": 0}
     except Exception as e:
