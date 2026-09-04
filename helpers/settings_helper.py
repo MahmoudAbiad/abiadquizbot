@@ -13,7 +13,10 @@ import time
 from typing import Dict, Optional
 
 from logger import get_logger, log_error
-from constants import WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS
+from constants import (
+    WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS,
+    CLASSIFICATION_VOTE_THRESHOLD,
+)
 
 logger = get_logger(__name__)
 
@@ -24,6 +27,11 @@ _DEFAULTS: Dict[str, float] = {
     "welcome_points": float(WELCOME_POINTS),
     "daily_renewal_points": float(DAILY_RENEWAL_POINTS),
     "referral_bonus_points": float(REFERRAL_BONUS_POINTS),
+    # 🩹 كانت ثابتاً وحيداً بـ constants.py بلا أي ربط فعلي بعتبة vote_on_classification
+    # في SQL (كل منهما كان يحمل نفس الرقم 3 بشكل مستقل ومكرر بلا مصدر حقيقة واحد -
+    # خطر انحراف صامت لو عُدِّل أحدهما بدون الآخر). الآن أصبح app_settings هو المصدر
+    # الوحيد الفعلي، ويُمرَّر صراحة لـ RPC عبر submit_classification_vote أدناه.
+    "classification_vote_threshold": float(CLASSIFICATION_VOTE_THRESHOLD),
 }
 
 # تسميات عرض للوحة الإدارة (تُستخدم في الرسائل والأزرار).
@@ -31,6 +39,14 @@ SETTING_LABELS: Dict[str, str] = {
     "welcome_points": "🎁 نقاط الترحيب (عند أول تسجيل)",
     "daily_renewal_points": "🔄 نقاط التجديد اليومي المجاني",
     "referral_bonus_points": "🤝 مكافأة الإحالة (لكل صديق)",
+    "classification_vote_threshold": "🗳 عتبة تثبيت تصنيف المادة (عدد الأصوات)",
+}
+
+# 🩹 حد أدنى مخصص لبعض الإعدادات (0 معقول لنقاط/مكافآت، لكن غير منطقي هنا: عتبة=0
+# تعني تثبيت أي تصنيف فور أول صوت "نعم" واحد بدل انتظار إجماع طلاب فعلي). الإعدادات
+# غير المذكورة هنا تبقى بحدها الأدنى الافتراضي (0) كما كانت دائماً.
+SETTING_MIN_VALUES: Dict[str, float] = {
+    "classification_vote_threshold": 1,
 }
 
 _cache: Dict[str, float] = {}

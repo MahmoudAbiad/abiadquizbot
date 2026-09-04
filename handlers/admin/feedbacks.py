@@ -54,7 +54,7 @@ def get_feedbacks_list_keyboard(feedbacks: list, page: int, total: int) -> types
     if nav_row:
         kb.append(nav_row)
 
-    kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم", callback_data="admin_main_menu")])
+    kb.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 

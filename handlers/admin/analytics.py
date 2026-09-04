@@ -148,7 +148,7 @@ async def show_today_active_users_handler(call: types.CallbackQuery):
             kb.append(nav_row)
 
         kb.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
-        kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+        kb.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
 
         text = (
             f"⚡ <b>الطلاب النشطون (خلال الـ 24 ساعة الماضية - توقيت سوريا)</b>\n"
@@ -217,7 +217,8 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
         if nav_row:
             kb.append(nav_row)
 
-        kb.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+        kb.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
+        kb.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
 
         text = (
             f"🎯 <b>الكويزات المُولدة خلال آخر 24 ساعة (الصفحة {page}/{total_pages})</b>\n"
@@ -366,7 +367,7 @@ async def show_recent_errors(call: types.CallbackQuery):
             kb_rows.append(nav_row)
         kb_rows.append([types.InlineKeyboardButton(text="📥 تصدير كل الأحداث (CSV)", callback_data="admin_export_events")])
         kb_rows.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
-        kb_rows.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+        kb_rows.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
 
         text = (
             f"🐞 <b>آخر الأخطاء التي واجهها الطلاب (آخر 7 أيام)</b>\n"
@@ -421,7 +422,7 @@ async def show_referral_leaderboard(call: types.CallbackQuery):
         if nav_row:
             kb_rows.append(nav_row)
         kb_rows.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
-        kb_rows.append([types.InlineKeyboardButton(text="⚙️ لوحة التحكم الرئيسية", callback_data="admin_main_menu")])
+        kb_rows.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
 
         text = (
             f"🎯 <b>قائمة الإحالات (مرتبة تنازلياً)</b>\n"
@@ -510,7 +511,7 @@ async def show_user_activity(call: types.CallbackQuery):
             f"🕒 <b>آخر الأحداث:</b>\n{events_lines}"
         )
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔙 رجوع لبيانات الطالب", callback_data="admin_main_menu")]
+            [types.InlineKeyboardButton(text="🔙 رجوع لبيانات الطالب", callback_data=f"admin_user_profile_{target_id}")]
         ])
         await safe_edit_text(call.message, text, reply_markup=kb)
         await call.answer()
