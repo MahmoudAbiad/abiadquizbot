@@ -19,14 +19,19 @@ MODULE: Dynamic AI Model Configuration (لوحة التحكم بموديلات �
 كاش محلي قصير (TTL) لتقليل عدد الاستعلامات على المسار الساخن (كل عملية توليد كويز
 تقرأ سلسلة الـ cascade)، يُصفَّر فوراً عند أي تعديل يقوم به الأدمن.
 
-⚠️ ملاحظة معمارية مهمة: التنفيذ الفعلي لسلسلة "cascade" و"detection" حالياً مربوط حصراً
-بمزوّد Gemini (helpers/gemini_helper.py و services/detection_common.py يستخدمان
-google-genai SDK مباشرة لقراءة الملفات/الصور بشكل أصلي). حقل "provider" بالجدول عام
-ويقبل "gemini"/"groq"/"openai" لإتاحة إضافة مزوّدين جدد مستقبلاً من نفس اللوحة، لكن أي
-صف بمزوّد غير "gemini" ضمن slot="cascade" أو slot="detection" سيُتخطى تلقائياً وقت
-التنفيذ الفعلي (مع تسجيل تحذير بالـ logs) لحين إضافة تكامل SDK مخصص لذلك المزوّد -
-راجع التعليق أعلى _attempt بـ helpers/gemini_helper.py. أما slot="groq_fast" فمربوط
-فعلياً بعميل Groq الموجود أصلاً (AsyncGroq) ويمكن تغيير اسم الموديل منه بأمان تام.
+⚠️ ملاحظة معمارية مهمة: التنفيذ الفعلي لسلسلة "cascade" مربوط حالياً بمزوّدين اثنين -
+Gemini (AI Studio، عبر مجموعة مفاتيح API_KEYS بالتناوب) وVertex AI (Google Cloud، عبر
+عميل Service Account واحد - راجع _VERTEX_CLIENT بـ helpers/gemini_helper.py) - كلاهما
+يستخدمان google-genai SDK نفسه (وضعان مختلفان لنفس المكتبة). سلسلة "detection" لا تزال
+مربوطة حصراً بـ Gemini (services/detection_common.py). حقل "provider" بالجدول عام ويقبل
+"gemini"/"vertex"/"groq"/"openai" لإتاحة إضافة مزوّدين جدد مستقبلاً من نفس اللوحة، لكن
+أي صف بمزوّد غير "gemini"/"vertex" ضمن slot="cascade"، أو غير "gemini" ضمن
+slot="detection"، سيُتخطى تلقائياً وقت التنفيذ الفعلي (مع تسجيل تحذير بالـ logs) لحين
+إضافة تكامل SDK مخصص لذلك المزوّد - راجع _get_models_cascade بـ helpers/gemini_helper.py.
+أما slot="groq_fast" فمربوط فعلياً بعميل Groq الموجود أصلاً (AsyncGroq) ويمكن تغيير اسم
+الموديل منه بأمان تام. ملاحظة على Vertex تحديداً: صف provider="vertex" بـ slot="cascade"
+يُتخطى بصمت (بدون خطأ للطالب) لو متغيرات بيئة Vertex الثلاثة غير مضبوطة على السيرفر -
+باقي السلسلة (Gemini) تستمر بالعمل بشكل طبيعي تماماً في هذه الحالة.
 ==============================================================================
 """
 
@@ -50,12 +55,17 @@ SLOT_DETECTION = "detection"
 SLOT_GROQ_FAST = "groq_fast"
 
 VALID_SLOTS = {SLOT_CASCADE, SLOT_DETECTION, SLOT_GROQ_FAST}
-VALID_PROVIDERS = {"gemini", "groq", "openai"}
+VALID_PROVIDERS = {"gemini", "groq", "openai", "vertex"}
 
 PROVIDER_LABELS: Dict[str, str] = {
     "gemini": "🟦 Gemini (Google)",
     "groq": "🟩 Groq",
     "openai": "⚪ OpenAI",
+    # 🆕 Vertex AI (Google Cloud) - مزوّد ثانٍ فعلياً مربوط بتنفيذ SDK حقيقي (راجع
+    # helpers/gemini_helper.py::_execute_cascade) لاستهلاك كريدت GCP المجاني (Free
+    # Trial/Developer Program) جنباً إلى جنب مع مفاتيح Gemini AI Studio العادية بنفس
+    # سلسلة الـ cascade - أولويته تتحدد بمكانه بالترتيب (⬆️⬇️) بالضبط مثل أي موديل آخر.
+    "vertex": "🟪 Vertex AI (Google Cloud)",
 }
 
 SLOT_LABELS: Dict[str, str] = {

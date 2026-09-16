@@ -223,12 +223,21 @@ async def choose_provider(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminState.waiting_for_new_model_name)
 
     warning = ""
-    if provider != "gemini" and slot == "cascade":
+    if provider == "vertex" and slot == "cascade":
+        warning = (
+            "\n\n💡 ملاحظة: تأكد من ضبط متغيرات بيئة Vertex الثلاثة على السيرفر "
+            "(GOOGLE_VERTEX_PROJECT / GOOGLE_VERTEX_LOCATION / GOOGLE_VERTEX_SA_KEY_JSON)، "
+            "وإلا سيُتخطى هذا الصف بصمت وقت التوليد (باقي السلسلة تستمر بالعمل طبيعياً). "
+            "اكتب اسم الموديل بالضبط كما يظهر في Vertex AI Model Garden - قد يختلف عن اسمه "
+            "في AI Studio (مثال: قد يحتاج لاحقة -001)."
+        )
+    elif provider not in ("gemini", "vertex") and slot == "cascade":
         warning = (
             "\n\n⚠️ ملاحظة: التنفيذ الفعلي لتوليد الأسئلة من الملفات (PDF/صور) عبر "
             f"{PROVIDER_LABELS.get(provider, provider)} غير مفعّل بعد بالكود (يحتاج دمج SDK "
             "مخصص لهذه الشركة). سيُضاف الموديل للسلسلة كبيانات، لكن سيُتخطى تلقائياً وقت "
-            "التوليد الفعلي حتى يُضاف هذا التكامل - Gemini يبقى يغطي كل الطلبات بهذه الأثناء."
+            "التوليد الفعلي حتى يُضاف هذا التكامل - Gemini/Vertex يبقيان يغطيان كل الطلبات "
+            "بهذه الأثناء."
         )
 
     await safe_edit_text(

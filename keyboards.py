@@ -755,6 +755,7 @@ def get_ai_provider_choice_keyboard(slot: str) -> types.InlineKeyboardMarkup:
     """اختيار الشركة (Provider) عند إضافة موديل جديد لسلسلة معيّنة."""
     kb = [
         [types.InlineKeyboardButton(text="🟦 Gemini (Google)", callback_data=f"admin_ai_provider_gemini_{slot}")],
+        [types.InlineKeyboardButton(text="🟪 Vertex AI (Google Cloud)", callback_data=f"admin_ai_provider_vertex_{slot}")],
         [types.InlineKeyboardButton(text="🟩 Groq", callback_data=f"admin_ai_provider_groq_{slot}")],
         [types.InlineKeyboardButton(text="⚪ OpenAI", callback_data=f"admin_ai_provider_openai_{slot}")],
         [types.InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"admin_ai_slot_{slot}")],

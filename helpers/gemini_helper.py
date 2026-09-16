@@ -154,6 +154,57 @@ _GEMINI_CLIENTS: List[genai.Client] = [genai.Client(api_key=key) for key in API_
 _GROQ_CLIENT: Optional[AsyncGroq] = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # ==============================================================================
+# 🆕 VERTEX AI CLIENT (مزوّد إضافي جانبي بسلسلة الـ cascade - راجع HISTORY_LOG.md)
+# ==============================================================================
+# AI-NOTE: عميل Vertex واحد (Singleton) اختياري بالكامل - لاستهلاك كريدت GCP المجاني
+# (Free Trial / Google Developer Program) عبر نفس موديلات Gemini، جنباً إلى جنب مع مفاتيح
+# AI Studio العادية (GEMINI_API_KEYS) بنفس سلسلة الـ cascade، دون أي استبدال لها. أولويته
+# تتحدد فقط بمكانه بترتيب slot="cascade" (لوحة الأدمن: handlers/admin/ai_control.py) -
+# تماماً مثل أي موديل Gemini آخر، لا حاجة لأي منطق أولوية إضافي هنا.
+#
+# المصادقة عبر Service Account (لا API Key) - محتوى ملف الـ JSON الكامل يُقرأ من متغيّر
+# بيئة واحد (GOOGLE_VERTEX_SA_KEY_JSON) بدل كتابته كملف على القرص، لأن نظام ملفات Heroku
+# إيفيميرال (يُمسح عند كل إعادة تشغيل/dyno جديد) - تمرير الاعتماد ككائن Credentials مباشرة
+# لـ genai.Client أنسب بيئياً ولا يحتاج أي كتابة ملفات وقت الإقلاع.
+#
+# لو أي من المتغيرات الثلاثة ناقص أو فشل تحليل الـ JSON، يبقى _VERTEX_CLIENT = None بهدوء
+# (بدون كراش على إقلاع البوت بأكمله) - أي صف provider="vertex" بالـ cascade يُتخطى بصمت
+# وقتها (راجع _execute_cascade)، وباقي السلسلة (Gemini) تستمر بالعمل طبيعياً تماماً.
+GOOGLE_VERTEX_PROJECT = os.getenv("GOOGLE_VERTEX_PROJECT", "").strip()
+GOOGLE_VERTEX_LOCATION = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1").strip()
+_GOOGLE_VERTEX_SA_KEY_JSON = os.getenv("GOOGLE_VERTEX_SA_KEY_JSON", "").strip()
+
+# فهرس محجوز (خارج نطاق 0..len(API_KEYS)-1 دائماً) لتتبّع حظر (مفتاح، موديل) الخاص بـ
+# Vertex ضمن نفس قاموس blocked_model_keys الحالي - بدون أي تعديل على بنية ذلك القاموس.
+VERTEX_KEY_INDEX = -1
+
+_VERTEX_CLIENT: Optional[genai.Client] = None
+if GOOGLE_VERTEX_PROJECT and _GOOGLE_VERTEX_SA_KEY_JSON:
+    try:
+        from google.oauth2 import service_account as _google_service_account
+
+        _vertex_credentials = _google_service_account.Credentials.from_service_account_info(
+            json.loads(_GOOGLE_VERTEX_SA_KEY_JSON),
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        _VERTEX_CLIENT = genai.Client(
+            vertexai=True,
+            project=GOOGLE_VERTEX_PROJECT,
+            location=GOOGLE_VERTEX_LOCATION,
+            credentials=_vertex_credentials,
+        )
+        log_info(logger, f"✅ Vertex AI client initialized (project={GOOGLE_VERTEX_PROJECT}, location={GOOGLE_VERTEX_LOCATION})")
+    except Exception as exc:
+        log_error(logger, f"Failed to initialize Vertex AI client (cascade will skip provider='vertex' rows): {exc}")
+        _VERTEX_CLIENT = None
+else:
+    log_warning(
+        logger,
+        "Vertex AI env vars not fully configured (GOOGLE_VERTEX_PROJECT/GOOGLE_VERTEX_SA_KEY_JSON) - "
+        "any provider='vertex' rows in the cascade slot will be skipped silently",
+    )
+
+# ==============================================================================
 # 🆕 MODEL WATERFALL CASCADE + PER-(KEY, MODEL) ROUND-ROBIN STATE
 # ==============================================================================
 # 🆕 سلسلة أولوية النماذج لم تعد ثابتة بالكود - انتقلت لجدول ai_model_slots بسوبا بيس
@@ -163,19 +214,38 @@ _GROQ_CLIENT: Optional[AsyncGroq] = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_
 # (نفس القيم الأربعة اللي كانت هون ثابتة سابقاً، مزروعة بالجدول كقيم أولية).
 # الحلقة الخارجية بمنطق التنفيذ (_execute_cascade) تستنفد كل المفاتيح على النموذج الحالي
 # قبل النزول للنموذج التالي بالسلسلة، بنفس الترتيب المُخزَّن بـ display_order.
-async def _get_models_cascade() -> List[str]:
-    """يرجع أسماء الموديلات المفعّلة بسلسلة الـ cascade بالترتيب (مزوّد Gemini فقط - راجع
-    ملاحظة helpers/ai_models_helper.py أعلى الملف حول القيود الحالية على المزوّدين الآخرين)."""
+async def _get_models_cascade() -> List[Dict[str, str]]:
+    """يرجع قائمة {'provider', 'model_name'} بالترتيب لسلسلة الـ cascade، للمزوّدين
+    المربوطين فعلياً بتنفيذ SDK هنا: Gemini (AI Studio، بالتناوب على API_KEYS) وVertex AI
+    (Google Cloud، عبر _VERTEX_CLIENT أعلاه). راجع ملاحظة helpers/ai_models_helper.py حول
+    القيود الحالية على أي مزوّد آخر (groq/openai) ضمن هذا الـ slot تحديداً."""
     entries = await get_cascade_models()
-    gemini_models = [e["model_name"] for e in entries if e.get("provider") == "gemini"]
-    if not gemini_models:
-        log_warning(logger, "No enabled Gemini models in cascade slot; falling back to gemini-3.5-flash-lite")
-        return ["gemini-3.5-flash-lite"]
-    non_gemini = [e for e in entries if e.get("provider") != "gemini"]
-    if non_gemini:
-        skipped = ", ".join(f"{e.get('provider')}:{e.get('model_name')}" for e in non_gemini)
-        log_warning(logger, f"Skipping non-Gemini cascade entries (no SDK integration wired yet): {skipped}")
-    return gemini_models
+    supported = [
+        {"provider": e["provider"], "model_name": e["model_name"]}
+        for e in entries if e.get("provider") in ("gemini", "vertex")
+    ]
+    if not supported:
+        log_warning(logger, "No enabled Gemini/Vertex models in cascade slot; falling back to gemini-3.5-flash-lite")
+        return [{"provider": "gemini", "model_name": "gemini-3.5-flash-lite"}]
+    unsupported = [e for e in entries if e.get("provider") not in ("gemini", "vertex")]
+    if unsupported:
+        skipped = ", ".join(f"{e.get('provider')}:{e.get('model_name')}" for e in unsupported)
+        log_warning(logger, f"Skipping unsupported-provider cascade entries (no SDK integration wired yet): {skipped}")
+    return supported
+
+
+async def _get_top_gemini_model() -> str:
+    """🆕 اسم أول موديل Gemini (AI Studio) مفعّل بسلسلة الـ cascade تحديداً - يُستخدم حصراً
+    من مساري Super PDF/Super Images المتوازيين (_generate_super_pdf/_generate_super_images
+    تحت) اللذين يحتاجان بالضرورة عدة مفاتيح AI Studio حقيقية موزَّعة على _GEMINI_CLIENTS
+    للمعالجة الثلاثية المتوازية. عميل Vertex واحد فقط (لا مجموعة مفاتيح)، فلا يصلح إطلاقاً
+    لهذا النمط من التوزيع - يُستثنى دوماً من هذا الاختيار حتى لو كان الأعلى أولوية بالسلسلة
+    العامة (راجع _get_models_cascade أعلاه، المستخدَمة بالمسار العادي _execute_cascade)."""
+    entries = await get_cascade_models()
+    gemini_entries = [e for e in entries if e.get("provider") == "gemini"]
+    if not gemini_entries:
+        return "gemini-3.5-flash-lite"
+    return gemini_entries[0]["model_name"]
 
 # AI-NOTE: تتبّع دقيق لكل زوج (فهرس المفتاح، اسم النموذج) على حدة - بدل حظر المفتاح
 # بالكامل عبر كل النماذج، هيك حظر مفتاح على نموذج مُعيّن (بسبب حصته انتهت مثلاً) لا يمنعه
@@ -375,24 +445,53 @@ async def _execute_cascade(
     attempt_fn: Callable[[genai.Client, int, str], Awaitable[Any]],
 ) -> Optional[Any]:
     """المنفّذ العام لسلسلة الأولوية الكاملة:
-    - الحلقة الخارجية: تمشي على MODELS_CASCADE من الأذكى للأضعف، وتستنفد كل المفاتيح على
-      النموذج الحالي قبل النزول للنموذج التالي.
-    - الحلقة الداخلية: تمشي على كل المفاتيح بدءاً من current_key_pointer (Round-Robin).
+    - الحلقة الخارجية: تمشي على صفوف الـ cascade (provider + model) من الأذكى للأضعف
+      بترتيب display_order (لوحة الأدمن) - بغض النظر عن المزوّد (Gemini أو Vertex).
+    - لكل صف provider="gemini": حلقة داخلية على كل مفاتيح AI Studio بدءاً من
+      current_key_pointer (Round-Robin)، بنفس المنطق الأصلي تماماً.
+    - لكل صف provider="vertex": محاولة واحدة فقط عبر _VERTEX_CLIENT (عميل واحد، لا مجموعة
+      مفاتيح) - يُتخطى بصمت لو العميل غير مُعدّ (متغيرات بيئة ناقصة، راجع أعلى الملف).
+      🆕 هذا بالضبط ما يمنح التحكم بأولوية Vertex مقابل مفاتيح AI Studio: مكانه بترتيب
+      السلسلة (⬆️⬇️ بلوحة الأدمن) هو من يقرر متى يُجرَّب - لا حاجة لأي منطق أولوية إضافي.
     - فحص لحظي بالذاكرة (بدون أي تأخير) ضد blocked_model_keys لتفادي أي زوج (مفتاح، نموذج)
       محظور حالياً، والانتقال فوراً للزوج التالي.
     - 🆕 كل زوج (مفتاح، موديل) يُجرَّب مرة واحدة بالضبط - بدون أي إعادة محاولة أو انتظار
       على نفس الزوج. أي فشل (بما فيه ازدحام 503 مؤقت) يُحظر فوراً وينتقل الـ cascade
       فوراً للزوج التالي (راجع _mark_model_key_failure لمدة الحظر حسب نوع الخطأ).
     """
-    if not API_KEYS:
-        log_error(logger, "GEMINI_API_KEYS is not configured")
+    if not API_KEYS and _VERTEX_CLIENT is None:
+        log_error(logger, "GEMINI_API_KEYS is not configured and Vertex client is not initialized")
         return None
 
     key_order = _round_robin_key_order()
     last_exc: Optional[Exception] = None
     models_cascade = await _get_models_cascade()
 
-    for model in models_cascade:
+    for entry in models_cascade:
+        provider = entry["provider"]
+        model = entry["model_name"]
+
+        if provider == "vertex":
+            if _VERTEX_CLIENT is None:
+                continue  # غير مُعدّ حالياً على هذا السيرفر - يُتخطى بصمت، السلسلة تكمل بباقي الصفوف
+            if _is_model_key_blocked(VERTEX_KEY_INDEX, model):
+                continue
+            try:
+                result = await attempt_fn(_VERTEX_CLIENT, VERTEX_KEY_INDEX, model)
+                log_info(logger, f"✅ Cascade success: provider=vertex model={model}")
+                _last_model_used_var.set({"provider": "vertex", "model": model, "key_index": VERTEX_KEY_INDEX})
+                return result
+            except Exception as exc:
+                last_exc = exc
+                if isinstance(exc, FileNotFoundError):
+                    log_error(logger, f"Local file missing during Vertex upload attempt (not a key/model issue, aborting cascade without penalizing keys): {exc}")
+                    return None
+                _mark_model_key_failure(VERTEX_KEY_INDEX, model, exc)
+            continue
+
+        # provider == "gemini" (المسار الأصلي، بدون أي تعديل بالمنطق)
+        if not API_KEYS:
+            continue
         for key_index in key_order:
             if _is_model_key_blocked(key_index, model):
                 continue
@@ -752,8 +851,10 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
     if len(chunk_paths) != 3:
         return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
 
-    models_cascade = await _get_models_cascade()
-    top_model = models_cascade[0]
+    # 🆕 يستخدم _get_top_gemini_model (لا _get_models_cascade) عمداً: هذا المسار يحتاج 3
+    # مفاتيح AI Studio حقيقية موزَّعة بالتوازي - عميل Vertex واحد فقط، فلا يصلح هنا حتى لو
+    # كان الأعلى أولوية بالسلسلة العامة (راجع التعليق أعلى _get_top_gemini_model).
+    top_model = await _get_top_gemini_model()
     key_indices = (_available_keys_for_model(top_model) or list(range(len(API_KEYS))))[:3]
     if len(key_indices) < 3:
         return None
@@ -813,8 +914,8 @@ async def _generate_super_images(
     if len(chunks) < 2:
         return await _generate_regular(file_paths, prompt_template.replace("{count}", str(count)))
 
-    models_cascade = await _get_models_cascade()
-    top_model = models_cascade[0]
+    # 🆕 راجع نفس الملاحظة أعلى _generate_super_pdf حول استخدام _get_top_gemini_model عمداً هنا.
+    top_model = await _get_top_gemini_model()
     key_indices = (_available_keys_for_model(top_model) or list(range(len(API_KEYS))))[:len(chunks)]
     if len(key_indices) < len(chunks):
         return None
