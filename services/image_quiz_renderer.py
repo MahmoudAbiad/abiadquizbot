@@ -145,6 +145,29 @@ _MATH_SPAN_RE = re.compile(r"\$[^$]+\$")
 # (فاصل سطر حقيقي بين السؤال بالإنجليزية/الفرنسية وترجمته العربية - راجع constants.py).
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f]")
 
+# 🛠️ FIX: اكتشفنا فعلياً (عبر Vertex) أن النموذج أحياناً يكتب أمر LaTeX بسيط (زي \lambda
+# لمعامل احتكاك بجدول بيانات) بدون تغليفه بـ $ $ إطلاقاً - رغم أن الموجّه (constants.py)
+# يوضّح صراحة أن رموز LaTeX داخل خلايا الجدول لازم تكون بصيغة $x$. بما إنه ما في $ بالسطر
+# أصلاً، _sanitize_line_for_mathtext تحت كانت ترجعه دون أي محاولة تفسير (راجع "$ not in
+# line" أدناه) فيُرسم كنص خام حرفي: "\lambda" بدل رمز λ. القائمة أدناه مقصودة بسيطة
+# (حروف يونانية + عمليات شائعة بلا وسائط) لتفادي أي التباس مع نص عربي/إنجليزي عادي.
+_BARE_LATEX_COMMAND_RE = re.compile(
+    r"\\(?:alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|"
+    r"omicron|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega|"
+    r"Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|"
+    r"pm|times|cdot|infty|approx|equiv|leq|geq|neq)\b"
+)
+
+
+def _auto_wrap_bare_latex(line: str) -> str:
+    """لو السطر خالٍ من $ إطلاقاً لكن فيه أمر LaTeX بسيط معروف كتبه النموذج بدون تغليف -
+    نلفّه تلقائياً بـ $ $ ليدخل مسار mathtext الطبيعي (ويُرسم كرمز رياضي صحيح) بدل ما يُرسم
+    حرفياً كنص خام. لا يلمس السطر إطلاقاً لو فيه $ أصلاً (تحكّم الكاتب بحدود الرياضيات بنفسه
+    عن قصد عندها، فلا داعي للتدخل)."""
+    if "$" in line:
+        return line
+    return _BARE_LATEX_COMMAND_RE.sub(lambda m: f"${m.group(0)}$", line)
+
 _MATH_PARSER = MathTextParser("agg")
 _FONT_CACHE: Dict[Any, fm.FontProperties] = {}
 
@@ -299,15 +322,31 @@ def _sanitize_line_for_mathtext(line: str) -> str:
 
     🛠️ FIX: نتحقق أولاً من وجود حروف تحكّم خام (راجع _CONTROL_CHARS_RE) لأن mathtext
     لا يرمي استثناءً لحرف تحكّم غير معروف (ينجح التحليل ويستبدله بصمت بصندوق فارغ) -
-    فبدون هذا الفحص كانت هذه الحالة تحديداً تفلت من try/except أدناه بالكامل."""
+    فبدون هذا الفحص كانت هذه الحالة تحديداً تفلت من try/except أدناه بالكامل.
+
+    🛠️ FIX: نماذج AI (لاحظناه تحديداً عبر Vertex) أحياناً تُضاعِف الـ backslash تبع أوامر
+    LaTeX عند إخراج JSON (\\lambda بدل \lambda - خلط بين تهريب JSON وصياغة LaTeX نفسها)،
+    فـ mathtext يفشل بتفسيرها كأمر LaTeX صحيح (لا يوجد أمر LaTeX اسمه \\lambda بـ backslash
+    مضاعف) ويسقط للـ fallback القديم: تجريد $ وعرض النص خام "\\lambda" بدل رمز λ. قبل
+    التسليم بالفشل، نجرّب تصحيح الـ backslash المضاعف (\\\\ → \\) وإعادة المحاولة مرة
+    وحدة - لو نجحت نستخدم النسخة المصحَّحة (وترسم λ صح)، ولو فشلت برضه (خطأ حقيقي غير
+    متعلق بمضاعفة backslash) نرجع لنفس fallback القديم (تجريد $) بلا أي تغيير بالسلوك."""
     if _CONTROL_CHARS_RE.search(line):
         return _CONTROL_CHARS_RE.sub("", line).replace("$", "")
+    line = _auto_wrap_bare_latex(line)
     if "$" not in line:
         return line
     try:
         _MATH_PARSER.parse(line, dpi=DPI)
         return line
     except Exception:
+        if "\\\\" in line:
+            healed = line.replace("\\\\", "\\")
+            try:
+                _MATH_PARSER.parse(healed, dpi=DPI)
+                return healed
+            except Exception:
+                pass
         return line.replace("$", "")
 
 
