@@ -26,7 +26,7 @@ import io
 import os
 import re
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -337,18 +337,30 @@ def _prepare_table(table: Any, is_ar: bool, max_width_px: float) -> Optional[Dic
     header_font_prop = _font_prop_sized(is_ar, bold=True, size=TABLE_FONT_SIZE)
     cell_wrap_width = max(col_width - 2 * TABLE_CELL_PAD_X, 30)
 
-    def _prep_row(cells: List[str], font_prop: fm.FontProperties) -> List[List[str]]:
-        return [
-            [_sanitize_line_for_mathtext(line) for line in _wrap_and_shape(cell, is_ar, cell_wrap_width, font_prop)]
-            for cell in cells
-        ]
+    # 🛠️ FIX: كانت كل الأسطر داخل خلية الجدول تُرسم بتباعد ثابت TABLE_ROW_LINE_HEIGHT_PX
+    # (24px) بغض النظر عن الارتفاع الفعلي المقاس للنص (نفس مبدأ الإصلاح المطبَّق مسبقاً
+    # على أسطر السؤال/الخيارات بـ _measure_line_height_px، لكنه لم يكن مطبَّقاً هون
+    # إطلاقاً). بما إن 24px أصلاً أصغر من الارتفاع الطبيعي لخط TABLE_FONT_SIZE=16 عند
+    # DPI=150 (16pt ≈ 33px)، أي خلية رأس جدول تلتف لأكتر من سطر (زي "Q التدفق (l/sec)")
+    # كانت أسطرها الفعلية تتراكب فوق بعضها بصرياً - ملحوظ تحديداً برؤوس الجداول العربية
+    # المختلطة بوحدات إنجليزية. الحل: نقيس ارتفاع كل سطر فعلياً بنفس الطريقة المستخدمة
+    # لأسطر السؤال، ونخزّنه مع السطر نفسه، ليُستخدم لاحقاً وقت الرسم بدل الثابت.
+    def _prep_row(cells: List[str], font_prop: fm.FontProperties) -> List[List[Tuple[str, float]]]:
+        result: List[List[Tuple[str, float]]] = []
+        for cell in cells:
+            rendered = [_sanitize_line_for_mathtext(line) for line in _wrap_and_shape(cell, is_ar, cell_wrap_width, font_prop)]
+            result.append([(line, _measure_line_height_px(line, font_prop, TABLE_ROW_LINE_HEIGHT_PX)) for line in rendered])
+        return result
 
     header_lines = _prep_row(headers, header_font_prop) if headers else []
     row_lines = [_prep_row(row, cell_font_prop) for row in rows]
 
-    def _row_height(lines_per_cell: List[List[str]]) -> float:
-        max_lines = max((len(lines) for lines in lines_per_cell), default=1) or 1
-        return max_lines * TABLE_ROW_LINE_HEIGHT_PX + 2 * TABLE_CELL_PAD_Y
+    def _row_height(lines_per_cell: List[List[Tuple[str, float]]]) -> float:
+        # ارتفاع الصف = أطول خلية فعلياً (مجموع ارتفاعات أسطرها المقاسة)، مو عدد
+        # أسطر × ثابت واحد - عشان خلية بسطرين قصار ما تاخد نفس ارتفاع خلية بسطر
+        # وحيد طويل (كسر/جذر) بدون داعٍ، وبالعكس.
+        cell_heights = [sum(h for _, h in lines) for lines in lines_per_cell] or [0.0]
+        return max(cell_heights, default=0.0) + 2 * TABLE_CELL_PAD_Y
 
     header_h = _row_height(header_lines) if header_lines else 0.0
     row_heights = [_row_height(lines) for lines in row_lines]
@@ -390,14 +402,17 @@ def _draw_table(ax, table_data: Dict[str, Any], x_left: float, y_top: float,
             else:
                 ax.add_patch(Rectangle((cx, y - row_h), col_w, row_h,
                                             facecolor="none", edgecolor=TABLE_BORDER_COLOR, linewidth=0.8))
-            lines = lines_per_cell[col_idx] if col_idx < len(lines_per_cell) else [""]
+            lines = lines_per_cell[col_idx] if col_idx < len(lines_per_cell) else [("", TABLE_ROW_LINE_HEIGHT_PX)]
             cell_center_x = cx + col_w / 2
-            text_y = y - TABLE_CELL_PAD_Y - TABLE_ROW_LINE_HEIGHT_PX / 2
-            for line in lines:
+            # نتمركز عمودياً وسط ارتفاع الصف الكامل (row_h) بدل البداية من أعلى ثابتة -
+            # مهم الآن إن كانت هذي الخلية أقصر من أطول خلية بنفس الصف (راجع _row_height).
+            cell_total_h = sum(h for _, h in lines)
+            text_y = y - (row_h - cell_total_h) / 2 - (lines[0][1] / 2 if lines else 0)
+            for line, line_h in lines:
                 ax.text(cell_center_x, text_y, line, ha="center", va="center",
                         fontsize=TABLE_FONT_SIZE, color="#1a1a1a" if bg != TABLE_HEADER_BG else "white",
                         fontproperties=font_prop)
-                text_y -= TABLE_ROW_LINE_HEIGHT_PX
+                text_y -= line_h
         y -= row_h
 
     if table_data["header_lines"]:
@@ -628,6 +643,14 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         option_render_blocks.append(rendered)
         option_block_heights.append(heights)
 
+    # 🛠️ FIX: كانت الفجوة الأولى قبل أول خيار (`y -= OPTION_GAP_PX` بالسطر ~683، قبل
+    # حلقة الرسم) غير محسوبة هون إطلاقاً - فقط الفجوات *بين/بعد* الخيارات (وحدة لكل
+    # option_block) كانت مُدرجة. هذا كان يسبب نقصاً ثابتاً بقيمة OPTION_GAP_PX تقريباً
+    # (يعوّضه جزئياً هامش "+6" بنقطة بداية النص بالسطر ~663، فالنقص الصافي الفعلي كان
+    # ~OPTION_GAP_PX - 6px) مع أي سؤال فيه خيارات - أي كل سؤال تقريباً - وهو بالضبط ما
+    # كان يفسّر تكرار "overflow detected, extending canvas" حتى بأسئلة عادية قصيرة، لا
+    # فقط بحالات نادرة متطرفة. الحل: إضافة نفس الفجوة الأولى هون (+ تعويض الـ 6px) بدل
+    # الاعتماد على شبكة الأمان بالأسفل (fig.set_size_inches) لتغطية نقص متوقّع ومنتظم.
     height_px = (
         HEADER_HEIGHT_PX + MARGIN_PX * 2
         + sum(q_line_heights)
@@ -635,6 +658,7 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         + matrices_extra_h
         + sum(sum(heights) for heights in option_block_heights)
         + len(option_blocks) * OPTION_GAP_PX
+        + (OPTION_GAP_PX - 6 if option_blocks else 0)
     )
     height_px = max(height_px, 380)
 
