@@ -374,32 +374,51 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
             duration_str = f"{duration:.1f}ث" if isinstance(duration, (int, float)) else "—"
             q_count = meta.get("questions_generated", "؟")
 
-            # 🆕 تفصيل التوكنز (input/output/thoughts) + التكلفة التقديرية - راجع
-            # _estimate_quiz_cost فوق. كويزات قديمة (قبل هالتحديث) ما فيها هالحقول إطلاقاً
-            # بالـ metadata، فبتظهر "غير مسجَّل" بدل أصفار مضلّلة.
+            # 🆕 تفصيل التوكنز (input/output/thoughts) بمسميات واضحة + التكلفة التقديرية -
+            # راجع _estimate_quiz_cost فوق. كويزات قديمة (قبل هالتحديث) ما فيها هالحقول
+            # إطلاقاً بالـ metadata، فبتظهر "غير مسجَّل" بدل أصفار مضلّلة.
             has_token_data = any(k in meta for k in ("input_tokens", "output_tokens", "total_tokens"))
             if has_token_data:
                 input_tok = meta.get("input_tokens", 0) or 0
                 output_tok = meta.get("output_tokens", 0) or 0
                 thoughts_tok = meta.get("thoughts_tokens", 0) or 0
                 total_tok = meta.get("total_tokens", 0) or 0
-                tokens_line = f"{input_tok}+{output_tok}"
+                tokens_line = f"📥إدخال {input_tok} + 📤إخراج {output_tok}"
                 if thoughts_tok:
-                    tokens_line += f"+{thoughts_tok}🧠"
-                tokens_line += f"={total_tok} توكن"
+                    tokens_line += f" + 🧠تفكير {thoughts_tok}"
+                tokens_line += f" = <b>{total_tok}</b> توكن"
 
                 cost, verified = _estimate_quiz_cost(meta, pricing)
                 if cost is None:
                     cost_line = "غير معروف السعر"
                 else:
                     cost_line = f"${cost:.4f}" + ("" if verified else " ⚠️")
-                token_cost_row = f" ┣ 🔢 {tokens_line} — 💰 {cost_line}\n"
+                token_cost_row = f" ┣ {tokens_line}\n ┣ 💰 {cost_line}\n"
             else:
                 token_cost_row = ""
+
+            # 🆕 ترتيب الموديل ضمن الكاسكيد *لحظة* نجاح هذا التوليد بالذات (cascade_rank/
+            # cascade_total - راجع gemini_helper._execute_cascade) - ثابت بالسجل حتى لو
+            # تغيّر ترتيب الكاسكيد لاحقاً من لوحة الأدمن. Super PDF/Images وGroq السريع لا
+            # ينتميان لسلسلة مرقّمة (راجع الملاحظات بـ gemini_helper.py) فتُعرض بوصف بدل رقم.
+            cascade_rank = meta.get("cascade_rank")
+            cascade_total = meta.get("cascade_total")
+            gen_mode = meta.get("generation_mode")
+            if cascade_rank and cascade_total:
+                rank_line = f" ┣ 📶 الترتيب بالكاسكيد: #{cascade_rank} من {cascade_total}\n"
+            elif gen_mode == "super_pdf":
+                rank_line = " ┣ 📶 الترتيب: 🔀 وضع Super PDF (أقوى موديل Gemini)\n"
+            elif gen_mode == "super_images":
+                rank_line = " ┣ 📶 الترتيب: 🔀 وضع Super Images (أقوى موديل Gemini)\n"
+            elif provider == "groq":
+                rank_line = " ┣ 📶 الترتيب: ⚡ مسار Groq السريع (خارج الكاسكيد)\n"
+            else:
+                rank_line = ""
 
             report_lines.append(
                 f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{row.get('user_id')}</code>\n"
                 f" ┣ 🤖 <code>[{provider}] {html_escape(str(model))}</code>\n"
+                f"{rank_line}"
                 f" ┣ ⏱ {duration_str} — 🧮 {q_count} سؤال\n"
                 f"{token_cost_row}"
                 f" ┗ 🕒 <code>{row.get('time_str')}</code>\n"
