@@ -27,7 +27,7 @@ from ai_models_helper import (
     PROVIDER_LABELS,
     SLOT_DETECTION,
 )
-from supabase_helper import admin_get_quiz_generation_log
+from supabase_helper import admin_get_quiz_generation_log, get_ai_model_pricing
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 
@@ -288,6 +288,28 @@ async def process_new_model_name(msg: types.Message, state: FSMContext):
     await _render_slot_screen(msg, slot)
 
 
+def _estimate_quiz_cost(meta: dict, pricing: dict) -> tuple:
+    """🆕 يحسب التكلفة التقديرية بالدولار لكويز واحد من metadata حدث quiz_generated
+    (input_tokens/output_tokens/thoughts_tokens) وجدول ai_model_pricing (get_ai_model_pricing).
+    توكنز التفكير (thoughts_tokens) تُحاسَب بسعر الإخراج (نفس منطق Google الفعلي: output
+    pricing يشمل thinking tokens ضمنياً - راجع migration_ai_model_pricing.sql).
+
+    يرجّع (cost_or_none, verified) - cost_or_none=None لو الموديل غير موجود إطلاقاً بجدول
+    الأسعار (لا نعرض 0$ مضلّل بهالحالة) - verified=False لو السعر المستخدم لسا غير مؤكد
+    من فاتورة حقيقية (راجع عمود verified بالجدول) حتى لو محسوب، لعرض تنبيه ⚠️ بجانبه."""
+    provider = meta.get("ai_provider")
+    model = meta.get("ai_model")
+    price = pricing.get((provider, model))
+    if not price:
+        return None, False
+    input_tokens = meta.get("input_tokens", 0) or 0
+    output_tokens = meta.get("output_tokens", 0) or 0
+    thoughts_tokens = meta.get("thoughts_tokens", 0) or 0
+    cost = (input_tokens / 1_000_000 * price["input"]) + \
+           ((output_tokens + thoughts_tokens) / 1_000_000 * price["output"])
+    return cost, price["verified"]
+
+
 # ==================== 🆕 سجل توليد الكويزات (وقت التوليد + الموديل المستخدم) ====================
 # يقبل كلا الشكلين: "admin_quiz_gen_log" (الدخول أول مرة = صفحة 1) و
 # "admin_quiz_gen_log_p_<page>" (التنقل بين الصفحات) - نفس نمط "🐞 آخر الأخطاء" بـ analytics.py.
@@ -321,6 +343,25 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
         ]
         avg_duration = f"{(sum(durations) / len(durations)):.1f}s" if durations else "—"
 
+        # 🆕 التكلفة التقديرية الإجمالية لكل الكويزات المجلوبة (كل الأيام السبعة، لا فقط
+        # الصفحة الحالية) - نفس منطق avg_duration فوق. كويزات بلا سعر معروف (موديل غير
+        # موجود بـ ai_model_pricing) تُستثنى من المجموع صراحة (has_unpriced) بدل تصفيرها.
+        pricing = await get_ai_model_pricing()
+        total_cost = 0.0
+        any_unverified = False
+        has_unpriced = False
+        for r in rows:
+            c, verified = _estimate_quiz_cost(r.get("metadata") or {}, pricing)
+            if c is None:
+                has_unpriced = True
+            else:
+                total_cost += c
+                if not verified:
+                    any_unverified = True
+        cost_str = f"~${total_cost:.3f}" if total_cost else "—"
+        if any_unverified or has_unpriced:
+            cost_str += " ⚠️"
+
         report_lines = []
         for idx, row in enumerate(page_items, start=start + 1):
             meta = row.get("metadata") or {}
@@ -333,10 +374,34 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
             duration_str = f"{duration:.1f}ث" if isinstance(duration, (int, float)) else "—"
             q_count = meta.get("questions_generated", "؟")
 
+            # 🆕 تفصيل التوكنز (input/output/thoughts) + التكلفة التقديرية - راجع
+            # _estimate_quiz_cost فوق. كويزات قديمة (قبل هالتحديث) ما فيها هالحقول إطلاقاً
+            # بالـ metadata، فبتظهر "غير مسجَّل" بدل أصفار مضلّلة.
+            has_token_data = any(k in meta for k in ("input_tokens", "output_tokens", "total_tokens"))
+            if has_token_data:
+                input_tok = meta.get("input_tokens", 0) or 0
+                output_tok = meta.get("output_tokens", 0) or 0
+                thoughts_tok = meta.get("thoughts_tokens", 0) or 0
+                total_tok = meta.get("total_tokens", 0) or 0
+                tokens_line = f"{input_tok}+{output_tok}"
+                if thoughts_tok:
+                    tokens_line += f"+{thoughts_tok}🧠"
+                tokens_line += f"={total_tok} توكن"
+
+                cost, verified = _estimate_quiz_cost(meta, pricing)
+                if cost is None:
+                    cost_line = "غير معروف السعر"
+                else:
+                    cost_line = f"${cost:.4f}" + ("" if verified else " ⚠️")
+                token_cost_row = f" ┣ 🔢 {tokens_line} — 💰 {cost_line}\n"
+            else:
+                token_cost_row = ""
+
             report_lines.append(
                 f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{row.get('user_id')}</code>\n"
                 f" ┣ 🤖 <code>[{provider}] {html_escape(str(model))}</code>\n"
                 f" ┣ ⏱ {duration_str} — 🧮 {q_count} سؤال\n"
+                f"{token_cost_row}"
                 f" ┗ 🕒 <code>{row.get('time_str')}</code>\n"
             )
 
@@ -355,6 +420,8 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
         text = (
             f"📊 <b>سجل توليد الكويزات (آخر {QUIZ_GEN_LOG_DAYS} أيام)</b>\n"
             f"إجمالي: <code>{total}</code> | متوسط زمن التوليد: <code>{avg_duration}</code> | صفحة {page}/{total_pages}\n"
+            f"💰 تكلفة تقديرية إجمالية: <code>{cost_str}</code>"
+            + (" (⚠️ يشمل أسعار غير مؤكدة أو كويزات بلا سعر معروف)" if (any_unverified or has_unpriced) else "") + "\n"
             f"───────────────────\n\n" +
             "\n".join(report_lines)
         )
