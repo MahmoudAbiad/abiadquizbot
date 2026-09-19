@@ -19,6 +19,7 @@ from services.image_quiz_renderer import render_question_image_async, looks_arab
 from services.quiz_engine import _question_image_object_path
 from supabase_helper import (
     get_file_quizzes,
+    log_ai_generation,
     refund_user_points,
     save_file_quiz_multiple,
     save_question_image_url,
@@ -362,6 +363,27 @@ async def execute_quiz_generation_workflow(
         if not quiz_data:
             return None, None, "ai_failed", None
 
+        # 3.1 🆕 بيانات آخر توليد ناجح (موديل/مزوّد/توكنز) - تُقرأ فوراً بعد عودة
+        # generate_quiz_smart وبنفس الـ Task (راجع ContextVar بـ gemini_helper.py). كانت
+        # total_tokens تُحفظ صفراً دائماً بالأسفل لأن generate_quiz_smart لا يُرجع التوكنز
+        # ضمن قيمة عودتها الفعلية (Optional[List[Dict]]) - هذا هو مصدرها الفعلي الوحيد.
+        generation_metadata = get_last_generation_metadata() or {}
+        generation_total_tokens = generation_metadata.get("total_tokens", 0)
+        # 🆕 يُسجَّل بجدول ai_generation_log المخصص (كان فارغاً تماماً حتى الآن) - راجع
+        # migration_ai_generation_log_tokens.sql لأعمدة input_tokens/output_tokens الجديدة.
+        # لا يُوقف التوليد إذا فشل (تحليلات ثانوية، ليست بالمسار الحرج).
+        asyncio.create_task(log_ai_generation(
+            user_id=user_id,
+            source_title=data.get("source_title", "كويز من مستند"),
+            provider=generation_metadata.get("provider"),
+            model_name=generation_metadata.get("model"),
+            duration_seconds=generation_metadata.get("duration_seconds"),
+            questions_count=len(quiz_data),
+            input_tokens=generation_metadata.get("input_tokens", 0),
+            output_tokens=generation_metadata.get("output_tokens", 0),
+            total_tokens=generation_total_tokens,
+        ))
+
         # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
         #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
         quiz_data = shuffle_quiz_options(quiz_data)
@@ -382,7 +404,7 @@ async def execute_quiz_generation_workflow(
                 creator_id=user_id,
                 source_title=data.get("source_title", "كويز من مستند"),
                 quiz_data=quiz_data,
-                total_tokens=0,
+                total_tokens=generation_total_tokens,
                 is_math_quiz=is_math_mode,
                 subject_type=subject_type,
                 question_type=question_type,

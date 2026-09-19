@@ -329,6 +329,37 @@ async def save_file_quiz_multiple(
         log_error(logger, f"Error saving central quiz data: {e}")
         return None
 
+async def log_ai_generation(
+    user_id: int, source_title: str, provider: Optional[str], model_name: Optional[str],
+    duration_seconds: Optional[float], questions_count: int,
+    input_tokens: int = 0, output_tokens: int = 0, total_tokens: int = 0,
+) -> None:
+    """🆕 يسجّل توليد ذكاء اصطناعي واحد بجدول ai_generation_log (كان فارغاً تماماً - غير
+    موصول من أي مكان بالكود سابقاً). يُستدعى عبر asyncio.create_task من services/quiz_service.py
+    مباشرة بعد generate_quiz_smart - لا يُوقف التوليد أبداً لو فشل هذا التسجيل (تحليلات
+    ثانوية فقط، ليست بالمسار الحرج لتسليم الكويز للطالب).
+
+    يتطلب migration_ai_generation_log_tokens.sql (يضيف input_tokens/output_tokens/total_tokens
+    غير الموجودة أصلاً بالجدول القديم) - راجع الملف المرفق قبل أول استخدام."""
+    if not provider or not model_name:
+        # 🆕 لا موديل فائز فعلياً (فشل التوليد بالكامل، أو مسار لا يمرّ بعد بآلية تتبّع
+        # الموديل - مثل Groq النصي السريع) - تسجيل صف بلا provider/model عديم الفائدة تحليلياً.
+        return
+    try:
+        await supabase.table("ai_generation_log").insert({
+            "user_id": user_id,
+            "source_title": source_title,
+            "provider": provider,
+            "model_name": model_name,
+            "duration_seconds": duration_seconds,
+            "questions_count": questions_count,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }).execute()
+    except Exception as e:
+        log_error(logger, f"Error logging AI generation to ai_generation_log: {e}")
+
 async def get_cached_quiz(file_hash: str) -> Optional[Dict[str, Any]]:
     """توجيه ذكي وفولباك (Backward Compatibility) لمحاذاة كود ملف البوت القديم مع الجدول المركزي الجديد"""
     try:
