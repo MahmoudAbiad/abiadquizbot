@@ -303,29 +303,36 @@ def get_last_generation_metadata() -> Optional[Dict[str, Any]]:
     "total_tokens"} لآخر توليد ناجح ضمن هذا الـ Task، أو None إذا فشل التوليد بالكامل (لا
     موديل نجح) أو لم يُستدعَ أي توليد بعد.
     input_tokens/output_tokens قد تكون 0 لو تعذّر استخراجها من usage_metadata (نادر) - total_tokens
-    يبقى الأدق دائماً لأنه مسحوب مباشرة من total_token_count بدل جمع input+output يدوياً."""
+    يبقى الأدق دائماً لأنه مسحوب مباشرة من total_token_count بدل جمع input+output يدوياً.
+    thoughts_tokens (🆕): توكنز "تفكير" موديلات reasoning (مثل gemini-3.6-flash) - مُحاسَبة
+    ضمن total_tokens من Google لكن غير ظاهرة بـ output_tokens (راجع _record_token_usage
+    لتفصيل السبب) - قد تكون 0 لموديلات لا تدعم التفكير أو لو لم تُفعَّل هذه الميزة."""
     return _last_generation_metadata_var.get()
 
 
 def _record_token_usage(response: Any) -> int:
     """🆕 يُستدعى مرة واحدة من كل _attempt فور نجاح الاستجابة - يقرأ usage_metadata
-    (المتاحة بنفس الشكل على Gemini AI Studio وVertex AI كلاهما) ويسجّل input/output/total
+    (المتاحة بنفس الشكل على Gemini AI Studio وVertex AI كلاهما) ويسجّل input/output/thoughts/total
     بـ _last_token_usage_var (تُقرأ لاحقاً من _finalize بـ generate_quiz_smart)، ويُرجع
     total_token_count كما كان سابقاً (توافقاً مع كل استدعاءات هذه الدالة القديمة التي
     تتوقع رقماً واحداً فقط - لا تغيير على أي توقيع دالة موجود).
 
     input_tokens = prompt_token_count (النص/الملف/الصورة المُرسلة).
-    output_tokens = candidates_token_count (الرد الفعلي فقط - يستثني thoughts_token_count
-    الخاص بموديلات التفكير إن وُجد، لأنه يُحاسَب كإخراج أيضاً من Google لكن غير مضمون
-    وجوده بكل نسخ SDK - total_token_count يبقى المصدر الأدق لو أردت التكلفة الكلية،
-    وinput/output تقريبيان مفيدان لتقدير نسبة التكلفة (الإخراج أغلى تقريباً 5 أضعاف)."""
+    output_tokens = candidates_token_count (الرد الفعلي فقط - يستثني thoughts_token_count).
+    thoughts_tokens (🆕) = thoughts_token_count إن وُجد (موديلات التفكير مثل gemini-3.6-flash
+    تحاسَب عليه كإخراج من Google لكنه منفصل عن الرد الظاهر للمستخدم) - 0 لو الموديل لا يدعم
+    التفكير أو الحقل غير موجود بهذه النسخة من الـ SDK (getattr بقيمة افتراضية 0، لا ينهار).
+    total_token_count يبقى المصدر الأدق للتكلفة الكلية دائماً - input/output/thoughts تفصيلية
+    لتحليل نسبة التكلفة (الإخراج والتفكير أغلى تقريباً 5 أضعاف الإدخال)."""
     usage = getattr(response, "usage_metadata", None)
     input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
     output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+    thoughts_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
     total_tokens = int(getattr(usage, "total_token_count", 0) or 0)
     _last_token_usage_var.set({
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "thoughts_tokens": thoughts_tokens,
         "total_tokens": total_tokens,
     })
     return total_tokens
@@ -837,7 +844,7 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[Tuple
 
 async def _generate_single_attempt(
     paths: Sequence[str], prompt: str, key_index: int, model: str
-) -> Tuple[List[Dict[str, Any]], int, int, int]:
+) -> Tuple[List[Dict[str, Any]], int, int, int, int]:
     """محاولة توليد وحيدة بمفتاح ونموذج محدَّدين سلفاً (بدون المرور بسلسلة الأولوية الكاملة) -
     تُستخدم حصراً بمسار Super PDF المتوازي حيث كل جزء (Chunk) مُخصَّص لمفتاح مختلف بنفس اللحظة."""
     client = _GEMINI_CLIENTS[key_index]
@@ -865,10 +872,11 @@ async def _generate_single_attempt(
         usage = getattr(response, "usage_metadata", None)
         input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
         output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+        thoughts_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
         token_count = int(getattr(usage, "total_token_count", 0) or 0)
         log_info(logger, f"✅ Cascade success (super pdf/images): provider=gemini model={model} key_index={key_index}")
         _last_model_used_var.set({"provider": "gemini", "model": model, "key_index": key_index})
-        return questions, int(token_count), input_tokens, output_tokens
+        return questions, int(token_count), input_tokens, output_tokens, thoughts_tokens
     except Exception as exc:
         _mark_model_key_failure(key_index, model, exc)
         raise
@@ -910,16 +918,18 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
         ]
         results = await asyncio.gather(*tasks)
         questions = [question for result, *_ in results for question in result]
-        total_tokens = sum(tokens for _, tokens, _, _ in results)
-        total_input = sum(inp for _, _, inp, _ in results)
-        total_output = sum(out for _, _, _, out in results)
+        total_tokens = sum(tokens for _, tokens, _, _, _ in results)
+        total_input = sum(inp for _, _, inp, _, _ in results)
+        total_output = sum(out for _, _, _, out, _ in results)
+        total_thoughts = sum(th for _, _, _, _, th in results)
         # 🆕 كل جزء نُفِّذ بمهمة (Task) منفصلة عبر asyncio.gather - ContextVar لا يتسرّب
         # تلقائياً من مهمة فرعية لمهمة أصلية، لذا نسجّل الموديل الفائز والتوكنز المجمّعة
         # صراحة هنا (top_model معروف مسبقاً بهذا النطاق نفسه، نفس الموديل استُخدم لكل
         # الأجزاء الثلاثة؛ التوكنز جمعناها يدوياً من كل نتيجة فرعية أعلاه بنفس السبب).
         _last_model_used_var.set({"provider": "gemini", "model": top_model, "key_index": None, "mode": "super_pdf"})
         _last_token_usage_var.set({
-            "input_tokens": total_input, "output_tokens": total_output, "total_tokens": total_tokens,
+            "input_tokens": total_input, "output_tokens": total_output,
+            "thoughts_tokens": total_thoughts, "total_tokens": total_tokens,
         })
         return questions, total_tokens
     finally:
@@ -978,13 +988,15 @@ async def _generate_super_images(
         return None
     results = await asyncio.gather(*tasks)
     questions = [question for result, *_ in results for question in result]
-    total_tokens = sum(tokens for _, tokens, _, _ in results)
-    total_input = sum(inp for _, _, inp, _ in results)
-    total_output = sum(out for _, _, _, out in results)
+    total_tokens = sum(tokens for _, tokens, _, _, _ in results)
+    total_input = sum(inp for _, _, inp, _, _ in results)
+    total_output = sum(out for _, _, _, out, _ in results)
+    total_thoughts = sum(th for _, _, _, _, th in results)
     # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول ContextVar وasyncio.gather.
     _last_model_used_var.set({"provider": "gemini", "model": top_model, "key_index": None, "mode": "super_images"})
     _last_token_usage_var.set({
-        "input_tokens": total_input, "output_tokens": total_output, "total_tokens": total_tokens,
+        "input_tokens": total_input, "output_tokens": total_output,
+        "thoughts_tokens": total_thoughts, "total_tokens": total_tokens,
     })
     return questions, total_tokens
 
@@ -1164,7 +1176,9 @@ async def generate_quiz_smart(
         # 🆕 قد تكون None لو المسار الفائز لم يستدع _record_token_usage لأي سبب (مثل
         # مسار Groq النصي السريع، غير مغطى بعد - راجع _generate_text_quiz) - نستخدم
         # قاموساً فارغاً بالتوكنز حتى لا ينهار .get() اللاحق بـ quiz_service.py.
-        tokens = _last_token_usage_var.get() or {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        tokens = _last_token_usage_var.get() or {
+            "input_tokens": 0, "output_tokens": 0, "thoughts_tokens": 0, "total_tokens": 0,
+        }
         if result_questions and winner:
             _last_generation_metadata_var.set({**winner, "duration_seconds": duration, **tokens})
         else:

@@ -381,6 +381,7 @@ async def execute_quiz_generation_workflow(
             questions_count=len(quiz_data),
             input_tokens=generation_metadata.get("input_tokens", 0),
             output_tokens=generation_metadata.get("output_tokens", 0),
+            thoughts_tokens=generation_metadata.get("thoughts_tokens", 0),
             total_tokens=generation_total_tokens,
         ))
 
