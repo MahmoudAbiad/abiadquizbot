@@ -306,7 +306,12 @@ def get_last_generation_metadata() -> Optional[Dict[str, Any]]:
     يبقى الأدق دائماً لأنه مسحوب مباشرة من total_token_count بدل جمع input+output يدوياً.
     thoughts_tokens (🆕): توكنز "تفكير" موديلات reasoning (مثل gemini-3.6-flash) - مُحاسَبة
     ضمن total_tokens من Google لكن غير ظاهرة بـ output_tokens (راجع _record_token_usage
-    لتفصيل السبب) - قد تكون 0 لموديلات لا تدعم التفكير أو لو لم تُفعَّل هذه الميزة."""
+    لتفصيل السبب) - قد تكون 0 لموديلات لا تدعم التفكير أو لو لم تُفعَّل هذه الميزة.
+    cascade_rank/cascade_total (🆕): ترتيب الموديل الفائز ضمن سلسلة الأولوية (ai_model_slots)
+    *لحظة* نجاح هذا التوليد بالذات (مثلاً cascade_rank=2, cascade_total=6 يعني كان ثاني
+    موديل بالسلسلة وقتها) - يبقى ثابتاً بالسجل حتى لو تغيّر ترتيب الكاسكيد لاحقاً من لوحة
+    الأدمن. None لكلا الحقلين لو المسار الفائز لا ينتمي لسلسلة مرقّمة (Super PDF/Images
+    يستخدم دائماً أقوى موديل بدون رقم ترتيب دقيق، أو Groq المستقل تماماً عن الكاسكيد)."""
     return _last_generation_metadata_var.get()
 
 
@@ -507,8 +512,9 @@ async def _execute_cascade(
     key_order = _round_robin_key_order()
     last_exc: Optional[Exception] = None
     models_cascade = await _get_models_cascade()
+    cascade_total = len(models_cascade)
 
-    for entry in models_cascade:
+    for cascade_rank, entry in enumerate(models_cascade, start=1):
         provider = entry["provider"]
         model = entry["model_name"]
 
@@ -519,8 +525,15 @@ async def _execute_cascade(
                 continue
             try:
                 result = await attempt_fn(_VERTEX_CLIENT, VERTEX_KEY_INDEX, model)
-                log_info(logger, f"✅ Cascade success: provider=vertex model={model}")
-                _last_model_used_var.set({"provider": "vertex", "model": model, "key_index": VERTEX_KEY_INDEX})
+                log_info(logger, f"✅ Cascade success: provider=vertex model={model} rank={cascade_rank}/{cascade_total}")
+                # 🆕 cascade_rank/cascade_total: ترتيب هذا الصف ضمن سلسلة الأولوية *لحظة*
+                # نجاح هذا التوليد تحديداً (لا الترتيب الحالي - قد يتغيّر لاحقاً من لوحة
+                # الأدمن) - يُقرأ بشاشة "📊 سجل توليد الكويزات" لعرض "كان ترتيبه #كذا حين
+                # تولّد هذا الكويز بالذات"، حتى لو تغيّر ترتيب الكاسكيد بعدها.
+                _last_model_used_var.set({
+                    "provider": "vertex", "model": model, "key_index": VERTEX_KEY_INDEX,
+                    "cascade_rank": cascade_rank, "cascade_total": cascade_total,
+                })
                 return result
             except Exception as exc:
                 last_exc = exc
@@ -542,10 +555,14 @@ async def _execute_cascade(
                 # 🆕 سطر تأكيد وحيد عند النجاح - يوضّح بالـ logs مباشرة (بدون الرجوع
                 # لقاعدة البيانات) إن السلسلة الديناميكية (ai_model_slots) هي فعلاً
                 # اللي حُكّمت هون: أي موديل نجح، بأي ترتيب، وبأي مفتاح.
-                log_info(logger, f"✅ Cascade success: provider=gemini model={model} key_index={key_index}")
+                log_info(logger, f"✅ Cascade success: provider=gemini model={model} key_index={key_index} rank={cascade_rank}/{cascade_total}")
                 # 🆕 تسجيل الموديل الفائز لهذا الـ Task الحالي - يُقرأ لاحقاً من
-                # generate_quiz_smart لبناء بيانات التتبع (لوحة الأدمن).
-                _last_model_used_var.set({"provider": "gemini", "model": model, "key_index": key_index})
+                # generate_quiz_smart لبناء بيانات التتبع (لوحة الأدمن). cascade_rank/total
+                # راجع نفس الملاحظة أعلى فرع provider=="vertex".
+                _last_model_used_var.set({
+                    "provider": "gemini", "model": model, "key_index": key_index,
+                    "cascade_rank": cascade_rank, "cascade_total": cascade_total,
+                })
                 return result
             except Exception as exc:
                 last_exc = exc
@@ -926,7 +943,13 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
         # تلقائياً من مهمة فرعية لمهمة أصلية، لذا نسجّل الموديل الفائز والتوكنز المجمّعة
         # صراحة هنا (top_model معروف مسبقاً بهذا النطاق نفسه، نفس الموديل استُخدم لكل
         # الأجزاء الثلاثة؛ التوكنز جمعناها يدوياً من كل نتيجة فرعية أعلاه بنفس السبب).
-        _last_model_used_var.set({"provider": "gemini", "model": top_model, "key_index": None, "mode": "super_pdf"})
+        _last_model_used_var.set({
+            "provider": "gemini", "model": top_model, "key_index": None, "mode": "super_pdf",
+            # 🆕 هالمسار بيستخدم دايماً أقوى موديل Gemini فقط (راجع _get_top_gemini_model) -
+            # رقم ترتيب دقيق ضمن الكاسكيد الكامل (يشمل Vertex) مو منطقي هون، فبنسيبه None
+            # صراحة (لا 1 مضلّلة) وبنعرض "Super PDF" بدل رقم بلوحة الأدمن.
+            "cascade_rank": None, "cascade_total": None,
+        })
         _last_token_usage_var.set({
             "input_tokens": total_input, "output_tokens": total_output,
             "thoughts_tokens": total_thoughts, "total_tokens": total_tokens,
@@ -993,7 +1016,11 @@ async def _generate_super_images(
     total_output = sum(out for _, _, _, out, _ in results)
     total_thoughts = sum(th for _, _, _, _, th in results)
     # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول ContextVar وasyncio.gather.
-    _last_model_used_var.set({"provider": "gemini", "model": top_model, "key_index": None, "mode": "super_images"})
+    _last_model_used_var.set({
+        "provider": "gemini", "model": top_model, "key_index": None, "mode": "super_images",
+        # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول عدم وجود رقم ترتيب دقيق هون.
+        "cascade_rank": None, "cascade_total": None,
+    })
     _last_token_usage_var.set({
         "input_tokens": total_input, "output_tokens": total_output,
         "thoughts_tokens": total_thoughts, "total_tokens": total_tokens,
@@ -1061,7 +1088,12 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
         raw_content = _repair_json_backslashes(raw_content)
         parsed = QuizResponse(**json.loads(raw_content))
         log_info(logger, f"✅ Cascade success: provider=groq model={groq_model}")
-        _last_model_used_var.set({"provider": "groq", "model": groq_model, "key_index": None})
+        _last_model_used_var.set({
+            "provider": "groq", "model": groq_model, "key_index": None,
+            # 🆕 مسار Groq السريع مستقل تماماً عن سلسلة الكاسكيد الرئيسية (slot منفصل
+            # groq_fast) - لا يوجد "ترتيب" ذو معنى هون، None صراحة بدل رقم وهمي.
+            "cascade_rank": None, "cascade_total": None,
+        })
         return [question.model_dump() for question in parsed.questions]
     except Exception as exc:
         log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
