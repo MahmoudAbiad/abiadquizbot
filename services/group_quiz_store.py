@@ -76,13 +76,24 @@ async def get_open_session_for_chat(chat_id: int) -> Optional[Dict[str, Any]]:
 
 
 async def get_due_sessions(limit: int = 50) -> List[Dict[str, Any]]:
-    """يجلب كل جلسات `fixed_interval` النشطة اللي حان وقت سؤالها التالي - أساس
-    النبضة الدورية بمستوى التطبيق كله (وليس مهمة بالذاكرة لكل جلسة، راجع
-    السبب بالخطة: انقطاع الاستضافة بمنتصف جلسة بيفقد أي حالة بالذاكرة)."""
+    """يجلب كل الجلسات النشطة (أي وضع) اللي حان وقت سؤالها التالي.
+
+    ⚠️ صارت تشمل `chain_to_timer` كمان، مش `fixed_interval` بس. السبب: تيليجرام
+    ما بيبعت تحديث `poll` للبوت لما الاستفتاء يسكّر لحاله بانتهاء `open_period` -
+    التوثيق الرسمي بيقول حرفياً "Bots receive only updates about **manually**
+    stopped polls" (يعني `bot.stop_poll` بس، مش الإغلاق التلقائي). فـ
+    `@router.poll()` بـ handlers/group_quiz.py ما بينفّذ أبداً بهالحالة، وكان
+    هاد سبب توقّف `chain_to_timer` عند السؤال الأول بالتجربة الفعلية (تأكّدنا
+    من `group_quiz_sessions.questions_sent` عالقة على 1 بكل الجلسات).
+    الحل: النبضة الدورية هي المسؤولة عن التقدّم بكلا الوضعين الآن -
+    `send_next_group_question` بتحسب `next_question_due_at` من
+    `question_timer_seconds` بوضع `chain_to_timer` بدل `question_interval_seconds`.
+    معالج `@router.poll()` تركناه كمسار تسريع اختياري بلا ضرر (idempotent عبر
+    `claim_question_slot`) بالحالات النادرة يلي تيليجرام بيبعت فيها تحديث."""
     try:
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         res = (await supabase.table("group_quiz_sessions").select("*")
-               .eq("status", "active").eq("pacing_mode", "fixed_interval")
+               .eq("status", "active").in_("pacing_mode", ["fixed_interval", "chain_to_timer"])
                .lte("next_question_due_at", now_iso)
                .limit(limit).execute())
         return res.data or []

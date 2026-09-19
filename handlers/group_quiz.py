@@ -3,18 +3,25 @@
 ==============================================================================
 MODULE: تشغيل الكويز ضمن الغروبات
 ==============================================================================
-يغطي حالياً (الخطوة 4 من الخطة):
+يغطي:
 - بدء الجلسة من داخل الغروب (`/start gq_<share_id>` أو `/groupquiz <share_id>`).
-- شاشتَي الإعداد: المؤقّت الداخلي لكل سؤال، ثم إيقاع الانتقال بين الأسئلة.
-- `send_next_group_question()` - نقطة الإرسال الموحّدة (بتُستدعى من بدء الجلسة
-  هلق، ومن النبضة الدورية بالخطوة 5، ومن معالج إغلاق الـ poll بالخطوة 6).
-- `@router.poll_answer()` نسخة الغروب.
-- إنهاء الجلسة تلقائياً بعد آخر سؤال + نشر الترتيب.
+- شاشات الإعداد: نمط الأنونيميتي، إخفاء الأسماء، المؤقّت الداخلي، إيقاع الانتقال.
+- `send_next_group_question()` - نقطة الإرسال الموحّدة (بدء الجلسة، النبضة
+  الدورية، ومعالج إغلاق الـ poll كمسار تسريع اختياري - راجع الملاحظة تحت).
+- `@router.poll_answer()` نسخة الغروب + `@router.poll()` (اختياري، انظر تحت).
+- `group_quiz_heartbeat_loop()` - النبضة الدورية، الضامن الوحيد للتقدّم بكلا
+  وضعي `fixed_interval` و`chain_to_timer` (مسجَّلة بـ webhook_server.py
+  و main.py، لازم بالاثنين).
+- زر "🏁 إنهاء الجلسة الآن" اليدوي + إنهاء تلقائي بعد آخر سؤال + نشر الترتيب.
 
-لسا مش مُنفَّذ (خطوات 5-7): النبضة الدورية لوضع `fixed_interval`، معالج
-`@router.poll()` لوضع `chain_to_timer`، وزر "🏁 إنهاء الجلسة الآن" اليدوي.
-يعني حالياً وضع `fixed_interval` بيرسل السؤال الأول بس وبيوقف لحين إضافة
-النبضة - هاد متوقّع وبالترتيب.
+⚠️ **تصحيح مهم على `chain_to_timer` (بعد تجربة فعلية):** الخطة الأصلية افترضت
+إنه `@router.poll()` بيوصله تحديث لما الاستفتاء يسكّر لحاله بانتهاء
+`open_period`. هاد غير صحيح - تيليجرام موثّق رسمياً إنه بيبعت تحديث `poll`
+بس للإغلاق **اليدوي** (`bot.stop_poll`)، مش التلقائي. فـ `chain_to_timer`
+هلق بيعتمد بالكامل على النبضة الدورية (نفس آلية `fixed_interval`، بس
+بمصدر توقيت مختلف: `question_timer_seconds` بدل `question_interval_seconds`)
+- راجع `send_next_group_question` و`services/group_quiz_store.py::get_due_sessions`.
+معالج `@router.poll()` ضل موجود كمسار تسريع اختياري بلا ضرر (idempotent).
 
 ⚠️ ترتيب تسجيل الـ router: لازم **قبل** `start_router` (حتى نلتقط `/start gq_`
 بالغروب قبل معالج البدء العام) و**قبل** `quiz_runner_router` (لأن معالج
@@ -431,8 +438,21 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
 
     # الحجز أولاً: لو النبضة الدورية ومعالج إغلاق الـ poll اشتغلوا سوا، واحد بس
     # بينجح - راجع claim_question_slot.
-    interval = session.get("question_interval_seconds")
-    next_due = _utc_iso(int(interval)) if (session.get("pacing_mode") == "fixed_interval" and interval) else None
+    #
+    # ⚠️ next_due محسوبة لكلا الوضعين هلق، مو fixed_interval بس. تيليجرام ما
+    # بيبعت تحديث poll تلقائياً عند إغلاق الاستفتاء بانتهاء open_period (بيبعت
+    # بس عند bot.stop_poll اليدوي - موثّق رسمياً)، فـ chain_to_timer ما ممكن
+    # يعتمد على @router.poll() لوحده (كان هاد سبب توقّفه عند أول سؤال فعلياً).
+    # النبضة الدورية هلق هي الضامن الوحيد للتقدّم بكلا الوضعين؛ @router.poll()
+    # ضل موجود كمسار تسريع اختياري بس (idempotent، بلا ضرر لو ما اشتغل).
+    pacing_mode = session.get("pacing_mode")
+    if pacing_mode == "fixed_interval":
+        wait_seconds = session.get("question_interval_seconds")
+    elif pacing_mode == "chain_to_timer":
+        wait_seconds = session.get("question_timer_seconds")
+    else:
+        wait_seconds = None
+    next_due = _utc_iso(int(wait_seconds)) if wait_seconds else None
     if not await claim_question_slot(session_id, idx, next_due):
         return False
 
@@ -583,11 +603,22 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
         log_error(logger, f"Error in handle_group_poll_answer: {e}", exception=e)
 
 
-# ==================== وضع chain_to_timer: إغلاق مؤقّت السؤال ====================
+# ==================== مسار تسريع اختياري: إغلاق يدوي للاستفتاء ====================
 @router.poll()
 async def handle_group_poll_closed(poll: types.Poll):
-    """تحديث `Poll` بيوصل لأي تغيّر بحالة الاستفتاء (تصويت جديد، إغلاق...) - نحنا
-    مهتمّين فقط بلحظة `is_closed=True`، يعني خلص وقت `open_period`.
+    """تحديث `Poll` بيوصل لأي تغيّر بحالة الاستفتاء - نحنا مهتمّين بلحظة
+    `is_closed=True` بس.
+
+    ⚠️ **هاد مسار تسريع اختياري، مش الآلية الأساسية لوضع `chain_to_timer`.**
+    تيليجرام ما بيبعت هالتحديث عند الإغلاق التلقائي بانتهاء `open_period` -
+    موثّق رسمياً: "Bots receive only updates about **manually** stopped
+    polls" - يعني بس لما ينادى `bot.stop_poll` صراحة. تأكّدنا من هاد عملياً:
+    بكل جلسات `chain_to_timer` المجرّبة، `questions_sent` علقت على ١ وما
+    تحرّكت. النبضة الدورية (`group_quiz_heartbeat_loop`) هلق هي الضامن
+    الوحيد للتقدّم بكلا الوضعين (راجع `send_next_group_question`). هالمعالج
+    تركناه بلا ضرر - لو تيليجرام بعت التحديث بأي ظرف (مثلاً لو حدا نادى
+    `bot.stop_poll` يدوياً بمكان تاني)، بينفّذ فوراً بدل انتظار النبضة، وبما
+    إنه `claim_question_slot` idempotent فما في خطر إرسال مزدوج.
 
     هاد التحديث بلا `chat` كمان (نفس `poll_answer`)، فالتمييز عبر سجل Redis.
     ما منستخدم `router.message.filter` (ما بينطبق على `poll` أصلاً) ولا داعي
@@ -623,7 +654,8 @@ async def handle_group_poll_closed(poll: types.Poll):
 
 # ==================== النبضة الدورية: وضع fixed_interval ====================
 async def group_quiz_heartbeat_tick() -> None:
-    """دورة واحدة: يجلب كل الجلسات اللي حان دورها ويبعت سؤالها التالي.
+    """دورة واحدة: يجلب كل الجلسات اللي حان دورها (بكلا الوضعين `fixed_interval`
+    و`chain_to_timer` - راجع الملاحظة بأعلى الملف) ويبعت سؤالها التالي.
 
     مستوى التطبيق كله (استعلام واحد لكل الجلسات المستحقة) وليس
     `asyncio.create_task` طويل العمر لكل جلسة على حدة - البوت بيتنقّل بين
