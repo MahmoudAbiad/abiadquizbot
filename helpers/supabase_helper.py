@@ -333,14 +333,21 @@ async def log_ai_generation(
     user_id: int, source_title: str, provider: Optional[str], model_name: Optional[str],
     duration_seconds: Optional[float], questions_count: int,
     input_tokens: int = 0, output_tokens: int = 0, total_tokens: int = 0,
+    thoughts_tokens: int = 0,
 ) -> None:
     """🆕 يسجّل توليد ذكاء اصطناعي واحد بجدول ai_generation_log (كان فارغاً تماماً - غير
     موصول من أي مكان بالكود سابقاً). يُستدعى عبر asyncio.create_task من services/quiz_service.py
     مباشرة بعد generate_quiz_smart - لا يُوقف التوليد أبداً لو فشل هذا التسجيل (تحليلات
     ثانوية فقط، ليست بالمسار الحرج لتسليم الكويز للطالب).
 
-    يتطلب migration_ai_generation_log_tokens.sql (يضيف input_tokens/output_tokens/total_tokens
-    غير الموجودة أصلاً بالجدول القديم) - راجع الملف المرفق قبل أول استخدام."""
+    thoughts_tokens (🆕): توكنز "تفكير" موديلات reasoning (مثل gemini-3.6-flash) - مفصولة
+    عن output_tokens لأنها غير ظاهرة بالرد النهائي، لكنها محاسَبة ضمن total_tokens من Google
+    (راجع helpers/gemini_helper.py::_record_token_usage للتفصيل). 0 دائماً للموديلات التي
+    لا تدعم التفكير.
+
+    يتطلب migration_ai_generation_log_tokens.sql (يضيف input_tokens/output_tokens/total_tokens)
+    ومigration_ai_generation_log_thoughts_tokens.sql (يضيف thoughts_tokens) - راجع الملفين
+    المرفقين قبل أول استخدام."""
     if not provider or not model_name:
         # 🆕 لا موديل فائز فعلياً (فشل التوليد بالكامل، أو مسار لا يمرّ بعد بآلية تتبّع
         # الموديل - مثل Groq النصي السريع) - تسجيل صف بلا provider/model عديم الفائدة تحليلياً.
@@ -355,6 +362,7 @@ async def log_ai_generation(
             "questions_count": questions_count,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "thoughts_tokens": thoughts_tokens,
             "total_tokens": total_tokens,
         }).execute()
     except Exception as e:
