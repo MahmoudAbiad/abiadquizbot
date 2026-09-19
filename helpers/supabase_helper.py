@@ -368,6 +368,43 @@ async def log_ai_generation(
     except Exception as e:
         log_error(logger, f"Error logging AI generation to ai_generation_log: {e}")
 
+
+# 🆕 كاش محلي قصير (نفس فكرة settings_helper) - شاشة الأدمن فقط تستدعيها، بس بلا كاش
+# رح نضرب الجدول بكل صفحة/تنقل صفحات بلوحة الأدمن بلا داعي.
+_pricing_cache: Dict[tuple, Dict[str, Any]] = {}
+_pricing_cache_timestamp: float = 0.0
+_PRICING_CACHE_TTL_SECONDS = 60
+
+
+async def get_ai_model_pricing(force_refresh: bool = False) -> Dict[tuple, Dict[str, Any]]:
+    """🆕 يرجع أسعار كل الموديلات من جدول ai_model_pricing (migration_ai_model_pricing.sql)
+    كقاموس {(provider, model_name): {"input": .., "output": .., "verified": bool}} - يُستخدم
+    لحساب التكلفة التقديرية بالدولار لكل كويز بشاشة "📊 سجل توليد الكويزات" (handlers/admin/ai_control.py).
+    موديل غير موجود بالجدول = سعره غير معروف (تُعرض "—" بدل رقم تكلفة، لا صفر مضلّل).
+    كاش قصير (60 ثانية) لتخفيف الضغط على شاشة الأدمن فقط - ليست بمسار حرج."""
+    global _pricing_cache, _pricing_cache_timestamp
+    now = time.monotonic()
+    if not force_refresh and _pricing_cache and (now - _pricing_cache_timestamp) < _PRICING_CACHE_TTL_SECONDS:
+        return _pricing_cache
+    try:
+        res = await supabase.table("ai_model_pricing") \
+            .select("provider, model_name, input_price_per_million, output_price_per_million, verified") \
+            .execute()
+        fresh = {
+            (row["provider"], row["model_name"]): {
+                "input": float(row["input_price_per_million"] or 0),
+                "output": float(row["output_price_per_million"] or 0),
+                "verified": bool(row.get("verified", False)),
+            }
+            for row in (res.data or [])
+        }
+        _pricing_cache = fresh
+        _pricing_cache_timestamp = now
+        return _pricing_cache
+    except Exception as e:
+        log_error(logger, f"Error fetching ai_model_pricing: {e}")
+        return _pricing_cache or {}
+
 async def get_cached_quiz(file_hash: str) -> Optional[Dict[str, Any]]:
     """توجيه ذكي وفولباك (Backward Compatibility) لمحاذاة كود ملف البوت القديم مع الجدول المركزي الجديد"""
     try:

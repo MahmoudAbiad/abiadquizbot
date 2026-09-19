@@ -1088,12 +1088,20 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # 🆕 (لوحة الأدمن: "📊 سجل توليد الكويزات") - نُرفق بيانات آخر توليد ناجح (الموديل
         # ومزوّده والمدة الكاملة بالثواني، راجع gemini_helper.get_last_generation_metadata)
         # ضمن نفس حدث quiz_generated - لا حاجة لجدول/حدث جديد منفصل.
+        # 🆕 التوكنز (input/output/thoughts/total) مرفقة بنفس generation_meta أصلاً (نفس
+        # المصدر يلي بيتغذّى منه ai_generation_log بـ services/quiz_service.py) - إضافتها
+        # هون بتخلي شاشة "سجل توليد الكويزات" تعرض التفصيل + التكلفة التقديرية لكل كويز
+        # بدون أي حاجة لربط جدولين بالوقت/المستخدم (طريقة هشة كنا رح نتجنبها).
         generation_meta = generation_meta or {}
         await log_usage_event(call.from_user.id, "quiz_generated", {
             "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost,
             "ai_provider": generation_meta.get("provider"),
             "ai_model": generation_meta.get("model"),
             "generation_seconds": generation_meta.get("duration_seconds"),
+            "input_tokens": generation_meta.get("input_tokens", 0),
+            "output_tokens": generation_meta.get("output_tokens", 0),
+            "thoughts_tokens": generation_meta.get("thoughts_tokens", 0),
+            "total_tokens": generation_meta.get("total_tokens", 0),
         })
         await reward_referrer_if_eligible(call.from_user.id)
 
