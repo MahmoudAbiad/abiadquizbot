@@ -53,8 +53,19 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
             "يمكنك مشاركته مع زملائك بسهولة! 🚀"
         )
         
+        # 🆕 زر "شغّل الكويز ضمن غروب" - نفس share_id أعلاه بالضبط، بلا أي رابط/كود
+        # مشاركة جديد. الرابط `?startgroup=` بيفتح لائحة غروبات المستخدم، وبعد
+        # الاختيار تيليجرام بيرسل `/start gq_<share_id>` كرسالة داخل الغروب نفسه -
+        # فمنعرف مباشرة chat_id والمُرسِل، ومنفحص صلاحية الأدمن عليه.
+        group_kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+            types.InlineKeyboardButton(
+                text="👥 شغّل الكويز ضمن غروب",
+                url=f"https://t.me/{bot_info.username}?startgroup=gq_{share_id}",
+            )
+        ]])
+
         asyncio.create_task(log_usage_event(call.from_user.id, "share_link_created", {"share_id": share_id}))
-        await call.message.answer(old_style_text, disable_web_page_preview=True)
+        await call.message.answer(old_style_text, disable_web_page_preview=True, reply_markup=group_kb)
         
     except Exception as e:
         log_error(logger, f"Error in share_quiz: {e}", exception=e)

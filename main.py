@@ -27,6 +27,7 @@ from handlers import (
     export_router,
     audio_router,
     quiz_delete_router,
+    group_quiz_router,
 )
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
 
@@ -68,6 +69,9 @@ def main():
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
     dp.include_routers(
+        # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
+        # (معالج poll_answer العام هناك بيوقف الانتشار) - راجع handlers/group_quiz.py
+        group_quiz_router,
         start_router,
         admin_router,
         sharing_router,
@@ -108,6 +112,12 @@ def main():
                 except Exception as e:
                     logger.error(f"Failed to set bot commands: {e}")
                     
+                # 👥 نبضة الكويز الجماعي الدورية - لازم بوضع polling كمان (وليس
+                # webhook فقط)، وإلا وضع fixed_interval بيرسل السؤال الأول ويعلّق
+                # لأي نسخة تشتغل محلياً/بـ polling.
+                from handlers.group_quiz import group_quiz_heartbeat_loop
+                asyncio.create_task(group_quiz_heartbeat_loop())
+
                 await dp.start_polling(bot)
                 
             except Exception as e:

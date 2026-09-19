@@ -865,3 +865,91 @@ def get_feature_flags_keyboard(flags: dict, registry: dict) -> types.InlineKeybo
         )])
     kb.append([types.InlineKeyboardButton(text="🔙 رجوع للإعدادات العامة", callback_data="admin_settings_general")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+# ==================== 🆕 كيبوردات الكويز الجماعي (ضمن الغروبات) ====================
+# راجع services/group_quiz_store.py و handlers/group_quiz.py.
+# صيغة callback_data مختصرة عمداً (gqt/gqp) لأن معرّف الجلسة UUID بطول 36 حرفاً
+# وسقف تيليجرام لـ callback_data هو 64 بايت.
+
+# خيارات المؤقّت الداخلي لكل سؤال (open_period). 0 = بلا مؤقّت.
+GROUP_TIMER_PRESETS = [0, 15, 30, 45, 60]
+# خيارات الفاصل الزمني الثابت بين سؤال وسؤال (بالثواني).
+GROUP_INTERVAL_PRESETS = [30, 60, 120, 300]
+
+
+def get_group_anonymity_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
+    """الشاشة الأولى فعلياً (قبل كل شي): تنافسي (نقاط/ترتيب) أم مجهول بالكامل؟
+
+    هاد فعلياً is_anonymous بنداء bot.send_poll، مو ميزة عرض بس - تيليجرام ما
+    بيبعت poll_answer إطلاقاً للاستفتاءات المجهولة، يعني الوضع المجهول بيلغي
+    التتبّع من جذوره (بلا نقاط ولا ترتيب)، مقابل إنه محدا - ولا حتى البوت -
+    بيعرف مين جاوب شو. راجع migration_group_quiz_anonymous_mode.sql."""
+    rows = [
+        [types.InlineKeyboardButton(text="🏆 تنافسي (نقاط + ترتيب نهائي)", callback_data=f"gqa:{session_id}:c")],
+        [types.InlineKeyboardButton(text="🙈 مجهول بالكامل (بلا نقاط ولا ترتيب)", callback_data=f"gqa:{session_id}:a")],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{session_id}")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_group_names_privacy_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
+    """الشاشة الأولى فعلياً (قبل المؤقّت): هل تظهر أسماء المشاركين برسائل البوت
+    (الترتيب النهائي/الدوري)؟ ⚠️ لا علاقة لهالإعداد بزر "من صوّت لمين" على
+    الاستفتاء نفسه - هاد مفروض من تيليجرام بمجرد is_anonymous=False (إجباري
+    للتصحيح) وما بينطفي من هون. راجع migration_group_quiz_show_names.sql."""
+    rows = [
+        [types.InlineKeyboardButton(text="👤 اعرض الأسماء بالترتيب", callback_data=f"gqn:{session_id}:1")],
+        [types.InlineKeyboardButton(text="🙈 إخفِ الأسماء (لاعب ١، لاعب ٢...)", callback_data=f"gqn:{session_id}:0")],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{session_id}")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_group_timer_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
+    """الشاشة الأولى: هل في مؤقّت داخلي لكل سؤال؟ وكم؟"""
+    rows = []
+    row = []
+    for seconds in GROUP_TIMER_PRESETS:
+        label = "🚫 بدون مؤقّت" if seconds == 0 else f"⏱ {seconds} ثانية"
+        row.append(types.InlineKeyboardButton(text=label, callback_data=f"gqt:{session_id}:{seconds}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{session_id}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_group_pacing_keyboard(session_id: str, timer_enabled: bool) -> types.InlineKeyboardMarkup:
+    """الشاشة الثانية: متى يُرسل السؤال التالي؟
+
+    خيار "فور انتهاء المؤقّت" (chain_to_timer) بيظهر **فقط** لو المعلّم فعّل
+    المؤقّت الداخلي بالشاشة السابقة - بلا مؤقّت ما في حدث إغلاق نعتمد عليه.
+    """
+    rows = []
+    if timer_enabled:
+        rows.append([types.InlineKeyboardButton(
+            text="⚡️ فور انتهاء مؤقّت السؤال",
+            callback_data=f"gqp:{session_id}:c:0",
+        )])
+    row = []
+    for seconds in GROUP_INTERVAL_PRESETS:
+        label = f"⏳ كل {seconds} ثانية" if seconds < 60 else f"⏳ كل {seconds // 60} دقيقة"
+        row.append(types.InlineKeyboardButton(text=label, callback_data=f"gqp:{session_id}:f:{seconds}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{session_id}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_group_question_control_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
+    """كيبورد كل سؤال جماعي - زر واحد بس (مش لكل سؤال أزرار تنقّل، الإرسال تلقائي
+    بالكامل حسب القرار المعماري رقم 3 بالخطة). يظهر تحت كل poll طول الجلسة."""
+    return types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text="🏁 إنهاء الجلسة الآن", callback_data=f"gqe:{session_id}")
+    ]])

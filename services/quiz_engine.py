@@ -28,6 +28,32 @@ def _question_image_object_path(quiz_id: Optional[str], idx: int, q: Dict[str, A
     return f"tmp/{uuid.uuid4().hex}.png"
 
 
+# ==================== المؤقّت الداخلي للسؤال (open_period) ====================
+# تيليجرام بيقبل open_period بين 5 و600 ثانية حصراً، وأي قيمة برّا المدى بترجع
+# BadRequest وبتُسقط السؤال كامل. بما إنه القيمة جاية من كيبورد (ممكن يوصلها
+# callback_data معدّل يدوياً)، منحصرها هون بمكان واحد بدل ما نثق بالواجهة.
+# القيمة None (الافتراضية) = بلا مؤقّت إطلاقاً = السلوك الحالي للنمط الفردي.
+TELEGRAM_MIN_OPEN_PERIOD = 5
+TELEGRAM_MAX_OPEN_PERIOD = 600
+
+
+def _sanitize_open_period(open_period: Optional[int]) -> Optional[int]:
+    """يرجّع قيمة open_period صالحة لتيليجرام، أو None لو ما في مؤقّت/القيمة تالفة."""
+    if open_period is None:
+        return None
+    try:
+        value = int(open_period)
+    except (TypeError, ValueError):
+        log_warning(logger, f"Invalid open_period value ignored: {open_period!r}")
+        return None
+    if value <= 0:
+        return None
+    clamped = max(TELEGRAM_MIN_OPEN_PERIOD, min(TELEGRAM_MAX_OPEN_PERIOD, value))
+    if clamped != value:
+        log_warning(logger, f"open_period {value}s out of Telegram range, clamped to {clamped}s")
+    return clamped
+
+
 def prepare_question_payload(q: Dict[str, Any], idx: int, total: int) -> Tuple[str, List[str], str, bool]:
     """
     تأخذ السؤال وتتحقق من حد أطوال التليجرام لتقرير هل تحتاج Text Fallback أم لا
@@ -49,12 +75,28 @@ def prepare_question_payload(q: Dict[str, Any], idx: int, total: int) -> Tuple[s
 
     return raw_question, clean_options, clean_explanation, needs_fallback
 
-async def _send_math_image_question(chat_id: int, user_id: int, q: Dict[str, Any], idx: int, total: int, control_kb: types.InlineKeyboardMarkup, quiz_id: Optional[str]):
+async def _send_math_image_question(
+    chat_id: int,
+    user_id: int,
+    q: Dict[str, Any],
+    idx: int,
+    total: int,
+    control_kb: types.InlineKeyboardMarkup,
+    quiz_id: Optional[str],
+    open_period: Optional[int] = None,
+    poll_meta: Optional[Dict[str, Any]] = None,
+    is_anonymous: bool = False,
+):
     """
     نمط الكويز المصوّر LaTeX: يرسم صورة واحدة للسؤال + الخيارات، ثم Poll منفصل
     يعرض فقط حروف الإجابة (أ/ب/ج/د أو A/B/C/D) لأن المحتوى الكامل موجود بالصورة.
     الصورة تُخزَّن مرة واحدة على Supabase Storage ويُعاد استخدام رابطها العام في
     كل مرة يُشغَّل فيها نفس الكويز (كاش)، بدل إعادة الرسم والرفع في كل مرة.
+
+    ⚠️ ملاحظة على `open_period` بهالمسار تحديداً: نمط الرياضيات = **رسالتين**
+    (صورة + poll)، والمؤقّت بيبدأ لحظة إرسال الـ poll (الرسالة التانية) مش
+    الصورة. برضو هاد النمط بيستهلك ضعف حصّة الـ rate limit للغروب - يُحسب
+    عند اختيار الفاصل الزمني بمسار الغروب.
     """
     is_ar = looks_arabic(str(q.get("question", "")))
     options = q.get("options") or []
@@ -99,22 +141,57 @@ async def _send_math_image_question(chat_id: int, user_id: int, q: Dict[str, Any
         correct_option_id=int(q["correct_option_id"]),
         explanation=clean_exp,
         reply_markup=control_kb,
-        is_anonymous=False,
+        is_anonymous=is_anonymous,
+        open_period=_sanitize_open_period(open_period),
     )
 
     quiz_data = {"chat_id": chat_id, "user_id": user_id, "correct_option_id": int(q["correct_option_id"]), "question_index": idx}
+    if poll_meta:
+        quiz_data.update(poll_meta)
     await redis_client.set(f"poll:{poll_msg.poll.id}", json.dumps(quiz_data), ex=7200)
     return poll_msg
 
 
-async def send_quiz_poll(chat_id: int, user_id: int, q: Dict[str, Any], idx: int, total: int, control_kb: types.InlineKeyboardMarkup, quiz_id: Optional[str] = None):
+async def send_quiz_poll(
+    chat_id: int,
+    user_id: int,
+    q: Dict[str, Any],
+    idx: int,
+    total: int,
+    control_kb: types.InlineKeyboardMarkup,
+    quiz_id: Optional[str] = None,
+    open_period: Optional[int] = None,
+    poll_meta: Optional[Dict[str, Any]] = None,
+    is_anonymous: bool = False,
+):
     """
     يقوم بإرسال السؤال كـ Poll أو Text Fallback وحفظ بيانات الجلسة في Redis.
     إذا كان السؤال مُعلَّماً بـ is_math (نمط الكويز المصوّر LaTeX)، يُحوَّل التنفيذ
     كاملاً لمسار الصورة + Poll الحروف بدل المسار النصي المعتاد.
+
+    البارامترات الاختيارية (لمسار الغروب فقط - النمط الفردي ما بيمرّرها إطلاقاً
+    فسلوكه مطابق تماماً للسابق، صفر أثر جانبي):
+
+    - `open_period`: المؤقّت الداخلي للسؤال بالثواني (5-600). يُمرَّر وقت الإرسال
+      فقط ولا يُخزَّن بالكويز نفسه (`quizzes.quiz_data`).
+    - `poll_meta`: حقول إضافية تُدمج بسجل `poll:{poll_id}` بـ Redis (مثلاً
+      `session_id` و`question_index` بمسار الغروب). سبب وجوده: منتجنّب إنه
+      المستدعي يكتب فوق نفس المفتاح بكتابة تانية بعد الإرسال - بينها نافذة
+      زمنية صغيرة ممكن يوصل فيها `poll_answer` ويُقرأ سجل ناقص.
+    - `is_anonymous`: **True تعطّل تتبّع الإجابات بالكامل** - تيليجرام ما بيبعت
+      `poll_answer` إطلاقاً للاستفتاءات المجهولة (موثّق رسمياً: "A user changed
+      their answer in a non-anonymous poll")، فمحدا رح يوصله أي تحديث لهالسؤال.
+      الافتراضي False = نفس سلوك النمط الفردي بالضبط.
     """
     if q.get("is_math"):
-        return await _send_math_image_question(chat_id, user_id, q, idx, total, control_kb, quiz_id)
+        return await _send_math_image_question(
+            chat_id, user_id, q, idx, total, control_kb, quiz_id,
+            open_period=open_period, poll_meta=poll_meta, is_anonymous=is_anonymous,
+        )
+        return await _send_math_image_question(
+            chat_id, user_id, q, idx, total, control_kb, quiz_id,
+            open_period=open_period, poll_meta=poll_meta,
+        )
 
     raw_q, clean_opts, clean_exp, needs_fallback = prepare_question_payload(q, idx, total)
 
@@ -139,7 +216,8 @@ async def send_quiz_poll(chat_id: int, user_id: int, q: Dict[str, Any], idx: int
         correct_option_id=int(q['correct_option_id']),
         explanation=clean_exp,
         reply_markup=control_kb,
-        is_anonymous=False
+        is_anonymous=is_anonymous,
+        open_period=_sanitize_open_period(open_period),
     )
 
     # حفظ حالة الـ Poll في Redis
@@ -149,5 +227,7 @@ async def send_quiz_poll(chat_id: int, user_id: int, q: Dict[str, Any], idx: int
         "correct_option_id": int(q['correct_option_id']),
         "question_index": idx,
     }
+    if poll_meta:
+        quiz_data.update(poll_meta)
     await redis_client.set(f"poll:{poll_msg.poll.id}", json.dumps(quiz_data), ex=7200)
     return poll_msg

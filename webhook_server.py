@@ -169,6 +169,12 @@ async def lifespan(app: FastAPI):
         # 🧹 إطلاق مهمة التنظيف التلقائي الدوري للبيانات
         asyncio.create_task(scheduled_cleanup_loop())
         print("🔄 تم جدولة تنظيف البيانات التلقائي كل 12 ساعة.")
+
+        # 👥 إطلاق نبضة الكويز الجماعي الدورية (وضع fixed_interval) - راجع
+        # handlers/group_quiz.py::group_quiz_heartbeat_loop
+        from handlers.group_quiz import group_quiz_heartbeat_loop
+        asyncio.create_task(group_quiz_heartbeat_loop())
+        print("👥 تم جدولة نبضة الكويز الجماعي الدورية كل 12 ثانية.")
             
     except Exception as e:
         print(f"❌ فشل تفعيل الـ Webhook أو المهام الدورية أثناء تشغيل السيرفر: {e}")
