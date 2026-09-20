@@ -953,3 +953,23 @@ def get_group_question_control_keyboard(session_id: str) -> types.InlineKeyboard
     return types.InlineKeyboardMarkup(inline_keyboard=[[
         types.InlineKeyboardButton(text="🏁 إنهاء الجلسة الآن", callback_data=f"gqe:{session_id}")
     ]])
+
+
+def get_group_channel_picker_keyboard(share_id: str, channels: list) -> types.InlineKeyboardMarkup:
+    """شاشة \"📢 شارك مع قناة\": زر لكل قناة (البوت أدمن فيها + عنده صلاحية نشر +
+    المستخدم نفسه أدمن فيها - الفلترة الأخيرة بيعملها المستدعي لايف).
+
+    `callback_data` = `gqchp:<share_id>:<chat_id>` (12 + ~14 حرف، تحت حد الـ 64 بايت).
+    `chat_title` جاي من تيليجرام - بيُقصّ لطول معقول لأنه نص زر (مو HTML، فما
+    في داعي escape هون).
+    """
+    rows = []
+    for ch in channels:
+        title = (ch.get("chat_title") or "قناة بلا اسم").strip()
+        if len(title) > 40:
+            title = title[:39] + "…"
+        rows.append([types.InlineKeyboardButton(
+            text=f"📢 {title}",
+            callback_data=f"gqchp:{share_id}:{int(ch['chat_id'])}",
+        )])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)

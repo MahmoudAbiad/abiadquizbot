@@ -86,6 +86,7 @@ async def _send_math_image_question(
     open_period: Optional[int] = None,
     poll_meta: Optional[Dict[str, Any]] = None,
     is_anonymous: bool = False,
+    message_thread_id: Optional[int] = None,
 ):
     """
     نمط الكويز المصوّر LaTeX: يرسم صورة واحدة للسؤال + الخيارات، ثم Poll منفصل
@@ -115,17 +116,17 @@ async def _send_math_image_question(
     caption = f"السؤال {idx + 1} من {total} 📝"
     try:
         if image_url:
-            await bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption)
+            await bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, message_thread_id=message_thread_id)
         else:
             # فشل الرفع لسبب ما (مثال: الباكت غير مُهيّأ) - نرسل الصورة مباشرة كملف بدل رابط
             if image_bytes is None:
                 image_bytes = await render_question_image_async(q, idx, total, is_ar)
-            await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption)
+            await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption, message_thread_id=message_thread_id)
     except Exception as exc:
         log_warning(logger, f"Failed sending math question image, retrying with raw bytes: {exc}")
         if image_bytes is None:
             image_bytes = await render_question_image_async(q, idx, total, is_ar)
-        await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption)
+        await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption, message_thread_id=message_thread_id)
 
     poll_question = "اختر الإجابة الصحيحة بالاعتماد على الصورة أعلاه 👆" if is_ar else "Choose the correct answer based on the image above 👆"
     # نمط الكويز المصوّر: explanation يُعرض بحقل Poll نصي عادي (وليس صورة)، لذا لازم
@@ -143,6 +144,7 @@ async def _send_math_image_question(
         reply_markup=control_kb,
         is_anonymous=is_anonymous,
         open_period=_sanitize_open_period(open_period),
+        message_thread_id=message_thread_id,
     )
 
     quiz_data = {"chat_id": chat_id, "user_id": user_id, "correct_option_id": int(q["correct_option_id"]), "question_index": idx}
@@ -163,6 +165,7 @@ async def send_quiz_poll(
     open_period: Optional[int] = None,
     poll_meta: Optional[Dict[str, Any]] = None,
     is_anonymous: bool = False,
+    message_thread_id: Optional[int] = None,
 ):
     """
     يقوم بإرسال السؤال كـ Poll أو Text Fallback وحفظ بيانات الجلسة في Redis.
@@ -182,15 +185,15 @@ async def send_quiz_poll(
       `poll_answer` إطلاقاً للاستفتاءات المجهولة (موثّق رسمياً: "A user changed
       their answer in a non-anonymous poll")، فمحدا رح يوصله أي تحديث لهالسؤال.
       الافتراضي False = نفس سلوك النمط الفردي بالضبط.
+    - `message_thread_id`: توبيك الغروب (Forum supergroup) يلي لازم السؤال يظهر
+      فيه، إن وجد. `None` = بلا تغيير (سلوك النمط الفردي القديم بالضبط - يظهر
+      بالغروب عادي بلا استهداف توبيك معيّن).
     """
     if q.get("is_math"):
         return await _send_math_image_question(
             chat_id, user_id, q, idx, total, control_kb, quiz_id,
             open_period=open_period, poll_meta=poll_meta, is_anonymous=is_anonymous,
-        )
-        return await _send_math_image_question(
-            chat_id, user_id, q, idx, total, control_kb, quiz_id,
-            open_period=open_period, poll_meta=poll_meta,
+            message_thread_id=message_thread_id,
         )
 
     raw_q, clean_opts, clean_exp, needs_fallback = prepare_question_payload(q, idx, total)
@@ -202,7 +205,7 @@ async def send_quiz_poll(
             full_text += f"**{i}.** {str(opt).strip()}\n"
             poll_options.append(f"الخيار رقم {i}")
 
-        await bot.send_message(chat_id=chat_id, text=full_text, parse_mode="Markdown")
+        await bot.send_message(chat_id=chat_id, text=full_text, parse_mode="Markdown", message_thread_id=message_thread_id)
         clean_q = "اختر الإجابة الصحيحة بناءً على التفاصيل أعلاه 👆:"
         clean_opts = poll_options
     else:
@@ -218,6 +221,7 @@ async def send_quiz_poll(
         reply_markup=control_kb,
         is_anonymous=is_anonymous,
         open_period=_sanitize_open_period(open_period),
+        message_thread_id=message_thread_id,
     )
 
     # حفظ حالة الـ Poll في Redis

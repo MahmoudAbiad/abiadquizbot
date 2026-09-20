@@ -13,6 +13,13 @@ MODULE: تشغيل الكويز ضمن الغروبات
   وضعي `fixed_interval` و`chain_to_timer` (مسجَّلة بـ webhook_server.py
   و main.py، لازم بالاثنين).
 - زر "🏁 إنهاء الجلسة الآن" اليدوي + إنهاء تلقائي بعد آخر سؤال + نشر الترتيب.
+- 📢 دعم القنوات (بند 3 بـ group_quiz_decisions.md): تيليجرام ما عندها Deep Link
+  للقنوات، فالأدمن بيبلّش من **الخاص** مع البوت (زر "📢 شارك مع قناة" بـ
+  handlers/sharing.py) وبيختار القناة من لائحة بتتغذّى من تحديثات `my_chat_member`
+  (`track_bot_chat_membership` -> جدول `bot_chat_memberships`). شاشات الإعداد
+  كلها بتشتغل بالخاص بنفس الأزرار (`gqa:/gqn:/gqt:/gqp:/gqc:`)؛ الفرق الوحيد بـ
+  `_guard_config_callback` (بتتحقق من أدمن القناة **الهدف** مش من محادثة الرسالة).
+  الجلسة نفسها (إرسال/نبضة/إنهاء) بلا أي تغيير - `chat_id` القناة هو نفسه بكل مكان.
 
 ⚠️ **تصحيح مهم على `chain_to_timer` (بعد تجربة فعلية):** الخطة الأصلية افترضت
 إنه `@router.poll()` بيوصله تحديث لما الاستفتاء يسكّر لحاله بانتهاء
@@ -30,9 +37,10 @@ MODULE: تشغيل الكويز ضمن الغروبات
 
 import asyncio
 import datetime
+import html
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from aiogram import F, Router, types
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -42,6 +50,7 @@ from aiogram.filters import Command, CommandObject
 from config import bot, redis_client
 from keyboards import (
     get_group_anonymity_keyboard,
+    get_group_channel_picker_keyboard,
     get_group_names_privacy_keyboard,
     get_group_pacing_keyboard,
     get_group_question_control_keyboard,
@@ -51,16 +60,21 @@ from logger import get_logger, log_error, log_info
 from services.group_permissions import is_group_admin
 from services.group_quiz_store import (
     claim_question_slot,
+    claim_session_cancel,
+    claim_session_finish,
     clear_session_questions_cache,
     create_session,
+    get_chat_membership,
     get_due_sessions,
     get_leaderboard,
     get_open_session_for_chat,
     get_session,
     get_session_questions,
+    list_postable_channels,
     record_answer,
     bump_participant,
     update_session,
+    upsert_chat_membership,
 )
 from services.quiz_engine import send_quiz_poll
 from supabase_helper import check_or_add_user, get_shared_quiz
@@ -72,7 +86,11 @@ router = Router()
 # ⚠️ ما بينطبق على `poll_answer` لأن تحديث PollAnswer ما فيه كائن chat أصلاً -
 # التمييز هناك بيصير عبر محتوى سجل Redis (راجع handle_group_poll_answer).
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
-router.callback_query.filter(F.message.chat.type.in_({"group", "supergroup"}))
+# ⚠️ وُسّع ليشمل `private` (شاشات إعداد جلسة قناة بتنعرض بخاص الأدمن) و`channel`
+# (زر "🏁 إنهاء الجلسة الآن" تحت استفتاءات القناة). آمن: كل معالجات callback بهالملف
+# بتفلتر على prefix خاص (`gq*:`) فما بتلتقط أي callback تاني، وأي معالج ما بيطابق
+# بينزل للـ routers اللي بعده عادي. `router.message` لسا محصور بالغروبات بس.
+router.callback_query.filter(F.message.chat.type.in_({"group", "supergroup", "private", "channel"}))
 
 # ⚠️ تصحيح (كان في تناقض هون): الحد الفعلي بين سؤالين مو بس هالرقم - النبضة
 # الدورية (`group_quiz_heartbeat_loop`) نفسها بتفحص كل `HEARTBEAT_INTERVAL_SECONDS`
@@ -127,11 +145,15 @@ def _utc_iso(seconds_from_now: int) -> str:
             + datetime.timedelta(seconds=seconds_from_now)).isoformat()
 
 
-async def _safe_call(coro_factory, *, what: str):
+async def _safe_call(coro_factory, *, what: str, on_error: Optional[Callable[[Exception], None]] = None):
     """يلفّ أي نداء إرسال لتيليجرام بمعالجة TelegramRetryAfter كخط دفاع أخير.
 
     `coro_factory` دالة بترجّع coroutine جديدة بكل محاولة (ما بينفع نعيد
     استخدام نفس الـ coroutine بعد ما انرمى منها استثناء).
+
+    `on_error` (اختياري): بيتنادى بالاستثناء **النهائي** بس (بعد أي إعادة محاولة)
+    قبل ما ترجع `None` - للمستدعي اللي بدو يعرف *ليش* فشل الإرسال (مثلاً
+    `send_next_group_question` بيعرضه للأدمن). الافتراضي `None` = سلوك مطابق للسابق.
     """
     try:
         return await coro_factory()
@@ -142,39 +164,55 @@ async def _safe_call(coro_factory, *, what: str):
             return await coro_factory()
         except Exception as e2:
             log_error(logger, f"Retry failed on {what}: {e2}")
+            if on_error:
+                on_error(e2)
             return None
     except Exception as e:
         log_error(logger, f"Failed on {what}: {e}")
+        if on_error:
+            on_error(e)
         return None
 
 
 # ==================== بدء الجلسة ====================
-async def _begin_group_session(msg: types.Message, share_id: str) -> None:
-    chat_id = msg.chat.id
-    user = msg.from_user
-    if not user:
-        return
+async def _start_session_setup(
+    *,
+    ui_msg: types.Message,
+    chat_id: int,
+    user: types.User,
+    share_id: str,
+    message_thread_id: Optional[int] = None,
+    is_channel: bool = False,
+    dest_title: Optional[str] = None,
+) -> None:
+    """المنطق المشترك لبدء إعداد جلسة (غروب أو قناة).
 
+    - `chat_id`: **المحادثة الهدف** (اللي رح ينبعت فيها الكويز) - مش بالضرورة
+      محادثة `ui_msg`. بمسار الغروب هي نفسها، بمسار القناة الهدف هي القناة وشاشات
+      الإعداد بتنعرض بخاص الأدمن (`ui_msg` = رسالة بالخاص).
+    - `user`: الأدمن اللي عم يبلّش الجلسة (منفصل عن `ui_msg.from_user` لأنه بمسار
+      القناة `ui_msg` هي رسالة البوت نفسه).
+    - `message_thread_id`: توبيك الغروب - دايماً `None` للقنوات (ما في توبيكس).
+    - `dest_title`: اسم القناة لعرضه بشاشة الإعداد (مسار القناة بس).
+    """
     if not await is_group_admin(chat_id, user.id):
-        await _safe_call(
-            lambda: msg.reply("⛔ فقط أدمن الغروب يقدر يشغّل كويز جماعي هون."),
-            what="reply not-admin",
-        )
+        not_admin_txt = ("⛔ فقط أدمن القناة يقدر يشغّل كويز جماعي عليها." if is_channel
+                         else "⛔ فقط أدمن الغروب يقدر يشغّل كويز جماعي هون.")
+        await _safe_call(lambda: ui_msg.reply(not_admin_txt), what="reply not-admin")
         return
 
     existing = await get_open_session_for_chat(chat_id)
     if existing:
-        await _safe_call(
-            lambda: msg.reply("⚠️ في جلسة كويز شغّالة (أو بانتظار الإعداد) بهالغروب. خلّصها أو ألغيها أولاً."),
-            what="reply session-exists",
-        )
+        exists_txt = ("⚠️ في جلسة كويز شغّالة (أو بانتظار الإعداد) بهالقناة. خلّصها أو ألغيها أولاً." if is_channel
+                      else "⚠️ في جلسة كويز شغّالة (أو بانتظار الإعداد) بهالغروب. خلّصها أو ألغيها أولاً.")
+        await _safe_call(lambda: ui_msg.reply(exists_txt), what="reply session-exists")
         return
 
     shared = await get_shared_quiz(share_id)
     questions = (shared or {}).get("quiz_data") or []
     if not shared or not questions:
         await _safe_call(
-            lambda: msg.reply("❌ رابط الكويز منتهي الصلاحية أو ما عاد موجوداً."),
+            lambda: ui_msg.reply("❌ رابط الكويز منتهي الصلاحية أو ما عاد موجوداً."),
             what="reply quiz-missing",
         )
         return
@@ -188,22 +226,53 @@ async def _begin_group_session(msg: types.Message, share_id: str) -> None:
         chat_id=chat_id,
         started_by=user.id,
         total_questions=len(questions),
+        message_thread_id=message_thread_id,
     )
     if not session:
-        await _safe_call(lambda: msg.reply("❌ تعذّر إنشاء الجلسة حالياً، جرّب بعد شوي."), what="reply create-failed")
+        await _safe_call(lambda: ui_msg.reply("❌ تعذّر إنشاء الجلسة حالياً، جرّب بعد شوي."), what="reply create-failed")
         return
 
-    title = shared.get("source_title") or shared.get("title") or "كويز"
+    # ⚠️ `source_title`/`title` نص حر من المستخدم ومنحطّه جوا parse_mode=HTML -
+    # لازم escape (نفس عائلة بق أسماء الطلاب بـ finish_group_session).
+    title = html.escape(shared.get("source_title") or shared.get("title") or "كويز")
+    dest_line = f"📢 القناة: <b>{html.escape(dest_title)}</b>\n" if (is_channel and dest_title) else ""
+    if is_channel:
+        # بلا أي ادّعاء عن مين بيشوف \"من صوّت لمين\" بالقنوات (ما تحقّقنا منه) - بس
+        # الحقيقة الثابتة: الاستفتاء غير المجهول = تيليجرام بتربط كل إجابة بصاحبها.
+        competitive_line = (
+            "🏆 <b>تنافسي</b>: نقاط وترتيب نهائي، بس الاستفتاء بيكون غير مجهول "
+            "(تيليجرام بتربط كل إجابة بصاحبها - قيد من تيليجرام نفسها، مش قابل للتعطيل)."
+        )
+    else:
+        competitive_line = (
+            "🏆 <b>تنافسي</b>: نقاط وترتيب نهائي، بس أي عضو بالغروب يقدر يشوف \"من صوّت لمين\" "
+            "على كل سؤال (قيد من تيليجرام نفسها، مش قابل للتعطيل)."
+        )
     text = (
         f"📚 <b>{title}</b>\n"
+        f"{dest_line}"
         f"عدد الأسئلة: {len(questions)}\n\n"
         "🎮 أول شي: شو نمط الجلسة؟\n"
-        "🏆 <b>تنافسي</b>: نقاط وترتيب نهائي، بس أي عضو بالغروب يقدر يشوف \"من صوّت لمين\" على كل سؤال (قيد من تيليجرام نفسها، مش قابل للتعطيل).\n"
+        f"{competitive_line}\n"
         "🙈 <b>مجهول بالكامل</b>: محدا (ولا حتى أنا) بيعرف مين جاوب شو - بالمقابل بلا نقاط ولا ترتيب إطلاقاً."
     )
     await _safe_call(
-        lambda: msg.answer(text, parse_mode="HTML", reply_markup=get_group_anonymity_keyboard(str(session["id"]))),
+        lambda: ui_msg.answer(text, parse_mode="HTML", reply_markup=get_group_anonymity_keyboard(str(session["id"]))),
         what="send anonymity screen",
+    )
+
+
+async def _begin_group_session(msg: types.Message, share_id: str) -> None:
+    """مسار الغروب: الرسالة نفسها جوا الغروب الهدف (`/start gq_<id>` أو `/groupquiz`)."""
+    user = msg.from_user
+    if not user:
+        return
+    await _start_session_setup(
+        ui_msg=msg,
+        chat_id=msg.chat.id,
+        user=user,
+        share_id=share_id,
+        message_thread_id=msg.message_thread_id,
     )
 
 
@@ -237,12 +306,37 @@ async def group_quiz_command(msg: types.Message, command: CommandObject):
 
 # ==================== شاشتا الإعداد ====================
 async def _guard_config_callback(call: types.CallbackQuery, session_id: str) -> Optional[Dict[str, Any]]:
-    """فحص مشترك لأزرار الإعداد: أدمن بالغروب + جلسة موجودة وبحالة waiting."""
-    if not await is_group_admin(call.message.chat.id, call.from_user.id):
+    """فحص مشترك لأزرار الإعداد: أدمن + جلسة موجودة وبحالة waiting.
+
+    مساران (بيتحدّدوا بنوع محادثة الرسالة اللي عليها الزر):
+
+    1. **غروب** (المسار الأصلي بلا أي تغيير): الشاشة جوا الغروب نفسه - الأدمن
+       بيتفحص على `call.message.chat.id` والجلسة لازم تكون لنفس المحادثة.
+    2. **خاص** (مسار القنوات): الشاشة بخاص الأدمن مع البوت، والقناة الهدف هي
+       `session["chat_id"]` (مش محادثة الرسالة). ثلاث شروط لازم تتحقق سوا:
+       الجلسة `waiting`، وصاحب الجلسة (`started_by`) هو نفسه الضاغط وهاي محادثته
+       الخاصة، و**أدمن لايف بالقناة الهدف** (مش بس وقت البدء - ممكن انسحبت صلاحيته
+       بين الشاشات).
+    """
+    chat = call.message.chat
+    if chat.type == "private":
+        session = await get_session(session_id)
+        if (not session
+                or session["status"] != "waiting"
+                or int(session["started_by"]) != call.from_user.id
+                or chat.id != call.from_user.id):
+            await call.answer("⚠️ هالجلسة ما عادت متاحة", show_alert=True)
+            return None
+        if not await is_group_admin(int(session["chat_id"]), call.from_user.id):
+            await call.answer("⛔ للأدمن فقط", show_alert=True)
+            return None
+        return session
+
+    if not await is_group_admin(chat.id, call.from_user.id):
         await call.answer("⛔ للأدمن فقط", show_alert=True)
         return None
     session = await get_session(session_id)
-    if not session or session["status"] != "waiting" or int(session["chat_id"]) != call.message.chat.id:
+    if not session or session["status"] != "waiting" or int(session["chat_id"]) != chat.id:
         await call.answer("⚠️ هالجلسة ما عادت متاحة", show_alert=True)
         return None
     return session
@@ -426,6 +520,215 @@ async def end_group_session_now(call: types.CallbackQuery):
             pass
 
 
+# ==================== دعم القنوات ====================
+def _member_status(member: Any) -> str:
+    """حالة العضوية كنص عادي - aiogram بترجّعها `str` عادي حالياً (use_enum_values)
+    بس منوحّد لو انرجعت Enum بنسخة تانية."""
+    status = getattr(member, "status", "")
+    return str(getattr(status, "value", status))
+
+
+@router.my_chat_member()
+async def track_bot_chat_membership(update: types.ChatMemberUpdated):
+    """كل ما تتغيّر حالة عضوية **البوت نفسه** بأي محادثة -> upsert بـ `bot_chat_memberships`.
+
+    بلا فلتر نوع محادثة (بعكس باقي الـ router) - لازم يلتقط channel/supergroup/group.
+    منتجاهل `private` بس: هناك `my_chat_member` بيوصل لما مستخدم يحظر/يفكّ حظر
+    البوت، مش عضوية بمحادثة نقدر ننشر فيها.
+
+    ⚠️ تحديثات `my_chat_member` بتوصل **من لحظة تفعيل allowed_updates وطالع بس**.
+    قنوات كان البوت أدمن فيها قبل هالنشر ما رح تنسجّل لحد ما تتغيّر حالة البوت
+    فيها (تعديل أي صلاحية أو إعادة إضافته).
+    """
+    try:
+        chat = update.chat
+        if chat.type not in ("channel", "supergroup", "group"):
+            return
+
+        new_status = _member_status(update.new_chat_member)
+        old_status = _member_status(update.old_chat_member)
+        # `can_post_messages` موجود بـ ChatMemberAdministrator بس (للقنوات) - غير هيك None.
+        can_post = getattr(update.new_chat_member, "can_post_messages", None)
+        if new_status != "administrator":
+            can_post = None
+
+        # added_by: بس لحظة الترقية الفعلية (مش أدمن -> أدمن) - راجع upsert_chat_membership.
+        promoted_now = new_status == "administrator" and old_status != "administrator"
+        added_by = update.from_user.id if (promoted_now and update.from_user) else None
+
+        await upsert_chat_membership(
+            chat_id=chat.id,
+            chat_type=chat.type,
+            chat_title=chat.title,
+            status=new_status,
+            can_post_messages=can_post,
+            added_by=added_by,
+        )
+        log_info(logger, f"Bot membership in {chat.type} {chat.id}: {old_status} -> {new_status} (can_post={can_post})")
+    except Exception as e:
+        log_error(logger, f"Error in track_bot_chat_membership: {e}", exception=e)
+
+
+async def _filter_channels_user_admins(channels: list, user_id: int, concurrency: int = 10) -> list:
+    """يفلتر لائحة القنوات لللي `user_id` أدمن فيها **لايف** (`is_group_admin` - كاش Redis
+    5 دقايق، fail-closed). بترتيب الإدخال نفسه. `Semaphore` بس لتفادي دفعة
+    `get_chat_member` كبيرة سوا لو اللائحة طويلة."""
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _check(ch: Dict[str, Any]) -> bool:
+        async with sem:
+            return await is_group_admin(int(ch["chat_id"]), user_id)
+
+    flags = await asyncio.gather(*(_check(ch) for ch in channels))
+    return [ch for ch, ok in zip(channels, flags) if ok]
+
+
+@router.callback_query(F.data.startswith("gqchl:"))
+async def list_channels_for_share(call: types.CallbackQuery):
+    """زر \"📢 شارك مع قناة\" (من handlers/sharing.py): يعرض القنوات اللي البوت أدمن
+    فيها بصلاحية نشر **والمستخدم نفسه أدمن فيها** (فحص لايف)."""
+    try:
+        if call.message.chat.type != "private":
+            await call.answer("افتح البوت بالخاص لاختيار القناة.", show_alert=True)
+            return
+        share_id = call.data.split(":", 1)[1]
+
+        candidates = await list_postable_channels()
+        mine = await _filter_channels_user_admins(candidates, call.from_user.id)
+
+        if not mine:
+            await call.message.answer(
+                "📢 ما لقيت قناة مؤهّلة للتشغيل. لازم يتحقق الشرطين سوا:\n"
+                "1) البوت أدمن بالقناة مع صلاحية «نشر الرسائل».\n"
+                "2) أنت كمان أدمن بنفس القناة.\n\n"
+                "ℹ️ إذا البوت أصلاً أدمن بالقناة من قبل، القناة ما بتظهر إلا بعد ما تتغيّر حالته فيها: "
+                "غيّر أي صلاحية للبوت بالقناة (مثلاً بدّل «تثبيت الرسائل» وارجع) أو أعد إضافته كأدمن، وجرّب هالزر مرة تانية."
+            )
+            return
+
+        await call.message.answer(
+            "📢 اختر القناة اللي بدك تشغّل عليها الكويز:",
+            reply_markup=get_group_channel_picker_keyboard(share_id, mine),
+        )
+    except Exception as e:
+        log_error(logger, f"Error in list_channels_for_share: {e}", exception=e)
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("gqchp:"))
+async def pick_channel_for_share(call: types.CallbackQuery):
+    """اختيار قناة من اللائحة -> نفس منطق بدء الجلسة بالضبط (`_start_session_setup`)
+    بس بـ `chat_id` القناة، وشاشات الإعداد بتنعرض هون بالخاص."""
+    try:
+        if call.message.chat.type != "private":
+            await call.answer("افتح البوت بالخاص لاختيار القناة.", show_alert=True)
+            return
+        _, share_id, raw_chat_id = call.data.split(":", 2)
+        chat_id = int(raw_chat_id)
+        user = call.from_user
+
+        # فحص وقائي (بند 3.3): صلاحية البوت **قبل** ما نبلّش الجلسة أصلاً، بدل ما
+        # نكتشف الفشل بعد إرسال أول سؤال. ما بيغطّي كل الحالات (السجل ممكن يكون
+        # قديم لو فاتنا تحديث) - فشل الإرسال الفعلي = بند 5 (لسا ما انكتب).
+        membership = await get_chat_membership(chat_id)
+        if (not membership
+                or membership.get("chat_type") != "channel"
+                or membership.get("status") != "administrator"):
+            await call.answer("⚠️ البوت مش أدمن بهالقناة حالياً.", show_alert=True)
+            return
+        if membership.get("can_post_messages") is not True:
+            await call.answer("⚠️ البوت ما عنده صلاحية «نشر الرسائل» بهالقناة.", show_alert=True)
+            return
+        if not await is_group_admin(chat_id, user.id):
+            await call.answer("⛔ لازم تكون أدمن بهالقناة.", show_alert=True)
+            return
+
+        title = membership.get("chat_title") or "القناة"
+        try:
+            # يمنع ضغطتين متتاليتين (الثانية كانت رح تنرفض بـ session-exists على أي حال)
+            await call.message.edit_text(f"📢 القناة المختارة: <b>{html.escape(title)}</b>", parse_mode="HTML")
+        except Exception:
+            pass
+        await _start_session_setup(
+            ui_msg=call.message,
+            chat_id=chat_id,
+            user=user,
+            share_id=share_id,
+            message_thread_id=None,
+            is_channel=True,
+            dest_title=title,
+        )
+    except Exception as e:
+        log_error(logger, f"Error in pick_channel_for_share: {e}", exception=e)
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
+
+
+async def _cancel_session_on_first_send_failure(session: Dict[str, Any], error: Optional[Exception]) -> None:
+    """يلغي الجلسة (`cancelled`) ويشرح للأدمن ليش - نداء لما يفشل إرسال **أول** سؤال.
+
+    - الإلغاء شرطي بقاعدة البيانات (`claim_session_cancel`): لو جلسة خلصت/انلغت
+      أصلاً بنفس اللحظة (مثلاً زر "إنهاء الآن") بننسحب بصمت بلا رسالة زايدة.
+    - **وين منبعت التنبيه؟** بالقناة: خاص الأدمن (`started_by`) بس - القناة نفسها
+      غالباً هي سبب الفشل (البوت ما بيقدر ينشر فيها) وما بدنا نضجّ مشتركيها
+      برسالة خطأ إدارية. بالغروب: بالغروب نفسه (مع التوبيك) لأنه الأدمن ممكن ما
+      يكون فتح البوت بالخاص أبداً، وإذا فشل هاد كمان بنجرّب الخاص.
+    - القناة بتنعرف من `bot_chat_memberships.chat_type` (جلسات القنوات بتنبدأ
+      حصراً من لائحة القنوات المبنية على هالجدول).
+    """
+    session_id = str(session["id"])
+    if not await claim_session_cancel(session_id):
+        return
+    await clear_session_questions_cache(session_id)
+    log_error(logger, f"Session {session_id} cancelled: first question could not be sent ({error})")
+
+    chat_id = int(session["chat_id"])
+    started_by = int(session["started_by"])
+    membership = await get_chat_membership(chat_id)
+    is_channel = bool(membership) and membership.get("chat_type") == "channel"
+
+    reason = html.escape(str(error))[:300] if error else ""
+    reason_line = f"\n\n<i>رد تيليجرام:</i> <code>{reason}</code>" if reason else ""
+
+    if is_channel:
+        title = html.escape((membership or {}).get("chat_title") or "القناة")
+        text = (
+            f"❌ تعذّر إرسال أول سؤال بالقناة <b>{title}</b>، فانلغت الجلسة.\n"
+            "تأكد إنه البوت أدمن بالقناة مع صلاحية «نشر الرسائل»، وبعدها ابدأ الجلسة من جديد."
+            f"{reason_line}"
+        )
+        await _safe_call(
+            lambda: bot.send_message(chat_id=started_by, text=text, parse_mode="HTML"),
+            what=f"notify admin of cancelled channel session {session_id}",
+        )
+        return
+
+    text = (
+        "❌ تعذّر إرسال أول سؤال، فانلغت الجلسة.\n"
+        "تأكد إنه البوت عنده صلاحية إرسال الاستفتاءات (Send Polls) بالغروب، وبعدها ابدأ الجلسة من جديد."
+        f"{reason_line}"
+    )
+    sent = await _safe_call(
+        lambda: bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="HTML",
+            message_thread_id=session.get("message_thread_id"),
+        ),
+        what=f"notify group of cancelled session {session_id}",
+    )
+    if sent is None:
+        await _safe_call(
+            lambda: bot.send_message(chat_id=started_by, text=text, parse_mode="HTML"),
+            what=f"notify admin (DM fallback) of cancelled session {session_id}",
+        )
+
+
 # ==================== الإرسال الموحّد ====================
 async def send_next_group_question(session: Dict[str, Any]) -> bool:
     """يرسل السؤال التالي بالجلسة. نقطة الدخول الوحيدة للإرسال.
@@ -465,6 +768,7 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
     if not await claim_question_slot(session_id, idx, next_due):
         return False
 
+    send_errors: list = []
     poll_msg = await _safe_call(
         lambda: send_quiz_poll(
             chat_id=int(session["chat_id"]),
@@ -476,6 +780,7 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
             quiz_id=str(session["quiz_id"]),
             open_period=session.get("question_timer_seconds"),
             is_anonymous=bool(session.get("poll_is_anonymous", False)),
+            message_thread_id=session.get("message_thread_id"),
             poll_meta={
                 "session_id": session_id,
                 "is_group": True,
@@ -489,9 +794,17 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
             },
         ),
         what=f"send group question {idx} (session {session_id})",
+        on_error=send_errors.append,
     )
     if poll_msg is None:
         log_error(logger, f"Question {idx} burned for session {session_id} (send failed after claim)")
+        if idx == 0:
+            # بند 5: فشل أول سؤال (غالباً البوت ناقص صلاحية إرسال استفتاءات) =
+            # مشكلة ثابتة مش عابرة - بدل ما النبضة تحرق باقي الأسئلة سؤال كل دورة
+            # وتوهم الأدمن إنه الجلسة شغّالة، منلغيها فوراً ومنشرح الأدمن ليش.
+            # (فشل سؤال بمنتصف الجلسة بعد ما انبعت غيره = غالباً عابر - بيضل
+            # السلوك القديم: يتحرق سؤال وحدة وبتكمل الجلسة.)
+            await _cancel_session_on_first_send_failure(session, send_errors[-1] if send_errors else None)
         return False
     await _remember_open_poll(session_id, int(session["chat_id"]), poll_msg.message_id)
     return True
@@ -500,20 +813,21 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
 async def finish_group_session(session: Dict[str, Any], manual: bool = False) -> None:
     """ينهي الجلسة وينشر الترتيب النهائي.
 
-    الترتيب هون مقصود (نفس ترتيب الخطة): 1) `status='finished'` أولاً - هاد اللي
-    بيمنع `handle_group_poll_closed` من إرسال سؤال إضافي لو التحديث وصل بنفس
-    اللحظة (الفحص هناك على `status == 'active'`). 2) `bot.stop_poll` على أي
+    الترتيب هون مقصود (نفس ترتيب الخطة): 1) `claim_session_finish` أولاً - هاد
+    اللي بيمنع `handle_group_poll_closed` من إرسال سؤال إضافي لو التحديث وصل
+    بنفس اللحظة (الفحص هناك على `status == 'active'`)، **وبيضمن كمان إنه نداء
+    واحد بس من بين عدة نداءات متزامنة محتملة (نهاية طبيعية + زر يدوي من أكتر
+    من أدمن + مسار تسريع @router.poll()) هو يلي بينشر رسالة النهاية** - تحديث
+    مشروط بقاعدة البيانات (`status IN ('waiting','active')` لحظة التنفيذ)، مش
+    فحص نسخة محلية (stale) من `session` زي قبل. 2) `bot.stop_poll` على أي
     poll لسا مفتوح - يقفل الاستفتاء نفسه بواجهة تيليجرام حتى لو حدا لسا
     بيحاول يجاوب. 3) نشر النتائج.
     """
     session_id = str(session["id"])
-    if session.get("status") == "finished":
+    if not await claim_session_finish(session_id):
+        # جلسة تانية (سباق) سبقتنا بالإنهاء، أو الجلسة خلصت أصلاً - انسحب بصمت
+        # بلا ما ننشر رسالة نهاية مكرّرة.
         return
-    await update_session(session_id, {
-        "status": "finished",
-        "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "next_question_due_at": None,
-    })
     await clear_session_questions_cache(session_id)
 
     open_poll = await _pop_open_poll(session_id)
@@ -553,7 +867,8 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             lines = ["🏁 <b>انتهت الجلسة! الترتيب النهائي:</b>", ""]
             for i, r in enumerate(rows):
                 if show_names:
-                    who = r.get("first_name") or (f"@{r['username']}" if r.get("username") else str(r["user_id"]))
+                    raw_who = r.get("first_name") or (f"@{r['username']}" if r.get("username") else str(r["user_id"]))
+                    who = html.escape(raw_who)
                 else:
                     who = f"لاعب {i + 1}"
                 rank = medals[i] if i < len(medals) else f"{i + 1}."
@@ -564,7 +879,12 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
         text += "\n\n<i>(أُنهيت يدوياً من قبل الأدمن)</i>"
 
     await _safe_call(
-        lambda: bot.send_message(chat_id=int(session["chat_id"]), text=text, parse_mode="HTML"),
+        lambda: bot.send_message(
+            chat_id=int(session["chat_id"]),
+            text=text,
+            parse_mode="HTML",
+            message_thread_id=session.get("message_thread_id"),
+        ),
         what=f"send leaderboard (session {session_id})",
     )
 

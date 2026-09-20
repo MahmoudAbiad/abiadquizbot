@@ -154,7 +154,7 @@ async def lifespan(app: FastAPI):
             await bot.set_webhook(
                 url=full_webhook_url,
                 drop_pending_updates=True,
-                allowed_updates=["message", "callback_query", "poll_answer", "poll"],
+                allowed_updates=["message", "callback_query", "poll_answer", "poll", "my_chat_member"],
                 secret_token=TELEGRAM_WEBHOOK_SECRET,
             )
             print(f"✅ تم تفعيل Webhook بنجاح على: {full_webhook_url}")

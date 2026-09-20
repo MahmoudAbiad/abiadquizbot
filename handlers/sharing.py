@@ -57,12 +57,21 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
         # مشاركة جديد. الرابط `?startgroup=` بيفتح لائحة غروبات المستخدم، وبعد
         # الاختيار تيليجرام بيرسل `/start gq_<share_id>` كرسالة داخل الغروب نفسه -
         # فمنعرف مباشرة chat_id والمُرسِل، ومنفحص صلاحية الأدمن عليه.
-        group_kb = types.InlineKeyboardMarkup(inline_keyboard=[[
-            types.InlineKeyboardButton(
+        #
+        # 🆕 زر "📢 شارك مع قناة" - `callback_data` مش `url`: تيليجرام ما عندها
+        # Deep Link موثّق للقنوات (بعكس `?startgroup=`)، فالبدء لازم يصير من هالخاص
+        # (منشورات القناة بلا `from_user` أصلاً). المعالجة بـ
+        # handlers/group_quiz.py::list_channels_for_share / pick_channel_for_share.
+        group_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(
                 text="👥 شغّل الكويز ضمن غروب",
                 url=f"https://t.me/{bot_info.username}?startgroup=gq_{share_id}",
-            )
-        ]])
+            )],
+            [types.InlineKeyboardButton(
+                text="📢 شارك مع قناة",
+                callback_data=f"gqchl:{share_id}",
+            )],
+        ])
 
         asyncio.create_task(log_usage_event(call.from_user.id, "share_link_created", {"share_id": share_id}))
         await call.message.answer(old_style_text, disable_web_page_preview=True, reply_markup=group_kb)
