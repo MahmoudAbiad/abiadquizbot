@@ -74,12 +74,21 @@ router = Router()
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
 router.callback_query.filter(F.message.chat.type.in_({"group", "supergroup"}))
 
-# الحد الأدنى الصارم للفاصل بين سؤالين، مفروض بالكود مش بالواجهة فقط.
+# ⚠️ تصحيح (كان في تناقض هون): الحد الفعلي بين سؤالين مو بس هالرقم - النبضة
+# الدورية (`group_quiz_heartbeat_loop`) نفسها بتفحص كل `HEARTBEAT_INTERVAL_SECONDS`
+# ثانية بس، فحتى لو `question_interval_seconds` انضبط لقيمة أصغر (تزوير
+# callback_data مثلاً)، ما في طريقة فعلية يوصل سؤالين أسرع من تكة نبضة وحدة.
+# فالحد الأدنى الحقيقي = أكبر قيمة بين الاثنين، مش رقم هالثابت لحاله.
+#
+# سبب وجود رقم منفصل أصلاً (بدل الاكتفاء بـ HEARTBEAT_INTERVAL_SECONDS مباشرة):
 # سقف تيليجرام الفعلي 20 رسالة/دقيقة لنفس الغروب (≈3 ثواني/رسالة)، وبعض الأنماط
 # بترسل **رسالتين** لكل سؤال (نمط الرياضيات: صورة + poll، ومسار الـ fallback
-# النصي للأسئلة الطويلة: نص + poll) - فالحد الأدنى محسوب على أساس رسالتين
-# مع هامش أمان.
-MIN_QUESTION_INTERVAL_SECONDS = 8
+# النصي للأسئلة الطويلة: نص + poll) - فهاد الرقم محسوب على أساس رسالتين مع هامش
+# أمان مستقل عن توقيت النبضة. أي تغيير مستقبلي لـ HEARTBEAT_INTERVAL_SECONDS
+# (تسريع النبضة لغرض تاني مثلاً) ما بيكسر هالضمان، لأنه الـ max() تحت بياخد
+# أعلى قيمة تلقائياً.
+HEARTBEAT_INTERVAL_SECONDS = 12  # 👈 نفس الرقم يُستخدم كـ default لـ group_quiz_heartbeat_loop تحت - مصدر حقيقة واحد
+MIN_QUESTION_INTERVAL_SECONDS = max(8, HEARTBEAT_INTERVAL_SECONDS)
 
 # آخر poll مفتوح لكل جلسة (chat_id + message_id) - `bot.stop_poll` بحاجة
 # message_id مش poll_id، وهاد مش مخزَّن بجدول group_quiz_sessions أصلاً (ولا
@@ -471,6 +480,12 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
                 "session_id": session_id,
                 "is_group": True,
                 "sent_at_ms": int(time.time() * 1000),
+                # قرار: صفر تتبّع/تسجيل إجابات للجلسات بدون مؤقّت (الاستفتاءات
+                # مصممة تضل مفتوحة للأبد، وتيليجرام نفسها كافية لعرض الجواب
+                # الصح لكل طالب لحاله - ما في داعي نخزّن هوية حدا). مخزّنة هون
+                # (مش عبر استعلام قاعدة بيانات إضافي بمعالج الإجابة) تفادياً
+                # لقراءة DB على كل جواب واصل.
+                "has_timer": bool(session.get("question_timer_seconds")),
             },
         ),
         what=f"send group question {idx} (session {session_id})",
@@ -515,6 +530,19 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
         # بيبعت poll_answer للاستفتاءات المجهولة) - رسالة صريحة بدل ما توحي
         # "لا يوجد أي إجابة مسجّلة" إنه محدا جاوب، بينما هو قرار مقصود بالإعداد.
         text = "🏁 خلصت الجلسة (نمط مجهول بالكامل - بلا نقاط ولا ترتيب فردي حسب الإعداد المُختار)."
+        needs_manual_suffix = True
+    elif not session.get("question_timer_seconds"):
+        # جلسة بدون مؤقّت: الاستفتاءات مصممة تضل مفتوحة للأبد، وما في أي
+        # تتبّع/تسجيل إجابات لهالنوع أصلاً (قرار: صفر tracking - الاعتماد
+        # الكامل على تيليجرام نفسها). فمفيش ترتيب نهشره، بس لازم إشعار واضح
+        # إنه ما في أسئلة جديدة جايّة (بدل سكوت تام يوحي بخلل). الصياغة نفسها
+        # بتفرّق بين "خلصت كل الأسئلة طبيعياً" و"الأدمن قطعها يدوياً قبل
+        # ما تخلص" - القطع اليدوي مش بالضرورة يعني كل الأسئلة انبعثت.
+        if manual:
+            text = "⏹️ تم إيقاف إرسال الأسئلة يدوياً من قبل الأدمن. الاستفتاءات المرسلة ضلّت مفتوحة، أي حدا لسا يقدر يجاوب عليها."
+        else:
+            text = "🏁 انتهت الأسئلة. الاستفتاءات المرسلة ضلّت مفتوحة، أي حدا لسا يقدر يجاوب عليها."
+        needs_manual_suffix = False
     else:
         rows = await get_leaderboard(session_id)
         show_names = session.get("show_names", True)  # True لو العمود لسا مش مضاف (fail-open نفس نمط باقي الإعدادات بالمشروع)
@@ -531,7 +559,8 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
                 rank = medals[i] if i < len(medals) else f"{i + 1}."
                 lines.append(f"{rank} {who} — {r.get('score', 0)} نقطة")
             text = "\n".join(lines)
-    if manual:
+        needs_manual_suffix = True
+    if manual and needs_manual_suffix:
         text += "\n\n<i>(أُنهيت يدوياً من قبل الأدمن)</i>"
 
     await _safe_call(
@@ -567,7 +596,14 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
     if not info.get("session_id"):
         raise SkipHandler()
 
-    # من هون وطالع: هاي إجابة على استفتاء جلسة جماعية - مسؤوليتنا نحنا.
+    if not info.get("has_timer"):
+        # جلسة بدون مؤقّت - بالتصميم ما منسجّل ولا منتتبّع (قرار: الاعتماد
+        # الكامل على واجهة تيليجرام نفسها لعرض الجواب الصح لكل طالب لحاله،
+        # بدون تخزين هوية أي حدا). هاد بيطبّق كمان على أي جواب متأخر يوصل
+        # حتى بعد أيام - نفس السلوك بالضبط، بلا حاجة لأي منطق تنظيف إضافي.
+        return
+
+    # من هون وطالع: هاي إجابة على استفتاء جلسة جماعية عندها مؤقّت - مسؤوليتنا نحنا.
     try:
         if not poll_answer.option_ids:
             return  # سحب الصوت (retract) - منتجاهله، الإجابة الأولى هي المعتمدة
@@ -671,10 +707,14 @@ async def group_quiz_heartbeat_tick() -> None:
             log_error(logger, f"Heartbeat failed for session {session.get('id')}: {e}", exception=e)
 
 
-async def group_quiz_heartbeat_loop(interval_seconds: int = 12) -> None:
+async def group_quiz_heartbeat_loop(interval_seconds: int = HEARTBEAT_INTERVAL_SECONDS) -> None:
     """حلقة خلفية دائمة - تُطلق مرة واحدة عند إقلاع السيرفر (نفس نمط
     `scheduled_analytics_batch_loop`/`scheduled_cleanup_loop` بـ webhook_server.py).
-    12 ثانية: جوّا مدى الـ 10-15 ثانية المتفق عليه بالخطة.
+
+    ⚠️ `HEARTBEAT_INTERVAL_SECONDS` (معرَّف بأعلى الملف) هو نفسه المستخدم بحساب
+    `MIN_QUESTION_INTERVAL_SECONDS` - مصدر حقيقة واحد بدل رقمين منفصلين ممكن
+    ينحرفوا عن بعض. لو غيّرت هالقيمة هون، غيّرها هناك كمان (أو مرّر
+    `interval_seconds` صراحة هون فقط لغرض اختبار - بدون ما تلمس الثابت الأساسي).
     """
     while True:
         try:
