@@ -57,7 +57,7 @@ from keyboards import (
     get_group_timer_keyboard,
 )
 from logger import get_logger, log_error, log_info
-from services.group_permissions import is_group_admin
+from services.group_permissions import invalidate_group_admin_cache, is_group_admin
 from services.group_quiz_store import (
     claim_question_slot,
     claim_session_cancel,
@@ -567,6 +567,71 @@ async def track_bot_chat_membership(update: types.ChatMemberUpdated):
         log_info(logger, f"Bot membership in {chat.type} {chat.id}: {old_status} -> {new_status} (can_post={can_post})")
     except Exception as e:
         log_error(logger, f"Error in track_bot_chat_membership: {e}", exception=e)
+        return
+
+    # بعد التسجيل (وبمعزل عن أي فشل فيه): لو المستخدم اللي غيّر حالة البوت كان عم يجهّز
+    # قناة لكويز - نبعتله زر البدء تلقائياً.
+    try:
+        await _notify_channel_ready(update, new_status=new_status, old_status=old_status, can_post=can_post)
+    except Exception as e:
+        log_error(logger, f"Error in _notify_channel_ready: {e}", exception=e)
+
+
+async def _notify_channel_ready(update: types.ChatMemberUpdated, *, new_status: str, old_status: str, can_post: Optional[bool]) -> None:
+    """يبعت للمستخدم (بالخاص) زر \"🚀 ابدأ\" لما البوت ينضاف أدمن بقناة **وعنده صلاحية نشر**،
+    بشرط إنه المستخدم نفسه (`update.from_user`) كان فاتح شاشة القنوات (نيّة معلّقة بـ Redis).
+
+    - إذا انضاف أدمن بس **بدون** صلاحية نشر (المستخدم شال التفعيل بشاشة تيليجرام) -> رسالة
+      قصيرة بتشرح كيف يفعّلها، والنيّة بتضل معلّقة: لما يفعّلها بيوصل `my_chat_member` جديد
+      وبتنبعت رسالة البدء.
+    - بس على **الانتقال** (مش أدمن -> أدمن، أو ما كان عنده نشر -> صار عنده) عشان ما تتكرر
+      الرسالة مع كل تحديث لاحق.
+    """
+    chat = update.chat
+    user = update.from_user
+    if chat.type != "channel" or new_status != "administrator" or not user:
+        return
+
+    old_can_post = getattr(update.old_chat_member, "can_post_messages", None) if old_status == "administrator" else None
+    gained_post = can_post is True and old_can_post is not True
+    just_added = old_status != "administrator"
+    if not (gained_post or just_added):
+        return
+
+    share_id = await _pop_pending_channel_intent(user.id, consume=False)
+    if not share_id:
+        return  # المستخدم ما كان عم يجهّز قناة لكويز - ما منزعجه برسالة
+
+    title = html.escape(chat.title or "القناة")
+    if can_post is True:
+        await _pop_pending_channel_intent(user.id, consume=True)
+        # الكاش القديم (لو انسأل عن هالقناة قبل) ممكن يكون "مش أدمن" - منمسحه
+        await invalidate_group_admin_cache(chat.id, user.id)
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+            types.InlineKeyboardButton(text="🚀 ابدأ على هالقناة", callback_data=f"gqchp:{share_id}:{chat.id}")
+        ]])
+        await _safe_call(
+            lambda: bot.send_message(
+                chat_id=user.id,
+                text=f"✅ تمام! البوت صار أدمن بقناة <b>{title}</b> وعنده صلاحية النشر.\nبدك تشغّل الكويز عليها هلق؟",
+                parse_mode="HTML",
+                reply_markup=kb,
+            ),
+            what=f"notify user {user.id} channel {chat.id} ready",
+        )
+    elif just_added:
+        await _safe_call(
+            lambda: bot.send_message(
+                chat_id=user.id,
+                text=(
+                    f"⚠️ البوت انضاف لقناة <b>{title}</b> بس صلاحية «نشر الرسائل» مطفية.\n"
+                    "فعّلها: إعدادات القناة ← المشرفون ← البوت ← «نشر الرسائل» ← حفظ.\n"
+                    "أول ما تحفظ برسلك زر البدء تلقائياً."
+                ),
+                parse_mode="HTML",
+            ),
+            what=f"notify user {user.id} channel {chat.id} missing post permission",
+        )
 
 
 async def _filter_channels_user_admins(channels: list, user_id: int, concurrency: int = 10) -> list:
@@ -583,35 +648,139 @@ async def _filter_channels_user_admins(channels: list, user_id: int, concurrency
     return [ch for ch, ok in zip(channels, flags) if ok]
 
 
+# ==== شاشات الخطوات (غروب + قناة) ====
+# نية "المستخدم عم يجهّز قناة لهالكويز" - بتنحفظ لحظة فتح شاشة القنوات، وبتُستخدم لما
+# يوصل `my_chat_member` (البوت انضاف أدمن بقناة) عشان نبعت للمستخدم زر "🚀 ابدأ"
+# تلقائياً. **ضرورية** لأنه رابط `?startchannel` ما بيحمل payload (موثّق: "absent in
+# channel links") - فما في طريقة تانية نربط القناة الجديدة بالكويز اللي كان عم يشاركه.
+_PENDING_CHANNEL_PREFIX = "gq:pending_channel:"
+_PENDING_CHANNEL_TTL = 1800  # 30 دقيقة - وقت كافي لإضافة البوت من تيليجرام والرجوع
+
+_bot_username_cache: Optional[str] = None
+
+
+async def _get_bot_username() -> str:
+    global _bot_username_cache
+    if not _bot_username_cache:
+        _bot_username_cache = (await bot.get_me()).username
+    return _bot_username_cache
+
+
+async def _set_pending_channel_intent(user_id: int, share_id: str) -> None:
+    try:
+        await redis_client.set(f"{_PENDING_CHANNEL_PREFIX}{user_id}", share_id, ex=_PENDING_CHANNEL_TTL)
+    except Exception as e:
+        log_error(logger, f"Redis error saving pending channel intent for {user_id}: {e}")
+
+
+async def _pop_pending_channel_intent(user_id: int, *, consume: bool = True) -> Optional[str]:
+    key = f"{_PENDING_CHANNEL_PREFIX}{user_id}"
+    try:
+        raw = await redis_client.get(key)
+        if not raw:
+            return None
+        if consume:
+            await redis_client.delete(key)
+        return raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+    except Exception as e:
+        log_error(logger, f"Redis error reading pending channel intent for {user_id}: {e}")
+        return None
+
+
+async def _build_channel_screen(share_id: str, user_id: int):
+    """نص + كيبورد شاشة القنوات: قنوات جاهزة (البوت أدمن + نشر + المستخدم أدمن لايف)
+    + زر إضافة البوت لقناة جديدة + خطوات صريحة."""
+    candidates = await list_postable_channels()
+    mine = await _filter_channels_user_admins(candidates, user_id)
+    username = await _get_bot_username()
+    add_url = f"https://t.me/{username}?startchannel&admin=post_messages"
+    ready = "✅ <b>قنواتك الجاهزة</b> (البوت أدمن فيها): اختر وحدة من الأزرار تحت.\n\n" if mine else ""
+    text = (
+        "📢 <b>تشغيل الكويز بقناة</b>\n\n"
+        f"{ready}"
+        "➕ <b>قناة جديدة؟</b>\n"
+        "1️⃣ اضغط «➕ أضف البوت لقناة» تحت.\n"
+        "2️⃣ اختر القناة من قائمة تيليجرام (لازم تكون مالك القناة أو مشرف بصلاحية إضافة مشرفين).\n"
+        "3️⃣ خلّي صلاحية «نشر الرسائل» مفعّلة وأكّد.\n"
+        "4️⃣ ارجع لهون - رح يوصلك زر «🚀 ابدأ» تلقائياً (أو اضغط «🔄 تحديث»)."
+    )
+    return text, get_group_channel_picker_keyboard(share_id, mine, add_url=add_url)
+
+
+@router.callback_query(F.data.startswith("gqg:"))
+async def show_group_share_steps(call: types.CallbackQuery):
+    """زر \"👥 شغّل الكويز ضمن غروب\": خطوات صريحة + زر اختيار الغروب (`?startgroup=`)."""
+    try:
+        if call.message.chat.type != "private":
+            await call.answer("افتح البوت بالخاص.", show_alert=True)
+            return
+        share_id = call.data.split(":", 1)[1]
+        username = await _get_bot_username()
+        text = (
+            "👥 <b>تشغيل الكويز بغروب</b>\n\n"
+            "1️⃣ اضغط «➕ اختر الغروب» تحت وحدّد الغروب من قائمة تيليجرام.\n"
+            "2️⃣ أكّد إضافة البوت (إذا مش موجود أصلاً بالغروب).\n"
+            "3️⃣ بعد الإضافة البوت بيبدأ شاشة الإعداد جوا الغروب - <b>لازم تكون أدمن</b> بالغروب.\n"
+            "4️⃣ اختر نمط الجلسة والمؤقّت واضغط ابدأ.\n\n"
+            "📌 البوت موجود أصلاً بالغروب، أو الغروب فيه توبيكات وبدك توبيك معيّن؟ "
+            "اكتب داخل الغروب (أو داخل التوبيك المطلوب):\n"
+            f"<code>/groupquiz {html.escape(share_id)}</code>\n\n"
+            "⚠️ إذا مش أدمن بالغروب، ابعت الأمر السابق لأدمن الغروب."
+        )
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+            types.InlineKeyboardButton(text="➕ اختر الغروب", url=f"https://t.me/{username}?startgroup=gq_{share_id}")
+        ]])
+        await call.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        log_error(logger, f"Error in show_group_share_steps: {e}", exception=e)
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
+
+
 @router.callback_query(F.data.startswith("gqchl:"))
 async def list_channels_for_share(call: types.CallbackQuery):
-    """زر \"📢 شارك مع قناة\" (من handlers/sharing.py): يعرض القنوات اللي البوت أدمن
-    فيها بصلاحية نشر **والمستخدم نفسه أدمن فيها** (فحص لايف)."""
+    """زر \"📢 شارك مع قناة\" (من handlers/sharing.py): شاشة القنوات الجاهزة + خطوات إضافة
+    البوت لقناة جديدة. بيسجّل نيّة المستخدم (`_set_pending_channel_intent`) حتى يوصله
+    زر البدء تلقائياً لما البوت ينضاف أدمن (`track_bot_chat_membership`)."""
     try:
         if call.message.chat.type != "private":
             await call.answer("افتح البوت بالخاص لاختيار القناة.", show_alert=True)
             return
         share_id = call.data.split(":", 1)[1]
-
-        candidates = await list_postable_channels()
-        mine = await _filter_channels_user_admins(candidates, call.from_user.id)
-
-        if not mine:
-            await call.message.answer(
-                "📢 ما لقيت قناة مؤهّلة للتشغيل. لازم يتحقق الشرطين سوا:\n"
-                "1) البوت أدمن بالقناة مع صلاحية «نشر الرسائل».\n"
-                "2) أنت كمان أدمن بنفس القناة.\n\n"
-                "ℹ️ إذا البوت أصلاً أدمن بالقناة من قبل، القناة ما بتظهر إلا بعد ما تتغيّر حالته فيها: "
-                "غيّر أي صلاحية للبوت بالقناة (مثلاً بدّل «تثبيت الرسائل» وارجع) أو أعد إضافته كأدمن، وجرّب هالزر مرة تانية."
-            )
-            return
-
-        await call.message.answer(
-            "📢 اختر القناة اللي بدك تشغّل عليها الكويز:",
-            reply_markup=get_group_channel_picker_keyboard(share_id, mine),
-        )
+        await _set_pending_channel_intent(call.from_user.id, share_id)
+        text, kb = await _build_channel_screen(share_id, call.from_user.id)
+        await call.message.answer(text, parse_mode="HTML", reply_markup=kb)
     except Exception as e:
         log_error(logger, f"Error in list_channels_for_share: {e}", exception=e)
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("gqchr:"))
+async def refresh_channels_screen(call: types.CallbackQuery):
+    """زر \"🔄 تحديث\": نفس الشاشة، بتنعدّل بمكانها (مش رسالة جديدة كل ضغطة)."""
+    try:
+        if call.message.chat.type != "private":
+            await call.answer("افتح البوت بالخاص.", show_alert=True)
+            return
+        share_id = call.data.split(":", 1)[1]
+        await _set_pending_channel_intent(call.from_user.id, share_id)
+        text, kb = await _build_channel_screen(share_id, call.from_user.id)
+        try:
+            await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            # "message is not modified" = ما في قناة جديدة - مش خطأ حقيقي
+            await call.answer("ما في جديد بعد.", show_alert=False)
+            log_info(logger, f"refresh_channels_screen: unchanged ({e})")
+            return
+    except Exception as e:
+        log_error(logger, f"Error in refresh_channels_screen: {e}", exception=e)
     finally:
         try:
             await call.answer()

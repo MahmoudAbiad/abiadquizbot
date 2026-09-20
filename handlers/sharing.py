@@ -53,24 +53,16 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
             "يمكنك مشاركته مع زملائك بسهولة! 🚀"
         )
         
-        # 🆕 زر "شغّل الكويز ضمن غروب" - نفس share_id أعلاه بالضبط، بلا أي رابط/كود
-        # مشاركة جديد. الرابط `?startgroup=` بيفتح لائحة غروبات المستخدم، وبعد
-        # الاختيار تيليجرام بيرسل `/start gq_<share_id>` كرسالة داخل الغروب نفسه -
-        # فمنعرف مباشرة chat_id والمُرسِل، ومنفحص صلاحية الأدمن عليه.
-        #
-        # 🆕 زر "📢 شارك مع قناة" - `callback_data` مش `url`: تيليجرام ما عندها
-        # Deep Link موثّق للقنوات (بعكس `?startgroup=`)، فالبدء لازم يصير من هالخاص
-        # (منشورات القناة بلا `from_user` أصلاً). المعالجة بـ
-        # handlers/group_quiz.py::list_channels_for_share / pick_channel_for_share.
+        # 🆕 أزرار التشغيل الجماعي - الاثنين `callback_data` (مش `url`): كل واحد بيفتح شاشة
+        # شرح خطوات صريحة جوا البوت قبل ما يودّي المستخدم لتيليجرام:
+        #  - "👥 غروب" (`gqg:`) -> شرح + رابط `?startgroup=gq_<share_id>` (نفس الـ share_id
+        #    بالضبط بلا أي كود جديد؛ تيليجرام بترسل `/start gq_<id>` جوا الغروب بعد الإضافة).
+        #  - "📢 قناة" (`gqchl:`) -> قنوات جاهزة + رابط `?startchannel&admin=post_messages`
+        #    لإضافة البوت كأدمن بخطوة وحدة (تيليجرام ما بتقدّم payload للقنوات، فالبدء من هالخاص).
+        # المعالجة كلها بـ handlers/group_quiz.py.
         group_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(
-                text="👥 شغّل الكويز ضمن غروب",
-                url=f"https://t.me/{bot_info.username}?startgroup=gq_{share_id}",
-            )],
-            [types.InlineKeyboardButton(
-                text="📢 شارك مع قناة",
-                callback_data=f"gqchl:{share_id}",
-            )],
+            [types.InlineKeyboardButton(text="👥 شغّل الكويز ضمن غروب", callback_data=f"gqg:{share_id}")],
+            [types.InlineKeyboardButton(text="📢 شارك مع قناة", callback_data=f"gqchl:{share_id}")],
         ])
 
         asyncio.create_task(log_usage_event(call.from_user.id, "share_link_created", {"share_id": share_id}))

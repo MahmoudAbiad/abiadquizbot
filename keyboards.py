@@ -955,9 +955,14 @@ def get_group_question_control_keyboard(session_id: str) -> types.InlineKeyboard
     ]])
 
 
-def get_group_channel_picker_keyboard(share_id: str, channels: list) -> types.InlineKeyboardMarkup:
-    """شاشة \"📢 شارك مع قناة\": زر لكل قناة (البوت أدمن فيها + عنده صلاحية نشر +
-    المستخدم نفسه أدمن فيها - الفلترة الأخيرة بيعملها المستدعي لايف).
+def get_group_channel_picker_keyboard(share_id: str, channels: list, add_url: Optional[str] = None) -> types.InlineKeyboardMarkup:
+    """شاشة \"📢 شارك مع قناة\": زر لكل قناة جاهزة (البوت أدمن فيها + عنده صلاحية نشر +
+    المستخدم نفسه أدمن فيها - الفلترة الأخيرة بيعملها المستدعي لايف)، وتحتها:
+
+    - \"➕ أضف البوت لقناة\" (`add_url`): رابط `?startchannel&admin=post_messages`
+      الرسمي - بيفتح لائحة تيليجرام الأصلية لاختيار القناة وبيضيف البوت كأدمن
+      بصلاحية النشر بخطوة وحدة (موثّق بـ core.telegram.org/api/links). `None` = بلا زر.
+    - \"🔄 تحديث\" (`gqchr:`): إعادة بناء الشاشة بعد ما يرجع المستخدم من الإضافة.
 
     `callback_data` = `gqchp:<share_id>:<chat_id>` (12 + ~14 حرف، تحت حد الـ 64 بايت).
     `chat_title` جاي من تيليجرام - بيُقصّ لطول معقول لأنه نص زر (مو HTML، فما
@@ -972,4 +977,7 @@ def get_group_channel_picker_keyboard(share_id: str, channels: list) -> types.In
             text=f"📢 {title}",
             callback_data=f"gqchp:{share_id}:{int(ch['chat_id'])}",
         )])
+    if add_url:
+        rows.append([types.InlineKeyboardButton(text="➕ أضف البوت لقناة", url=add_url)])
+    rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"gqchr:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
