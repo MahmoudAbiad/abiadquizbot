@@ -25,6 +25,10 @@ from handlers.quiz_runner import _send_main_menu, _start_loaded_quiz
 
 logger = get_logger(__name__)
 router = Router()
+# 🩹 FIX (تسريب خصوصية): /favorites بيرد بلائحة كويزات المستخدم المحفوظة وأقسامه
+# بنفس المحادثة اللي انكتب فيها - بلا هالفلتر أي عضو بغروب مضاف فيه البوت كان
+# يقدر يكتبها ويكشف قائمته الخاصة لكل الغروب. راجع نفس الملاحظة بـ handlers/start.py.
+router.message.filter(F.chat.type == "private")
 
 # ==================== بناء واجهات النصوص المصنفة ====================
 

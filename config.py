@@ -120,7 +120,16 @@ async def set_bot_commands(bot_instance: Bot):
             types.BotCommand(command="channel", description="📢 قناة التحديثات والأخبار"),
             types.BotCommand(command="support", description="💬 التواصل مع الدعم الفني"),
         ]
-        await bot_instance.set_my_commands(student_commands, scope=types.BotCommandScopeDefault())
+        # 🩹 FIX: BotCommandScopeDefault() كانت بتغطي كل أنواع المحادثات (خاص + غروب +
+        # قناة)، فقائمة أوامر الطلاب (start/favorites/channel/support) كانت تظهر بزر
+        # القائمة الزرقاء جوا أي غروب مضاف فيه البوت - رغم إنها أوامر مخصّصة للخاص فقط
+        # (بترد ببيانات شخصية: رصيد النقاط، قائمة المفضلة...). الحماية الفعلية صارت
+        # بفلتر chat.type على مستوى الراوتر (راجع handlers/start.py وhandlers/favorites.py)
+        # - هاد التعديل هون تجميلي بالكامل (إخفاء القائمة من الغروب)، وما بيغني عنه.
+        await bot_instance.set_my_commands(student_commands, scope=types.BotCommandScopeAllPrivateChats())
+        # مسح أي قائمة قديمة كانت مخزَّنة بـ Default قبل هالتعديل (وإلا بتضل ظاهرة
+        # بالغروبات القديمة لحد ما تيليجرام يحدّثها لحاله - قد يتأخر).
+        await bot_instance.set_my_commands([], scope=types.BotCommandScopeDefault())
         
         # أوامر الآدمن الخاصة (تظهر للآدمن فقط)
         if ADMIN_ID != 0:

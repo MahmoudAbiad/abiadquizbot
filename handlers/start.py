@@ -15,6 +15,13 @@ from settings_helper import get_setting
 
 logger = get_logger(__name__)
 router = Router()
+# 🩹 FIX (تسريب خصوصية): هاي الأوامر (start/support/channel) بترد بمعلومات شخصية
+# (رصيد النقاط، رابط الإحالة...) بنفس المحادثة اللي انكتب فيها الأمر. بلا هالفلتر،
+# أي عضو بأي غروب مضاف فيه البوت كان يقدر يكتبها ويكشف بياناته الخاصة للجميع هناك
+# (حتى لو ما ظهرت بقائمة الأوامر الزرقاء بالغروب بعد تعديل config.py::set_bot_commands -
+# الفلتر هون هو الحماية الفعلية، مش مجرد إخفاء القائمة). نفس نمط الفلتر المستخدم
+# أصلاً بـ group_quiz_router (راجع handlers/group_quiz.py).
+router.message.filter(F.chat.type == "private")
 
 async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, args_payload: str):
     """الماكينة المسؤولة عن تحميل وتشغيل الكويز القادم من الروابط العميقة بأمان"""
