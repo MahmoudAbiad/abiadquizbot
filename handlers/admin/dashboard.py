@@ -27,6 +27,11 @@ class IsAdminFilter(BaseFilter):
 # تطبيق الفلتر المركزي على كافة الأحداث الموجهة لهذا الراوتر
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
+# 🩹 FIX (تسريب خصوصية): محمي أصلاً بهوية الأدمن (IsAdminFilter) بس بلا فلتر مكان -
+# لو الأدمن كتب الأمر بالغلط جوا أي غروب هو عضو فيه، اللوحة/العملية كانت رح تنفّذ
+# وتظهر علناً هناك. راجع نفس الملاحظة بـ handlers/start.py وhandlers/favorites.py.
+router.message.filter(F.chat.type == "private")
+router.callback_query.filter(F.message.chat.type == "private")
 
 
 # ==================== حالات الـ FSM للإدارة ====================
@@ -61,6 +66,7 @@ async def render_admin_dashboard(event, state: FSMContext = None):
         "💬 <b>التواصل:</b> رسالة مخصصة أو جماعية\n"
         "👥 <b>المستخدمون:</b> بحث، استعراض، تصدير CSV\n"
         "📊 <b>التحليلات:</b> إحصائيات عامة + تقارير مفصلة\n"
+        "👥 <b>الكويز الجماعي:</b> إحصائيات جلسات الغروبات والقنوات\n"
         "📋 <b>الملاحظات:</b> مراجعة ملاحظات الكويزات\n"
         "🤖 <b>الذكاء الاصطناعي:</b> الموديلات وسجل التوليد\n"
         "⚙️ <b>الإعدادات العامة:</b> نقاط النظام + مفاتيح التحكم"

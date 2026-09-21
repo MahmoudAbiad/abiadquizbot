@@ -17,12 +17,13 @@ MODULE: طبقة الوصول لقاعدة البيانات الخاصة بجل�
 (والنبضة الدورية + معالج `poll` المغلق ممكن ينادوا نفس الجلسة بنفس اللحظة).
 """
 
+import asyncio
 import datetime
 import json
 from typing import Any, Dict, List, Optional
 
 from config import redis_client
-from logger import get_logger, log_error
+from logger import get_logger, log_error, log_info
 from supabase_helper import supabase
 
 logger = get_logger(__name__)
@@ -399,3 +400,157 @@ async def list_postable_channels(limit: int = _CHANNEL_CANDIDATES_LIMIT) -> List
     except Exception as e:
         log_error(logger, f"Error listing postable channels: {e}")
         return []
+
+
+# ==================== إحصائيات لوحة الأدمن ====================
+# استعلامات للقراءة فقط، تُستدعى عند فتح شاشة "📊 إحصائيات الكويز الجماعي"
+# بلوحة الأدمن (handlers/admin/group_quiz_stats.py) - بلا أي كاش، لأنها شاشة
+# نادرة الفتح (أدمن بس، عند الطلب) عكس المسارات الساخنة بباقي الملف.
+SESSION_STATUSES_FOR_STATS = ("waiting", "active", "finished", "cancelled")
+
+
+async def get_group_quiz_overview_stats() -> Dict[str, Any]:
+    """أرقام إجمالية شاملة: عدد الجلسات حسب الحالة، جلسات آخر 7/30 يوم، عدد
+    سطور المشاركة والإجابات المخزّنة (لتوضيح حجم البيانات المتراكمة)، عدد
+    الغروبات/القنوات المميّزة اللي شغّلت جلسة ولو مرة، وعدد القنوات الجاهزة
+    للنشر حالياً."""
+    stats: Dict[str, Any] = {"counts_by_status": {}, "error": False}
+    try:
+        for status in SESSION_STATUSES_FOR_STATS:
+            res = await supabase.table("group_quiz_sessions").select("id", count="exact").eq("status", status).execute()
+            stats["counts_by_status"][status] = res.count or 0
+        stats["total_sessions"] = sum(stats["counts_by_status"].values())
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for days, key in ((7, "sessions_last_7_days"), (30, "sessions_last_30_days")):
+            cutoff = (now - datetime.timedelta(days=days)).isoformat()
+            res = await supabase.table("group_quiz_sessions").select("id", count="exact").gte("created_at", cutoff).execute()
+            stats[key] = res.count or 0
+
+        participants_res = await supabase.table("group_quiz_participants").select("id", count="exact").execute()
+        stats["total_participation_rows"] = participants_res.count or 0
+
+        answers_res = await supabase.table("group_quiz_answers").select("id", count="exact").execute()
+        stats["total_answers"] = answers_res.count or 0
+
+        chats_res = await supabase.table("group_quiz_sessions").select("chat_id").execute()
+        stats["distinct_chats_used"] = len({r["chat_id"] for r in (chats_res.data or [])})
+
+        stats["postable_channels_now"] = len(await list_postable_channels())
+    except Exception as e:
+        log_error(logger, f"Error building group quiz overview stats: {e}")
+        stats["error"] = True
+    return stats
+
+
+async def get_recent_group_sessions(limit: int = 10) -> List[Dict[str, Any]]:
+    """آخر `limit` جلسة (بغض النظر عن حالتها)، مع اسم المحادثة (من
+    `bot_chat_memberships`)، عنوان الكويز (من `quizzes`)، وعدد المشاركين -
+    مجمّعة يدوياً بمكالمات منفصلة (نفس نمط `get_leaderboard`/`bump_participant`،
+    ما في joins جاهزة بـ Supabase query builder)."""
+    try:
+        res = (await supabase.table("group_quiz_sessions").select("*")
+               .order("created_at", desc=True).limit(limit).execute())
+        sessions = res.data or []
+        if not sessions:
+            return sessions
+
+        chat_ids = list({int(s["chat_id"]) for s in sessions})
+        quiz_ids = list({s["quiz_id"] for s in sessions if s.get("quiz_id")})
+        session_ids = [str(s["id"]) for s in sessions]
+
+        chats_res = await supabase.table("bot_chat_memberships").select("chat_id, chat_title, chat_type").in_("chat_id", chat_ids).execute()
+        chat_map = {int(r["chat_id"]): r for r in (chats_res.data or [])}
+
+        quiz_map: Dict[str, str] = {}
+        if quiz_ids:
+            quizzes_res = await supabase.table("quizzes").select("id, source_title").in_("id", quiz_ids).execute()
+            quiz_map = {r["id"]: (r.get("source_title") or "كويز") for r in (quizzes_res.data or [])}
+
+        parts_res = await supabase.table("group_quiz_participants").select("session_id").in_("session_id", session_ids).execute()
+        participant_counts: Dict[str, int] = {}
+        for r in (parts_res.data or []):
+            sid = str(r["session_id"])
+            participant_counts[sid] = participant_counts.get(sid, 0) + 1
+
+        for s in sessions:
+            chat_info = chat_map.get(int(s["chat_id"]), {})
+            s["_chat_title"] = chat_info.get("chat_title") or f"محادثة {s['chat_id']}"
+            s["_chat_type"] = chat_info.get("chat_type") or "؟"
+            s["_quiz_title"] = quiz_map.get(s.get("quiz_id"), "كويز")
+            s["_participant_count"] = participant_counts.get(str(s["id"]), 0)
+        return sessions
+    except Exception as e:
+        log_error(logger, f"Error loading recent group quiz sessions: {e}")
+        return []
+
+
+# ==================== سياسة الاحتفاظ / التنظيف الدوري ====================
+# ⚠️ ما في أي تنظيف كان موجود أصلاً لهالجداول الأربعة (راجع
+# README_GROUP_QUIZ_DELIVERY.md - كانت مذكورة صراحة كـ"لسا ما تنفّذ"). القرار
+# هون: نحذف الجلسات القديمة *المنتهية فعلياً* (finished/cancelled) بس - أي
+# جلسة نشطة (active) أو بانتظار الإعداد (waiting) الحديثة ما بتنلمس إطلاقاً،
+# بغض النظر عن عمرها، تفادياً لأي حذف لجلسة شغّالة فعلياً بالغلط.
+GROUP_SESSION_RETENTION_DAYS = 90  # 👈 عدّل هالرقم حسب حاجتك - كم يوم تحتفظ بجلسة منتهية قبل حذفها نهائياً
+# جلسات "waiting" مهجورة (أدمن بلش الإعداد وما كمّل - مش نفس منطق التجاهل
+# المؤقت الـ 10 دقايق بـ get_open_session_for_chat، هاد حذف فعلي نهائي فمهلته
+# أطول بكتير قصداً - يوم كامل بدل 10 دقايق، حتى ما نحذف جلسة الأدمن لسا ناوي
+# يرجعلها بنفس اليوم).
+ABANDONED_WAITING_CLEANUP_HOURS = 24
+
+
+async def cleanup_old_group_quiz_data() -> Dict[str, int]:
+    """يحذف الجلسات المنتهية/الملغاة الأقدم من `GROUP_SESSION_RETENTION_DAYS`
+    (+ جلسات waiting المهجورة الأقدم من `ABANDONED_WAITING_CLEANUP_HOURS`)،
+    مع كل صفوفها التابعة بـ group_quiz_answers وgroup_quiz_participants -
+    حذف صريح بالكود بدل الاعتماد على ON DELETE CASCADE (غير مؤكّد تعريفه
+    بقاعدة البيانات الحالية). يرجّع عدد الصفوف المحذوفة بكل جدول للّوج."""
+    deleted = {"sessions": 0, "participants": 0, "answers": 0}
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        finished_cutoff = (now - datetime.timedelta(days=GROUP_SESSION_RETENTION_DAYS)).isoformat()
+        waiting_cutoff = (now - datetime.timedelta(hours=ABANDONED_WAITING_CLEANUP_HOURS)).isoformat()
+
+        finished_res = (await supabase.table("group_quiz_sessions").select("id")
+                         .in_("status", ["finished", "cancelled"]).lt("created_at", finished_cutoff).execute())
+        waiting_res = (await supabase.table("group_quiz_sessions").select("id")
+                        .eq("status", "waiting").lt("created_at", waiting_cutoff).execute())
+
+        session_ids = list({r["id"] for r in (finished_res.data or []) + (waiting_res.data or [])})
+        if not session_ids:
+            return deleted
+
+        ans_res = await supabase.table("group_quiz_answers").delete().in_("session_id", session_ids).execute()
+        deleted["answers"] = len(ans_res.data or [])
+
+        part_res = await supabase.table("group_quiz_participants").delete().in_("session_id", session_ids).execute()
+        deleted["participants"] = len(part_res.data or [])
+
+        sess_res = await supabase.table("group_quiz_sessions").delete().in_("id", session_ids).execute()
+        deleted["sessions"] = len(sess_res.data or [])
+
+        if deleted["sessions"]:
+            log_info(
+                logger,
+                f"Group quiz cleanup: deleted {deleted['sessions']} session(s), "
+                f"{deleted['participants']} participant row(s), {deleted['answers']} answer row(s) "
+                f"(finished/cancelled older than {GROUP_SESSION_RETENTION_DAYS}d, "
+                f"or waiting abandoned > {ABANDONED_WAITING_CLEANUP_HOURS}h).",
+            )
+    except Exception as e:
+        log_error(logger, f"Error cleaning up old group quiz data: {e}")
+    return deleted
+
+
+async def group_quiz_cleanup_loop(interval_seconds: int = 43200) -> None:
+    """حلقة خلفية دائمة (كل 12 ساعة افتراضياً - نفس دورة `scheduled_cleanup_loop`
+    الموجودة بـ webhook_server.py، بس هاي منفصلة ومستقلة تماماً حتى تشتغل بوضع
+    polling كمان بلا اعتماد على وجود ذاك الملف - نفس سبب استقلالية
+    `group_quiz_heartbeat_loop`). تُطلق مرة واحدة عند إقلاع السيرفر (main.py
+    ووebhook_server.py الاثنين)."""
+    while True:
+        try:
+            await cleanup_old_group_quiz_data()
+        except Exception as e:
+            log_error(logger, f"Error inside group quiz cleanup loop: {e}", exception=e)
+        await asyncio.sleep(interval_seconds)

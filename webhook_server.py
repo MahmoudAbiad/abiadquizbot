@@ -175,7 +175,15 @@ async def lifespan(app: FastAPI):
         from handlers.group_quiz import group_quiz_heartbeat_loop
         asyncio.create_task(group_quiz_heartbeat_loop())
         print("👥 تم جدولة نبضة الكويز الجماعي الدورية كل 12 ثانية.")
-            
+
+        # 🧹 تنظيف دوري منفصل لبيانات الكويز الجماعي القديمة (جلسات منتهية/ملغاة
+        # أقدم من GROUP_SESSION_RETENTION_DAYS، وجلسات waiting مهجورة) - مستقلة
+        # عمداً عن scheduled_cleanup_loop فوق (راجع services/group_quiz_store.py
+        # لتعديل مدة الاحتفاظ الافتراضية 90 يوم).
+        from services.group_quiz_store import group_quiz_cleanup_loop
+        asyncio.create_task(group_quiz_cleanup_loop())
+        print("🧹 تم جدولة تنظيف بيانات الكويز الجماعي القديمة كل 12 ساعة.")
+
     except Exception as e:
         print(f"❌ فشل تفعيل الـ Webhook أو المهام الدورية أثناء تشغيل السيرفر: {e}")
         logger.error(f"Failed to set webhook or tasks on startup: {e}")

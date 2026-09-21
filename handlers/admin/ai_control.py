@@ -36,6 +36,11 @@ router = Router()
 
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
+# 🩹 FIX (تسريب خصوصية): محمي أصلاً بهوية الأدمن (IsAdminFilter) بس بلا فلتر مكان -
+# لو الأدمن كتب الأمر بالغلط جوا أي غروب هو عضو فيه، اللوحة/العملية كانت رح تنفّذ
+# وتظهر علناً هناك. راجع نفس الملاحظة بـ handlers/start.py وhandlers/favorites.py.
+router.message.filter(F.chat.type == "private")
+router.callback_query.filter(F.message.chat.type == "private")
 
 # 🆕 لوحة "سجل توليد الكويزات" (وقت التوليد + الموديل المستخدم لكل كويز)
 QUIZ_GEN_LOG_PAGE_SIZE = 6       # عدد الكويزات المعروضة بالصفحة الواحدة

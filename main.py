@@ -118,6 +118,13 @@ def main():
                 from handlers.group_quiz import group_quiz_heartbeat_loop
                 asyncio.create_task(group_quiz_heartbeat_loop())
 
+                # 🧹 تنظيف دوري لبيانات الكويز الجماعي القديمة (جلسات منتهية/ملغاة
+                # أقدم من GROUP_SESSION_RETENTION_DAYS) - نفس سبب استقلاليتها عن
+                # scheduled_cleanup_loop بـ webhook_server.py (تلك ما بتشتغل أصلاً
+                # بوضع polling حالياً).
+                from services.group_quiz_store import group_quiz_cleanup_loop
+                asyncio.create_task(group_quiz_cleanup_loop())
+
                 await dp.start_polling(bot)
                 
             except Exception as e:

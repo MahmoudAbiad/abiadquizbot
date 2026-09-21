@@ -655,10 +655,22 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="💬 التواصل مع الطلاب", callback_data="admin_communication_menu")],
         [types.InlineKeyboardButton(text="👥 إدارة المستخدمين", callback_data="admin_users_menu")],
         [types.InlineKeyboardButton(text="📊 التحليلات والإحصائيات", callback_data="admin_stats")],
+        [types.InlineKeyboardButton(text="👥 إحصائيات الكويز الجماعي", callback_data="admin_group_quiz_stats")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
         [types.InlineKeyboardButton(text="⚙️ الإعدادات العامة", callback_data="admin_settings_general")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_group_quiz_stats_keyboard() -> types.InlineKeyboardMarkup:
+    """كيبورد شاشة إحصائيات الكويز الجماعي: زر لآخر الجلسات + رجوع للنظرة العامة
+    (نفس الزر شغّال كـ"تحديث" بالشاشتين لأنه بيعيد استعلام الأرقام من جديد)."""
+    kb = [
+        [types.InlineKeyboardButton(text="🕐 آخر الجلسات", callback_data="admin_group_quiz_recent")],
+        [types.InlineKeyboardButton(text="🔄 نظرة عامة", callback_data="admin_group_quiz_stats")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 

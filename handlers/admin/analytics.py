@@ -28,6 +28,11 @@ router = Router()
 # 🔒 حماية أمنية للراوتر
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
+# 🩹 FIX (تسريب خصوصية): محمي أصلاً بهوية الأدمن (IsAdminFilter) بس بلا فلتر مكان -
+# لو الأدمن كتب الأمر بالغلط جوا أي غروب هو عضو فيه، اللوحة/العملية كانت رح تنفّذ
+# وتظهر علناً هناك. راجع نفس الملاحظة بـ handlers/start.py وhandlers/favorites.py.
+router.message.filter(F.chat.type == "private")
+router.callback_query.filter(F.message.chat.type == "private")
 
 
 QUIZZES_PAGE_SIZE = 4      # عدد الكويزات المعروضة في الصفحة الواحدة
