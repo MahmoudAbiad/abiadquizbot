@@ -1,0 +1,15 @@
+.env
+.env.*
+*.pem
+*.key
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+logs/
+downloads/
+*.db
+*.sqlite3
+.idea/
+.vscode/
+.DS_Store
