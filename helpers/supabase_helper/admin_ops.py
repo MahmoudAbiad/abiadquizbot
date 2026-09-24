@@ -13,19 +13,19 @@ async def admin_add_points(target_id: int, amount: int, balance_type: str = "pai
     try:
         if balance_type not in ("free", "paid"):
             return None
-        user = await supabase.table("users").select("free_points, paid_points").eq("user_id", target_id).execute()
-        if user.data:
-            paid_points = float(user.data[0].get('paid_points') or 0)
-            free_points = float(user.data[0].get('free_points') or 0)
-            if balance_type == "free":
-                free_points += amount
-            else:
-                paid_points += amount
-            await supabase.table("users").update({
-                "free_points": free_points,
-                "paid_points": paid_points,
-            }).eq("user_id", target_id).execute()
-            return int(free_points + paid_points)
+        # 🆕 يُنفَّذ عبر RPC ذري (UPDATE ... SET x_points = x_points + amount) بدل
+        # قراءة الرصيد ثم كتابته من بايثون - نفس نمط award_referral_bonus_atomic /
+        # refund_user_points_atomic. القراءة-ثم-الكتابة كانت عرضة لفقدان تحديثات
+        # (lost update) لو أضاف الأدمن نقاطاً بنفس اللحظة اللي فيها البوت بيخصم
+        # نقاط من نفس المستخدم (توليد كويز) أو بيسترجعها له.
+        rpc_response = await supabase.rpc("admin_add_points_atomic", {
+            "target_user_id": target_id,
+            "amount": float(amount),
+            "balance_type": balance_type,
+        }).execute()
+        if rpc_response.data:
+            row = rpc_response.data[0] if isinstance(rpc_response.data, list) else rpc_response.data
+            return int(row["total_points"])
         return None
     except Exception as e:
         logger.error(f"Error in admin_add_points: {e}")

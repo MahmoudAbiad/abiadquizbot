@@ -204,12 +204,21 @@ async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
         is_valid, error = validate_user_id(user_id)
         if not is_valid:
             return False
-        response = await supabase.table("users").select("paid_points").eq("user_id", user_id).execute()
-        if not response.data:
+
+        # 🆕 يُنفَّذ عبر RPC ذري (UPDATE ... SET paid_points = paid_points + amount) بدل
+        # قراءة الرصيد ثم كتابته من بايثون - نفس نمط award_referral_bonus_atomic.
+        # القراءة-ثم-الكتابة كانت عرضة لفقدان تحديثات (lost update) لو صار خصم
+        # واسترجاع نقاط لنفس المستخدم بشكل شبه متزامن (مثلاً استرجاع بسبب فشل توليد
+        # كويز بالتزامن مع خصم كويز آخر يولّده نفس المستخدم بجلسة ثانية).
+        rpc_response = await supabase.rpc("refund_user_points_atomic", {
+            "target_user_id": user_id,
+            "points_to_refund": float(points_to_refund),
+        }).execute()
+
+        if rpc_response.data is None:
+            # المستخدم غير موجود بالجدول أصلاً
             return False
-        current_paid = float(response.data[0].get("paid_points") or 0)
-        new_paid = current_paid + float(points_to_refund)
-        await supabase.table("users").update({"paid_points": new_paid}).eq("user_id", user_id).execute()
+
         log_info(logger, f"Refunded {points_to_refund} points to user {user_id}")
         return True
     except Exception as e:
