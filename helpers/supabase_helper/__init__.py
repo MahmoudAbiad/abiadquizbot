@@ -28,6 +28,7 @@ from .users import (
     _check_daily_renewal,
     update_user_stats,
     refund_user_points,
+    refund_user_points_split,
 )
 
 from .quiz_cache import (
@@ -162,7 +163,7 @@ __all__ = [
     # users
     "_balance_payload", "check_or_add_user", "_add_new_user",
     "reward_referrer_if_eligible", "_check_daily_renewal",
-    "update_user_stats", "refund_user_points",
+    "update_user_stats", "refund_user_points", "refund_user_points_split",
     # quiz_cache
     "_is_transient_jwt_clock_skew_error", "get_file_quizzes",
     "save_file_quiz_multiple", "log_ai_generation",

@@ -21,6 +21,7 @@ from supabase_helper import (
     get_file_quizzes,
     log_ai_generation,
     refund_user_points,
+    refund_user_points_split,
     save_file_quiz_multiple,
     save_question_image_url,
     upload_quiz_question_image,
@@ -136,7 +137,27 @@ def shuffle_quiz_options(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 async def refund_user_on_failure(user_id: int, data: Dict[str, Any]) -> None:
-    """إعادة النقاط تلقائياً في حال فشل التوليد"""
+    """إعادة النقاط تلقائياً في حال فشل التوليد.
+
+    🆕 [طبقة 3] بترجع كل جزء لمصدره الصحيح (debited_free → free_points،
+    debited_paid → paid_points) بدل ما ترجع كل شي لـpaid_points - هاد كان عم
+    "يُرقّي" نقاط مجانية مؤقتة (بتنصفر يومياً) لنقاط مدفوعة دائمة بكل عملية
+    فشل/ريفوند. debited_free/debited_paid متوفرين بالـstate من update_user_stats
+    وقت الخصم (راجع handlers/files.py).
+
+    fallback: لو الحالة (state) قديمة وما فيها التقسيم لأي سبب (مثلاً لسا معلّقة
+    من قبل هالإصلاح)، نرجع لسلوك الطبقة القديمة (كل شي لـpaid_points) بدل ما
+    نخسر الريفوند كلياً.
+    """
+    debited_free = data.get("debited_free")
+    debited_paid = data.get("debited_paid")
+    if debited_free is not None or debited_paid is not None:
+        free_amount = float(debited_free or 0)
+        paid_amount = float(debited_paid or 0)
+        if free_amount > 0 or paid_amount > 0:
+            await refund_user_points_split(user_id, free_amount, paid_amount)
+        return
+
     cost = float(data.get("debited_cost") or 0)
     if cost > 0:
         await refund_user_points(user_id, cost)

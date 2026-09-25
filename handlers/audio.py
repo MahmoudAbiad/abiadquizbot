@@ -37,7 +37,7 @@ from logger import get_logger, log_error, log_info
 from services.audio_service import summarize_lecture_text, transcribe_audio_lecture
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
 from supabase_helper import (
-    check_or_add_user, refund_user_points, update_user_stats, log_usage_event,
+    check_or_add_user, refund_user_points_split, update_user_stats, log_usage_event,
 )
 from r2_helper import download_audio_temp_to_file, delete_audio_temp
 from utils import ensure_directory_exists, safe_file_cleanup
@@ -371,6 +371,8 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         return
 
     charged = False
+    debited_free = 0.0
+    debited_paid = 0.0
     try:
         user_info = await _current_user(None, user=call.from_user)
         balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
@@ -386,7 +388,8 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             )
             return
 
-        if await update_user_stats(call.from_user.id, cost) is None:
+        deduction = await update_user_stats(call.from_user.id, cost)
+        if deduction is None:
             # 🆕 حالة سباق رصيد نادرة جداً (خصم متزامن آخر أفرغ الرصيد بين لحظة الفحص
             # ولحظة الخصم الذري)
             await state.set_state(None)
@@ -399,6 +402,11 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             )
             return
         charged = True
+        # 🆕 [طبقة 2] نحفظ التقسيم الفعلي (كم اتخصم من free_points وكم من paid_points)
+        # عشان أي ريفوند لاحق بهالدالة (كامل أو جزئي أو عند استثناء) يرجع كل جزء
+        # لمصدره الصحيح بدل ما يرجعه كله لـpaid_points.
+        debited_free = deduction["debited_free"]
+        debited_paid = deduction["debited_paid"]
 
         asyncio.create_task(log_usage_event(call.from_user.id, "audio_transcription_confirmed", {
             "duration_minutes": duration_minutes, "cost": cost,
@@ -425,7 +433,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         pure_text, truncated = transcription_result if transcription_result else (None, False)
 
         if not pure_text or not pure_text.strip():
-            await refund_user_points(call.from_user.id, cost)
+            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
             await state.set_state(None)
             await call.message.edit_text(
                 "⚠️ <b>تعذر تفريغ المحاضرة الصوتية!</b> يرجى التأكد من وضوح الصوت والمحاولة مجدداً. تم إرجاع نقاطك.",
@@ -439,9 +447,14 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         # هذه النسبة لاحقاً بناءً على ملاحظات فعلية لطول الجزء المفقود بالمتوسط.
         partial_refund_amount = 0.0
         if truncated:
-            partial_refund_amount = round(cost * 0.5, 2)
+            # 🆕 [طبقة 3] نفس نسبة الـ50% تُطبَّق على الشقّين (free/paid) على حدة
+            # بدل ما يُحسب المبلغ من cost الإجمالي ويرجع كله لـpaid_points - هيك
+            # التوزيع النسبي بين الرصيدين يضل صحيح بعد الريفوند الجزئي.
+            free_refund = round(debited_free * 0.5, 2)
+            paid_refund = round(debited_paid * 0.5, 2)
+            partial_refund_amount = free_refund + paid_refund
             if partial_refund_amount > 0:
-                await refund_user_points(call.from_user.id, partial_refund_amount)
+                await refund_user_points_split(call.from_user.id, free_refund, paid_refund)
             asyncio.create_task(log_usage_event(call.from_user.id, "audio_transcription_truncated", {
                 "duration_minutes": duration_minutes, "cost": cost, "partial_refund": partial_refund_amount,
             }))
@@ -481,7 +494,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
     except Exception as exc:
         log_error(logger, f"Audio confirm/transcription failed: {exc}", exception=exc)
         if charged:
-            await refund_user_points(call.from_user.id, cost)
+            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
         await state.set_state(None)
         error_text = "❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية." + (" تم إرجاع نقاطك." if charged else "")
         try:

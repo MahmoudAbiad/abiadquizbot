@@ -176,7 +176,20 @@ async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dic
         log_error(logger, f"Error checking daily renewal via RPC: {e}", exception=e)
         return _balance_payload(user_data.get('free_points'), user_data.get('paid_points'), status="error", referrer=None)
     
-async def update_user_stats(user_id: int, points_to_deduct: float, questions_generated: Optional[int] = None) -> Optional[float]:
+async def update_user_stats(user_id: int, points_to_deduct: float, questions_generated: Optional[int] = None) -> Optional[Dict[str, float]]:
+    """
+    🆕 [طبقة 2] الدالة كانت ترجع رقم واحد (الرصيد المتبقي) وترمي معلومة التقسيم
+    اللي أصلاً محسوبة داخل deduct_user_points_atomic (كم اتخصم من free_points
+    وكم من paid_points). هلق بترجع التقسيم كامل، لأنه هاي المعلومة لازم تُحفظ
+    بالـ state لحظة الخصم (debited_free/debited_paid) عشان أي ريفوند لاحق يرجع
+    كل جزء لمصدره الصحيح بدل ما يرجع الكل لـpaid_points (كان عم "يُرقّي" نقاط
+    مجانية مؤقتة لنقاط مدفوعة دائمة عند كل فشل).
+
+    ⚠️ Breaking change: القيمة المرجعة صارت dict {remaining_points, debited_free,
+    debited_paid} بدل float. كل الأماكن اللي بتنادي هاي الدالة (services/quiz_service.py،
+    handlers/files.py، handlers/audio.py) لازم تتحدّث بنفس الوقت لتقرأ الشكل الجديد
+    وتخزّن debited_free/debited_paid بدل debited_cost بس - غير هيك رح تنكسر.
+    """
     try:
         is_valid, error = validate_user_id(user_id)
         if not is_valid: return None
@@ -189,15 +202,66 @@ async def update_user_stats(user_id: int, points_to_deduct: float, questions_gen
             "points_to_deduct": points_to_deduct,
             "questions_generated": questions_generated
         }).execute()
-        
-        if rpc_response.data is not None:
-            return float(rpc_response.data)
-        return None
+
+        if not rpc_response.data:
+            # المستخدم غير موجود، أو رصيده الإجمالي أقل من points_to_deduct
+            # (الدالة الذرية بترجع نتيجة فاضية بالحالتين - RETURN بلا QUERY)
+            return None
+
+        row = rpc_response.data[0] if isinstance(rpc_response.data, list) else rpc_response.data
+        return {
+            "remaining_points": float(row["remaining_points"]),
+            "debited_free": float(row["debited_free"]),
+            "debited_paid": float(row["debited_paid"]),
+        }
     except Exception as e:
         log_error(logger, f"Error updating user stats via RPC: {e}", exception=e)
         return None
 
+async def refund_user_points_split(user_id: int, free_amount: float, paid_amount: float) -> bool:
+    """
+    🆕 [طبقة 2/3] بديل split-aware عن refund_user_points: بيرجع كل جزء لمصدره
+    الصحيح (free_amount → free_points، paid_amount → paid_points) بدل ما يرمي
+    الكل بـpaid_points. القيم المتوقّعة هون هي نفسها debited_free/debited_paid
+    المحفوظة بالـ state من نتيجة update_user_stats وقت الخصم.
+
+    ملاحظة لريفوند جزئي (زي partial_refund_amount = cost * 0.5 بـhandlers/audio.py):
+    نفس النسبة لازم تنطبق على الشقّين (free_amount * النسبة، paid_amount * النسبة)
+    عشان التوزيع النسبي يضل صحيح - هاي نقطة قرار محتاجة نحسمها سوا بالطبقة الثالثة.
+    """
+    try:
+        free_amount = max(float(free_amount or 0), 0.0)
+        paid_amount = max(float(paid_amount or 0), 0.0)
+        if free_amount <= 0 and paid_amount <= 0:
+            return True
+        is_valid, error = validate_user_id(user_id)
+        if not is_valid:
+            return False
+
+        rpc_response = await supabase.rpc("refund_user_points_split_atomic", {
+            "target_user_id": user_id,
+            "free_amount": free_amount,
+            "paid_amount": paid_amount,
+        }).execute()
+
+        if not rpc_response.data:
+            # المستخدم غير موجود بالجدول أصلاً
+            return False
+
+        log_info(logger, f"Refunded (free={free_amount}, paid={paid_amount}) points to user {user_id}")
+        return True
+    except Exception as e:
+        log_error(logger, f"Error refunding split points for user {user_id}: {e}", exception=e)
+        return False
+
 async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
+    """
+    ⚠️ الشكل القديم (كل الريفوند بيروح لـpaid_points بالكامل) - متروك مؤقتاً
+    لأي مكان بالكود بيعمل ريفوند بدون ما يعرف أصلاً وين اتخصمت النقاط (مثلاً
+    تصحيح إداري يدوي). بمجرد ما نحدّث نداءات quiz_service.py/handlers/audio.py/
+    handlers/files.py لتستخدم refund_user_points_split أعلاه، هاي الدالة رح
+    تضل بس fallback للحالات اللي فعلاً ما عندها تقسيم معروف.
+    """
     try:
         if points_to_refund <= 0:
             return True

@@ -1038,7 +1038,10 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         mode = determine_execution_mode(items, count)
         user_info = await _current_user(call.message, call.from_user)
 
-        if float(user_info["points"]) < cost or await update_user_stats(call.from_user.id, cost, count) is None:
+        deduction = None
+        if float(user_info["points"]) >= cost:
+            deduction = await update_user_stats(call.from_user.id, cost, count)
+        if deduction is None:
             # 🩹 لسا ما بدأنا الخصم/التوليد فعلياً - نرجّع الحالة لـ waiting_for_count
             # (بدل ما تضل عالقة بـ processing_file_quiz بلا أي توليد شغال فعلياً) حتى
             # يقدر الطالب يلغي الطلب أو يستبدله بملف جديد عادي.
@@ -1050,8 +1053,17 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             "requested_count": count, "items_count": items, "cost": cost, "mode": mode
         }))
 
-        await state.update_data(debited_cost=cost, calculated_cost=cost, requested_count=count, execution_mode=mode)
+        # 🆕 [طبقة 2] نخزّن التقسيم الفعلي (كم اتخصم من free_points وكم من paid_points -
+        # راجع deduct_user_points_atomic) بجانب debited_cost الإجمالي، عشان أي ريفوند
+        # لاحق (refund_user_on_failure بـservices/quiz_service.py) يرجع كل جزء لمصدره
+        # الصحيح بدل ما يرجعه كله لـpaid_points.
+        await state.update_data(
+            debited_cost=cost, calculated_cost=cost, requested_count=count, execution_mode=mode,
+            debited_free=deduction["debited_free"], debited_paid=deduction["debited_paid"],
+        )
         data["debited_cost"] = cost  # 🩹 إصلاح خلل موجود مسبقاً: استرجاع النقاط كان يقرأ نسخة قديمة من الحالة بدون هذا الحقل، فيحسب دائماً صفراً
+        data["debited_free"] = deduction["debited_free"]
+        data["debited_paid"] = deduction["debited_paid"]
         try:
             await call.message.delete()
         except Exception:
