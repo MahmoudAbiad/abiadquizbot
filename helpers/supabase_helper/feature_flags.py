@@ -64,7 +64,7 @@ async def set_feature_flag(key: str, enabled: bool) -> bool:
     على أول طلب طالب تالٍ مباشرة، وعلى كل نسخ البوت الأخرى بنفس اللحظة أيضاً."""
     try:
         await supabase.table("feature_flags").upsert({
-            "key": key, "enabled": enabled, "updated_at": datetime.datetime.utcnow().isoformat()
+            "key": key, "enabled": enabled, "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }).execute()
         try:
             await redis_client.set(_flag_redis_key(key), "1" if enabled else "0", ex=FEATURE_FLAG_CACHE_TTL_SECONDS)

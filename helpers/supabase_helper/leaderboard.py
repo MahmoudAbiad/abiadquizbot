@@ -31,7 +31,7 @@ async def get_or_update_high_score(user_id: int, quiz_id: str, current_score: in
                 await supabase.table("quiz_scores").update({
                     "highest_score": current_score,
                     "total_questions": total_questions,
-                    "updated_at": datetime.datetime.utcnow().isoformat()
+                    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
                 }).eq("id", existing["id"]).execute()
             else:
                 new_highest = previous_score

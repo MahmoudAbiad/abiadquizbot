@@ -150,7 +150,7 @@ async def auto_cleanup_bad_quizzes():
     """تنظيف تلقائي شامل للكويزات المرفوضة من الطلاب (ديسلايكات عالية) والتي تجاوزت 48 ساعة،
     باستثناء أي كويز عندو share_code أو محفوظ بالمفضلة أو تم استخدامه ولو مرة."""
     try:
-        threshold = (datetime.datetime.utcnow() - datetime.timedelta(days=2)).isoformat()
+        threshold = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).isoformat()
         deletable_ids = await _get_safe_to_delete_quiz_ids(threshold)
         if deletable_ids:
             # 🆕 نفس منطق تنظيف تصويتات/تثبيت التصنيف اليتيمة المطبَّق بـ admin_delete_quiz
