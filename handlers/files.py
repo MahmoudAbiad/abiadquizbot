@@ -230,7 +230,7 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     )
 
     mode = determine_execution_mode(items, selected_count, is_album=is_album)
-    cost = calculate_quiz_points_cost(items, selected_count, is_album)
+    cost = await calculate_quiz_points_cost(items, selected_count, is_album)
     difficulty = data.get("difficulty", DIFFICULTY_MEDIUM)
     question_type_label = build_question_type_label(
         data.get("subject_type", "other"), data.get("question_type", QUESTION_TYPE_GENERAL),
@@ -543,7 +543,7 @@ async def _render_cache_decision_screen(reply_target: types.Message, state: FSMC
     # التصنيف الفعلي يصير معروفاً، فهون نسمح دايماً بزر "توليد جديد" بدون حجب مبكر خاطئ.
     show_generate_btn = True
 
-    keyboard = get_multiple_quizzes_keyboard(
+    keyboard = await get_multiple_quizzes_keyboard(
         all_quizzes, filtered_quizzes, data.get("items_count", 1), bool(data.get("is_album")),
         show_generate_btn=show_generate_btn, filter_type=filter_type, filter_difficulty=filter_difficulty,
         viewer_id=viewer_id,
@@ -853,7 +853,7 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
         # 🩹 إصلاح خلل حقيقي: السعر يُحسب هون من عدد أسئلة *هذا الكويز المختار تحديداً*
         # (بدل قيمة "cache_cost" واحدة محسوبة سابقاً من أول كويز بالقائمة وتُطبَّق على
         # الجميع - كانت تسبب حجب طلاب برصيد كافٍ فعلياً لكويز أرخص من هذا الملف).
-        cost = calculate_cached_points_cost(
+        cost = await calculate_cached_points_cost(
             int(data.get("items_count", 1)), len(selected_quiz["quiz_data"]), bool(data.get("is_album"))
         )
 
@@ -1038,7 +1038,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
                 await state.clear()
                 return
 
-        cost = calculate_quiz_points_cost(items, count, is_album)
+        cost = await calculate_quiz_points_cost(items, count, is_album)
         mode = determine_execution_mode(items, count, is_album=is_album)
         user_info = await _current_user(call.message, call.from_user)
 

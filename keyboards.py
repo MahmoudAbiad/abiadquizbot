@@ -407,7 +407,7 @@ def get_document_export_keyboard() -> types.InlineKeyboardMarkup:
 
 # ==================== لوحات إدارة المخازن المتعددة والتقييمات ====================
 
-def get_multiple_quizzes_keyboard(
+async def get_multiple_quizzes_keyboard(
     all_quizzes: list, filtered_quizzes: list, items: int, is_album: bool, show_generate_btn: bool = True,
     filter_type: str = "all", filter_difficulty: str = "all", viewer_id=None,
 ) -> types.InlineKeyboardMarkup:
@@ -477,7 +477,11 @@ def get_multiple_quizzes_keyboard(
         type_label = q.get("question_type_label") or "🔀 متنوع"
         diff_label = DIFFICULTY_LABELS_AR.get(q.get("difficulty") or "medium", "🟡 متوسط")
         # 🩹 سعر هذا الكويز تحديداً (وليس سعراً عاماً موحّداً) بناءً على عدد أسئلته الفعلي
-        quiz_cost = calculate_cached_points_cost(items, q_count, is_album)
+        # 🆕 calculate_cached_points_cost صارت async (تقرأ معدّلي التسعير من إعدادات
+        # الأدمن الديناميكية - راجع helpers/points_calculator.py وsettings_helper.py)،
+        # فصارت هذه الدالة نفسها async تبعاً لذلك (مستدعيها الوحيد _render_cache_decision_screen
+        # بـ handlers/files.py أصلاً async وتُستدعى الآن بـ await).
+        quiz_cost = await calculate_cached_points_cost(items, q_count, is_album)
         btn_text = f"{icon} {type_label} | {diff_label} | {q_count} سؤال ({quiz_cost:.2f}💎) | 👍{likes} 👎{dislikes}"
         kb.append([types.InlineKeyboardButton(text=btn_text, callback_data=f"use_multi_{q['id']}")])
         # 🆕 زر حذف مستقل تحت كل كويز على حدة (بيظهر بس للأدمن أو لمالك هذا الكويز

@@ -32,6 +32,13 @@ _DEFAULTS: Dict[str, float] = {
     # خطر انحراف صامت لو عُدِّل أحدهما بدون الآخر). الآن أصبح app_settings هو المصدر
     # الوحيد الفعلي، ويُمرَّر صراحة لـ RPC عبر submit_classification_vote أدناه.
     "classification_vote_threshold": float(CLASSIFICATION_VOTE_THRESHOLD),
+    # 🆕 تسعير الكويزات (كان رقمين ثابتين مباشرة بالكود بـ helpers/points_calculator.py:
+    # 1.0 للتير الأساسي و1.5 للتجاوز/سوبر) - صارا معدّلين قابلين للتعديل من لوحة الأدمن
+    # دون لمس عتبات التفعيل نفسها (MAX_STANDARD_PAGES/MAX_STANDARD_QUESTIONS/
+    # MAX_LIMIT_PAGES/MAX_ALBUM_IMAGES تبقى ثابتة بـ constants.py كما هي تماماً، لأنها
+    # مرتبطة أيضاً بقرار التنفيذ الفعلي is_super_pdf/is_super_images بـ gemini_helper.py).
+    "quiz_standard_rate": 1.0,
+    "quiz_overage_rate": 1.5,
 }
 
 # تسميات عرض للوحة الإدارة (تُستخدم في الرسائل والأزرار).
@@ -40,6 +47,8 @@ SETTING_LABELS: Dict[str, str] = {
     "daily_renewal_points": "🔄 نقاط التجديد اليومي المجاني",
     "referral_bonus_points": "🤝 مكافأة الإحالة (لكل صديق)",
     "classification_vote_threshold": "🗳 عتبة تثبيت تصنيف المادة (عدد الأصوات)",
+    "quiz_standard_rate": "💎 سعر الكويز العادي (نقطة/وحدة)",
+    "quiz_overage_rate": "🚀 سعر التجاوز/السوبر (نقطة/وحدة)",
 }
 
 # 🩹 حد أدنى مخصص لبعض الإعدادات (0 معقول لنقاط/مكافآت، لكن غير منطقي هنا: عتبة=0
@@ -47,6 +56,9 @@ SETTING_LABELS: Dict[str, str] = {
 # غير المذكورة هنا تبقى بحدها الأدنى الافتراضي (0) كما كانت دائماً.
 SETTING_MIN_VALUES: Dict[str, float] = {
     "classification_vote_threshold": 1,
+    # 🆕 تفادياً لتصفير سعر الكويز بالغلط (0 حد أدنى افتراضي كان سيسمح بذلك تماماً).
+    "quiz_standard_rate": 0.1,
+    "quiz_overage_rate": 0.1,
 }
 
 _cache: Dict[str, float] = {}
