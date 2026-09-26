@@ -713,7 +713,9 @@ def get_admin_settings_general_keyboard() -> types.InlineKeyboardMarkup:
 
 def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKeyboardMarkup:
     """لوحة إعدادات النقاط: زر تعديل لكل إعداد + رجوع (قسم فرعي ضمن الإعدادات العامة -
-    راجع get_admin_settings_general_keyboard)."""
+    راجع get_admin_settings_general_keyboard). labels المتوقّع هنا هو
+    settings_helper.POINTS_SETTING_LABELS (إعدادات النقاط فقط، بدون أي إعداد خاص
+    بميزة معيّنة - راجع settings_helper.SETTING_TO_FEATURE_FLAG)."""
     kb = []
     for key, label in labels.items():
         value = settings.get(key)
@@ -867,19 +869,41 @@ def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
 # ==================== 🆕 مفاتيح التحكم (Feature Flags) ====================
 
 def get_feature_flags_keyboard(flags: dict, registry: dict) -> types.InlineKeyboardMarkup:
-    """لوحة تشغيل/إيقاف مفاتيح التحكم. flags: {key: enabled} (من
-    supabase_helper.get_all_feature_flags), registry: {key: label} (من
-    constants.FEATURE_FLAGS_REGISTRY) - زر واحد لكل مفتاح، يعرض حالته الحالية
-    ويعكسها عند الضغط (نفس نمط ✅/🚫 المستخدم بأزرار موديلات الذكاء الاصطناعي)."""
+    """لوحة "مفاتيح التحكم": زر واحد لكل ميزة يعرض حالتها الحالية، لكنه لا يبدّلها
+    مباشرة (كما كان سابقاً) بل يفتح لوحة تفاصيل الميزة (get_feature_detail_keyboard)
+    التي فيها زر التشغيل/الإيقاف نفسه بالإضافة لأي إعدادات أخرى خاصة بتلك الميزة
+    (مثلاً عتبة تثبيت التصنيف لميزة classification_vote_prompt - كانت هذه العتبة
+    ضائعة سابقاً ضمن "إعدادات النقاط" رغم أنها لا علاقة لها بالنقاط). flags: {key:
+    enabled} (من supabase_helper.get_all_feature_flags), registry: {key: label}
+    (من constants.FEATURE_FLAGS_REGISTRY)."""
     kb = []
     for key, label in registry.items():
         enabled = flags.get(key, True)
         status_icon = "✅" if enabled else "🚫"
         kb.append([types.InlineKeyboardButton(
             text=f"{status_icon} {label}",
-            callback_data=f"admin_flag_toggle_{key}"
+            callback_data=f"admin_flag_detail_{key}"
         )])
     kb.append([types.InlineKeyboardButton(text="🔙 رجوع للإعدادات العامة", callback_data="admin_settings_general")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_feature_detail_keyboard(flag_key: str, enabled: bool, extra_settings: list) -> types.InlineKeyboardMarkup:
+    """لوحة تفاصيل ميزة واحدة ضمن "مفاتيح التحكم": زر تشغيل/إيقاف الميزة نفسها +
+    زر تعديل لكل إعداد إضافي خاص بها (extra_settings)، بدل الاكتفاء بالتشغيل/الإيقاف
+    فقط كما كانت get_feature_flags_keyboard قديماً. extra_settings: قائمة عناصر
+    (setting_key, label, value_text) جاهزة للعرض - راجع
+    handlers/admin/feature_flags.py (FEATURE_EXTRA_SETTINGS + render_feature_detail)
+    لمصدرها."""
+    kb = []
+    toggle_text = "🚫 إيقاف الميزة" if enabled else "✅ تشغيل الميزة"
+    kb.append([types.InlineKeyboardButton(text=toggle_text, callback_data=f"admin_flag_toggle_{flag_key}")])
+    for setting_key, label, value_text in extra_settings:
+        kb.append([types.InlineKeyboardButton(
+            text=f"{label}: {value_text}",
+            callback_data=f"admin_setting_edit_{setting_key}"
+        )])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع لمفاتيح التحكم", callback_data="admin_flags_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 

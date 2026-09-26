@@ -12,7 +12,14 @@ from keyboards import (
     get_cancel_keyboard,
     get_admin_dashboard_keyboard,
 )
-from settings_helper import get_app_settings, update_app_setting, SETTING_LABELS, SETTING_MIN_VALUES
+from settings_helper import (
+    get_app_settings,
+    update_app_setting,
+    SETTING_LABELS,
+    SETTING_MIN_VALUES,
+    SETTING_TO_FEATURE_FLAG,
+    POINTS_SETTING_LABELS,
+)
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 
@@ -49,7 +56,11 @@ async def open_settings_general_menu(call: types.CallbackQuery, state: FSMContex
 
 async def _render_settings_menu(event, state: FSMContext = None):
     """يعرض لوحة إعدادات النقاط بالقيم الحالية (يجلبها مباشرة من قاعدة البيانات
-    وليس من الكاش، حتى يرى الأدمن دائماً آخر قيمة فعلية بعد أي تعديل)."""
+    وليس من الكاش، حتى يرى الأدمن دائماً آخر قيمة فعلية بعد أي تعديل).
+    🩹 عتبة تثبيت التصنيف لم تعد تُعرض هنا - صارت جزءاً من لوحة تفاصيل ميزة
+    "رسالة التحقق المجتمعي من التصنيف" ضمن "🧩 مفاتيح التحكم" (راجع
+    settings_helper.SETTING_TO_FEATURE_FLAG وhandlers/admin/feature_flags.py)
+    لأنها إعداد خاص بتلك الميزة تحديداً وليست إعداد نقاط."""
     if state:
         await state.clear()
 
@@ -60,10 +71,9 @@ async def _render_settings_menu(event, state: FSMContext = None):
         "اضغط على أي إعداد لتعديل قيمته. القيمة الجديدة تُطبَّق فوراً على كل الطلاب.\n\n"
         f"🎁 نقاط الترحيب: <code>{settings.get('welcome_points', 0):.0f}</code>\n"
         f"🔄 التجديد اليومي: <code>{settings.get('daily_renewal_points', 0):.0f}</code>\n"
-        f"🤝 مكافأة الإحالة: <code>{settings.get('referral_bonus_points', 0):.0f}</code>\n"
-        f"🗳 عتبة تثبيت التصنيف: <code>{settings.get('classification_vote_threshold', 0):.0f}</code>"
+        f"🤝 مكافأة الإحالة: <code>{settings.get('referral_bonus_points', 0):.0f}</code>"
     )
-    reply_markup = get_admin_settings_keyboard(settings, SETTING_LABELS)
+    reply_markup = get_admin_settings_keyboard(settings, POINTS_SETTING_LABELS)
 
     if isinstance(event, types.Message):
         await event.answer(text, reply_markup=reply_markup, parse_mode="HTML")
@@ -147,4 +157,13 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
         "القيمة الجديدة سارية المفعول فوراً لكل الطلاب.",
         parse_mode="HTML"
     )
-    await _render_settings_menu(msg)
+
+    # 🩹 لو الإعدد المُعدَّل خاص بميزة معيّنة (مثلاً عتبة تثبيت التصنيف)، نرجّع الأدمن
+    # للوحة تفاصيل تلك الميزة ضمن "مفاتيح التحكم" بدل لوحة "إعدادات النقاط" - لأنه
+    # فعلياً جاء من هناك (راجع settings_helper.SETTING_TO_FEATURE_FLAG).
+    feature_key = SETTING_TO_FEATURE_FLAG.get(setting_key)
+    if feature_key:
+        from .feature_flags import render_feature_detail
+        await render_feature_detail(msg, feature_key)
+    else:
+        await _render_settings_menu(msg)

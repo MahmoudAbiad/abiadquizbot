@@ -61,6 +61,25 @@ SETTING_MIN_VALUES: Dict[str, float] = {
     "quiz_overage_rate": 0.1,
 }
 
+# 🩹 عتبة تصنيف المادة إعداد خاص بميزة "رسالة التحقق المجتمعي من التصنيف"
+# (classification_vote_prompt بـ constants.FEATURE_FLAGS_REGISTRY) وليست إعداد نقاط -
+# لذلك مكانها الطبيعي هو لوحة تفاصيل تلك الميزة ضمن "🧩 مفاتيح التحكم"، وليس ضمن
+# "🎯 إعدادات النقاط" كما كانت سابقاً. تبقى مسجّلة بـ SETTING_LABELS/SETTING_MIN_VALUES
+# فوق (تدفّق التعديل العام بـ handlers/admin/settings.py يعتمد عليها بغض النظر عن مكان
+# عرضها)، وهذا القاموس فقط يوجّه أي إعداد من هذا النوع لواجهة الميزة الصحيحة بدل إعدادات
+# النقاط. راجع handlers/admin/feature_flags.py (FEATURE_EXTRA_SETTINGS + render_feature_detail).
+SETTING_TO_FEATURE_FLAG: Dict[str, str] = {
+    "classification_vote_threshold": "classification_vote_prompt",
+}
+
+# نسخة من SETTING_LABELS تستثني أي إعداد صار خاصاً بميزة معيّنة (راجع
+# SETTING_TO_FEATURE_FLAG فوق) - هي التي تُستخدم فعلياً بعرض لوحة "إعدادات النقاط"
+# (keyboards.get_admin_settings_keyboard عبر handlers/admin/settings.py) حتى لا يظهر
+# فيها إعداد لا علاقة له بالنقاط.
+POINTS_SETTING_LABELS: Dict[str, str] = {
+    key: label for key, label in SETTING_LABELS.items() if key not in SETTING_TO_FEATURE_FLAG
+}
+
 _cache: Dict[str, float] = {}
 _cache_timestamp: float = 0.0
 
