@@ -19,7 +19,7 @@ from aiogram.fsm.context import FSMContext
 from constants import FEATURE_FLAGS_REGISTRY
 from keyboards import get_feature_flags_keyboard, get_feature_detail_keyboard
 from supabase_helper import get_all_feature_flags, set_feature_flag
-from settings_helper import get_app_settings, SETTING_LABELS
+from settings_helper import get_app_settings, SETTING_LABELS, format_setting_value
 from logger import get_logger
 from .dashboard import IsAdminFilter, safe_edit_text
 
@@ -83,7 +83,7 @@ async def render_feature_detail(event, flag_key: str) -> None:
             extra_settings.append((
                 setting_key,
                 SETTING_LABELS.get(setting_key, setting_key),
-                f"{value:.0f}",
+                format_setting_value(value),
             ))
 
     status_line = "✅ مفعّلة حالياً" if enabled else "🚫 موقوفة حالياً"

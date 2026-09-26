@@ -19,6 +19,7 @@ from settings_helper import (
     SETTING_MIN_VALUES,
     SETTING_TO_FEATURE_FLAG,
     POINTS_SETTING_LABELS,
+    format_setting_value,
 )
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
@@ -69,9 +70,9 @@ async def _render_settings_menu(event, state: FSMContext = None):
         "⚙️ <b>إعدادات النقاط</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "اضغط على أي إعداد لتعديل قيمته. القيمة الجديدة تُطبَّق فوراً على كل الطلاب.\n\n"
-        f"🎁 نقاط الترحيب: <code>{settings.get('welcome_points', 0):.0f}</code>\n"
-        f"🔄 التجديد اليومي: <code>{settings.get('daily_renewal_points', 0):.0f}</code>\n"
-        f"🤝 مكافأة الإحالة: <code>{settings.get('referral_bonus_points', 0):.0f}</code>"
+        f"🎁 نقاط الترحيب: <code>{format_setting_value(settings.get('welcome_points'))}</code>\n"
+        f"🔄 التجديد اليومي: <code>{format_setting_value(settings.get('daily_renewal_points'))}</code>\n"
+        f"🤝 مكافأة الإحالة: <code>{format_setting_value(settings.get('referral_bonus_points'))}</code>"
     )
     reply_markup = get_admin_settings_keyboard(settings, POINTS_SETTING_LABELS)
 
@@ -107,8 +108,8 @@ async def prompt_setting_edit(call: types.CallbackQuery, state: FSMContext):
     await safe_edit_text(
         call.message,
         f"✍️ <b>تعديل: {label}</b>\n\n"
-        f"القيمة الحالية: <code>{current_value:.0f}</code>\n\n"
-        f"أرسل القيمة الجديدة (رقم صحيح أو عشري، {min_value:.0f} أو أكثر):",
+        f"القيمة الحالية: <code>{format_setting_value(current_value)}</code>\n\n"
+        f"أرسل القيمة الجديدة (رقم صحيح أو عشري، {format_setting_value(min_value)} أو أكثر):",
         reply_markup=get_cancel_keyboard()
     )
     try:
@@ -137,7 +138,7 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
 
     min_value = SETTING_MIN_VALUES.get(setting_key, 0)
     if new_value < min_value:
-        await msg.answer(f"❌ القيمة أقل من الحد الأدنى المسموح ({min_value:.0f}).", reply_markup=get_cancel_keyboard())
+        await msg.answer(f"❌ القيمة أقل من الحد الأدنى المسموح ({format_setting_value(min_value)}).", reply_markup=get_cancel_keyboard())
         return
 
     if new_value > 100000:
@@ -153,7 +154,7 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
 
     label = SETTING_LABELS[setting_key]
     await msg.answer(
-        f"✅ <b>تم التحديث بنجاح!</b>\n\n{label}: <code>{updated_value:.0f}</code>\n\n"
+        f"✅ <b>تم التحديث بنجاح!</b>\n\n{label}: <code>{format_setting_value(updated_value)}</code>\n\n"
         "القيمة الجديدة سارية المفعول فوراً لكل الطلاب.",
         parse_mode="HTML"
     )

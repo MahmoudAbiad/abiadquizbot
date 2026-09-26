@@ -80,6 +80,20 @@ POINTS_SETTING_LABELS: Dict[str, str] = {
     key: label for key, label in SETTING_LABELS.items() if key not in SETTING_TO_FEATURE_FLAG
 }
 
+
+def format_setting_value(value: Optional[float]) -> str:
+    """يعرض قيمة الإعداد كعدد صحيح لو كانت صحيحة فعلاً (مثلاً 50.0 -> "50")، وإلا
+    بمنزلتين عشريتين كحد أقصى مع حذف الأصفار الزائدة (مثلاً 1.5 -> "1.5"،
+    0.1 -> "0.1"). 🩹 قبل هذه الدالة كانت كل قيم إعدادات النقاط تُعرض بصيغة `:.0f`
+    (تقريب لعدد صحيح دائماً)، فكانت قيمة عشرية فعلية مثل سعر السوبر 1.5 تظهر بلوحة
+    الأدمن "2" رغم إن المخزَّن فعلياً 1.5 - يسبب لبساً حقيقياً للأدمن عند التعديل."""
+    if value is None:
+        return "؟"
+    value = float(value)
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
 _cache: Dict[str, float] = {}
 _cache_timestamp: float = 0.0
 

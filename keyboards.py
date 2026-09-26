@@ -716,10 +716,10 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
     راجع get_admin_settings_general_keyboard). labels المتوقّع هنا هو
     settings_helper.POINTS_SETTING_LABELS (إعدادات النقاط فقط، بدون أي إعداد خاص
     بميزة معيّنة - راجع settings_helper.SETTING_TO_FEATURE_FLAG)."""
+    from settings_helper import format_setting_value
     kb = []
     for key, label in labels.items():
-        value = settings.get(key)
-        value_text = f"{value:.0f}" if value is not None else "؟"
+        value_text = format_setting_value(settings.get(key))
         kb.append([types.InlineKeyboardButton(
             text=f"{label}: {value_text}",
             callback_data=f"admin_setting_edit_{key}"
