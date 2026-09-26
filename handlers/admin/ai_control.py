@@ -356,6 +356,12 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
         any_unverified = False
         has_unpriced = False
         for r in rows:
+            # 🆕 كويز من الكاش (event_type == cached_quiz_used) كلفته الفعلية بـ$ هي صفر
+            # حرفياً (لا استدعاء AI إطلاقاً) - مش "سعر غير معروف" (has_unpriced)، فما بنحطلها
+            # علامة ⚠️ مضلّلة، وما بنستدعي _estimate_quiz_cost يلي أصلاً مبني على metadata
+            # حدث quiz_generated (ai_provider/tokens) غير الموجودة هون إطلاقاً.
+            if r.get("event_type") == "cached_quiz_used":
+                continue
             c, verified = _estimate_quiz_cost(r.get("metadata") or {}, pricing)
             if c is None:
                 has_unpriced = True
@@ -373,6 +379,20 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
             user = row.get("user") or {}
             username_str = f"@{user['username']}" if user.get("username") and user['username'] != "Unknown" else "بدون يوزر"
             name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "بدون اسم"
+
+            # 🆕 كويز من الكاش (لا توليد AI فعلي - راجع الملاحظة بـ admin_get_quiz_generation_log
+            # وhandle_multi_cache_selection بـ files.py): سطر مخصَّص أبسط بدل عرض "؟"/"غير
+            # مسجَّل" مضلّلة بكل حقول التوليد (موديل/توكنز/كاسكيد) غير الموجودة أصلاً هون.
+            if row.get("event_type") == "cached_quiz_used":
+                q_count = meta.get("questions_generated", "؟")
+                report_lines.append(
+                    f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{row.get('user_id')}</code>\n"
+                    f" ┣ 🧩 نوع العملية: 🗃️ من الكاش\n"
+                    f" ┣ 🧮 {q_count} سؤال — 💳 {meta.get('cost', '؟')} نقطة\n"
+                    f" ┗ 🕒 <code>{row.get('time_str')}</code>\n"
+                )
+                continue
+
             provider = meta.get("ai_provider") or "؟"
             model = meta.get("ai_model") or "غير مسجَّل"
             duration = meta.get("generation_seconds")
@@ -410,13 +430,30 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
             cascade_total = meta.get("cascade_total")
             gen_mode = meta.get("generation_mode")
             chunk_details = meta.get("chunk_details")  # 🆕 تفصيل كل جزء بمسار Super (راجع gemini_helper.py)
+            # 🆕 تصنيف "مستوى الطلب" الحقيقي (Standard/Over-Limit - راجع determine_execution_mode
+            # بـ services/quiz_service.py، محفوظ صراحة من handlers/files.py) - يُستخدم فقط
+            # للتفريق بين عادي/موسّع تحت. gen_mode يبقى المصدر الوحيد والحاسم لـ"سوبر" (فعلي
+            # 100% من التنفيذ نفسه)؛ business_mode لا يقدر يدّعي "سوبر" أبداً هون لأنه Standard/
+            # Over-Limit فقط أصلاً بمنطق determine_execution_mode الحالي.
+            business_mode = meta.get("business_mode")
 
-            mode_labels = {
-                "super_pdf": "🔀 Super PDF",
-                "super_images": "🔀 Super Images",
-                "regular": "➡️ عادي",
+            # 🆕 "سوبر" ونوعها (PDF/صور) مصدرهما gen_mode حصراً (الحقيقة الفعلية من التنفيذ).
+            # "موسّع" مصدره business_mode لأنه Standard وOver-Limit كلاهما ينفَّذان عبر
+            # _generate_regular بالضبط (نفس gen_mode="regular")، فـ gen_mode وحده لا يميّز
+            # بينهما إطلاقاً - لازم مصدر إضافي (المحسوب مسبقاً وقت التسعير بـ files.py).
+            super_labels = {
+                "super_pdf": "🚀 سوبر — PDF",
+                "super_images": "🚀 سوبر — صور",
             }
-            mode_line = f" ┣ 🧩 نوع العملية: {mode_labels.get(gen_mode, '➡️ عادي' if provider != 'groq' else '⚡ Groq السريع')}\n"
+            if gen_mode in super_labels:
+                mode_text = super_labels[gen_mode]
+            elif business_mode == "Over-Limit":
+                mode_text = "📈 موسّع"
+            elif provider == "groq":
+                mode_text = "⚡ Groq السريع"
+            else:
+                mode_text = "➡️ عادي"
+            mode_line = f" ┣ 🧩 نوع العملية: {mode_text}\n"
 
             if chunk_details:
                 # 🆕 كل جزء (Task) استقل بكاسكيد خاص فيه (نماذج × مفاتيح) - فممكن كل جزء

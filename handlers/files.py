@@ -229,7 +229,7 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟",
     )
 
-    mode = determine_execution_mode(items, selected_count)
+    mode = determine_execution_mode(items, selected_count, is_album=is_album)
     cost = calculate_quiz_points_cost(items, selected_count, is_album)
     difficulty = data.get("difficulty", DIFFICULTY_MEDIUM)
     question_type_label = build_question_type_label(
@@ -239,7 +239,7 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     )
 
     text = f"{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
-    if mode == "Super-Processing":
+    if mode in ("Super-PDF", "Super-Images"):
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
     # 🆕 اختبار جاهز (محلول/غير محلول): لا معنى لأزرار عدد جاهزة عشوائية (5/10/15/20) هنا -
@@ -868,6 +868,10 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
             
         asyncio.create_task(log_usage_event(call.from_user.id, "cached_quiz_used", {
             "quiz_id": quiz_uuid, "cost": cost,
+            # 🆕 يُعرض الآن بلوحة "📊 سجل توليد الكويزات" (راجع admin_get_quiz_generation_log
+            # وai_control.py) جنب توليد AI الفعلي - questions_generated هون هو نفس المفتاح
+            # المستخدَم بصف quiz_generated العادي، لعرض عدد الأسئلة بنفس السطر بلا فرع خاص.
+            "questions_generated": len(selected_quiz["quiz_data"]),
         }))
 
         from handlers.quiz_runner import _start_loaded_quiz
@@ -1035,7 +1039,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
                 return
 
         cost = calculate_quiz_points_cost(items, count, is_album)
-        mode = determine_execution_mode(items, count)
+        mode = determine_execution_mode(items, count, is_album=is_album)
         user_info = await _current_user(call.message, call.from_user)
 
         deduction = None
@@ -1121,6 +1125,15 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             # نجاحه) - None لأي مسار غير super (راجع gemini_helper._generate_super_pdf/
             # _generate_super_images). يُعرض بلوحة الأدمن "📊 سجل توليد الكويزات".
             "chunk_details": generation_meta.get("chunk_details"),
+            # 🆕 تصنيف "مستوى الطلب" الحقيقي (Standard/Over-Limit/Super-PDF/Super-Images -
+            # راجع determine_execution_mode بـ services/quiz_service.py) - محسوب أصلاً
+            # فوق بهذه الدالة (متغيّر `mode`) قبل التوليد لغرض التسعير، ونُرفقه هنا أيضاً
+            # لأن `generation_mode` وحده (من gemini_helper) لا يفرّق بين Standard وOver-Limit:
+            # الاتنين ينفَّذان عبر _generate_regular بالضبط (نفس مسار الكود)، فـ
+            # `generation_mode` بيرجع "regular" لكليهما. لوحة الأدمن (ai_control.py) بتعتمد
+            # `generation_mode` كمصدر حقيقة أساسي لـ"سوبر" (فعلي 100%)، وبترجع لهذا الحقل
+            # فقط للتفريق بين عادي/موسّع بالحالة غير-السوبر.
+            "business_mode": mode,
         })
         await reward_referrer_if_eligible(call.from_user.id)
 

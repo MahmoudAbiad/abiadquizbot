@@ -2,8 +2,8 @@
 
 from constants import (
     DISCOUNT_RATE_FOR_CACHED,
+    MAX_ALBUM_IMAGES,
     MAX_LIMIT_PAGES,
-    MAX_LIMIT_QUESTIONS,
     MAX_STANDARD_PAGES,
     MAX_STANDARD_QUESTIONS,
 )
@@ -27,11 +27,20 @@ def calculate_quiz_points_cost(
 
     Album images have a flat 1-point image charge; non-album documents use
     the page tier. Super processing uses its own flat rate for all items.
+
+    🆕 عتبة "سوبر" (السعر المضاعف بالأسفل) صارت مطابقة تماماً لشرط التنفيذ الفعلي بـ
+    gemini_helper.generate_quiz_smart (نفس منطق determine_execution_mode بـ
+    quiz_service.py - راجع الملاحظة هناك للتفاصيل): ألبوم > MAX_ALBUM_IMAGES (10)، أو
+    ملف > MAX_LIMIT_PAGES (35) صفحة. كانت سابقاً تُطبَّق نفس عتبة الصفحات (35) حتى على
+    الصور - يعني ألبوم Super Images فعلي (>10 صور) بعدد أسئلة معتدل كان يُسعَّر بالسعر
+    العادي (تحت-تسعير حقيقي، مو مجرد خطأ عرض). عدد الأسئلة وحده لم يعد يُفعّل السعر
+    المضاعف لنفس السبب (لا معالجة متوازية فعلية تقابله).
     """
     items = max(0, int(pages_or_images))
     question_count = max(0, int(questions))
 
-    if items > MAX_LIMIT_PAGES or question_count > MAX_LIMIT_QUESTIONS:
+    is_super = (items > MAX_ALBUM_IMAGES) if is_album else (items > MAX_LIMIT_PAGES)
+    if is_super:
         return round((items + question_count) * 1.5, 2)
 
     item_cost = float(items) if is_album else _tier_cost(items, MAX_STANDARD_PAGES)

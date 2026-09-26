@@ -409,12 +409,17 @@ async def admin_get_quiz_generation_log(limit: int = 200, days: int = 7) -> List
     الطالب - يغذّي لوحة الأدمن الجديدة "📊 سجل توليد الكويزات" (handlers/admin/ai_control.py):
     لكل كويز مولَّد، الوقت المستغرق (generation_seconds) واسم/مزوّد الموديل المستخدم
     (ai_model/ai_provider) - كلها مُرفقة أصلاً بـ metadata الحدث من handlers/files.py.
-    نفس نمط admin_get_recent_errors تماماً (تصفح محلي، صفحة الطالب مُرفقة)."""
+    نفس نمط admin_get_recent_errors تماماً (تصفح محلي، صفحة الطالب مُرفقة).
+
+    🆕 صار يجلب 'cached_quiz_used' كمان (إعادة استخدام كويز جاهز من نفس الملف - لا توليد
+    AI فعلي إطلاقاً) بجانب 'quiz_generated' الأصلي، بنفس القائمة المرتّبة زمنياً - عشان
+    لوحة "سجل توليد الكويزات" تعكس كل كويز وصل لطالب (جديد أو من الكاش)، لا التوليد
+    الفعلي بس. event_type مُرفق بكل صف الآن ليميّز ai_control.py بين الحالتين بالعرض."""
     try:
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
         query = supabase.table("usage_events") \
-            .select("user_id, metadata, created_at") \
-            .eq("event_type", "quiz_generated") \
+            .select("user_id, metadata, created_at, event_type") \
+            .in_("event_type", ["quiz_generated", "cached_quiz_used"]) \
             .gte("created_at", since)
         if ADMIN_ID:
             query = query.neq("user_id", ADMIN_ID)

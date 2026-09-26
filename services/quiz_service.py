@@ -5,7 +5,7 @@ import random
 from typing import Any, Dict, Tuple, Optional, List
 
 from constants import (
-    MAX_LIMIT_PAGES, MAX_LIMIT_QUESTIONS, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS,
+    MAX_ALBUM_IMAGES, MAX_LIMIT_PAGES, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS,
     SUBJECT_MATH, SUBJECT_OTHER, SUBJECT_ENGLISH, SUBJECT_FRENCH, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
     QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM, QUESTION_TYPE_OPTIONS,
     # 🆕 اختبار محلول/غير محلول
@@ -72,17 +72,32 @@ async def _prefetch_math_quiz_images(quiz_id: str, quiz_data: List[Dict[str, Any
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
-def determine_execution_mode(items: int, questions: int, cached: bool = False) -> str:
-    """تحديد وضع التنفيذ (عادي، متقدم، أو كاش)"""
+def determine_execution_mode(items: int, questions: int, cached: bool = False, is_album: bool = False) -> str:
+    """تحديد وضع التنفيذ - 🆕 صار مطابقاً تماماً لشرط التنفيذ الفعلي بـ
+    gemini_helper.generate_quiz_smart (is_super_pdf/is_super_images بالضبط)، بدل عتبة
+    صفحات موحّدة وهمية كانت تُطبَّق حتى على الصور:
+    - is_album=True: "سوبر" فقط لو عدد الصور > MAX_ALBUM_IMAGES (نفس شرط is_super_images
+      الحقيقي حرفياً - كان سابقاً يُقاس بعتبة صفحات PDF (35) الأكبر بكثير من عتبة الصور
+      الحقيقية (10)، فألبوم من 12 صورة كان يُصنَّف "Standard" رغم دخوله الفعلي بمعالجة
+      Super Images المتوازية).
+    - ملف/PDF: "سوبر" فقط لو الصفحات > MAX_LIMIT_PAGES (نفس شرط is_super_pdf الحقيقي).
+      🆕 عدد الأسئلة وحده لم يعد كافياً لتصنيف الطلب "سوبر" (كان سابقاً كذلك) لأنه لا يقابل
+      أي معالجة متوازية فعلية - generate_quiz_smart لا يفحص عدد الأسئلة إطلاقاً عند اختيار
+      المسار، فطلب 60 سؤالاً من ملف 5 صفحات يُنفَّذ بمكالمة Gemini واحدة عادية تماماً. عدد
+      أسئلة كبير مع محتوى صغير يبقى "Over-Limit" (مكالمة واحدة أثقل - مخرجات أكبر - لا
+      مسار مختلف)."""
     if cached: return "Cached"
-    if items > MAX_LIMIT_PAGES or questions > MAX_LIMIT_QUESTIONS: return "Super-Processing"
+    if is_album:
+        return "Super-Images" if items > MAX_ALBUM_IMAGES else "Standard"
+    if items > MAX_LIMIT_PAGES: return "Super-PDF"
     if items > MAX_STANDARD_PAGES or questions > MAX_STANDARD_QUESTIONS: return "Over-Limit"
     return "Standard"
 
 MODE_LABELS_AR = {
     "Standard": "⚡ عادي",
     "Over-Limit": "📈 موسّع",
-    "Super-Processing": "🚀 معالجة فائقة (ملف كبير)",
+    "Super-PDF": "🚀 معالجة فائقة (PDF كبير)",
+    "Super-Images": "🚀 معالجة فائقة (ألبوم صور كبير)",
     "Cached": "🗃️ من الكاش",
 }
 
