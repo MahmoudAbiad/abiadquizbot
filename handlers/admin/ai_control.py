@@ -402,23 +402,38 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
             else:
                 token_cost_row = ""
 
-            # 🆕 ترتيب الموديل ضمن الكاسكيد *لحظة* نجاح هذا التوليد بالذات (cascade_rank/
+            # 🆕 نوع العملية المتبعة (عادي/Super PDF/Super Images/Groq السريع) + ترتيب
+            # الموديل(ات) ضمن الكاسكيد *لحظة* نجاح هذا التوليد بالذات (cascade_rank/
             # cascade_total - راجع gemini_helper._execute_cascade) - ثابت بالسجل حتى لو
-            # تغيّر ترتيب الكاسكيد لاحقاً من لوحة الأدمن. Super PDF/Images وGroq السريع لا
-            # ينتميان لسلسلة مرقّمة (راجع الملاحظات بـ gemini_helper.py) فتُعرض بوصف بدل رقم.
+            # تغيّر ترتيب الكاسكيد لاحقاً من لوحة الأدمن.
             cascade_rank = meta.get("cascade_rank")
             cascade_total = meta.get("cascade_total")
             gen_mode = meta.get("generation_mode")
-            if cascade_rank and cascade_total:
-                rank_line = f" ┣ 📶 الترتيب بالكاسكيد: #{cascade_rank} من {cascade_total}\n"
-            elif gen_mode == "super_pdf":
-                rank_line = " ┣ 📶 الترتيب: 🔀 وضع Super PDF (أقوى موديل Gemini)\n"
-            elif gen_mode == "super_images":
-                rank_line = " ┣ 📶 الترتيب: 🔀 وضع Super Images (أقوى موديل Gemini)\n"
+            chunk_details = meta.get("chunk_details")  # 🆕 تفصيل كل جزء بمسار Super (راجع gemini_helper.py)
+
+            mode_labels = {
+                "super_pdf": "🔀 Super PDF",
+                "super_images": "🔀 Super Images",
+                "regular": "➡️ عادي",
+            }
+            mode_line = f" ┣ 🧩 نوع العملية: {mode_labels.get(gen_mode, '➡️ عادي' if provider != 'groq' else '⚡ Groq السريع')}\n"
+
+            if chunk_details:
+                # 🆕 كل جزء (Task) استقل بكاسكيد خاص فيه (نماذج × مفاتيح) - فممكن كل جزء
+                # يفوز بموديل/رتبة مختلفة عن التاني، هيك بنعرضهن مفصّلين بدل وصف عام واحد.
+                chunk_lines = []
+                for chunk_index, chunk in enumerate(chunk_details, start=1):
+                    c_model = html_escape(str(chunk.get("model") or "؟"))
+                    c_rank, c_total = chunk.get("cascade_rank"), chunk.get("cascade_total")
+                    rank_part = f" (#{c_rank}/{c_total})" if c_rank and c_total else ""
+                    chunk_lines.append(f"     {chunk_index}. <code>{c_model}</code>{rank_part}")
+                rank_line = mode_line + " ┣ 📶 تفصيل الأجزاء:\n" + "\n".join(chunk_lines) + "\n"
+            elif cascade_rank and cascade_total:
+                rank_line = mode_line + f" ┣ 📶 الترتيب بالكاسكيد: #{cascade_rank} من {cascade_total}\n"
             elif provider == "groq":
-                rank_line = " ┣ 📶 الترتيب: ⚡ مسار Groq السريع (خارج الكاسكيد)\n"
+                rank_line = mode_line
             else:
-                rank_line = ""
+                rank_line = mode_line
 
             report_lines.append(
                 f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{row.get('user_id')}</code>\n"

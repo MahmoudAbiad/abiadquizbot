@@ -1117,6 +1117,10 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             "cascade_rank": generation_meta.get("cascade_rank"),
             "cascade_total": generation_meta.get("cascade_total"),
             "generation_mode": generation_meta.get("mode"),
+            # 🆕 تفصيل كل جزء بمسار Super PDF/Images (موديل + مفتاح + رتبته بالكاسكيد لحظة
+            # نجاحه) - None لأي مسار غير super (راجع gemini_helper._generate_super_pdf/
+            # _generate_super_images). يُعرض بلوحة الأدمن "📊 سجل توليد الكويزات".
+            "chunk_details": generation_meta.get("chunk_details"),
         })
         await reward_referrer_if_eligible(call.from_user.id)
 

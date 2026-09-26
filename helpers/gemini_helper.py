@@ -234,19 +234,6 @@ async def _get_models_cascade() -> List[Dict[str, str]]:
     return supported
 
 
-async def _get_top_gemini_model() -> str:
-    """🆕 اسم أول موديل Gemini (AI Studio) مفعّل بسلسلة الـ cascade تحديداً - يُستخدم حصراً
-    من مساري Super PDF/Super Images المتوازيين (_generate_super_pdf/_generate_super_images
-    تحت) اللذين يحتاجان بالضرورة عدة مفاتيح AI Studio حقيقية موزَّعة على _GEMINI_CLIENTS
-    للمعالجة الثلاثية المتوازية. عميل Vertex واحد فقط (لا مجموعة مفاتيح)، فلا يصلح إطلاقاً
-    لهذا النمط من التوزيع - يُستثنى دوماً من هذا الاختيار حتى لو كان الأعلى أولوية بالسلسلة
-    العامة (راجع _get_models_cascade أعلاه، المستخدَمة بالمسار العادي _execute_cascade)."""
-    entries = await get_cascade_models()
-    gemini_entries = [e for e in entries if e.get("provider") == "gemini"]
-    if not gemini_entries:
-        return "gemini-3.5-flash-lite"
-    return gemini_entries[0]["model_name"]
-
 # AI-NOTE: تتبّع دقيق لكل زوج (فهرس المفتاح، اسم النموذج) على حدة - بدل حظر المفتاح
 # بالكامل عبر كل النماذج، هيك حظر مفتاح على نموذج مُعيّن (بسبب حصته انتهت مثلاً) لا يمنعه
 # إطلاقاً من الاستمرار بالعمل على نموذج آخر من السلسلة بنفس اللحظة.
@@ -481,14 +468,10 @@ def _round_robin_key_order() -> List[int]:
     return order
 
 
-def _available_keys_for_model(model: str) -> List[int]:
-    """قائمة فهارس المفاتيح غير المحظورة حالياً على نموذج مُعيّن بالذات (تُستخدم بمسار
-    Super PDF المتوازي الذي يحتاج عدة مفاتيح متاحة بنفس اللحظة على نفس النموذج)."""
-    return [index for index in range(len(API_KEYS)) if not _is_model_key_blocked(index, model)]
-
-
 async def _execute_cascade(
-    attempt_fn: Callable[[genai.Client, int, str], Awaitable[Any]],
+    attempt_fn: Callable[[genai.Client, int, str, int, int], Awaitable[Any]],
+    exclude_vertex: bool = False,
+    mode: str = "regular",
 ) -> Optional[Any]:
     """المنفّذ العام لسلسلة الأولوية الكاملة:
     - الحلقة الخارجية: تمشي على صفوف الـ cascade (provider + model) من الأذكى للأضعف
@@ -504,9 +487,33 @@ async def _execute_cascade(
     - 🆕 كل زوج (مفتاح، موديل) يُجرَّب مرة واحدة بالضبط - بدون أي إعادة محاولة أو انتظار
       على نفس الزوج. أي فشل (بما فيه ازدحام 503 مؤقت) يُحظر فوراً وينتقل الـ cascade
       فوراً للزوج التالي (راجع _mark_model_key_failure لمدة الحظر حسب نوع الخطأ).
-    """
-    if not API_KEYS and _VERTEX_CLIENT is None:
-        log_error(logger, "GEMINI_API_KEYS is not configured and Vertex client is not initialized")
+
+    🆕 exclude_vertex: يستثني صفوف provider="vertex" من هذه السلسلة تحديداً (تُستخدم من
+    مساري Super PDF/Super Images المتوازيين - راجع _generate_super_pdf/_generate_super_images).
+    السبب: عميل Vertex واحد فقط (لا مجموعة مفاتيح)، وquota الـ Gemini Enterprise Agent
+    Platform (الاسم الجديد لـ Vertex AI) محسوبة على مستوى المشروع كله (per_project_per_
+    base_model) وليس لكل client/عملية على حدة - فلو 3 أجزاء متوازية كلهن اختاروا Vertex
+    بنفس اللحظة، بيضربوا نفس الـ quota pool المشترك دفعة وحدة بدل التوزّع على 3 مصادر
+    مستقلة كما هو الهدف من التوازي هون. الاستثناء ينطبق فقط على هذا النداء (المسار
+    العادي غير المتوازي بيضل يقدر يستخدم Vertex عادي، بأولويته بالسلسلة كما هي).
+
+    🆕 mode: وسم نصي حر ("regular"، "super_pdf"، "super_images"...) يُحفظ ضمن
+    _last_model_used_var["mode"] بعد كل نجاح - يُقرأ لاحقاً بلوحة الأدمن ("📊 سجل توليد
+    الكويزات") لعرض نوع العملية المتبعة. القيمة الافتراضية "regular" تغطي كل الاستدعاءات
+    الحالية (generate_structured_with_cascade/generate_text_with_cascade/_generate_regular)
+    بدون أي تعديل عليها. مساري Super PDF/Images بيمرّروا mode الخاص فيهن صراحة، وبيتجاوزوا
+    هالقيمة بأي حال بـ _last_model_used_var.set() الخاص فيهن بالدالة الأم (راجع الملاحظة
+    عن ContextVar وasyncio.gather أعلى _build_super_chunk_attempt_fn) - فمرّرتها هون بس
+    لضمان صحة القيمة حتى لو استُدعيت _execute_cascade مستقبلاً من مسار جديد ما بيعمل
+    override صريح متل هالاثنين.
+
+    🆕 cascade_rank/cascade_total تُمرَّر الآن أيضاً لـ attempt_fn نفسها (وليس فقط
+    محفوظة بـ _last_model_used_var) - ضروري لمسار Super PDF/Images تحديداً حيث كل جزء
+    Task منفصل عبر asyncio.gather، فلازم attempt_fn ترجّع رقم ترتيبها صراحة بقيمة
+    العودة (راجع _build_super_chunk_attempt_fn) بدل الاعتماد على ContextVar اللي ما
+    بيترشح لمهمة الأب."""
+    if not API_KEYS and (exclude_vertex or _VERTEX_CLIENT is None):
+        log_error(logger, "GEMINI_API_KEYS is not configured" + ("" if exclude_vertex else " and Vertex client is not initialized"))
         return None
 
     key_order = _round_robin_key_order()
@@ -519,12 +526,14 @@ async def _execute_cascade(
         model = entry["model_name"]
 
         if provider == "vertex":
+            if exclude_vertex:
+                continue  # مُستبعد صراحة بهذا النداء (Super PDF/Images) - راجع الملاحظة أعلى الدالة
             if _VERTEX_CLIENT is None:
                 continue  # غير مُعدّ حالياً على هذا السيرفر - يُتخطى بصمت، السلسلة تكمل بباقي الصفوف
             if _is_model_key_blocked(VERTEX_KEY_INDEX, model):
                 continue
             try:
-                result = await attempt_fn(_VERTEX_CLIENT, VERTEX_KEY_INDEX, model)
+                result = await attempt_fn(_VERTEX_CLIENT, VERTEX_KEY_INDEX, model, cascade_rank, cascade_total)
                 log_info(logger, f"✅ Cascade success: provider=vertex model={model} rank={cascade_rank}/{cascade_total}")
                 # 🆕 cascade_rank/cascade_total: ترتيب هذا الصف ضمن سلسلة الأولوية *لحظة*
                 # نجاح هذا التوليد تحديداً (لا الترتيب الحالي - قد يتغيّر لاحقاً من لوحة
@@ -532,7 +541,7 @@ async def _execute_cascade(
                 # تولّد هذا الكويز بالذات"، حتى لو تغيّر ترتيب الكاسكيد بعدها.
                 _last_model_used_var.set({
                     "provider": "vertex", "model": model, "key_index": VERTEX_KEY_INDEX,
-                    "cascade_rank": cascade_rank, "cascade_total": cascade_total,
+                    "cascade_rank": cascade_rank, "cascade_total": cascade_total, "mode": mode,
                 })
                 return result
             except Exception as exc:
@@ -551,7 +560,7 @@ async def _execute_cascade(
                 continue
             client = _GEMINI_CLIENTS[key_index]
             try:
-                result = await attempt_fn(client, key_index, model)
+                result = await attempt_fn(client, key_index, model, cascade_rank, cascade_total)
                 # 🆕 سطر تأكيد وحيد عند النجاح - يوضّح بالـ logs مباشرة (بدون الرجوع
                 # لقاعدة البيانات) إن السلسلة الديناميكية (ai_model_slots) هي فعلاً
                 # اللي حُكّمت هون: أي موديل نجح، بأي ترتيب، وبأي مفتاح.
@@ -561,7 +570,7 @@ async def _execute_cascade(
                 # راجع نفس الملاحظة أعلى فرع provider=="vertex".
                 _last_model_used_var.set({
                     "provider": "gemini", "model": model, "key_index": key_index,
-                    "cascade_rank": cascade_rank, "cascade_total": cascade_total,
+                    "cascade_rank": cascade_rank, "cascade_total": cascade_total, "mode": mode,
                 })
                 return result
             except Exception as exc:
@@ -641,7 +650,7 @@ async def generate_structured_with_cascade(
     """
     final_contents: List[Any] = ([prompt_instruction] if prompt_instruction else []) + list(contents)
 
-    async def _attempt(client: genai.Client, key_index: int, model: str) -> Tuple[Any, int]:
+    async def _attempt(client: genai.Client, key_index: int, model: str, cascade_rank: int, cascade_total: int) -> Tuple[Any, int]:
         response = await asyncio.wait_for(
             client.aio.models.generate_content(
                 model=model,
@@ -681,7 +690,7 @@ async def generate_text_with_cascade(
     بدل تسليمها للمستخدم بصمت وكأنها نتيجة كاملة."""
     final_contents: List[Any] = ([prompt_instruction] if prompt_instruction else []) + list(contents)
 
-    async def _attempt(client: genai.Client, key_index: int, model: str) -> Tuple[str, int, bool]:
+    async def _attempt(client: genai.Client, key_index: int, model: str, cascade_rank: int, cascade_total: int) -> Tuple[str, int, bool]:
         response = await asyncio.wait_for(
             client.aio.models.generate_content(
                 model=model,
@@ -830,7 +839,7 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[Tuple
         log_error(logger, "GEMINI_API_KEYS is not configured")
         return None
 
-    async def _attempt(client: genai.Client, key_index: int, model: str) -> Tuple[List[Dict[str, Any]], int]:
+    async def _attempt(client: genai.Client, key_index: int, model: str, cascade_rank: int, cascade_total: int) -> Tuple[List[Dict[str, Any]], int]:
         uploaded: List[Any] = []
         try:
             contents = await _build_contents_for_paths(client, paths, prompt, uploaded)
@@ -859,52 +868,82 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[Tuple
     return await _execute_cascade(_attempt)
 
 
-async def _generate_single_attempt(
-    paths: Sequence[str], prompt: str, key_index: int, model: str
-) -> Tuple[List[Dict[str, Any]], int, int, int, int]:
-    """محاولة توليد وحيدة بمفتاح ونموذج محدَّدين سلفاً (بدون المرور بسلسلة الأولوية الكاملة) -
-    تُستخدم حصراً بمسار Super PDF المتوازي حيث كل جزء (Chunk) مُخصَّص لمفتاح مختلف بنفس اللحظة."""
-    client = _GEMINI_CLIENTS[key_index]
-    uploaded: List[Any] = []
-    try:
-        contents = await _build_contents_for_paths(client, paths, prompt, uploaded)
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=QuizResponse,
+def _build_super_chunk_attempt_fn(
+    paths: Sequence[str], prompt: str
+) -> Callable[[genai.Client, int, str, int, int], Awaitable[Tuple[List[Dict[str, Any]], int, int, int, int, str, int, int, int]]]:
+    """🆕 (طلب صريح من المستخدم: كاسكيد نظامي كامل بدل تثبيت مفتاح واحد + محاولة احتياطية
+    وحيدة) يبني attempt_fn متوافقة تماماً مع توقيع _execute_cascade العام (نفس المُنفِّذ
+    المستخدَم بمسار التوليد العادي بالضبط) لجزء واحد ثابت (مسار/مسارات + برومبت) ضمن
+    Super PDF/Images.
+
+    الفرق الجوهري عن التصميم السابق: client/key_index/model هلق كلها تُمرَّر من
+    _execute_cascade نفسه حسب مكانه الحالي بالسلسلة (رتبة الموديل × دورة المفاتيح)، بدل ما
+    تكون مُثبَّتة سلفاً لكل جزء. عملياً: يجرَّب أقوى موديل (MODELS_CASCADE[0]) على كل مفتاح
+    متاح بالتتالي؛ لو فشل على كل المفاتيح، ينتقل الكاسكيد كامل للموديل التالي بالسلسلة على كل
+    المفاتيح من جديد، وهكذا - تماماً نفس منطق التوليد العادي، مطبَّق هون على مستوى كل جزء
+    (Chunk) على حدة، بالتوازي مع بقية الأجزاء (لكل جزء نسخته الخاصة من هذا الكاسكيد، تعمل
+    بنفس اللحظة عبر asyncio.gather بالمستدعي - راجع _generate_super_pdf).
+
+    🆕 نُعيد أيضاً model/key_index الفائزين صراحة ضمن القيمة المُرجَعة (وليس فقط عبر
+    ContextVar الذي يضبطه _execute_cascade داخلياً) لأن كل جزء يُنفَّذ بمهمة (Task) منفصلة
+    عبر asyncio.gather بالمستدعي، وContextVar لا يتسرّب تلقائياً من مهمة فرعية لمهمة أصلية -
+    بدونها ما كان بالإمكان معرفة أي موديل/مفتاح فاز فعلياً بكل جزء من نطاق الدالة المستدعية.
+
+    ملاحظة تصميم: تسجيل فشل كل زوج (مفتاح، موديل) هون من مسؤولية _execute_cascade نفسه
+    (يستدعي _mark_model_key_failure تلقائياً بكل استثناء) - لا نكرّر ذلك هون تفادياً لأي
+    ازدواجية بالحظر.
+
+    🆕 نرجّع أيضاً cascade_rank/cascade_total الفائزين (ممرَّرين هلق من _execute_cascade
+    نفسه لكل attempt - راجع الملاحظة الموازية فوق _execute_cascade) لنفس سبب model/key_index:
+    كل جزء Task منفصل، فلازم يرجّع رقم ترتيبه صراحة بقيمة العودة بدل الاعتماد على ContextVar.
+    يُستخدم لاحقاً من _generate_super_pdf/_generate_super_images لبناء تفصيل دقيق لكل جزء
+    (أي موديل فاز، وبأي ترتيب ضمن الكاسكيد وقتها) - يُعرض بلوحة الأدمن ("📊 سجل توليد
+    الكويزات") بدل وصف عام واحد لكل السوبر."""
+    async def _attempt(client: genai.Client, key_index: int, model: str, cascade_rank: int, cascade_total: int):
+        uploaded: List[Any] = []
+        try:
+            contents = await _build_contents_for_paths(client, paths, prompt, uploaded)
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=QuizResponse,
+                    ),
                 ),
-            ),
-            timeout=AI_REQUEST_TIMEOUT,
-        )
-        parsed = _parse_structured_gemini_response(response, QuizResponse, model)
-        if not hasattr(parsed, "questions"):
-            raise ValueError("Gemini returned no structured questions")
-        questions = [question.model_dump() for question in parsed.questions]
-        # 🆕 لا نستدعي _record_token_usage هنا: هذه الدالة تُنفَّذ ضمن مهمة فرعية عبر
-        # asyncio.gather (راجع _generate_super_pdf/_generate_super_images) وContextVar لا
-        # يتسرّب لمهمة الأب - نُرجع usage_metadata الخام ليُجمَع ويُسجَّل صراحة بالمستدعي.
-        usage = getattr(response, "usage_metadata", None)
-        input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
-        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
-        thoughts_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
-        token_count = int(getattr(usage, "total_token_count", 0) or 0)
-        log_info(logger, f"✅ Cascade success (super pdf/images): provider=gemini model={model} key_index={key_index}")
-        _last_model_used_var.set({"provider": "gemini", "model": model, "key_index": key_index})
-        return questions, int(token_count), input_tokens, output_tokens, thoughts_tokens
-    except Exception as exc:
-        _mark_model_key_failure(key_index, model, exc)
-        raise
-    finally:
-        for uploaded_file in uploaded:
-            asyncio.create_task(_safe_delete_gemini_file(client, uploaded_file.name))
+                timeout=AI_REQUEST_TIMEOUT,
+            )
+            parsed = _parse_structured_gemini_response(response, QuizResponse, model)
+            if not hasattr(parsed, "questions"):
+                raise ValueError("Gemini returned no structured questions")
+            questions = [question.model_dump() for question in parsed.questions]
+            usage = getattr(response, "usage_metadata", None)
+            input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+            output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+            thoughts_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
+            token_count = int(getattr(usage, "total_token_count", 0) or 0)
+            return (
+                questions, int(token_count), input_tokens, output_tokens, thoughts_tokens,
+                model, key_index, cascade_rank, cascade_total,
+            )
+        finally:
+            for uploaded_file in uploaded:
+                asyncio.create_task(_safe_delete_gemini_file(client, uploaded_file.name))
+    return _attempt
 
 
 async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) -> Optional[Tuple[List[Dict[str, Any]], int]]:
-    """معالجة متوازية لملفات الـ PDF الضخمة بتوزيع المهام على 3 مفاتيح API مختلفة بطلب واحد
-    لكل جزء، باستخدام أقوى نموذج بسلسلة الأولوية (MODELS_CASCADE[0]) لكل الأجزاء الثلاثة."""
+    """معالجة متوازية لملفات الـ PDF الضخمة: تقسيم الملف لـ 3 أجزاء، وكل جزء يُنفَّذ بمهمة
+    (Task) مستقلة عبر _execute_cascade (نفس المُنفِّذ العام المستخدَم بالتوليد العادي)،
+    بالتوازي فيما بينها عبر asyncio.gather.
+
+    🆕 (طلب صريح من المستخدم) كاسكيد نظامي كامل لكل جزء بدل تثبيت مفتاح واحد + محاولة
+    احتياطية وحيدة: كل جزء يجرَّب أقوى موديل على كل مفتاح متاح بالتتالي، فإذا فشل على الكل
+    ينتقل للموديل التالي بالسلسلة على كل المفاتيح من جديد، وهكذا حتى نفاد السلسلة كاملة (أو
+    النجاح). يعني الأجزاء الثلاثة لم تعد "مقفولة" كل واحدة بمفتاح مختلف من البداية - ممكن
+    جزءين ينتهي بهم المطاف يجربون نفس المفتاح لو الأول فشل عليه، وهذا مقبول ومقصود (كل مفتاح
+    يتحمّل عدة طلبات متزامنة براحة)."""
     if len(API_KEYS) < 3:
         log_error(logger, "Super processing requires three distinct GEMINI_API_KEYS")
         return None
@@ -916,38 +955,53 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
     if len(chunk_paths) != 3:
         return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
 
-    # 🆕 يستخدم _get_top_gemini_model (لا _get_models_cascade) عمداً: هذا المسار يحتاج 3
-    # مفاتيح AI Studio حقيقية موزَّعة بالتوازي - عميل Vertex واحد فقط، فلا يصلح هنا حتى لو
-    # كان الأعلى أولوية بالسلسلة العامة (راجع التعليق أعلى _get_top_gemini_model).
-    top_model = await _get_top_gemini_model()
-    key_indices = (_available_keys_for_model(top_model) or list(range(len(API_KEYS))))[:3]
-    if len(key_indices) < 3:
-        return None
     base, remainder = divmod(count, 3)
     question_counts = [base + (1 if index < remainder else 0) for index in range(3)]
     try:
         tasks = [
-            _generate_single_attempt(
-                [chunk_path], prompt_template.replace("{count}", str(question_count)), key_index, top_model
+            _execute_cascade(
+                _build_super_chunk_attempt_fn(
+                    [chunk_path], prompt_template.replace("{count}", str(question_count))
+                ),
+                exclude_vertex=True,
             )
-            for chunk_path, question_count, key_index in zip(chunk_paths, question_counts, key_indices)
+            for chunk_path, question_count in zip(chunk_paths, question_counts)
             if question_count > 0
         ]
         results = await asyncio.gather(*tasks)
-        questions = [question for result, *_ in results for question in result]
-        total_tokens = sum(tokens for _, tokens, _, _, _ in results)
-        total_input = sum(inp for _, _, inp, _, _ in results)
-        total_output = sum(out for _, _, _, out, _ in results)
-        total_thoughts = sum(th for _, _, _, _, th in results)
+        # 🆕 لو جزء واحد استنفد السلسلة كاملة (كل موديل × كل مفتاح فشل معه)، _execute_cascade
+        # يرجّع له None بدل رفع استثناء - نعامل فشل أي جزء كفشل كامل للطلب (نفس سلوك
+        # asyncio.gather السابق عند رفع استثناء، لكن بشكل صريح هلق).
+        if any(result is None for result in results):
+            log_error(logger, "Super PDF: chunk exhausted the entire model/key cascade")
+            return None
+        questions = [question for result in results for question in result[0]]
+        total_tokens = sum(result[1] for result in results)
+        total_input = sum(result[2] for result in results)
+        total_output = sum(result[3] for result in results)
+        total_thoughts = sum(result[4] for result in results)
+        winning_models = [result[5] for result in results]
+        # 🆕 تفصيل كامل لكل جزء على حدة (موديل/مفتاح/رتبته ضمن الكاسكيد لحظة نجاحه) - يُقرأ
+        # لاحقاً بلوحة الأدمن ("📊 سجل توليد الكويزات") لعرض كل جزء برقمه الحقيقي بدل وصف
+        # عام واحد لكل عملية Super. راجع _build_super_chunk_attempt_fn لمصدر هالحقول.
+        chunk_details = [
+            {"model": result[5], "key_index": result[6], "cascade_rank": result[7], "cascade_total": result[8]}
+            for result in results
+        ]
         # 🆕 كل جزء نُفِّذ بمهمة (Task) منفصلة عبر asyncio.gather - ContextVar لا يتسرّب
-        # تلقائياً من مهمة فرعية لمهمة أصلية، لذا نسجّل الموديل الفائز والتوكنز المجمّعة
-        # صراحة هنا (top_model معروف مسبقاً بهذا النطاق نفسه، نفس الموديل استُخدم لكل
-        # الأجزاء الثلاثة؛ التوكنز جمعناها يدوياً من كل نتيجة فرعية أعلاه بنفس السبب).
+        # تلقائياً من مهمة فرعية لمهمة أصلية، لذا نسجّل الموديل/المفتاح الفائزين والتوكنز
+        # المجمّعة صراحة هنا من القيم المُعادة من كل جزء (راجع _build_super_chunk_attempt_fn).
+        # حقل "model": موديل الجزء الأول لو كل الأجزاء استخدمت نفس الموديل (الحالة الشائعة)،
+        # أو "mixed" صراحة لو اختلفت (كاسكيد فعلي صار فيه انتقال لموديل/مفتاح آخر لبعض
+        # الأجزاء) - chunk_details يحفظ التفصيل الكامل (موديل + مفتاح + رتبة) لكل جزء بأي حال.
         _last_model_used_var.set({
-            "provider": "gemini", "model": top_model, "key_index": None, "mode": "super_pdf",
-            # 🆕 هالمسار بيستخدم دايماً أقوى موديل Gemini فقط (راجع _get_top_gemini_model) -
-            # رقم ترتيب دقيق ضمن الكاسكيد الكامل (يشمل Vertex) مو منطقي هون، فبنسيبه None
-            # صراحة (لا 1 مضلّلة) وبنعرض "Super PDF" بدل رقم بلوحة الأدمن.
+            "provider": "gemini",
+            "model": winning_models[0] if len(set(winning_models)) == 1 else "mixed",
+            "key_index": None, "mode": "super_pdf",
+            "chunk_details": chunk_details,
+            # 🆕 هالمسار بيشمل كاسكيد كامل عبر عدة أزواج (مفتاح، موديل) محتملة لكل جزء - رقم
+            # ترتيب دقيق واحد ضمن الكاسكيد الكامل مو منطقي هون (كل جزء ممكن يفوز برتبة
+            # مختلفة)، فبنسيبه None صراحة - رتبة كل جزء الحقيقية موجودة جوا chunk_details.
             "cascade_rank": None, "cascade_total": None,
         })
         _last_token_usage_var.set({
@@ -976,9 +1030,9 @@ async def _generate_super_images(
     file_paths: List[str], count: int, prompt_template: str
 ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     """🆕 معالجة متوازية لألبومات الصور الكبيرة (أكبر من SUPER_IMAGE_BATCH_THRESHOLD -
-    مصدرها حصراً رفع الويب حالياً، راجع handlers/files.py::process_web_uploaded_images)
-    بتوزيع المهام على 3 مفاتيح API مختلفة بطلب واحد لكل دفعة صور، بنفس منطق
-    _generate_super_pdf أعلاه حرفياً - فقط الدفعات هون قوائم صور بدل أجزاء PDF.
+    مصدرها حصراً رفع الويب حالياً، راجع handlers/files.py::process_web_uploaded_images)،
+    بنفس منطق _generate_super_pdf أعلاه حرفياً (كاسكيد نظامي كامل عبر _execute_cascade لكل
+    دفعة صور، بالتوازي مع بقية الدفعات) - فقط الدفعات هون قوائم صور بدل أجزاء PDF.
 
     ملاحظة مهمة: التقسيم لـ 3 دفعات هون سببه توزيع عدد الأسئلة الكبير على طلبات
     متعددة (تفادي انقطاع finish_reason=MAX_TOKENS بالمخرجات) وتسريع الاستجابة عبر
@@ -993,32 +1047,40 @@ async def _generate_super_images(
     if len(chunks) < 2:
         return await _generate_regular(file_paths, prompt_template.replace("{count}", str(count)))
 
-    # 🆕 راجع نفس الملاحظة أعلى _generate_super_pdf حول استخدام _get_top_gemini_model عمداً هنا.
-    top_model = await _get_top_gemini_model()
-    key_indices = (_available_keys_for_model(top_model) or list(range(len(API_KEYS))))[:len(chunks)]
-    if len(key_indices) < len(chunks):
-        return None
     base, remainder = divmod(count, len(chunks))
     question_counts = [base + (1 if index < remainder else 0) for index in range(len(chunks))]
     tasks = [
-        _generate_single_attempt(
-            chunk, prompt_template.replace("{count}", str(question_count)), key_index, top_model
+        _execute_cascade(
+            _build_super_chunk_attempt_fn(chunk, prompt_template.replace("{count}", str(question_count))),
+            exclude_vertex=True,
         )
-        for chunk, question_count, key_index in zip(chunks, question_counts, key_indices)
+        for chunk, question_count in zip(chunks, question_counts)
         if question_count > 0
     ]
     if not tasks:
         return None
     results = await asyncio.gather(*tasks)
-    questions = [question for result, *_ in results for question in result]
-    total_tokens = sum(tokens for _, tokens, _, _, _ in results)
-    total_input = sum(inp for _, _, inp, _, _ in results)
-    total_output = sum(out for _, _, _, out, _ in results)
-    total_thoughts = sum(th for _, _, _, _, th in results)
-    # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول ContextVar وasyncio.gather.
+    if any(result is None for result in results):
+        log_error(logger, "Super Images: chunk exhausted the entire model/key cascade")
+        return None
+    questions = [question for result in results for question in result[0]]
+    total_tokens = sum(result[1] for result in results)
+    total_input = sum(result[2] for result in results)
+    total_output = sum(result[3] for result in results)
+    total_thoughts = sum(result[4] for result in results)
+    winning_models = [result[5] for result in results]
+    # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول ContextVar/asyncio.gather وchunk_details.
+    chunk_details = [
+        {"model": result[5], "key_index": result[6], "cascade_rank": result[7], "cascade_total": result[8]}
+        for result in results
+    ]
     _last_model_used_var.set({
-        "provider": "gemini", "model": top_model, "key_index": None, "mode": "super_images",
-        # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول عدم وجود رقم ترتيب دقيق هون.
+        "provider": "gemini",
+        "model": winning_models[0] if len(set(winning_models)) == 1 else "mixed",
+        "key_index": None, "mode": "super_images",
+        "chunk_details": chunk_details,
+        # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول عدم وجود رقم ترتيب دقيق هون -
+        # رتبة كل جزء الحقيقية موجودة جوا chunk_details.
         "cascade_rank": None, "cascade_total": None,
     })
     _last_token_usage_var.set({
