@@ -167,7 +167,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             f"💰 <code>1</code> نقطة تقريباً لكل صفحة/سؤال، وخصم <code>90%</code> عند إعادة استخدام كويز جاهز.\n"
             f"📊 رصيدك: <code>{points:.2f}</code> نقطة (🎁 {free_points:.2f} · 💳 {paid_points:.2f})\n\n"
             f"🎯 شارك رابط دعوتك مع زملائك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁\n"
-            f"❓ محتاج شرح أوضح بالخطوات؟ اضغط 🎬 «كيف يعمل البوت؟» بالأسفل، أو أرسل /help بأي وقت."
+           #f"❓ محتاج شرح أوضح بالخطوات؟ اضغط 🎬 «كيف يعمل البوت؟» بالأسفل، أو أرسل /help بأي وقت."
         )
         
         await msg.answer(
