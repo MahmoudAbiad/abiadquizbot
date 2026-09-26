@@ -3,41 +3,60 @@
 معالج المحاضرات الصوتية: يستقبل رسائل صوتية (voice/audio)، يفرّغها نصياً عبر
 services/audio_service.py، ثم يعرض على الطالب أربعة إجراءات ممكنة على النص
 الناتج (تصدير Word/PDF، تلخيص أكاديمي، تحويل لكويز، أو استلام النص الخام).
+
+🆕 [إعادة هيكلة] هذا الملف أصبح طبقة Handlers خالصة فقط: استقبال الطلب، تحقق
+سريع من الحالة/المدخلات، استدعاء الخدمات، ثم الرد على الطالب. منطق الأعمال
+الذي كان مدمجاً هنا سابقاً انتقل بالكامل لطبقة Services دون أي تغيير سلوكي:
+- قياس مدة الملف الصوتي (mutagen/ffprobe/ffmpeg)  -> services/audio_duration_service.py
+- توحيد قياس المدة+التسعير+التحقق من السقف الأقصى (كان مكرراً حرفياً بين المسار
+  المباشر ومسار رفع الويب)                        -> services/audio_flow_service.py
+- حساب الرصيد/العجز ونص "الرصيد لا يكفي"           -> services/audio_flow_service.py
+- حساب الاسترجاع الجزئي عند نجاح جزئي بالتفريغ      -> services/audio_flow_service.py
+- كتابة ملف txt مؤقت (نص مفرّغ/ملخص طويل)          -> services/audio_flow_service.py
+
+لم يتغيّر أي من: أسماء حالات QuizState، أي callback_data، مفاتيح state.update_data/
+Redis، آلية القفل (QuizState.processing_audio)، أو أي تحقق أمني/حدود أحجام.
 """
 
 import asyncio
-import json
 import os
-import re
-import shutil
-import subprocess
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
-from mutagen import File as MutagenFile
 
 from config import QuizState, bot, dp
 from constants import (
-    ADMIN_CONTACT, ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE,
-    MAX_AUDIO_DURATION_MINUTES, MAX_AUDIO_WEB_UPLOAD_SIZE,
+    ADMIN_CONTACT, MAX_AUDIO_WEB_UPLOAD_SIZE,
     MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
     MSG_REDIRECT_TO_WEB_UPLOAD,
 )
 from helpers.gemini_helper import get_safe_mime_type
-from helpers.points_calculator import calculate_audio_transcription_cost
 from keyboards import (
     get_audio_action_keyboard, get_document_export_keyboard, get_audio_confirm_keyboard,
     get_web_upload_redirect_keyboard,
 )
 from logger import get_logger, log_error, log_info
+from services.audio_duration_service import format_duration_cap_exceeded_text
+from services.audio_flow_service import (
+    DOWNLOADS_DIR,
+    AudioCostResult,
+    build_insufficient_balance_text,
+    compute_balance_and_deficit,
+    compute_partial_refund,
+    evaluate_audio_cost,
+    get_or_create_audio_user,
+    log_audio_uploaded_event,
+    log_insufficient_balance_event,
+    write_temp_text_export,
+)
 from services.audio_service import summarize_lecture_text, transcribe_audio_lecture
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
 from supabase_helper import (
-    check_or_add_user, refund_user_points_split, update_user_stats, log_usage_event,
+    log_usage_event, refund_user_points_split, update_user_stats,
 )
 from r2_helper import download_audio_temp_to_file, delete_audio_temp
 from utils import ensure_directory_exists, safe_file_cleanup
@@ -45,54 +64,11 @@ from utils import ensure_directory_exists, safe_file_cleanup
 logger = get_logger(__name__)
 router = Router()
 
-DOWNLOADS_DIR = "downloads"
 MAX_AUDIO_FILE_SIZE = 20 * 1024 * 1024  # حد تيليجرام لتحميل الملفات عبر بوتات API (20 ميجابايت)
 MAX_INLINE_TEXT_CHARS = 4000  # حد رسالة تيليجرام النصية الآمن قبل اللجوء لإرسال مستند .txt
 
 
-# ==================== أدوات مساعدة داخلية ====================
-
-async def _current_user(message: types.Message, user: Any = None) -> Dict[str, Any]:
-    user = user or message.from_user
-    return await check_or_add_user(
-        user.id,
-        user.username or "Unknown",
-        user.first_name or "Unknown",
-        user.last_name or "Unknown",
-    )
-
-
-async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float, action: str = "audio_transcription") -> None:
-    balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
-    deficit = max(0.0, required - balance)
-
-    # 🆕 تتبع تحليلي: نفس حدث "insufficient_balance_blocked" المُسجَّل بـ handlers/files.py
-    # (راجع التعليق هناك) - نفس منطق اعتماد user_info["user_id"] بدل message.from_user
-    # لأن message هون غالباً رسالة البوت نفسها وليست رسالة الطالب.
-    tracked_user_id = user_info.get("user_id")
-    if tracked_user_id:
-        asyncio.create_task(log_usage_event(tracked_user_id, "insufficient_balance_blocked", {
-            "action": action, "required_points": required, "current_balance": balance,
-            "deficit_points": deficit, "free_points": float(user_info.get("free_points") or 0),
-            "paid_points": float(user_info.get("paid_points") or 0),
-        }))
-
-    contact = ADMIN_CONTACT.lstrip("@")
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]
-        ]
-    )
-    await message.answer(
-        "❌ <b>رصيدك الحالي لا يكفي لتفريغ وتحليل هذه المحاضرة الصوتية.</b>\n\n"
-        f"🎁 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
-        f"💳 المدفوع: <code>{float(user_info.get('paid_points') or 0):.2f}</code>\n"
-        f"💰 الإجمالي الحالي: <code>{balance:.2f}</code> / المطلوب: <code>{required:.2f}</code>\n"
-        f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>",
-        reply_markup=keyboard,
-        parse_mode="HTML",
-    )
-
+# ==================== أدوات مساعدة داخلية (طبقة Handler فقط) ====================
 
 def _extract_extension(message: types.Message) -> str:
     if message.voice:
@@ -102,102 +78,31 @@ def _extract_extension(message: types.Message) -> str:
     return ext if ext else ".mp3"
 
 
-def _resolve_ffprobe_path() -> Optional[str]:
-    """🩹 يحدد مسار ffprobe القابل للاستخدام فعلياً بالبيئة الحالية:
-    1) ffprobe من PATH مباشرة (إذا كانت البيئة تحتوي ffmpeg مثبت عبر النظام - حالة Docker
-       لو أُضيف لاحقاً apt-get install ffmpeg).
-    2) الثنائي الساكن (static binary) المرفق مع حزمة imageio-ffmpeg (مضافة لـ requirements.txt
-       خصيصاً لهذا السبب) - يعمل بلا أي اعتماد على النظام، وهو الحل الفعلي المطلوب لأن
-       عملية النشر الحالية على Heroku (Procfile + heroku/python buildpack) لا تملك ffmpeg
-       مثبتاً على مستوى النظام إطلاقاً، وDockerfile الموجود بالمشروع لا يُثبّته أيضاً - فكان
-       الفشل هون صامتاً ودائماً 100% من المرات رغم وجود كود fallback يبدو صحيحاً.
-    ffprobe نفسه غير مرفق مع imageio-ffmpeg (فقط ffmpeg)، فنعتمد بالحالة الثانية على ffmpeg
-    نفسه لقراءة المدة (عبر stderr) بدل ffprobe - راجع _probe_duration_ffmpeg_stderr_sync."""
-    system_path = shutil.which("ffprobe")
-    if system_path:
-        return system_path
-    return None
+async def _send_insufficient_balance(
+    message: types.Message, user_info: Dict[str, Any], required: float, action: str = "audio_transcription"
+) -> None:
+    """إرسال رسالة "الرصيد لا يكفي" + زر شحن + تتبع تحليلي - نص الرسالة وحساب
+    الرصيد/العجز يأتيان من services/audio_flow_service.py، وبناء لوحة المفاتيح
+    (Telegram-specific) يبقى هنا."""
+    balance, _ = compute_balance_and_deficit(user_info, required)
 
+    # 🆕 تتبع تحليلي: نفس حدث "insufficient_balance_blocked" المُسجَّل بـ handlers/files.py
+    # (راجع التعليق هناك) - نفس منطق اعتماد user_info["user_id"] بدل message.from_user
+    # لأن message هون غالباً رسالة البوت نفسها وليست رسالة الطالب.
+    tracked_user_id = user_info.get("user_id")
+    if tracked_user_id:
+        asyncio.create_task(log_insufficient_balance_event(tracked_user_id, action, required, balance, user_info))
 
-def _probe_duration_ffprobe_sync(file_path: str) -> Optional[int]:
-    """🩹 Fallback ثانٍ لما mutagen يفشل بقراءة المدة - صار يحصل بشكل متكرر تحديداً لملفات
-    m4a المرفوعة عبر صفحة الويب (audio_web_*). السبب الأرجح: بعض متصفحات/أجهزة المستخدمين
-    تسجّل عبر MediaRecorder وتنتج mp4/m4a بدون moov atom بأول الملف (fragmented/streamed)،
-    وmutagen ما بيقدر يلاقي ترويسة المدة بهالحالة رغم إنو الملف سليم ومشغَّل تماماً. ffprobe
-    أقوى بكتير بقراءة هيك ملفات لأنه بيقدر يمسح الملف كامل مش يعتمد فقط عالترويسة المتوقعة
-    بأول الملف. يُرجع None لو ffprobe نفسه غير متوفر أو فشل (عندها نجرب ffmpeg الساكن)."""
-    ffprobe_path = _resolve_ffprobe_path()
-    if not ffprobe_path:
-        return None
-    try:
-        result = subprocess.run(
-            [
-                ffprobe_path, "-v", "error", "-show_entries", "format=duration",
-                "-of", "json", file_path,
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            return None
-        duration = float(json.loads(result.stdout)["format"]["duration"])
-        if duration > 0:
-            return int(duration + 0.999)  # تقريب لأعلى لأقرب ثانية
-    except Exception:  # أي فشل هون (timeout، ملف تالف فعلياً...) غير حرج
-        pass
-    return None
-
-
-def _probe_duration_ffmpeg_stderr_sync(file_path: str) -> Optional[int]:
-    """🩹 Fallback ثالث وأخير: يستعمل الثنائي الساكن لـ ffmpeg (imageio_ffmpeg.get_ffmpeg_exe -
-    يُنزَّل تلقائياً مرة واحدة مع pip install، ويعمل بلا أي اعتماد على apt/النظام، وبالتالي
-    يشتغل فعلياً على Heroku خلافاً لـ ffprobe). ffmpeg بدون ffprobe ما بيرجّع JSON منظم،
-    فنقرأ سطر 'Duration: HH:MM:SS.xx' من stderr يدوياً."""
-    try:
-        import imageio_ffmpeg
-        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
-    try:
-        result = subprocess.run(
-            [ffmpeg_path, "-i", file_path, "-f", "null", "-"],
-            capture_output=True, text=True, timeout=30,
-        )
-        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", result.stderr or "")
-        if not match:
-            return None
-        hours, minutes, seconds = match.groups()
-        total_seconds = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-        if total_seconds > 0:
-            return int(total_seconds + 0.999)  # تقريب لأعلى لأقرب ثانية
-    except Exception:  # أي فشل هون (timeout، ملف تالف فعلياً...) غير حرج
-        pass
-    return None
-
-
-def _probe_actual_duration_seconds_sync(file_path: str) -> Optional[int]:
-    """يقرأ المدة الفعلية للملف الصوتي بعد تحميله محلياً (من ترويسة الملف نفسها،
-    وليس من الـ metadata التي أرسلها تطبيق تيليجرام للعميل مع الرسالة). مهم لأن
-    `message.audio.duration` (خلافاً لـ `message.voice.duration` الذي يقيسه تيليجرام
-    وقت التسجيل) قيمة يُرسلها العميل مع الملف وقد لا تطابق الملف الفعلي (بالخطأ أو
-    عمداً)، بينما التكلفة الحقيقية عند Gemini مرتبطة بطول الصوت الفعلي لا المُعلَن.
-    يُرجع None إن تعذّرت القراءة تماماً (لا mutagen ولا ffprobe ولا ffmpeg قدروا) - عندها
-    نرجع للاعتماد على مدة تيليجرام المُعلَنة (أو دقيقة واحدة كحد أدنى) كحل احتياطي أخير."""
-    try:
-        audio = MutagenFile(file_path)
-        if audio is not None and audio.info is not None and audio.info.length:
-            return int(audio.info.length + 0.999)  # تقريب لأعلى لأقرب ثانية
-    except Exception:  # أي فشل هون (صيغة غير مدعومة، ملف تالف...) غير حرج، نجرب ffprobe/ffmpeg بعدها
-        pass
-    return _probe_duration_ffprobe_sync(file_path) or _probe_duration_ffmpeg_stderr_sync(file_path)
-
-
-def _duration_cap_exceeded_text(duration_minutes: int) -> str:
-    """🆕 رسالة موحّدة عند تجاوز مدة المحاضرة للحد الأقصى (MAX_AUDIO_DURATION_MINUTES) -
-    مشتركة بين مسار تيليجرام المباشر ومسار رفع الويب."""
-    return (
-        f"❌ مدة هذه المحاضرة ({duration_minutes} دقيقة) تتجاوز الحد الأقصى المسموح به حالياً "
-        f"({MAX_AUDIO_DURATION_MINUTES // 60} ساعات لكل ملف واحد). يرجى تقسيم التسجيل إلى "
-        "أجزاء أصغر وإرسال كل جزء على حدة."
+    contact = ADMIN_CONTACT.lstrip("@")
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]
+        ]
+    )
+    await message.answer(
+        build_insufficient_balance_text(user_info, required),
+        reply_markup=keyboard,
+        parse_mode="HTML",
     )
 
 
@@ -216,7 +121,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     اكتمال تجهيز السابق. يُفكّ القفل صراحة بكل مسارات الخروج المبكر وضمنياً عند
     الانتقال لشاشة التأكيد (waiting_for_audio_confirm).
 
-    🆕 حساب المدة على الملف الفعلي بعد تحميله (`_probe_actual_duration_seconds_sync`)
+    🆕 حساب المدة على الملف الفعلي بعد تحميله (services.audio_flow_service.evaluate_audio_cost)
     بدل الاعتماد حصراً على `message.audio.duration` (قيمة يُرسلها تطبيق العميل ضمن
     الرسالة نفسها لرسائل audio - قابلة للتعارض مع محتوى الملف الحقيقي، خلافاً لرسائل
     voice التي يقيس تيليجرام مدتها بنفسه وقت التسجيل). التسعير يُحتسب دائماً من القيمة
@@ -281,31 +186,30 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     try:
         await bot.download(media, destination=destination)
 
-        actual_duration_seconds = await asyncio.to_thread(_probe_actual_duration_seconds_sync, destination)
-        duration_seconds = max(reported_duration_seconds, actual_duration_seconds or 0) or reported_duration_seconds
-        duration_minutes = max(1, (duration_seconds + 59) // 60)
+        # 🆕 قياس المدة الفعلية + دمجها مع المُعلَنة + حساب الدقائق + التحقق من السقف
+        # الأقصى + حساب التكلفة - كل ذلك موحّد الآن بدالة خدمة واحدة (كانت أربع خطوات
+        # مكررة هون وبـ process_web_uploaded_audio أدناه). راجع AI-NOTE بجانب
+        # MAX_AUDIO_DURATION_MINUTES بـ constants.py لشرح سبب اختيار 4 ساعات تحديداً
+        # (مرتبط بحد توكنز إخراج Gemini).
+        cost_result: AudioCostResult = await evaluate_audio_cost(destination, reported_duration_seconds)
+        duration_minutes = cost_result.duration_minutes
+        cost = cost_result.cost
 
-        # 🆕 سقف مدة فعلية (وليس فقط حجم الملف) - راجع AI-NOTE بجانب MAX_AUDIO_DURATION_MINUTES
-        # بـ constants.py لشرح سبب اختيار 4 ساعات تحديداً (مرتبط بحد توكنز إخراج Gemini).
-        if duration_minutes > MAX_AUDIO_DURATION_MINUTES:
+        if cost_result.exceeds_cap:
             await state.set_state(None)
             safe_file_cleanup(destination)
             try:
-                await status_msg.edit_text(_duration_cap_exceeded_text(duration_minutes))
+                await status_msg.edit_text(format_duration_cap_exceeded_text(duration_minutes))
             except Exception:
-                await message.answer(_duration_cap_exceeded_text(duration_minutes))
+                await message.answer(format_duration_cap_exceeded_text(duration_minutes))
             return
 
-        cost = calculate_audio_transcription_cost(duration_minutes)
-
-        user_info = await _current_user(message)
-        balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
+        user_info = await get_or_create_audio_user(message.from_user)
+        balance, _ = compute_balance_and_deficit(user_info, cost)
 
         # 🆕 تتبع تحليلي: يسجَّل بمجرد معرفة مدة/تكلفة الملف، بغض النظر عن قرار الطالب
         # لاحقاً بشاشة التأكيد - يسد فجوة "صفر أحداث" الحالية لميزة الصوت بالكامل.
-        asyncio.create_task(log_usage_event(message.from_user.id, "audio_uploaded", {
-            "duration_minutes": duration_minutes, "cost": cost, "source": "telegram_message",
-        }))
+        asyncio.create_task(log_audio_uploaded_event(message.from_user.id, duration_minutes, cost, "telegram_message"))
 
         if balance < cost:
             await state.set_state(None)  # فكّ القفل - لم يُخصَم أي شيء إطلاقاً
@@ -314,7 +218,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
             except Exception:
                 pass
             safe_file_cleanup(destination)
-            await _insufficient_balance(message, user_info, cost)
+            await _send_insufficient_balance(message, user_info, cost)
             return
 
         # 🆕 لا خصم ولا تفريغ هون - فقط تخزين مؤقت لبيانات الطلب بانتظار تأكيد الطالب
@@ -374,8 +278,8 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
     debited_free = 0.0
     debited_paid = 0.0
     try:
-        user_info = await _current_user(None, user=call.from_user)
-        balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
+        user_info = await get_or_create_audio_user(call.from_user)
+        balance, _ = compute_balance_and_deficit(user_info, cost)
         if balance < cost:
             await state.set_state(None)
             safe_file_cleanup(destination)
@@ -447,12 +351,11 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         # هذه النسبة لاحقاً بناءً على ملاحظات فعلية لطول الجزء المفقود بالمتوسط.
         partial_refund_amount = 0.0
         if truncated:
-            # 🆕 [طبقة 3] نفس نسبة الـ50% تُطبَّق على الشقّين (free/paid) على حدة
-            # بدل ما يُحسب المبلغ من cost الإجمالي ويرجع كله لـpaid_points - هيك
-            # التوزيع النسبي بين الرصيدين يضل صحيح بعد الريفوند الجزئي.
-            free_refund = round(debited_free * 0.5, 2)
-            paid_refund = round(debited_paid * 0.5, 2)
-            partial_refund_amount = free_refund + paid_refund
+            # 🆕 [طبقة 3] نفس نسبة الـ50% تُطبَّق على الشقّين (free/paid) على حدة عبر
+            # services/audio_flow_service.compute_partial_refund بدل ما يُحسب المبلغ من
+            # cost الإجمالي ويرجع كله لـpaid_points - هيك التوزيع النسبي بين الرصيدين
+            # يضل صحيح بعد الريفوند الجزئي.
+            free_refund, paid_refund, partial_refund_amount = compute_partial_refund(debited_free, debited_paid)
             if partial_refund_amount > 0:
                 await refund_user_points_split(call.from_user.id, free_refund, paid_refund)
             asyncio.create_task(log_usage_event(call.from_user.id, "audio_transcription_truncated", {
@@ -567,10 +470,7 @@ async def handle_audio_send_text(call: types.CallbackQuery, state: FSMContext) -
         if len(pure_text) <= MAX_INLINE_TEXT_CHARS:
             await call.message.answer(pure_text)
         else:
-            ensure_directory_exists(DOWNLOADS_DIR)
-            txt_path = os.path.join(DOWNLOADS_DIR, f"transcript_{call.from_user.id}_{uuid.uuid4().hex}.txt")
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(pure_text)
+            txt_path = write_temp_text_export("transcript", call.from_user.id, pure_text)
             await call.message.answer_document(
                 types.FSInputFile(txt_path),
                 caption="📋 النص الكامل المفرغ من المحاضرة الصوتية.",
@@ -614,11 +514,8 @@ async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -
             await status_msg.edit_text(f"✨ <b>ملخص المحاضرة (صياغة أكاديمية):</b>\n\n{summary}{truncated_note}", parse_mode="HTML")
         else:
             await status_msg.delete()
-            ensure_directory_exists(DOWNLOADS_DIR)
-            txt_path = os.path.join(DOWNLOADS_DIR, f"summary_{call.from_user.id}_{uuid.uuid4().hex}.txt")
+            txt_path = write_temp_text_export("summary", call.from_user.id, summary)
             try:
-                with open(txt_path, "w", encoding="utf-8") as f:
-                    f.write(summary)
                 await call.message.answer_document(
                     types.FSInputFile(txt_path),
                     caption="✨ ملخص المحاضرة (صياغة أكاديمية) - النص طويل فأُرسل كملف.",
@@ -750,11 +647,12 @@ async def process_web_uploaded_audio(
     - لا يوجد حد MAX_AUDIO_FILE_SIZE (20MB) هون - الحد المطبَّق مسبقاً هو
       MAX_AUDIO_WEB_UPLOAD_SIZE (250MB) بمرحلة /api/audio-upload/init.
     - لا يوجد "مدة معلَنة" من تيليجرام لملف مرفوع عبر الويب - الاعتماد الكامل على
-      القياس الفعلي بعد التحميل المحلي (_probe_actual_duration_seconds_sync).
-      ⚠️ قرار معلّق: لو تعذّر القياس (mutagen فشل)، الكود حالياً يفترض دقيقة واحدة
-      فقط كحد أدنى (نفس سلوك duration_minutes = max(1, ...) بالتدفق العادي) - هاد
-      ممكن يعني دفع أقل من التكلفة الحقيقية لمحاضرة طويلة بصيغة غير مدعومة. راجع
-      PROJECT_STATUS.md قبل الإنتاج لتقرر إذا بدك رفض الملف بدل هيك بهالحالة تحديداً.
+      القياس الفعلي بعد التحميل المحلي (services.audio_flow_service.evaluate_audio_cost
+      بلا reported_duration_seconds). ⚠️ قرار معلّق: لو تعذّر القياس (mutagen فشل)،
+      الكود حالياً يفترض دقيقة واحدة فقط كحد أدنى (نفس سلوك duration_minutes =
+      max(1, ...) بالتدفق العادي) - هاد ممكن يعني دفع أقل من التكلفة الحقيقية
+      لمحاضرة طويلة بصيغة غير مدعومة. راجع PROJECT_STATUS.md قبل الإنتاج لتقرر إذا
+      بدك رفض الملف بدل هيك بهالحالة تحديداً.
     - نسخة Supabase Storage المؤقتة (object_path) تُخزَّن بـ state data بدل حذفها
       فوراً، وتُحذف لاحقاً إما بالتأكيد (handle_audio_confirm_start.finally) أو
       بالإلغاء (handle_audio_confirm_cancel) - نفس مبدأ "لا تخزين دائم" المطلوب،
@@ -813,25 +711,26 @@ async def process_web_uploaded_audio(
             await delete_audio_temp(object_path)
             return
 
-        actual_duration_seconds = await asyncio.to_thread(_probe_actual_duration_seconds_sync, destination)
-        if actual_duration_seconds is None:
+        # 🆕 نفس دالة evaluate_audio_cost المستخدمة بـ handle_audio_message أعلاه (بلا
+        # reported_duration_seconds - لا توجد مدة مُعلَنة من تيليجرام بمسار الويب أصلاً).
+        cost_result: AudioCostResult = await evaluate_audio_cost(destination)
+        if cost_result.probed_seconds is None:
             log_error(logger, f"Could not probe duration for web-uploaded audio '{destination}' - defaulting to 1 minute charge.")
-        duration_seconds = actual_duration_seconds or 0
-        duration_minutes = max(1, (duration_seconds + 59) // 60)
+        duration_minutes = cost_result.duration_minutes
 
         # 🆕 سقف مدة فعلية - نفس المنطق المطبَّق بالمسار المباشر بـ handle_audio_message،
         # وأهم هون تحديداً لأن حد الحجم بهالمسار (250MB) أعلى بكثير وما بيعكس المدة الفعلية.
-        if duration_minutes > MAX_AUDIO_DURATION_MINUTES:
+        if cost_result.exceeds_cap:
             await state.set_state(None)
             safe_file_cleanup(destination)
             await delete_audio_temp(object_path)
             try:
-                await status_msg.edit_text(_duration_cap_exceeded_text(duration_minutes))
+                await status_msg.edit_text(format_duration_cap_exceeded_text(duration_minutes))
             except Exception:
-                await bot.send_message(chat_id, _duration_cap_exceeded_text(duration_minutes))
+                await bot.send_message(chat_id, format_duration_cap_exceeded_text(duration_minutes))
             return
 
-        cost = calculate_audio_transcription_cost(duration_minutes)
+        cost = cost_result.cost
 
         # 2) استنتاج نوع MIME من محتوى الملف الفعلي (لا يوجد mime_type جاهز من
         # تيليجرام هون خلافاً لرسائل audio/voice العادية) - نفس الدالة المستخدمة
@@ -841,12 +740,10 @@ async def process_web_uploaded_audio(
         fake_user = type("U", (), {
             "id": user_id, "username": None, "first_name": "Unknown", "last_name": "Unknown",
         })()
-        user_info = await _current_user(None, user=fake_user)
-        balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
+        user_info = await get_or_create_audio_user(fake_user)
+        balance, _ = compute_balance_and_deficit(user_info, cost)
 
-        asyncio.create_task(log_usage_event(user_id, "audio_uploaded", {
-            "duration_minutes": duration_minutes, "cost": cost, "source": "web_upload",
-        }))
+        asyncio.create_task(log_audio_uploaded_event(user_id, duration_minutes, cost, "web_upload"))
 
         if balance < cost:
             await state.set_state(None)
@@ -857,15 +754,10 @@ async def process_web_uploaded_audio(
             except Exception:
                 pass
             # 🆕 تتبع تحليلي: نفس حدث "insufficient_balance_blocked" المستخدم بباقي مسارات
-            # الحجب (راجع _insufficient_balance أعلى الملف) - هالمسار تحديداً (رفع محاضرة
+            # الحجب (راجع _send_insufficient_balance أعلى الملف) - هالمسار تحديداً (رفع محاضرة
             # عبر صفحة الويب) ما كان يمر أصلاً عبر تلك الدالة المشتركة (رسالة مختلفة/بدون
             # زر شحن) فكان النشاط هون غير مُتتبَّع إطلاقاً قبل هالإضافة.
-            deficit = max(0.0, cost - balance)
-            asyncio.create_task(log_usage_event(user_id, "insufficient_balance_blocked", {
-                "action": "audio_transcription_web", "required_points": cost, "current_balance": balance,
-                "deficit_points": deficit, "free_points": float(user_info.get("free_points") or 0),
-                "paid_points": float(user_info.get("paid_points") or 0),
-            }))
+            asyncio.create_task(log_insufficient_balance_event(user_id, "audio_transcription_web", cost, balance, user_info))
             await bot.send_message(
                 chat_id,
                 f"❌ رصيدك الحالي لا يكفي لتفريغ هذه المحاضرة.\n"
