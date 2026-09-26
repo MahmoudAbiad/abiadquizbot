@@ -144,6 +144,11 @@ def _repair_json_backslashes(text: str) -> str:
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
+# 🩹 FIX: هامش أمان لتقدير التوكنز قبل نداء Groq (راجع الشرح الكامل داخل _generate_text_quiz
+# أسفل منطق الحاجز الاستباقي). حد Groq الفعلي (TPM) هو 8000 - نترك هامش ~1000 توكن كاحتياط
+# لعدم دقة التقدير (حرفين/توكن تقريبي، مش tokenizer حقيقي).
+_GROQ_TPM_SAFE_LIMIT = 7000
+
 # AI-NOTE (memory-leak fix): سابقاً كان يتم إنشاء genai.Client()/AsyncGroq() جديد بكل
 # استدعاء توليد (أحياناً عدة مرات بنفس الطلب عبر مسارات fallback/Super PDF)، وهاد العميل
 # بيحمل جوّاه connection pool خاص فيه (httpx) ما بينسكر أبداً - وهاد كان سبب تسريب الذاكرة
@@ -281,6 +286,13 @@ _last_token_usage_var: contextvars.ContextVar[Optional[Dict[str, int]]] = contex
 # get_last_generation_metadata() بعد عودة generate_quiz_smart مباشرة وبنفس الـ Task.
 _last_generation_metadata_var: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
     "_last_generation_metadata_var", default=None
+)
+# 🆕 FIX: سبب تخطّي Groq الاستباقي (راجع الحاجز التقديري للتوكنز داخل _generate_text_quiz) -
+# منفصل عن _last_model_used_var لأنه بيُضبط *قبل* ما نعرف مين رح يفوز أصلاً (Gemini/Vertex)،
+# وازم يبقى مرتبط بنفس عملية التوليد النهائية حتى لو الفائز موديل تاني كلياً. None يعني Groq
+# تُجرَّب فعلياً (نجح أو فشل بنداء حقيقي) أو المسار أصلاً ما بيمر على Groq إطلاقاً (is_math_mode).
+_groq_skip_reason_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_groq_skip_reason_var", default=None
 )
 
 
@@ -1132,6 +1144,27 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
         formatted_prompt = prompt.replace("{option_count}", str(OPTION_COUNT))
         formatted_content = f"{formatted_prompt}\n\n{json_schema_instruction}\n\n[المحتوى التعليمي]:\n{pure_text}"
 
+        # 🩹 FIX: حاجز استباقي لحد الـ TPM (Tokens Per Minute) الفعلي لـ Groq (8000 توكن على
+        # الخطة الحالية - راجع رؤوس الاستجابة x-ratelimit-limit-tokens، وخطأ 413 الفعلي اللي
+        # صار بالـ logs: "Limit 8000, Requested 9165"). بدل ما ننتظر Groq يرفض الطلب بـ 413
+        # (نفس النتيجة النهائية فعلياً بفضل except أدناه، لكن بعد استهلاك round-trip كامل)،
+        # نقدّر عدد التوكنز محلياً *قبل* أي نداء شبكة، ولو تجاوز هامش الأمان (7000 من أصل 8000)
+        # نتخطى Groq فوراً بإرجاع None - نفس آلية الفولباك بـ generate_quiz_smart (سطر ~1340)
+        # بتاخد المسار لـ Gemini على طول بدون أي تأخير إضافي. التقدير محافظ (حرفين/توكن تقريباً
+        # - النص العربي يميل لتوكنز أكثر من الإنجليزي بنفس عدد الأحرف مع أغلب الـ BPE tokenizers).
+        _estimated_tokens = len(formatted_content) / 2.0
+        if _estimated_tokens > _GROQ_TPM_SAFE_LIMIT:
+            log_warning(
+                logger,
+                f"Skipping Groq (estimated ~{int(_estimated_tokens)} tokens > safe limit "
+                f"{_GROQ_TPM_SAFE_LIMIT}/8000 TPM) — routing directly to Gemini cascade",
+            )
+            # 🆕 FIX: نسجّل سبب التخطي هون - يُقرأ لاحقاً من _finalize بـ generate_quiz_smart
+            # ويُرفَق بـ metadata التوليد النهائي (حتى لو الفائز صار Gemini/Vertex)، عشان
+            # يُميَّز بلوحة الأدمن عن أي فشل Groq حقيقي (نداء فعلي انرفض/تأخّر).
+            _groq_skip_reason_var.set("text_too_long")
+            return None
+
         # 🆕 اسم الموديل صار ديناميكياً من لوحة التحكم (slot="groq_fast") بدل ثابت بالكود.
         groq_model = (await get_groq_fast_model())["model_name"]
         response = await asyncio.wait_for(
@@ -1260,6 +1293,7 @@ async def generate_quiz_smart(
     _generation_start_time = time.monotonic()
     _last_model_used_var.set(None)
     _last_token_usage_var.set(None)
+    _groq_skip_reason_var.set(None)
 
     def _finalize(result_questions: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
         """يُستدعى مرة واحدة تماماً قبل كل return فعلي بهذه الدالة (نجاحاً أو فشلاً) -
@@ -1274,7 +1308,13 @@ async def generate_quiz_smart(
             "input_tokens": 0, "output_tokens": 0, "thoughts_tokens": 0, "total_tokens": 0,
         }
         if result_questions and winner:
-            _last_generation_metadata_var.set({**winner, "duration_seconds": duration, **tokens})
+            # 🆕 FIX: نرفق سبب تخطّي Groq الاستباقي (لو صار) بغض النظر مين الفائز النهائي -
+            # None الافتراضي (المفتاح موجود دائماً، مش بس لو صار تخطي، حتى تسهل القراءة
+            # بلوحة الأدمن عبر .get() بسيط بدون داعٍ لفحص وجود المفتاح أصلاً).
+            _last_generation_metadata_var.set({
+                **winner, "duration_seconds": duration, **tokens,
+                "groq_skip_reason": _groq_skip_reason_var.get(),
+            })
         else:
             _last_generation_metadata_var.set(None)
         return result_questions

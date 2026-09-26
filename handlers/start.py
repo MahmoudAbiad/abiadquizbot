@@ -12,6 +12,7 @@ from supabase_helper import (
 from logger import get_logger, log_info
 from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 from settings_helper import get_setting
+from utils import safe_title
 
 logger = get_logger(__name__)
 router = Router()
@@ -63,7 +64,7 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
             "payload_type": "share" if args_payload.startswith("share_") else "quiz",
         }))
 
-        await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{quiz_title}</b>...", parse_mode="HTML")
+        await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{safe_title(quiz_title)}</b>...", parse_mode="HTML")
         await _start_loaded_quiz(
             target_msg, state, shared["quiz_data"], 
             quiz_title, 

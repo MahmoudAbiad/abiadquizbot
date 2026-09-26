@@ -43,7 +43,7 @@ router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
 
 # 🆕 لوحة "سجل توليد الكويزات" (وقت التوليد + الموديل المستخدم لكل كويز)
-QUIZ_GEN_LOG_PAGE_SIZE = 6       # عدد الكويزات المعروضة بالصفحة الواحدة
+QUIZ_GEN_LOG_PAGE_SIZE = 5       # عدد الكويزات المعروضة بالصفحة الواحدة
 QUIZ_GEN_LOG_FETCH_LIMIT = 200   # السقف الأقصى المجلوب من قاعدة البيانات دفعة واحدة قبل التصفح المحلي
 QUIZ_GEN_LOG_DAYS = 7            # نطاق الأيام المشمولة بالجلب
 
@@ -454,6 +454,15 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
             else:
                 mode_text = "➡️ عادي"
             mode_line = f" ┣ 🧩 نوع العملية: {mode_text}\n"
+
+            # 🆕 FIX: سبب تخطّي Groq الاستباقي (راجع _generate_text_quiz بـgemini_helper.py) -
+            # يُميّز صراحة "تخطّي استباقي بسبب طول النص" عن أي فشل Groq فعلي بنداء حقيقي (413/
+            # timeout/مفتاح ناقص) - كلاهما كانا يظهران متطابقين تماماً كـ provider=gemini/vertex
+            # عادي بدون هذا السطر، فما كان فيه أي طريقة للتفريق بينهم من لوحة الأدمن.
+            groq_skip_labels = {"text_too_long": "⏭️ Groq اتخطّى استباقياً (النص أطول من الحد الآمن)"}
+            groq_skip_reason = meta.get("groq_skip_reason")
+            if groq_skip_reason:
+                mode_line += f" ┣ {groq_skip_labels.get(groq_skip_reason, f'⏭️ Groq اتخطّى: {groq_skip_reason}')}\n"
 
             # 🆕 نوع/مصدر المحتوى الصريح (content_source) - مُحدَّد صراحة عند نقطة الاستقبال
             # الفعلية بالكود (راجع handlers/files.py::_document_content_source وhandle_pure_text

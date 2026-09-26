@@ -1,3 +1,4 @@
+import html
 import io
 import csv
 import json
@@ -200,8 +201,8 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
             name = f"{student.get('first_name', '')} {student.get('last_name', '')}".strip() or "بدون اسم"
 
             report_lines.append(
-                f"<b>{idx}. {title}</b>\n"
-                f" ┣ 👤 الطالب: <b>{name}</b> ({username})\n"
+                f"<b>{idx}. {html.escape(title)}</b>\n"
+                f" ┣ 👤 الطالب: <b>{html.escape(name)}</b> ({username})\n"
                 f" ┣ 🆔 الآيدي: <code>{user_id}</code>\n"
                 f" ┗ 🕒 الوقت: <code>{time_str}</code>\n"
                 f"───────────────────"

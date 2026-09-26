@@ -872,7 +872,7 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
             time_label = "🕒 تاريخ الاستخدام" if is_cached else "🕒 تاريخ الإنشاء"
 
             report_lines.append(
-                f"<b>{idx}. {title}</b>{cache_tag}\n"
+                f"<b>{idx}. {html.escape(title)}</b>{cache_tag}\n"
                 f" ┣ {time_label} (توقيت سوريا): <code>{time_syria}</code>\n"
                 f" ┗ 👍 {likes} | 👎 {dislikes}\n"
                 f"───────────────────"

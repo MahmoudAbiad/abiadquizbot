@@ -1166,6 +1166,9 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             "cascade_rank": generation_meta.get("cascade_rank"),
             "cascade_total": generation_meta.get("cascade_total"),
             "generation_mode": generation_meta.get("mode"),
+            # 🆕 FIX: سبب تخطّي Groq الاستباقي لو صار ("text_too_long") - None بالحالة
+            # العادية (راجع gemini_helper._generate_text_quiz + _finalize بـ generate_quiz_smart).
+            "groq_skip_reason": generation_meta.get("groq_skip_reason"),
             # 🆕 تفصيل كل جزء بمسار Super PDF/Images (موديل + مفتاح + رتبته بالكاسكيد لحظة
             # نجاحه) - None لأي مسار غير super (راجع gemini_helper._generate_super_pdf/
             # _generate_super_images). يُعرض بلوحة الأدمن "📊 سجل توليد الكويزات".

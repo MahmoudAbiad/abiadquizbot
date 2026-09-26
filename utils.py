@@ -3,11 +3,23 @@ Utility functions for file processing and hashing.
 """
 
 import base64
+import html
 import os
 import hashlib
+import unicodedata
 from logger import get_logger, log_error, log_info
 
 logger = get_logger(__name__)
+
+
+def safe_title(text) -> str:
+    """
+    يهرّب (escape) أي نص حر مصدره المستخدم (عنوان كويز، اسم غروب/قناة...) قبل
+    ما ينحط جوا رسالة بـ parse_mode="HTML"، لتفادي HTML injection (تاغات مكسورة
+    أو روابط <a href> مزيفة تنعرض لمستخدم تاني). استخدمها بأي مكان بتحط فيه
+    نص من الداتابيس أو من تيليجرام (chat.title مثلاً) جوا <b>...</b> أو مشابه.
+    """
+    return html.escape(str(text) if text is not None else "")
 
 # 🆕 file_hash (SHA-256 hex, 64 حرف) طويل جداً ليُستخدم مباشرة ضمن callback_data
 # (حد تيليجرام 64 بايت للحقل كاملاً). هذا التحويل ذهاب/إياب Base64 URL-Safe يضغطه
@@ -68,6 +80,16 @@ def format_file_size(size_bytes: int) -> str:
         size_bytes /= 1024.0
     return f"{size_bytes:.2f} TB"
 
+def _normalize_extracted_text(text: str) -> str:
+    """🩹 FIX: بعض ملفات Word (عادةً محوَّلة أصلاً من PDF عبر أدوات تحويل ضعيفة) بتخزّن
+    الحروف العربية كأشكال عرض توافقية (Unicode Presentation Forms، نطاق U+FE70-U+FEFF -
+    مثلاً 'ﻟ' U+FEDF) بدل الحرف المنطقي القياسي ('ل' U+0644). النص بيبين سليم بصرياً (الخط
+    بيرندر الشكل صح) لكن python-docx بيستخرجه "صحيحاً تقنياً" وفاسداً فعلياً لأي معالجة نصية
+    لاحقة (بحث/مقارنة/فهم الموديل). NFKC هو الحل القياسي - بيحوّل هاي الأشكال التوافقية رجوع
+    لمكافئها المنطقي القياسي تلقائياً، ما بيأثر على نص سليم أصلاً."""
+    return unicodedata.normalize("NFKC", text) if text else text
+
+
 def extract_text_from_file(file_path: str) -> str | None:
     """
     استخراج النص الصافي من ملفات Word (.docx), PowerPoint (.pptx), TXT.
@@ -78,7 +100,7 @@ def extract_text_from_file(file_path: str) -> str | None:
         # 1. ملفات النص المباشر
         if ext == ".txt":
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
+                return _normalize_extracted_text(f.read())
 
         # 2. مستندات Word الحديثة فقط
         elif ext == ".docx":
@@ -99,7 +121,7 @@ def extract_text_from_file(file_path: str) -> str | None:
                         if cell_text:
                             full_text.append(cell_text)
 
-            return "\n".join(full_text) if full_text else None
+            return _normalize_extracted_text("\n".join(full_text)) if full_text else None
 
         # 3. عروض PowerPoint الحديثة فقط
         elif ext == ".pptx":
@@ -115,7 +137,7 @@ def extract_text_from_file(file_path: str) -> str | None:
                             if text:
                                 text_runs.append(text)
 
-            return "\n".join(text_runs) if text_runs else None
+            return _normalize_extracted_text("\n".join(text_runs)) if text_runs else None
 
         # 4. الصيغ الثنائية القديمة (Log Warning بدلاً من العطل)
         elif ext in [".doc", ".ppt"]:

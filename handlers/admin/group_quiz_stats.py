@@ -11,6 +11,8 @@ MODULE: شاشة إحصائيات الكويز الجماعي بلوحة الأ�
 هالملف عرض/تنسيق بس، بلا لمس مباشر لـ supabase.
 """
 
+import html
+
 from aiogram import Router, types, F
 
 from constants import format_syria_time
@@ -93,8 +95,8 @@ async def show_recent_group_sessions(call: types.CallbackQuery):
                 status_label = STATUS_LABELS.get(s.get("status"), s.get("status", "؟"))
                 chat_type_label = CHAT_TYPE_LABELS.get(s.get("_chat_type"), "؟")
                 lines.append(
-                    f"┣ {chat_type_label} <b>{s['_chat_title']}</b>\n"
-                    f"┃  📚 {s['_quiz_title']} — {status_label}\n"
+                    f"┣ {chat_type_label} <b>{html.escape(s['_chat_title'])}</b>\n"
+                    f"┃  📚 {html.escape(s['_quiz_title'])} — {status_label}\n"
                     f"┃  👤 {s['_participant_count']} مشارك · 🕐 {format_syria_time(s.get('created_at'))}"
                 )
             text = "\n".join(lines)
