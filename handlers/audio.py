@@ -704,6 +704,9 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
             input_type="text",
             items_count=1,
             is_album=False,
+            # 🆕 مصدر/نوع المحتوى الصريح لسجل توليد الكويزات بلوحة الأدمن - راجع
+            # handlers/files.py::handle_count_start حيث يُرحَّل هذا الحقل لحدث quiz_generated.
+            content_source="audio_transcript",
         )
         await _ask_question_count(
             call.message,

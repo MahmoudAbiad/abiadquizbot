@@ -101,6 +101,25 @@ MODE_LABELS_AR = {
     "Cached": "🗃️ من الكاش",
 }
 
+# 🆕 تقدير تقريبي لعدد الكلمات بالصفحة الواحدة (نص عربي/إنكليزي متوسط الكثافة، بلا صور/
+# تنسيق ثقيل) - يُستخدم فقط لمصادر بلا مفهوم "صفحة" فعلي بذاتها (نص مباشر، تفريغ محاضرة
+# صوتية، مستندات أوفيس docx/pptx/txt). ليس دقيقاً 100% (يعتمد بشدة على الخط/التباعد
+# الفعلي لو كان المستند سيُطبع)، لكنه أفضل بما لا يُقاس من items_count=1 ثابت للجميع
+# بغض النظر عن الحجم الفعلي - كان يعني أن محتوى ضخماً وآخر صغيراً يُصنَّفان "عادي"
+# ويُسعَّران بنفس السعر تماماً (راجع نقاش handlers/files.py._ask_question_count).
+WORDS_PER_PAGE_ESTIMATE = 500
+
+
+def estimate_pages_from_text(text: str) -> Tuple[int, int]:
+    """تقدير عدد 'صفحات' من نص خام لا يملك عدد صفحات فعلياً (بعكس PDF الحقيقي) - عدد
+    الكلمات (تقسيم بسيط على المسافات) ÷ WORDS_PER_PAGE_ESTIMATE، مقرَّب لأعلى، بحد أدنى
+    صفحة واحدة. يرجع (الصفحات المقدَّرة, عدد الكلمات الفعلي) معاً - الاتنين يُحفظان
+    بميتاداتا الكويز ليظهرا صراحة بلوحة الأدمن "📊 سجل توليد الكويزات" (شفافية: صفحة
+    "مقدَّرة" من كلمات، لا صفحة PDF حقيقية مُعدودة)."""
+    word_count = len((text or "").split())
+    estimated_pages = max(1, -(-word_count // WORDS_PER_PAGE_ESTIMATE))  # ceiling division
+    return estimated_pages, word_count
+
 def build_transparency_text(
     items: int, questions: int, mode: str, cost: float,
     difficulty: Optional[str] = None, question_type_label: Optional[str] = None,

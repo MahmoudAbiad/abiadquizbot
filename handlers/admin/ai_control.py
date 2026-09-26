@@ -455,6 +455,38 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
                 mode_text = "➡️ عادي"
             mode_line = f" ┣ 🧩 نوع العملية: {mode_text}\n"
 
+            # 🆕 نوع/مصدر المحتوى الصريح (content_source) - مُحدَّد صراحة عند نقطة الاستقبال
+            # الفعلية بالكود (راجع handlers/files.py::_document_content_source وhandle_pure_text
+            # وhandlers/audio.py::handle_audio_to_quiz)، وليس استنتاجاً من estimated_word_count
+            # أو أي حقل آخر - يُعرض دائماً (بعكس سطر "📝 تقدير:" تحته المشروط بوجود تقدير
+            # كلمات فقط). كويزات قديمة (قبل هذا التحديث) ما فيها هذا الحقل إطلاقاً بالـ
+            # metadata فتظهر "غير مسجَّل" صراحة بدل قيمة فاضية أو خطأ.
+            content_source_labels = {
+                "pdf": "📄 PDF",
+                "docx": "📝 Word",
+                "pptx": "📊 PowerPoint",
+                "txt": "📃 نصي (txt)",
+                "images": "🖼️ صور",
+                "telegram_text": "⌨️ نص مباشر (تيليجرام)",
+                "audio_transcript": "🎙️ تفريغ محاضرة صوتية",
+                # 🆕 امتداد مستند نادر خارج الأنواع الأربعة المدعومة فعلياً (راجع
+                # _document_content_source بـhandlers/files.py) - ليس من القيم السبع
+                # الأساسية المطلوبة، لكن مُعرَّف صراحة هون بدل قيمة خام غير مفهومة بالعرض.
+                "unknown_document": "❓ مستند آخر",
+            }
+            content_source = meta.get("content_source")
+            content_source_text = content_source_labels.get(content_source, "غير مسجَّل" if not content_source else content_source)
+            mode_line += f" ┣ 📂 مصدر المحتوى: {content_source_text}\n"
+
+            # 🆕 لمصادر بلا صفحات فعلية (نص مباشر/تفريغ صوتي/مستندات أوفيس - راجع
+            # estimate_pages_from_text بـ services/quiz_service.py): إشارة صريحة إنه رقم
+            # "الصفحات" أعلاه بحساب عادي/موسّع/سوبر هو تقدير من عدد الكلمات، لا عدّ فعلي
+            # (بعكس PDF/صورة حقيقيين). None لأي كويز من ملف حقيقي - ما بيظهر السطر إطلاقاً.
+            estimated_word_count = meta.get("estimated_word_count")
+            if estimated_word_count:
+                est_pages = meta.get("items_count", "؟")
+                mode_line += f" ┣ 📝 تقدير: {estimated_word_count} كلمة ≈ {est_pages} صفحة\n"
+
             if chunk_details:
                 # 🆕 كل جزء (Task) استقل بكاسكيد خاص فيه (نماذج × مفاتيح) - فممكن كل جزء
                 # يفوز بموديل/رتبة مختلفة عن التاني، هيك بنعرضهن مفصّلين بدل وصف عام واحد.

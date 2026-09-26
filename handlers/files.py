@@ -57,7 +57,7 @@ from services.file_service import compute_combined_hash, download_photos_service
 from services.subject_classifier import classify_subject, get_pending_classification_snapshot
 from services.quiz_service import (
     determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow,
-    combo_quiz_count, build_question_type_label,
+    combo_quiz_count, build_question_type_label, estimate_pages_from_text,
 )
 from handlers.audio import _build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لرفع الصوت عبر الويب
 
@@ -75,6 +75,27 @@ PENDING_REQUEST_STATES = (
     QuizState.waiting_for_custom_question_type,  # 🆕
     QuizState.waiting_for_quiz_extraction_choice,  # 🆕 اختيار "كما هي/حل بالذكاء الاصطناعي"
 )
+
+# 🆕 حقل "content_source" الصريح لسجل توليد الكويزات بلوحة الأدمن (راجع log_usage_event
+# لحدث quiz_generated بـhandle_count_start أدناه) - يُحدَّد هون فقط من امتداد المستند
+# الفعلي وقت الاستقبال المباشر (قبل أي معالجة/استخراج لاحق)، لا استنتاجاً لاحقاً. يُستخدم
+# من مساري تيليجرام (handle_media) والويب (process_web_uploaded_file) كلاهما لتوحيد
+# المنطق بمكان واحد فقط.
+def _document_content_source(extension: str) -> str:
+    ext = (extension or "").lower()
+    if ext == ".pdf":
+        return "pdf"
+    if ext in (".docx", ".doc"):
+        return "docx"
+    if ext in (".pptx", ".ppt"):
+        return "pptx"
+    if ext == ".txt":
+        return "txt"
+    # 🆕 امتداد مستند غير متوقع (خارج الأنواع الأربعة المدعومة فعلياً بالبوت - راجع
+    # extract_office_text_if_needed بـservices/file_service.py) - نادر جداً عملياً، لكن
+    # نتفادى قيمة مضلِّلة (مثل "pdf" لملف ليس PDF فعلاً)؛ يُعرض بلوحة الأدمن كـ"غير معروف".
+    return "unknown_document"
+
 
 def _cancel_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")]])
@@ -199,7 +220,7 @@ async def process_album_background(message: types.Message, state: FSMContext):
         title = f"كويز من ألبوم صور ({len(file_paths)} صور)" if is_album else "كويز من صورة"
         file_hash = await asyncio.to_thread(compute_combined_hash, file_paths)
         
-        await _finalize_media_processing(message, state, file_paths, title, len(file_paths), is_album, file_hash)
+        await _finalize_media_processing(message, state, file_paths, title, len(file_paths), is_album, file_hash, content_source="images")
     except Exception as exc:
         log_error(logger, f"Album background processing failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
@@ -404,8 +425,22 @@ async def _ask_question_count(
             if is_valid and extracted_text:
                 await state.update_data(cached_office_text=extracted_text)
                 detection_text, detection_paths = extracted_text, None
+                # 🆕 مستندات الأوفيس ما إلها "صفحات" فعلية بذاتها (بعكس PDF المُعدود عبر
+                # get_pdf_page_count_sync) - items_count كان يُثبَّت=1 دايماً بغض النظر عن
+                # الحجم الفعلي (راجع items=1 بـ handle_media)، فمستند ضخم وآخر صغير كانا
+                # يُصنَّفان "عادي" ويُسعَّران بنفس السعر تماماً. نقدّرها هون من عدد الكلمات
+                # الفعلي فور توفر النص المستخرَج - يُحفظ estimated_word_count صراحة أيضاً
+                # ليظهر بلوحة الأدمن (راجع log_usage_event أدناه بنفس الملف).
+                est_pages, word_count = estimate_pages_from_text(extracted_text)
+                await state.update_data(items_count=est_pages, estimated_word_count=word_count)
             else:
                 detection_text, detection_paths = None, None  # سيُعاد اكتشاف الخطأ لاحقاً كالمعتاد أثناء التوليد
+    elif not is_media and pure_text:
+        # 🆕 نفس الملاحظة أعلاه بالضبط، تنطبق على النص المباشر - سواء كتبه الطالب يدوياً
+        # (handle_pure_text) أو نقله من تفريغ محاضرة صوتية (handle_audio_to_quiz) - كلاهما
+        # كان يثبّت items_count=1 دايماً بغض النظر عن طول النص الفعلي.
+        est_pages, word_count = estimate_pages_from_text(pure_text)
+        await state.update_data(items_count=est_pages, estimated_word_count=word_count)
 
     # 🆕 استدعاء واحد فقط موحّد (services/subject_classifier.py) يحل محل الاستدعاءين
     # المنفصلين السابقين (فحص إنجليزي هنا + فحص رياضيات لاحقاً بـ quiz_service.py).
@@ -585,7 +620,7 @@ async def handle_cache_filter_difficulty(call: types.CallbackQuery, state: FSMCo
 
 async def _finalize_media_processing(
     message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int,
-    is_album: bool, file_hash: str, user_id: Optional[int] = None,
+    is_album: bool, file_hash: str, content_source: str, user_id: Optional[int] = None,
 ):
     """
     🆕 user_id: مُمرَّر صراحة (بدل الاعتماد حصراً على message.from_user.id) لأنه لما
@@ -606,6 +641,10 @@ async def _finalize_media_processing(
         common_state = {
             "file_paths": file_paths, "source_title": title, "input_type": "media",
             "file_hash": file_hash, "items_count": items, "is_album": is_album,
+            # 🆕 مصدر/نوع المحتوى الصريح (pdf/docx/pptx/txt/images) - مُحدَّد صراحة عند نقطة
+            # الاستقبال الفعلية (handle_media/process_web_uploaded_file/_images)، يُرحَّل
+            # لاحقاً لسجل حدث quiz_generated بـhandle_count_start.
+            "content_source": content_source,
         }
         
         if cached_quizzes:
@@ -676,7 +715,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 file_paths, err = await download_photos_service(message.from_user.id, [current])
                 if err or not file_paths: return
                 file_hash = await asyncio.to_thread(compute_combined_hash, file_paths)
-                await _finalize_media_processing(message, state, file_paths, "كويز من صورة", 1, False, file_hash)
+                await _finalize_media_processing(message, state, file_paths, "كويز من صورة", 1, False, file_hash, content_source="images")
         else:
             valid, error = validate_file_size(message.document.file_size, "document")
             if not valid:
@@ -705,7 +744,10 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                     safe_file_cleanup(destination)
                     return
             file_hash = await asyncio.to_thread(calculate_file_hash, destination)
-            await _finalize_media_processing(message, state, [destination], title, items, False, file_hash)
+            await _finalize_media_processing(
+                message, state, [destination], title, items, False, file_hash,
+                content_source=_document_content_source(extension),
+            )
 
     except Exception as exc:
         log_error(logger, f"Media handling failed: {exc}", exception=exc)
@@ -738,7 +780,10 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         "content_type": "text", "text_length": len(text)
     }))
 
-    await state.update_data(pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False)
+    await state.update_data(
+        pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False,
+        content_source="telegram_text",
+    )
     await _ask_question_count(
         message, state,
         "✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة."
@@ -1134,6 +1179,19 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             # `generation_mode` كمصدر حقيقة أساسي لـ"سوبر" (فعلي 100%)، وبترجع لهذا الحقل
             # فقط للتفريق بين عادي/موسّع بالحالة غير-السوبر.
             "business_mode": mode,
+            # 🆕 عدد "الصفحات" الفعلي/المُقدَّر المُستخدَم بحساب التصنيف/التسعير أعلاه -
+            # لم يكن مُسجَّلاً بهذا السجل إطلاقاً سابقاً (راجع services/quiz_service.py:
+            # estimate_pages_from_text لتفاصيل كيف يُقدَّر لمصادر بلا صفحات فعلية).
+            "items_count": items,
+            # 🆕 None لملف PDF/صورة حقيقي (له عدد صفحات/صور فعلي، لا تقدير). رقم فعلي فقط
+            # لمصادر نصية بلا مفهوم صفحة (نص مباشر، تفريغ صوتي، مستندات أوفيس) - وجوده هو
+            # إشارة "items_count أعلاه تقدير من كلمات، لا عدّ فعلي" تُعرض صراحة بلوحة الأدمن.
+            "estimated_word_count": data.get("estimated_word_count"),
+            # 🆕 نوع/مصدر المحتوى الصريح (pdf/docx/pptx/txt/images/telegram_text/
+            # audio_transcript) - مُحدَّد صراحة عند نقطة الاستقبال الفعلية (راجع
+            # _document_content_source وhandle_pure_text/handle_audio_to_quiz)، لا استنتاجاً
+            # لاحقاً هون. None لأي كويز قديم قبل هذا التحديث (لوحة الأدمن تعرضه "غير مسجَّل").
+            "content_source": data.get("content_source"),
         })
         await reward_referrer_if_eligible(call.from_user.id)
 
@@ -1343,7 +1401,10 @@ async def process_web_uploaded_file(
 
         await state.set_state(None)  # فكّ القفل - _finalize_media_processing بتحدد الحالة التالية بنفسها
         await status_msg.delete()
-        await _finalize_media_processing(status_msg, state, [destination], title, items, False, file_hash, user_id=user_id)
+        await _finalize_media_processing(
+            status_msg, state, [destination], title, items, False, file_hash,
+            content_source=_document_content_source(extension), user_id=user_id,
+        )
     except Exception as exc:
         log_error(logger, f"Web-uploaded file preparation failed: {exc}", exception=exc)
         safe_file_cleanup(destination)
@@ -1421,7 +1482,10 @@ async def process_web_uploaded_images(
 
         await state.set_state(None)
         await status_msg.delete()
-        await _finalize_media_processing(status_msg, state, local_paths, title, len(local_paths), is_album, file_hash, user_id=user_id)
+        await _finalize_media_processing(
+            status_msg, state, local_paths, title, len(local_paths), is_album, file_hash,
+            content_source="images", user_id=user_id,
+        )
     except Exception as exc:
         log_error(logger, f"Web-uploaded images preparation failed: {exc}", exception=exc)
         for path in local_paths:
