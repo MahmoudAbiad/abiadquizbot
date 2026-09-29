@@ -56,18 +56,25 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
                 actual_quiz_id = fav_res.data[0]["quiz_id"]
             
     if shared and actual_quiz_id:
-        await check_or_add_user(
+        # 🆕 لو المستخدم جديد كلياً فهو انضم عبر هذا الرابط المشترك: نمرّر المصدر والكويز
+        # ليُخزَّنا ذرياً مع إنشاء الحساب (لا أثر على المستخدمين الحاليين).
+        link_user_info = await check_or_add_user(
             target_msg.from_user.id,
             target_msg.from_user.username or "Unknown",
             target_msg.from_user.first_name,
             target_msg.from_user.last_name or "Unknown",
-            None
+            None,
+            join_source="shared_link",
+            join_quiz_id=str(actual_quiz_id),
         )
+        is_new_via_link = link_user_info.get("status") == "new"
         from handlers.quiz_runner import _start_loaded_quiz
         quiz_title = shared.get('title') or shared.get('source_title') or 'كويز مشترك'
 
         asyncio.create_task(log_usage_event(target_msg.from_user.id, "shared_link_opened", {
             "payload_type": "share" if args_payload.startswith("share_") else "quiz",
+            "quiz_id": str(actual_quiz_id),
+            "is_new_user": is_new_via_link,
         }))
 
         await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{safe_title(quiz_title)}</b>...", parse_mode="HTML")
@@ -122,7 +129,8 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             msg.from_user.username or "Unknown",
             msg.from_user.first_name,
             msg.from_user.last_name or "Unknown",
-            referrer_id
+            referrer_id,
+            join_source="website" if command.args == "website" else None,
         )
         
         points = user_info["points"]

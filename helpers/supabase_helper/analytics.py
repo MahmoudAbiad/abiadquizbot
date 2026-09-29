@@ -690,10 +690,12 @@ async def admin_get_user_quizzes(creator_id: int, limit: int = 5, offset: int = 
 async def auto_cleanup_old_analytics_data() -> None:
     """حذف سجلات الأحداث القديمة جداً والسيئة."""
     try:
-        thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).isoformat()
+        # 🆕 الاحتفاظ بالأحداث 90 يوماً (كان 30) لتوافق زر «90 يوم» بلوحة التحليلات وطرق الانضمام
+        USAGE_EVENTS_RETENTION_DAYS = 90
+        ninety_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=USAGE_EVENTS_RETENTION_DAYS)).isoformat()
         three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).isoformat()
         
-        await supabase.table("usage_events").delete().lt("created_at", thirty_days_ago).execute()
+        await supabase.table("usage_events").delete().lt("created_at", ninety_days_ago).execute()
 
         deletable_ids = await _get_safe_to_delete_quiz_ids(three_days_ago)
         if deletable_ids:
@@ -708,3 +710,40 @@ async def auto_cleanup_old_analytics_data() -> None:
     except Exception as e:
         log_error(logger, f"Error in database cleanup: {e}")
 
+
+# ==================== طرق الانضمام إلى البوت (لوحة الأدمن) ====================
+# كل الاستعلامات عبر دوال RPC بقاعدة البيانات (migration_join_sources.sql) لتجنّب
+# سحب آلاف الصفوف لبايثون. الدوال متاحة لـ service_role فقط.
+
+async def admin_get_join_source_stats(days: int) -> Dict[str, int]:
+    """عدد المنضمين الجدد خلال آخر N يوم مقسّمين حسب الوسيلة: bot/shared_link/referral/website/unknown."""
+    try:
+        res = await supabase.rpc("admin_join_stats", {"p_days": days}).execute()
+        return {r["source"]: int(r["cnt"]) for r in (res.data or [])}
+    except Exception as e:
+        log_error(logger, f"Error fetching join source stats: {e}")
+        raise
+
+
+async def admin_get_joined_users(source: str, days: int, limit: int, offset: int) -> List[Dict[str, Any]]:
+    """المستخدمون المنضمون عبر وسيلة معيّنة (مع total_count بكل صف). detail = اسم الكويز/المُحيل."""
+    try:
+        res = await supabase.rpc("admin_joined_users", {
+            "p_source": source, "p_days": days, "p_limit": limit, "p_offset": offset,
+        }).execute()
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error fetching joined users: {e}")
+        raise
+
+
+async def admin_get_shared_links_stats(days: int, limit: int, offset: int) -> List[Dict[str, Any]]:
+    """إحصاءات الروابط المشتركة: الكويز/صاحبه/التشغيلات/المشغّلون الفريدون/الانضمامات."""
+    try:
+        res = await supabase.rpc("admin_shared_links_stats", {
+            "p_days": days, "p_limit": limit, "p_offset": offset,
+        }).execute()
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error fetching shared links stats: {e}")
+        raise

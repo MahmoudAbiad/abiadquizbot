@@ -21,7 +21,8 @@ def _balance_payload(free_points: Any = 0, paid_points: Any = 0, **extra: Any) -
     return {"free_points": free, "paid_points": paid, "points": free + paid, **extra}
 
 # ==================== User Management ====================
-async def check_or_add_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int] = None) -> Dict[str, Any]:
+async def check_or_add_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int] = None,
+                              join_source: Optional[str] = None, join_quiz_id: Optional[str] = None) -> Dict[str, Any]:
     try:
         is_valid, error = validate_user_id(user_id)
         if not is_valid:
@@ -31,14 +32,16 @@ async def check_or_add_user(user_id: int, username: str, first_name: str, last_n
         response = await supabase.table("users").select("*").eq("user_id", user_id).execute()
         
         if not response.data:
-            return await _add_new_user(user_id, username, first_name, last_name, referrer_id, today)
+            return await _add_new_user(user_id, username, first_name, last_name, referrer_id, today,
+                                       join_source=join_source, join_quiz_id=join_quiz_id)
         
         return await _check_daily_renewal(user_id, response.data[0], today)
     except Exception as e:
         log_error(logger, f"Error in check_or_add_user: {e}", exception=e)
         return _balance_payload(status="error", referrer=None)
 
-async def _add_new_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int], today: str) -> Dict[str, Any]:
+async def _add_new_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int], today: str,
+                        join_source: Optional[str] = None, join_quiz_id: Optional[str] = None) -> Dict[str, Any]:
     try:
         actual_referrer = None
         referrer_name = None
@@ -53,7 +56,19 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
         # بدل الاعتماد على القيمة الثابتة في constants.py مباشرة.
         welcome_points = await get_setting("welcome_points")
 
+        # 🆕 طريقة الانضمام (لوحة الأدمن > التحليلات > طرق الانضمام). الإحالة تُحسم هنا لا في
+        # المستدعي: لو الـ referrer غير موجود بالقاعدة (actual_referrer=None) فالمستخدم ليس إحالة فعلية.
+        if actual_referrer:
+            resolved_source, resolved_quiz = "referral", None
+        elif join_source in ("shared_link", "website"):
+            resolved_source = join_source
+            resolved_quiz = join_quiz_id if join_source == "shared_link" else None
+        else:
+            resolved_source, resolved_quiz = "bot", None
+
         await supabase.table("users").insert({
+            "join_source": resolved_source,
+            "join_quiz_id": resolved_quiz,
             "user_id": user_id,
             "username": username,
             "first_name": first_name,

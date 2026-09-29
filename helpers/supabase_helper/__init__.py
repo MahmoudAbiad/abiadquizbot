@@ -135,6 +135,9 @@ from .analytics import (
     USER_QUIZZES_FETCH_CAP,
     admin_get_user_quizzes,
     auto_cleanup_old_analytics_data,
+    admin_get_join_source_stats,
+    admin_get_joined_users,
+    admin_get_shared_links_stats,
 )
 
 from .storage_files import _create_signed_upload_target
@@ -208,6 +211,7 @@ __all__ = [
     "admin_get_referral_leaderboard", "admin_get_today_active_users",
     "admin_get_today_quizzes", "USER_QUIZZES_FETCH_CAP",
     "admin_get_user_quizzes", "auto_cleanup_old_analytics_data",
+    "admin_get_join_source_stats", "admin_get_joined_users", "admin_get_shared_links_stats",
     # storage_audio
     "create_audio_upload_target", "get_audio_temp_object_size",
     "download_audio_temp_to_file", "delete_audio_temp",

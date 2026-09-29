@@ -427,7 +427,7 @@ async def show_referral_leaderboard(call: types.CallbackQuery):
             nav_row.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"admin_referrals_{page + 1}"))
         if nav_row:
             kb_rows.append(nav_row)
-        kb_rows.append([types.InlineKeyboardButton(text="📊 رجوع للتحليلات", callback_data="admin_analytics_7")])
+        kb_rows.append([types.InlineKeyboardButton(text="📥 رجوع لطرق الانضمام", callback_data="admin_joinsrc_30")])
         kb_rows.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
 
         text = (
