@@ -24,6 +24,12 @@ router = Router()
 # أصلاً بـ group_quiz_router (راجع handlers/group_quiz.py).
 router.message.filter(F.chat.type == "private")
 
+# 🆕 مصادر الوصول المسموحة القادمة من روابط خارجية عبر /start <source>، مثال: الموقع التعريفي
+# abiad.me يستخدم t.me/AbiadQuizMakerbot?start=website. قائمة بيضاء صريحة عن قصد حتى لا
+# يُخزَّن أي نص عشوائي بالتحليلات. هذه القيم ليست أرقاماً ولا تبدأ بـ share_/quiz_ فلا تتداخل
+# مع الإحالات ولا الروابط العميقة، وتُسجَّل فقط ضمن حدث bot_start بدون أي تغيير على منطق التسجيل.
+ALLOWED_START_SOURCES = {"website"}
+
 async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, args_payload: str):
     """الماكينة المسؤولة عن تحميل وتشغيل الكويز القادم من الروابط العميقة بأمان"""
     actual_quiz_id = None
@@ -125,10 +131,14 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         status = user_info["status"]
 
         # 🆕 تسجيل حدث بدء تشغيل البوت لتتبع نمط عودة/تجدد الطلاب
-        asyncio.create_task(log_usage_event(msg.from_user.id, "bot_start", {
+        start_source = command.args if command.args in ALLOWED_START_SOURCES else None
+        bot_start_meta = {
             "status": status,
             "has_referrer": bool(referrer_id),
-        }))
+        }
+        if start_source:
+            bot_start_meta["source"] = start_source
+        asyncio.create_task(log_usage_event(msg.from_user.id, "bot_start", bot_start_meta))
         
         # 🆕 (2026-08-28) إلغاء دليل الـ5 خطوات نهائياً بناءً على طلب صريح من المستخدم:
         # لا نفع حقيقي كان يُضاف من الشرح المطوّل - استبدلناه برسالة ترحيب من سطرين
