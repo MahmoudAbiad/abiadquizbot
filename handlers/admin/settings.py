@@ -12,7 +12,7 @@ from keyboards import (
     get_cancel_keyboard,
     get_admin_dashboard_keyboard,
 )
-from settings_helper import (
+from helpers.settings_helper import (
     get_app_settings,
     update_app_setting,
     SETTING_LABELS,

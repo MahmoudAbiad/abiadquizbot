@@ -25,7 +25,7 @@ from services.export_service import (
     build_quiz_docx,
     build_quiz_pdf,
 )
-from supabase_helper import get_favorite_quiz, log_usage_event
+from helpers.supabase_helper import get_favorite_quiz, log_usage_event
 
 logger = get_logger(__name__)
 router = Router()

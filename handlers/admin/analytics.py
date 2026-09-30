@@ -8,7 +8,7 @@ from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest
 
 from constants import format_syria_time
-from supabase_helper import (
+from helpers.supabase_helper import (
     admin_get_usage_overview,
     admin_get_daily_active_users,
     admin_get_today_active_users,

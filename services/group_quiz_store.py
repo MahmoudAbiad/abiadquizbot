@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 
 from config import redis_client
 from logger import get_logger, log_error, log_info
-from supabase_helper import supabase
+from helpers.supabase_helper import supabase
 
 logger = get_logger(__name__)
 

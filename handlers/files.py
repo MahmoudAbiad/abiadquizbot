@@ -10,7 +10,7 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 
 from config import QuizState, bot, redis_client, ADMIN_ID
-from settings_helper import get_setting
+from helpers.settings_helper import get_setting
 from constants import (
     ADMIN_CONTACT, BTN_CANCEL_REQUEST, ERROR_ALBUM_TOO_LARGE,
     MAX_ALBUM_IMAGES, MAX_SUPER_PAGES, MAX_TEXT_INPUT_SIZE, MSG_NOTHING_TO_CANCEL,
@@ -34,7 +34,7 @@ from constants import (
     MSG_CLASSIFICATION_VOTE_ALREADY, MSG_CLASSIFICATION_VOTE_ERROR,
     MSG_CLASSIFICATION_LOCKED_SUFFIX, MSG_CLASSIFICATION_VOTE_ADMIN_ALERT,
 )
-from gemini_helper import get_pdf_page_count_sync
+from helpers.gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from keyboards import (
     get_multiple_quizzes_keyboard, get_question_count_keyboard,
@@ -43,12 +43,12 @@ from keyboards import (
     get_quiz_detected_count_keyboard, get_classification_vote_keyboard,
 )
 from logger import get_logger, log_error, log_warning
-from supabase_helper import (
+from helpers.supabase_helper import (
     check_or_add_user, get_file_quizzes, update_user_stats, log_usage_event, mark_quiz_attempt_stopped,
     reward_referrer_if_eligible, get_classification_lock, submit_classification_vote,
     has_user_voted_on_classification, is_feature_enabled,
 )
-from r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
+from helpers.r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, short_token_to_hash
 from validators import validate_file_size, validate_question_count
 

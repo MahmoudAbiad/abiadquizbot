@@ -62,9 +62,9 @@ from constants import (
 )
 from logger import get_logger, log_warning
 from services.detection_common import IMAGE_EXTENSIONS, build_text_sample
-from ai_models_helper import get_detection_model
+from helpers.ai_models_helper import get_detection_model
 from config import redis_client
-from supabase_helper import get_classification_lock
+from helpers.supabase_helper import get_classification_lock
 
 logger = get_logger(__name__)
 

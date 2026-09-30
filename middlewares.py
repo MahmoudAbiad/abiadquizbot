@@ -67,7 +67,7 @@ class ErrorTrackingMiddleware(BaseMiddleware):
             logger.error(f"Unhandled exception while processing update {event.update_id}: {e}", exc_info=True)
             if user_id and user_id != ADMIN_ID:
                 try:
-                    from supabase_helper import log_error_event
+                    from helpers.supabase_helper import log_error_event
                     asyncio.create_task(log_error_event(
                         user_id=user_id,
                         error_message=f"Unhandled exception: {e}",

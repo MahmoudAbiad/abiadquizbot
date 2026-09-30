@@ -33,7 +33,7 @@ from typing import Any, Dict, Optional, Tuple
 from constants import MAX_AUDIO_DURATION_MINUTES
 from helpers.points_calculator import calculate_audio_transcription_cost
 from services.audio_duration_service import probe_actual_duration_seconds
-from supabase_helper import check_or_add_user, log_usage_event
+from helpers.supabase_helper import check_or_add_user, log_usage_event
 from utils import ensure_directory_exists
 
 DOWNLOADS_DIR = "downloads"

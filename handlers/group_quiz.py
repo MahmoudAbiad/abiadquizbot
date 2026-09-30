@@ -77,7 +77,7 @@ from services.group_quiz_store import (
     upsert_chat_membership,
 )
 from services.quiz_engine import send_quiz_poll
-from supabase_helper import check_or_add_user, get_shared_quiz
+from helpers.supabase_helper import check_or_add_user, get_shared_quiz
 
 logger = get_logger(__name__)
 

@@ -15,7 +15,7 @@ from keyboards import (
     get_ai_provider_choice_keyboard,
     get_ai_cancel_keyboard,
 )
-from ai_models_helper import (
+from helpers.ai_models_helper import (
     get_all_models,
     add_model,
     remove_model,
@@ -27,7 +27,7 @@ from ai_models_helper import (
     PROVIDER_LABELS,
     SLOT_DETECTION,
 )
-from supabase_helper import admin_get_quiz_generation_log, get_ai_model_pricing
+from helpers.supabase_helper import admin_get_quiz_generation_log, get_ai_model_pricing
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 

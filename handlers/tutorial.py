@@ -15,7 +15,7 @@ from aiogram.filters import Command
 
 from config import bot
 from keyboards import get_main_menu_keyboard
-from supabase_helper import log_usage_event
+from helpers.supabase_helper import log_usage_event
 from logger import get_logger, log_error
 
 logger = get_logger(__name__)

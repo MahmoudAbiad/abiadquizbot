@@ -12,12 +12,12 @@ from constants import (
     SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
     QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
 )
-from gemini_helper import generate_quiz_smart, get_last_generation_metadata
+from helpers.gemini_helper import generate_quiz_smart, get_last_generation_metadata
 from logger import get_logger, log_warning
 from services.file_service import extract_office_text_if_needed
 from services.image_quiz_renderer import render_question_image_async, looks_arabic
 from services.quiz_engine import _question_image_object_path
-from supabase_helper import (
+from helpers.supabase_helper import (
     get_file_quizzes,
     log_ai_generation,
     refund_user_points,

@@ -27,7 +27,7 @@
 from aiogram import Router, types, F
 
 from logger import get_logger, log_error
-from supabase_helper import admin_get_quiz_by_id, admin_delete_quiz
+from helpers.supabase_helper import admin_get_quiz_by_id, admin_delete_quiz
 from services.quiz_permissions import can_delete_quiz
 
 logger = get_logger(__name__)

@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 
 from config import bot
-from supabase_helper import create_shared_quiz_id, save_shared_quiz, get_shared_quiz, log_usage_event
+from helpers.supabase_helper import create_shared_quiz_id, save_shared_quiz, get_shared_quiz, log_usage_event
 from logger import get_logger, log_error
 
 # استيراد الوظيفة المشتركة لتشغيل الكويز الجاهز

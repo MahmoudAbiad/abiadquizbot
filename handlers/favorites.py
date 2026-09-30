@@ -9,7 +9,7 @@ from constants import (
     DEFAULT_FAVORITE_SECTION_TITLE,
     MSG_FAVORITES_SEARCH_EMPTY, MSG_FAVORITES_SEARCH_PROMPT
 )
-from supabase_helper import (
+from helpers.supabase_helper import (
     list_favorite_quizzes, list_favorite_sections,
     get_favorite_quiz, remove_favorite_quiz, log_usage_event,
     supabase # 🆕 تم استيراد كائن سوبابيس لعمل الاستعلام المباشر للـ UUID

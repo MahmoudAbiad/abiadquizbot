@@ -124,7 +124,7 @@ def _track_error_for_current_user(message: str, exception: Optional[Exception]) 
         except RuntimeError:
             return  # لا يوجد event loop نشط حالياً (مثلاً كود مزامن خارج سياق البوت)
 
-        from supabase_helper import log_error_event
+        from helpers.supabase_helper import log_error_event
         loop.create_task(log_error_event(
             user_id=ctx.user_id,
             error_message=message,

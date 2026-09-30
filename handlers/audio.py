@@ -55,10 +55,10 @@ from services.audio_flow_service import (
 )
 from services.audio_service import summarize_lecture_text, transcribe_audio_lecture
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
-from supabase_helper import (
+from helpers.supabase_helper import (
     log_usage_event, refund_user_points_split, update_user_stats,
 )
-from r2_helper import download_audio_temp_to_file, delete_audio_temp
+from helpers.r2_helper import download_audio_temp_to_file, delete_audio_temp
 from utils import ensure_directory_exists, safe_file_cleanup
 
 logger = get_logger(__name__)

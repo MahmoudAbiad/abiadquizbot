@@ -4,7 +4,7 @@ import io
 import csv
 import html
 from constants import USER_QUIZZES_PAGE_SIZE, format_syria_time as _format_syria_time
-from supabase_helper import admin_get_user_quizzes
+from helpers.supabase_helper import admin_get_user_quizzes
 from .admin_utils import sanitize_csv_value
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
@@ -13,7 +13,7 @@ from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from config import bot
-from supabase_helper import (
+from helpers.supabase_helper import (
     supabase, 
     admin_add_points, 
     admin_get_global_stats, 

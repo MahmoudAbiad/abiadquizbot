@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 from ._client import supabase, logger, log_error, log_warning, log_info
 from .analytics import log_usage_event
 from validators import validate_user_id
-from settings_helper import get_setting
+from helpers.settings_helper import get_setting
 
 
 def _balance_payload(free_points: Any = 0, paid_points: Any = 0, **extra: Any) -> Dict[str, Any]:

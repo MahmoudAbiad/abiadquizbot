@@ -31,12 +31,12 @@ from telegram_webapp_auth import verify_telegram_init_data
 
 # 🆕 دوال التحليلات وتنظيف قاعدة البيانات تضل من Supabase (Postgres) - لا علاقة لها
 # بمشكلة سقف الـ50MB (تلك خاصة بـStorage فقط، مو بقاعدة البيانات).
-from supabase_helper import flush_analytics_queue, auto_cleanup_old_analytics_data
+from helpers.supabase_helper import flush_analytics_queue, auto_cleanup_old_analytics_data
 
 # 🆕 دوال التخزين المؤقت (رفع الصوت/الملفات/الصور) انتقلت من Supabase Storage
 # لـ Cloudflare R2 (راجع helpers/r2_helper.py) - نفس الأسماء تماماً (drop-in)
 # لتفادي أي تعديل إضافي بمكان استدعائها هون أو بـ handlers/audio.py و files.py.
-from r2_helper import (
+from helpers.r2_helper import (
     create_audio_upload_target, cleanup_stale_audio_uploads,
     get_audio_temp_object_size, delete_audio_temp,
     create_file_upload_target, create_image_upload_targets, cleanup_stale_file_uploads,

@@ -16,7 +16,7 @@ from constants import (
     BTN_CLASSIFICATION_VOTE_YES, BTN_CLASSIFICATION_VOTE_NO,
     CLASSIFICATION_SUBJECT_CODES,
 )
-from settings_helper import get_setting
+from helpers.settings_helper import get_setting
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
 from services.quiz_permissions import can_delete_quiz
@@ -716,7 +716,7 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
     راجع get_admin_settings_general_keyboard). labels المتوقّع هنا هو
     settings_helper.POINTS_SETTING_LABELS (إعدادات النقاط فقط، بدون أي إعداد خاص
     بميزة معيّنة - راجع settings_helper.SETTING_TO_FEATURE_FLAG)."""
-    from settings_helper import format_setting_value
+    from helpers.settings_helper import format_setting_value
     kb = []
     for key, label in labels.items():
         value_text = format_setting_value(settings.get(key))

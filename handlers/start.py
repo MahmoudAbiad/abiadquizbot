@@ -5,13 +5,13 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from config import bot, QuizState
 from keyboards import get_main_menu_keyboard
-from supabase_helper import (
+from helpers.supabase_helper import (
     check_or_add_user, get_shared_quiz, get_favorite_quiz_by_global_id, 
     supabase, log_usage_event, mark_quiz_attempt_stopped
 )
 from logger import get_logger, log_info
 from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
-from settings_helper import get_setting
+from helpers.settings_helper import get_setting
 from utils import safe_title
 
 logger = get_logger(__name__)

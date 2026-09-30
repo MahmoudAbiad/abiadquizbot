@@ -13,7 +13,7 @@ from logger import get_logger, log_warning
 # راجع services/image_quiz_renderer.py للتفاصيل.
 from services.image_quiz_renderer import render_question_image_async, looks_arabic, letters_for
 from services.latex_text import latex_to_plain
-from supabase_helper import _is_valid_uuid, save_question_image_url, upload_quiz_question_image
+from helpers.supabase_helper import _is_valid_uuid, save_question_image_url, upload_quiz_question_image
 
 logger = get_logger(__name__)
 

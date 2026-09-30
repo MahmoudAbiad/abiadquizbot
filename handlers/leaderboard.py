@@ -4,7 +4,7 @@ current student's own visibility (publish/hide) directly under the board.
 """
 import asyncio
 from aiogram import Router, types, F
-from supabase_helper import (
+from helpers.supabase_helper import (
     publish_score_to_leaderboard, hide_score_from_leaderboard,
     get_top_5_leaderboard, get_my_leaderboard_status, log_usage_event,
 )

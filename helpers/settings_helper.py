@@ -106,7 +106,7 @@ async def get_app_settings(force_refresh: bool = False) -> Dict[str, float]:
     if not force_refresh and _cache and (now - _cache_timestamp) < SETTINGS_CACHE_TTL_SECONDS:
         return _cache
 
-    from supabase_helper import supabase  # استيراد متأخر لتفادي أي دورة استيراد
+    from helpers.supabase_helper import supabase  # استيراد متأخر لتفادي أي دورة استيراد
 
     try:
         response = await supabase.table("app_settings").select("key, value").execute()
@@ -137,7 +137,7 @@ async def update_app_setting(key: str, value: float) -> Optional[float]:
     if value is None or value < 0:
         return None
 
-    from supabase_helper import supabase
+    from helpers.supabase_helper import supabase
 
     try:
         rpc_response = await supabase.rpc("update_app_setting_atomic", {

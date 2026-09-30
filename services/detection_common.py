@@ -27,7 +27,7 @@ from google.genai import types
 
 from constants import MATH_DETECTION_TEXT_SAMPLE_CHARS, MATH_DETECTION_TIMEOUT
 from logger import get_logger, log_warning
-from ai_models_helper import get_detection_model
+from helpers.ai_models_helper import get_detection_model
 
 logger = get_logger(__name__)
 

@@ -18,8 +18,8 @@ from aiogram.fsm.context import FSMContext
 
 from constants import FEATURE_FLAGS_REGISTRY
 from keyboards import get_feature_flags_keyboard, get_feature_detail_keyboard
-from supabase_helper import get_all_feature_flags, set_feature_flag
-from settings_helper import get_app_settings, SETTING_LABELS, format_setting_value
+from helpers.supabase_helper import get_all_feature_flags, set_feature_flag
+from helpers.settings_helper import get_app_settings, SETTING_LABELS, format_setting_value
 from logger import get_logger
 from .dashboard import IsAdminFilter, safe_edit_text
 

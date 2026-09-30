@@ -65,7 +65,7 @@ from constants import (
 from logger import get_logger, log_error, log_info, log_warning
 from mem_utils import release_memory_to_os
 from utils import calculate_file_hash, safe_file_cleanup
-from ai_models_helper import get_cascade_models, get_groq_fast_model
+from helpers.ai_models_helper import get_cascade_models, get_groq_fast_model
 
 # ==============================================================================
 # CONFIGURATION & GLOBAL STATE

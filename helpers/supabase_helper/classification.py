@@ -9,7 +9,7 @@ import datetime
 from typing import Optional, Dict, List, Any
 
 from ._client import supabase, logger, log_error, log_info
-from settings_helper import get_setting, SETTING_MIN_VALUES
+from helpers.settings_helper import get_setting, SETTING_MIN_VALUES
 
 # ==================== 🆕 التحقق المجتمعي من تصنيف المادة ====================
 # راجع migration_classification_votes.sql للمخطط الكامل + services/subject_classifier.py

@@ -7,7 +7,7 @@ from constants import (
     MAX_STANDARD_PAGES,
     MAX_STANDARD_QUESTIONS,
 )
-from settings_helper import get_setting
+from helpers.settings_helper import get_setting
 
 # 🆕 Audio transcription pricing tier: first AUDIO_STANDARD_MINUTES minutes are billed at
 # the standard 1.0 point/minute rate, any minute beyond that is billed at the overage rate.

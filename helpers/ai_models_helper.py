@@ -111,7 +111,7 @@ async def get_all_models(slot: str, force_refresh: bool = False) -> List[Dict]:
     if not force_refresh and cached and (now - cached[0]) < CACHE_TTL_SECONDS:
         return cached[1]
 
-    from supabase_helper import supabase  # استيراد متأخر لتفادي أي دورة استيراد
+    from helpers.supabase_helper import supabase  # استيراد متأخر لتفادي أي دورة استيراد
 
     try:
         response = await (
@@ -168,7 +168,7 @@ async def add_model(slot: str, provider: str, model_name: str) -> Optional[Dict]
     if slot not in VALID_SLOTS or provider not in VALID_PROVIDERS or not _MODEL_NAME_PATTERN.match(model_name):
         return None
 
-    from supabase_helper import supabase
+    from helpers.supabase_helper import supabase
 
     try:
         rpc_response = await supabase.rpc(
@@ -185,7 +185,7 @@ async def add_model(slot: str, provider: str, model_name: str) -> Optional[Dict]
 
 async def remove_model(model_id: int, slot: str) -> bool:
     """حذف موديل من السلسلة عبر RPC ai_model_remove."""
-    from supabase_helper import supabase
+    from helpers.supabase_helper import supabase
 
     try:
         await supabase.rpc("ai_model_remove", {"p_id": model_id}).execute()
@@ -198,7 +198,7 @@ async def remove_model(model_id: int, slot: str) -> bool:
 
 async def toggle_model(model_id: int, slot: str) -> Optional[Dict]:
     """تبديل حالة التفعيل عبر RPC ai_model_toggle."""
-    from supabase_helper import supabase
+    from helpers.supabase_helper import supabase
 
     try:
         rpc_response = await supabase.rpc("ai_model_toggle", {"p_id": model_id}).execute()
@@ -215,7 +215,7 @@ async def move_model(model_id: int, slot: str, direction: str) -> bool:
     if direction not in ("up", "down"):
         return False
 
-    from supabase_helper import supabase
+    from helpers.supabase_helper import supabase
 
     try:
         await supabase.rpc("ai_model_move", {"p_id": model_id, "p_direction": direction}).execute()

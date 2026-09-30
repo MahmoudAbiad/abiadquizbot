@@ -3,7 +3,7 @@ from typing import Optional, Dict
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 
-from supabase_helper import (
+from helpers.supabase_helper import (
     admin_get_feedbacks_page,
     admin_get_feedback_by_id,
     admin_get_quiz_board_position,
