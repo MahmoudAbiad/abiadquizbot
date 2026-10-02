@@ -316,7 +316,7 @@ def _wrap_and_shape(text: str, is_ar: bool, max_width_px: float, font_prop: fm.F
 
 
 def _sanitize_line_for_mathtext(line: str) -> str:
-    """يتحقق أن matplotlib قادر فعلاً على تفسير أي صيغة LaTeX موجودة بالسطر قبل رسمه؛
+    r"""يتحقق أن matplotlib قادر فعلاً على تفسير أي صيغة LaTeX موجودة بالسطر قبل رسمه؛
     لو فشل (رمز LaTeX غير مدعوم أرسله النموذج)، يجرّد علامات $ ويعرض السطر كنص عادي
     بدل تعطيل توليد الصورة بأكملها.
 

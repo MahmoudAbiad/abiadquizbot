@@ -244,7 +244,7 @@ def get_quiz_detected_count_keyboard(selected_count: int) -> types.InlineKeyboar
     🆕 كيبورد شاشة تأكيد عدد الأسئلة عندما subject_type = اختبار جاهز (محلول/غير محلول):
     بلا أزرار عدد جاهزة عشوائية (5/10/15/20 من get_question_count_keyboard) لأن العدد
     الحقيقي محدَّد فعلياً بالمستند نفسه وتم رصده تلقائياً (راجع classify_subject +
-    handlers/files.py._show_question_count_screen) - فقط زر تعديل يدوي (لو بدا الرصد غير
+    handlers/files.py.show_question_count_screen) - فقط زر تعديل يدوي (لو بدا الرصد غير
     دقيق) وزر بدء الاستخراج مباشرة بالعدد المرصود. selected_count غير مستخدم مباشرة هنا
     (السعر/العدد المعروضان فوق هذا الكيبورد بنص الشاشة نفسه) لكنه مُمرَّر لتوحيد التوقيع
     مع get_question_count_keyboard ولإتاحة أي تخصيص مستقبلي بالأزرار بحسب العدد الحالي.

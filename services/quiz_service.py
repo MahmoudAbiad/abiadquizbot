@@ -1,5 +1,6 @@
 # services/quiz_service.py
 import asyncio
+from task_utils import spawn
 import os
 import random
 from typing import Any, Dict, Tuple, Optional, List
@@ -106,7 +107,7 @@ MODE_LABELS_AR = {
 # صوتية، مستندات أوفيس docx/pptx/txt). ليس دقيقاً 100% (يعتمد بشدة على الخط/التباعد
 # الفعلي لو كان المستند سيُطبع)، لكنه أفضل بما لا يُقاس من items_count=1 ثابت للجميع
 # بغض النظر عن الحجم الفعلي - كان يعني أن محتوى ضخماً وآخر صغيراً يُصنَّفان "عادي"
-# ويُسعَّران بنفس السعر تماماً (راجع نقاش handlers/files.py._ask_question_count).
+# ويُسعَّران بنفس السعر تماماً (راجع نقاش handlers/files.py.ask_question_count).
 WORDS_PER_PAGE_ESTIMATE = 500
 
 
@@ -427,7 +428,7 @@ async def execute_quiz_generation_workflow(
         # 🆕 يُسجَّل بجدول ai_generation_log المخصص (كان فارغاً تماماً حتى الآن) - راجع
         # migration_ai_generation_log_tokens.sql لأعمدة input_tokens/output_tokens الجديدة.
         # لا يُوقف التوليد إذا فشل (تحليلات ثانوية، ليست بالمسار الحرج).
-        asyncio.create_task(log_ai_generation(
+        spawn(log_ai_generation(
             user_id=user_id,
             source_title=data.get("source_title", "كويز من مستند"),
             provider=generation_metadata.get("provider"),
@@ -484,6 +485,6 @@ async def execute_quiz_generation_workflow(
         # 🆕 راجع تعليق _prefetch_math_quiz_images أعلاه - يشمل فقط كويزات رياضية بمعرّف
         # UUID صالح فعلياً (بدونه save_question_image_url لن يجد صفاً ليحدّثه لاحقاً).
         if is_math_mode and new_quiz_id and quiz_data:
-            asyncio.create_task(_prefetch_math_quiz_images(new_quiz_id, quiz_data))
+            spawn(_prefetch_math_quiz_images(new_quiz_id, quiz_data))
 
         return quiz_data, new_quiz_id, "", get_last_generation_metadata()

@@ -5,6 +5,7 @@ User Management: تسجيل/تحديث بيانات المستخدم، التج�
 """
 
 import asyncio
+from task_utils import spawn
 import datetime
 from typing import Optional, Dict, Any
 
@@ -83,7 +84,7 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
         # 🆕 تسجيل نشاط "انضم عبر رابط دعوة بواسطة فلان" — حدث تحليلات عادي (usage_events)
         # يظهر بلوحة الأدمن ويُستخدم أيضاً كسجل زمني دقيق لكل إحالة جديدة من الآن فصاعداً
         if actual_referrer:
-            asyncio.create_task(log_usage_event(user_id, "joined_via_referral", {
+            spawn(log_usage_event(user_id, "joined_via_referral", {
                 "referrer_id": actual_referrer,
                 "referrer_name": referrer_name,
             }))

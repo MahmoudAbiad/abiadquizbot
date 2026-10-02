@@ -10,6 +10,7 @@
 هذا الملف إضافي بالكامل: لا يحذف ولا يعدّل أي معالج (handler) أو ميزة موجودة مسبقاً.
 """
 import asyncio
+from task_utils import spawn
 from aiogram import Router, types, F
 from aiogram.filters import Command
 
@@ -135,7 +136,7 @@ async def send_tutorial(message: types.Message, step_index: int = 0) -> None:
 async def cmd_help(message: types.Message) -> None:
     """أمر /help: يفتح الدليل التفاعلي من أول خطوة، لأي مستخدم في أي وقت."""
     await send_tutorial(message, 0)
-    asyncio.create_task(log_usage_event(message.from_user.id, "tutorial_opened", {"source": "command"}))
+    spawn(log_usage_event(message.from_user.id, "tutorial_opened", {"source": "command"}))
 
 
 @router.callback_query(F.data == "how_to_use")
@@ -147,7 +148,7 @@ async def open_tutorial_from_menu(call: types.CallbackQuery) -> None:
             reply_markup=_tutorial_keyboard(0),
             parse_mode="HTML",
         )
-        asyncio.create_task(log_usage_event(call.from_user.id, "tutorial_opened", {"source": "menu_button"}))
+        spawn(log_usage_event(call.from_user.id, "tutorial_opened", {"source": "menu_button"}))
     except Exception as exc:
         log_error(logger, f"open_tutorial_from_menu failed: {exc}", exception=exc)
     finally:
@@ -188,7 +189,7 @@ async def finish_tutorial(call: types.CallbackQuery) -> None:
             "🏠 القائمة الرئيسية",
             reply_markup=await get_main_menu_keyboard(bot_info.username, call.from_user.id)
         )
-        asyncio.create_task(log_usage_event(call.from_user.id, "tutorial_completed"))
+        spawn(log_usage_event(call.from_user.id, "tutorial_completed"))
     except Exception as exc:
         log_error(logger, f"finish_tutorial failed: {exc}", exception=exc)
     finally:

@@ -41,6 +41,7 @@ MODULE: Unified Subject Classifier (الفحص الموحّد لتصنيف ال�
 """
 
 import asyncio
+from task_utils import spawn
 import os
 from typing import Any, List, Literal, Optional
 
@@ -113,7 +114,7 @@ class SubjectClassification(BaseModel):
     # 🆕 تقدير آلي لعدد الأسئلة الفعلي الموجود بالمستند - يُملأ فقط عندما subject يساوي
     # quiz_solved أو quiz_unsolved (اختبار جاهز الصياغة أصلاً)، ويُستخدم لاحقاً لعرض شاشة
     # تأكيد عدد/تكلفة جاهزة بدل تخيير الطالب بأزرار عدد عشوائية (5/10/15/20) لا علاقة لها
-    # بالعدد الحقيقي بمستند اختبار جاهز أصلاً. راجع handlers/files.py._show_question_count_screen.
+    # بالعدد الحقيقي بمستند اختبار جاهز أصلاً. راجع handlers/files.py.show_question_count_screen.
     question_count: Optional[int] = Field(
         default=None,
         description=(
@@ -331,7 +332,7 @@ async def _classify_media(file_paths: List[str]) -> SubjectClassification:
             log_warning(logger, f"[subject_classifier] Classification call failed with one key, trying next key if available: {exc}")
         finally:
             for uploaded_file in uploaded:
-                asyncio.create_task(_safe_delete_gemini_file(client, uploaded_file.name))
+                spawn(_safe_delete_gemini_file(client, uploaded_file.name))
     return _fallback()
 
 

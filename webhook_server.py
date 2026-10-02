@@ -4,7 +4,9 @@ Handles HTTP server setup safely with modern lifespan context and proper Pydanti
 """
 
 import os
-import asyncio  
+import hmac
+import asyncio
+from task_utils import spawn
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -163,17 +165,17 @@ async def lifespan(app: FastAPI):
             await set_bot_commands(bot)
             
         # ⚡ إطلاق مهمة تجميع وتفريغ تحليلات Redis كل دقيقة
-        asyncio.create_task(scheduled_analytics_batch_loop())
+        spawn(scheduled_analytics_batch_loop())
         print("⚡ تم جدولة رفع أحداث التحليلات كل دقيقة عبر Redis Batching.")
 
         # 🧹 إطلاق مهمة التنظيف التلقائي الدوري للبيانات
-        asyncio.create_task(scheduled_cleanup_loop())
+        spawn(scheduled_cleanup_loop())
         print("🔄 تم جدولة تنظيف البيانات التلقائي كل 12 ساعة.")
 
         # 👥 إطلاق نبضة الكويز الجماعي الدورية (وضع fixed_interval) - راجع
         # handlers/group_quiz.py::group_quiz_heartbeat_loop
         from handlers.group_quiz import group_quiz_heartbeat_loop
-        asyncio.create_task(group_quiz_heartbeat_loop())
+        spawn(group_quiz_heartbeat_loop())
         print("👥 تم جدولة نبضة الكويز الجماعي الدورية كل 12 ثانية.")
 
         # 🧹 تنظيف دوري منفصل لبيانات الكويز الجماعي القديمة (جلسات منتهية/ملغاة
@@ -181,12 +183,16 @@ async def lifespan(app: FastAPI):
         # عمداً عن scheduled_cleanup_loop فوق (راجع services/group_quiz_store.py
         # لتعديل مدة الاحتفاظ الافتراضية 90 يوم).
         from services.group_quiz_store import group_quiz_cleanup_loop
-        asyncio.create_task(group_quiz_cleanup_loop())
+        spawn(group_quiz_cleanup_loop())
         print("🧹 تم جدولة تنظيف بيانات الكويز الجماعي القديمة كل 12 ساعة.")
 
     except Exception as e:
         print(f"❌ فشل تفعيل الـ Webhook أو المهام الدورية أثناء تشغيل السيرفر: {e}")
-        logger.error(f"Failed to set webhook or tasks on startup: {e}")
+        logger.critical(f"Failed to set webhook or tasks on startup: {e}", exc_info=True)
+        # 🔒 كان الخطأ يُبلَع هون فيكمل السيرفر شغّال بدون webhook مسجَّل وبدون الحلقات
+        # الخلفية (heartbeat/تحليلات/تنظيف) و/health يضل يرجع "ok". نعيد رمي الاستثناء
+        # ليفشل الإقلاع بشكل واضح وتعيد المنصة تشغيل الحاوية/تظهر المشكلة بالـ logs.
+        raise
 
     yield  # هنا يعمل السيرفر ويستقبل الطلبات...
 
@@ -219,17 +225,24 @@ async def webhook(request: Request):
     استقبال التحديثات من تلغرام والتحقق منها، ثم إحالتها للمعالجة في الخلفية
     والرد فوراً لـ Telegram بـ OK لمنع الـ Retries والبطء.
     """
-    if TELEGRAM_WEBHOOK_SECRET:
-        incoming_secret = request.headers.get("x-telegram-bot-api-secret-token")
-        if incoming_secret != TELEGRAM_WEBHOOK_SECRET:
-            raise HTTPException(status_code=403, detail="Forbidden")
+    # 🔒 Fail-closed: لو السر غير مضبوط نرفض كل الطلبات بدل ما نقبل أي تحديث مزوّر
+    # (كان الفحص يتخطى نفسه بصمت لما TELEGRAM_WEBHOOK_SECRET فاضي).
+    if not TELEGRAM_WEBHOOK_SECRET:
+        logger.error("Webhook request rejected: TELEGRAM_WEBHOOK_SECRET is not configured")
+        raise HTTPException(status_code=503, detail="Webhook not configured")
+
+    incoming_secret = request.headers.get("x-telegram-bot-api-secret-token") or ""
+    if not hmac.compare_digest(
+        incoming_secret.encode("utf-8"), TELEGRAM_WEBHOOK_SECRET.encode("utf-8")
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     try:
         update_data = await request.json()
         update = Update.model_validate(update_data)
         
         # ⚡ تشغيل المعالجة الكاملة للتحديث في الخلفية دون انتظار
-        asyncio.create_task(process_update_safely(update))
+        spawn(process_update_safely(update))
         
     except Exception as e:
         logger.error(f"Error parsing incoming webhook update: {e}", exc_info=True)
@@ -352,7 +365,7 @@ async def audio_upload_complete(payload: AudioUploadCompleteRequest):
         await delete_audio_temp(payload.object_path)
         raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
 
-    asyncio.create_task(
+    spawn(
         process_web_uploaded_audio(
             user_id=user_id,
             chat_id=user_id,  # محادثة خاصة - chat_id يساوي user_id بالبوتات الفردية
@@ -425,7 +438,7 @@ async def file_upload_complete(payload: FileUploadCompleteRequest):
         await delete_file_temp(payload.object_path)
         raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
 
-    asyncio.create_task(
+    spawn(
         process_web_uploaded_file(
             user_id=user_id,
             chat_id=user_id,
@@ -508,7 +521,7 @@ async def image_upload_complete(payload: ImageUploadCompleteRequest):
             await delete_file_temp_batch(object_paths)
             raise HTTPException(status_code=413, detail="حجم إحدى الصور يتجاوز الحد المسموح أو تعذر التحقق منه.")
 
-    asyncio.create_task(
+    spawn(
         process_web_uploaded_images(
             user_id=user_id,
             chat_id=user_id,

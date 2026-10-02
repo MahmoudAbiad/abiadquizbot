@@ -4,6 +4,7 @@ Handles anti-spam (Rate Limiting) to protect the bot and API keys.
 """
 
 import asyncio
+from task_utils import spawn
 from typing import Any, Awaitable, Callable, Dict, Optional, Set
 from aiogram import BaseMiddleware
 from aiogram.types import Update, Message, CallbackQuery
@@ -68,7 +69,7 @@ class ErrorTrackingMiddleware(BaseMiddleware):
             if user_id and user_id != ADMIN_ID:
                 try:
                     from helpers.supabase_helper import log_error_event
-                    asyncio.create_task(log_error_event(
+                    spawn(log_error_event(
                         user_id=user_id,
                         error_message=f"Unhandled exception: {e}",
                         exception=e,

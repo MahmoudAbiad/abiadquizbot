@@ -12,7 +12,7 @@ from helpers.supabase_helper import (
 )
 from keyboards import get_admin_dashboard_keyboard, build_contact_button
 from logger import get_logger
-from handlers.quiz_runner import _start_loaded_quiz
+from handlers.quiz_runner import start_loaded_quiz
 from .dashboard import IsAdminFilter, safe_edit_text
 
 logger = get_logger(__name__)
@@ -166,7 +166,7 @@ async def admin_callback_try_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ تعذر تحميل بيانات هذا الكويز، قد يكون محذوفاً.", show_alert=True)
             return
         await call.answer("🎯 جاري تشغيل الكويز لتجربته...")
-        await _start_loaded_quiz(
+        await start_loaded_quiz(
             call, state, quiz["quiz_data"],
             quiz.get("source_title") or "كويز (تجربة إدارية)",
             origin="admin_test",

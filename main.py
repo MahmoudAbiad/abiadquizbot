@@ -6,6 +6,7 @@ Supports both Webhook (Railway/Srv) and Polling modes.
 import sys
 import os
 import asyncio
+from task_utils import spawn
 from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 import logging
@@ -116,14 +117,14 @@ def main():
                 # webhook فقط)، وإلا وضع fixed_interval بيرسل السؤال الأول ويعلّق
                 # لأي نسخة تشتغل محلياً/بـ polling.
                 from handlers.group_quiz import group_quiz_heartbeat_loop
-                asyncio.create_task(group_quiz_heartbeat_loop())
+                spawn(group_quiz_heartbeat_loop())
 
                 # 🧹 تنظيف دوري لبيانات الكويز الجماعي القديمة (جلسات منتهية/ملغاة
                 # أقدم من GROUP_SESSION_RETENTION_DAYS) - نفس سبب استقلاليتها عن
                 # scheduled_cleanup_loop بـ webhook_server.py (تلك ما بتشتغل أصلاً
                 # بوضع polling حالياً).
                 from services.group_quiz_store import group_quiz_cleanup_loop
-                asyncio.create_task(group_quiz_cleanup_loop())
+                spawn(group_quiz_cleanup_loop())
 
                 await dp.start_polling(bot)
                 

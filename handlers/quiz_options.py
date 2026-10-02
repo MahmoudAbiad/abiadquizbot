@@ -33,6 +33,7 @@ from constants import (
 )
 from keyboards import get_quiz_difficulty_keyboard, get_quiz_type_keyboard
 from logger import get_logger, log_error
+from handlers.files import show_question_count_screen
 
 logger = get_logger(__name__)
 router = Router()
@@ -154,9 +155,8 @@ async def handle_difficulty_screen(call: types.CallbackQuery, state: FSMContext)
         return
     await state.update_data(difficulty=value)
 
-    from handlers.files import _show_question_count_screen  # تفادي استيراد دائري (circular import)
     try:
-        await _show_question_count_screen(call.message, state, edit=True)
+        await show_question_count_screen(call.message, state, edit=True)
     except Exception as exc:
         log_error(logger, f"Failed to proceed from difficulty screen to count screen: {exc}", exception=exc)
         await call.message.answer("❌ حدث خطأ غير متوقع، حاول مجدداً.")

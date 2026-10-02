@@ -1,5 +1,6 @@
 # services/quiz_engine.py
 import asyncio
+from task_utils import spawn
 import hashlib
 import json
 import uuid
@@ -111,7 +112,7 @@ async def _send_math_image_question(
         image_url = await upload_quiz_question_image(image_bytes, object_path)
         if image_url and quiz_id and _is_valid_uuid(quiz_id):
             q["image_url"] = image_url  # يبقى بالذاكرة طوال الجلسة الحالية أيضاً
-            asyncio.create_task(save_question_image_url(quiz_id, idx, image_url))
+            spawn(save_question_image_url(quiz_id, idx, image_url))
 
     caption = f"السؤال {idx + 1} من {total} 📝"
     try:

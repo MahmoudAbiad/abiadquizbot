@@ -1,4 +1,5 @@
 import asyncio
+from task_utils import spawn
 from typing import Optional
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
@@ -10,6 +11,7 @@ from helpers.supabase_helper import (
     supabase, log_usage_event, mark_quiz_attempt_stopped
 )
 from logger import get_logger, log_info
+from handlers.quiz_runner import start_loaded_quiz
 from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 from helpers.settings_helper import get_setting
 from utils import safe_title
@@ -68,17 +70,16 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
             join_quiz_id=str(actual_quiz_id),
         )
         is_new_via_link = link_user_info.get("status") == "new"
-        from handlers.quiz_runner import _start_loaded_quiz
         quiz_title = shared.get('title') or shared.get('source_title') or 'كويز مشترك'
 
-        asyncio.create_task(log_usage_event(target_msg.from_user.id, "shared_link_opened", {
+        spawn(log_usage_event(target_msg.from_user.id, "shared_link_opened", {
             "payload_type": "share" if args_payload.startswith("share_") else "quiz",
             "quiz_id": str(actual_quiz_id),
             "is_new_user": is_new_via_link,
         }))
 
         await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{safe_title(quiz_title)}</b>...", parse_mode="HTML")
-        await _start_loaded_quiz(
+        await start_loaded_quiz(
             target_msg, state, shared["quiz_data"], 
             quiz_title, 
             origin="shared", 
@@ -146,7 +147,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         }
         if start_source:
             bot_start_meta["source"] = start_source
-        asyncio.create_task(log_usage_event(msg.from_user.id, "bot_start", bot_start_meta))
+        spawn(log_usage_event(msg.from_user.id, "bot_start", bot_start_meta))
         
         # 🆕 (2026-08-28) إلغاء دليل الـ5 خطوات نهائياً بناءً على طلب صريح من المستخدم:
         # لا نفع حقيقي كان يُضاف من الشرح المطوّل - استبدلناه برسالة ترحيب من سطرين
@@ -155,7 +156,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         # طرفه) لكنه يُستخدم فقط لتأكيد الفهم وإظهار القائمة الرئيسية بعدها مباشرة -
         # حتى لا يبقى المستخدم بلا أي أزرار وصول (شحن رصيد/مفضلة/دعم) إلى أن يكتب
         # /start يدوياً من جديد (نفس المبدأ اللي كان بمعالج tut_finish القديم بالدليل
-        # المحذوف الآن بالكامل - راجع HISTORY_LOG.md لتفاصيل الإزالة).
+        # المحذوف الآن بالكامل - راجع docs/HISTORY_LOG.md لتفاصيل الإزالة).
         if status == "new":
             intro_text = (
                 "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
@@ -213,7 +214,7 @@ async def handle_deep_link_overwrite_confirm(call: types.CallbackQuery, state: F
         
         # إصلاح التتبع: إغلاق محاولة الكويز القائم قبل مسح الحالة كي لا تبقى معلقة بالداتابيز
         if data.get("attempt_id"):
-            asyncio.create_task(mark_quiz_attempt_stopped(data["attempt_id"]))
+            spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
 
         await state.clear()
         if payload:
@@ -250,7 +251,7 @@ async def ack_new_user_start(call: types.CallbackQuery):
             "📥 تمام! أرسل الآن ملفك (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشرة في هذه المحادثة 🔥",
             parse_mode="HTML",
         )
-        asyncio.create_task(log_usage_event(call.from_user.id, "start_cta_acknowledged"))
+        spawn(log_usage_event(call.from_user.id, "start_cta_acknowledged"))
     except Exception as e:
         logger.error(f"Error in ack_new_user_start: {e}")
     finally:
@@ -281,7 +282,7 @@ async def show_recharge_info(call: types.CallbackQuery):
         log_info(logger, f"User {call.from_user.id} requested recharge info")
         
         # تسجيل حدث طلب معلومات الشحن
-        asyncio.create_task(log_usage_event(call.from_user.id, "recharge_info_viewed"))
+        spawn(log_usage_event(call.from_user.id, "recharge_info_viewed"))
     except Exception as e:
         logger.error(f"Error in show_recharge_info: {e}")
     finally:
@@ -311,7 +312,7 @@ async def cmd_support(message: types.Message):
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
     
     # تسجيل حدث فتح الدعم الفني
-    asyncio.create_task(log_usage_event(message.from_user.id, "support_opened"))
+    spawn(log_usage_event(message.from_user.id, "support_opened"))
 
 
 @router.message(Command("channel"))
@@ -332,4 +333,4 @@ async def cmd_channel(message: types.Message):
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
     
     # تسجيل حدث فتح القناة
-    asyncio.create_task(log_usage_event(message.from_user.id, "channel_opened"))
+    spawn(log_usage_event(message.from_user.id, "channel_opened"))

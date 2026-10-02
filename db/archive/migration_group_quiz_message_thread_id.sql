@@ -1,5 +1,5 @@
 -- بند 1.7 (دعم التوبيكس / Forum supergroups) — راجع group_quiz_decisions.md
--- تمت المعالجة فعلياً على قاعدة البيانات الحية (project pqawoanhbgvdtbdhnbod) عبر
+-- تمت المعالجة فعلياً على قاعدة البيانات الحية (project <project-ref>) عبر
 -- Supabase MCP وقت التنفيذ. هالملف للتوثيق/المرجعية بس، نفس نمط ملفات
 -- migration_group_quiz_*.sql الموجودة بالمشروع.
 

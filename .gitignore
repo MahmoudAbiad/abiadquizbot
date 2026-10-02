@@ -1,15 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets / credentials (never commit)
 .env
 .env.*
+!.env.example
 *.pem
 *.key
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-logs/
-downloads/
+*service-account*.json
+*service_account*.json
+*credentials*.json
+
+# Local data
 *.db
 *.sqlite3
+logs/
+*.log
+downloads/
+
+# Editors / OS
 .idea/
 .vscode/
 .DS_Store

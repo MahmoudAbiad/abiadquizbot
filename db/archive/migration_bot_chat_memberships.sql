@@ -1,7 +1,7 @@
 -- ============================================================
 -- Migration: bot_chat_memberships (بند 3 - دعم القنوات) — راجع group_quiz_decisions.md
 --
--- تمت المعالجة فعلياً على القاعدة الحية (project pqawoanhbgvdtbdhnbod) عبر
+-- تمت المعالجة فعلياً على القاعدة الحية (project <project-ref>) عبر
 -- Supabase MCP بطلب صريح من صاحب المشروع، وتم التحقق (أعمدة + RLS مفعّل + صفر
 -- policies). هالملف للتوثيق/المرجعية بس، نفس نمط ملفات migration_group_quiz_*.sql.
 -- آمن للتشغيل عدة مرات (IF NOT EXISTS).

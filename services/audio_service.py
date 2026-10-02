@@ -30,6 +30,7 @@ MODULE: AI Audio Lecture Service (Transcription & Summarization)
 """
 
 import asyncio
+from task_utils import spawn
 import os
 from typing import Any, List, Optional, Tuple
 
@@ -173,7 +174,7 @@ async def transcribe_audio_lecture(file_path: str, mime_type: str) -> Optional[T
     finally:
         if cleanup_ref:
             client, file_name = cleanup_ref
-            asyncio.create_task(_safe_delete_uploaded_file(client, file_name))
+            spawn(_safe_delete_uploaded_file(client, file_name))
 
     if not result:
         log_error(logger, f"Audio transcription cascade exhausted for file: {file_path}")

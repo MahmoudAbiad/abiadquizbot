@@ -190,7 +190,7 @@
 
 ## 🔧 معلومات تقنية للاستمرارية
 
-- **Supabase project المستخدم فعلياً:** `telegramquizbot` (project_id: `pqawoanhbgvdtbdhnbod`) -
+- **Supabase project المستخدم فعلياً:** `telegramquizbot` (project_id: `<project-ref>`) -
   فيه مشروع تاني بنفس الاسم تقريباً (`Test_telegramquizbot`) لكنه غير نشط، **لا تلمسه
   بالغلط**.
 - **بادئات callback_data المحجوزة حالياً (لا تكرر أي وحدة فيها لأي زر جديد):**
@@ -280,6 +280,41 @@
    (`edit_reply_markup(reply_markup=None)`) لمنع الضغط المتكرر غير المجدي.
 
 **فحص:** `callback_data` الجديد فريد (لا تصادم مع البادئات المحجوزة بـ
-`CURRENT_STATE.md`). `python3 -m compileall .` نجح على كامل المشروع.
+`docs/CURRENT_STATE.md`). `python3 -m compileall .` نجح على كامل المشروع.
 
 **لم يُختبر على بيئة تشغيل حقيقية بعد.**
+
+---
+
+## 🧹 إعادة الهيكلة (خطوات 0-1) - كسر دورات الاستيراد بين الـ handlers
+
+- `services/flow_state.py` (جديد): `build_state_for_chat(chat_id, user_id)` - كانت `_build_state_for_chat` داخل `handlers/audio.py`.
+- أسماء صارت عامة (كانت خاصة `_x` وتُستورد بين الملفات): `start_loaded_quiz` و`send_main_menu` (في `handlers/quiz_runner.py`)، `ask_question_count` و`show_question_count_screen` (في `handlers/files.py`).
+- أُزيلت كل الاستيرادات الكسولة بين `files` / `audio` / `quiz_runner` / `start` / `quiz_options` (صارت top-level).
+- `tests/smoke_import_test.py` (جديد): يستورد كل الوحدات ويتحقق من الـ routers. تشغيل: `python tests/smoke_import_test.py`.
+- إصلاح docstring بـ `services/image_quiz_renderer.py` (كان يعطي SyntaxWarning)، وإضافة `.gitignore`.
+- ⚠️ تحقق ساكن + استيراد فقط (لا تشغيل فعلي مع تيليجرام/Supabase): جرّب فعلياً رفع ملف، رفع صوت، وفتح كويز مشترك، قبل النشر.
+
+## 🧩 إعادة الهيكلة (خطوة 2) - تقسيم helpers/gemini_helper.py إلى حزمة
+
+`helpers/gemini_helper.py` (1428 سطر) صار حزمة `helpers/gemini_helper/` (أكبر ملف فيها 283 سطراً). `__init__.py` يعيد تصدير كل الأسماء السابقة، فكل `from helpers.gemini_helper import ...` الموجود يعمل بلا تعديل.
+
+| الملف | المسؤولية |
+|---|---|
+| `clients.py` | `API_KEYS`، عملاء Gemini/Groq/Vertex (Singletons)، إعدادات البيئة |
+| `state.py` | ContextVars لآخر توليد، `_record_token_usage`، `get_last_generation_metadata` |
+| `parsing.py` | `_repair_json_backslashes`، `_parse_structured_gemini_response` |
+| `cascade.py` | حظر/تبريد (مفتاح، موديل)، Round-Robin، `_execute_cascade` |
+| `media.py` | MIME، Inline مقابل Files API، تقسيم PDF/الصور |
+| `loading.py` | رسالة الانتظار المتحركة |
+| `schemas.py` | `QuizTable`/`QuizMatrix`/`QuizQuestion`/`QuizResponse` |
+| `generic.py` | `generate_structured_with_cascade`، `generate_text_with_cascade` |
+| `generation.py` | المسار العادي + Super PDF/Images |
+| `text_generation.py` | Groq السريع + احتياطي Gemini للنص |
+| `prompts.py` | تعليمات الصعوبة ونوع الأسئلة |
+| `quiz_generator.py` | `generate_quiz_smart` (نقطة الدخول) |
+
+- ⚠️ `current_key_pointer` (عدّاد Round-Robin) لا يُعاد تصديره عمداً: يُعاد ربطه بـ `global` داخل `cascade.py`، فأي نسخة منه خارجها ستكون قديمة. لا أحد يستورده خارج الحزمة اليوم.
+- أسماء الـ logger صارت لكل ملف على حدة (مثلاً `helpers.gemini_helper.cascade`) بدل `helpers.gemini_helper` - انتبه لو عندك فلاتر لوغز تعتمد على الاسم القديم.
+- أي تعديل مستقبلي على حالة مشتركة (`blocked_model_keys`، `_GEMINI_CLIENTS`، `API_KEYS`) يجب أن يعدّل الكائن نفسه (in-place) لا أن يعيد ربط الاسم.
+- تحقق (ساكن + اختبار تكافؤ بعميل Gemini وهمي، قبل/بعد، مخرجات مطابقة حرفياً): ترميم JSON/LaTeX، حظر/تبريد المفاتيح، Round-Robin، فشل-ثم-نجاح بين المفاتيح، `generate_quiz_smart` بمساراته (رياضي/نص/ملفات/Super PDF) مع `chunk_details` والـ metadata. لم يُجرَّب مع Gemini/Groq/Vertex الحقيقية.

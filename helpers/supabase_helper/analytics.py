@@ -7,6 +7,7 @@ Usage Analytics & Tracking: تسجيل أحداث الاستخدام والأخ�
 """
 
 import asyncio
+from task_utils import spawn
 import datetime
 import os
 import traceback
@@ -128,7 +129,7 @@ def start_quiz_attempt(user_id: int, quiz_id: Optional[str], source_type: str, t
     if ADMIN_ID and user_id == ADMIN_ID:
         return client_ref
         
-    asyncio.create_task(_insert_quiz_attempt(client_ref, user_id, quiz_id, source_type, total_questions))
+    spawn(_insert_quiz_attempt(client_ref, user_id, quiz_id, source_type, total_questions))
     return client_ref
 
 

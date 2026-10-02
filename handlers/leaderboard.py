@@ -3,6 +3,7 @@ Leaderboard module - handles displaying the top 5 users and toggling the
 current student's own visibility (publish/hide) directly under the board.
 """
 import asyncio
+from task_utils import spawn
 from aiogram import Router, types, F
 from helpers.supabase_helper import (
     publish_score_to_leaderboard, hide_score_from_leaderboard,
@@ -61,7 +62,7 @@ async def handle_publish_score(call: types.CallbackQuery):
             await call.answer("❌ حدث خطأ أثناء نشر النتيجة. يرجى المحاولة لاحقاً.", show_alert=True)
             return
 
-        asyncio.create_task(log_usage_event(user_id, "score_published", {"quiz_id": quiz_id}))
+        spawn(log_usage_event(user_id, "score_published", {"quiz_id": quiz_id}))
         await call.answer("✅ تم نشر نتيجتك بنجاح في لوحة الشرف!")
 
         text, kb = await _build_leaderboard_view(quiz_id, user_id)
@@ -85,7 +86,7 @@ async def handle_hide_score(call: types.CallbackQuery):
             await call.answer("❌ حدث خطأ أثناء إخفاء النتيجة. يرجى المحاولة لاحقاً.", show_alert=True)
             return
 
-        asyncio.create_task(log_usage_event(user_id, "score_hidden", {"quiz_id": quiz_id}))
+        spawn(log_usage_event(user_id, "score_hidden", {"quiz_id": quiz_id}))
         await call.answer("🙈 تم إخفاء نتيجتك من لوحة الشرف.")
 
         text, kb = await _build_leaderboard_view(quiz_id, user_id)
@@ -105,7 +106,7 @@ async def handle_show_leaderboard(call: types.CallbackQuery):
 
         text, kb = await _build_leaderboard_view(quiz_id, call.from_user.id)
 
-        asyncio.create_task(log_usage_event(call.from_user.id, "leaderboard_viewed", {"quiz_id": quiz_id}))
+        spawn(log_usage_event(call.from_user.id, "leaderboard_viewed", {"quiz_id": quiz_id}))
 
         await call.message.answer(text, reply_markup=kb, parse_mode="Markdown")
         await call.answer()

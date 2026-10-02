@@ -19,6 +19,7 @@ Redis، آلية القفل (QuizState.processing_audio)، أو أي تحقق أ
 """
 
 import asyncio
+from task_utils import spawn
 import os
 import time
 import uuid
@@ -26,9 +27,8 @@ from typing import Any, Dict
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.base import StorageKey
 
-from config import QuizState, bot, dp
+from config import QuizState, bot
 from constants import (
     ADMIN_CONTACT, MAX_AUDIO_WEB_UPLOAD_SIZE,
     MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
@@ -54,6 +54,8 @@ from services.audio_flow_service import (
     write_temp_text_export,
 )
 from services.audio_service import summarize_lecture_text, transcribe_audio_lecture
+from services.flow_state import build_state_for_chat
+from handlers.files import ask_question_count
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
 from helpers.supabase_helper import (
     log_usage_event, refund_user_points_split, update_user_stats,
@@ -91,7 +93,7 @@ async def _send_insufficient_balance(
     # لأن message هون غالباً رسالة البوت نفسها وليست رسالة الطالب.
     tracked_user_id = user_info.get("user_id")
     if tracked_user_id:
-        asyncio.create_task(log_insufficient_balance_event(tracked_user_id, action, required, balance, user_info))
+        spawn(log_insufficient_balance_event(tracked_user_id, action, required, balance, user_info))
 
     contact = ADMIN_CONTACT.lstrip("@")
     keyboard = types.InlineKeyboardMarkup(
@@ -209,7 +211,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
 
         # 🆕 تتبع تحليلي: يسجَّل بمجرد معرفة مدة/تكلفة الملف، بغض النظر عن قرار الطالب
         # لاحقاً بشاشة التأكيد - يسد فجوة "صفر أحداث" الحالية لميزة الصوت بالكامل.
-        asyncio.create_task(log_audio_uploaded_event(message.from_user.id, duration_minutes, cost, "telegram_message"))
+        spawn(log_audio_uploaded_event(message.from_user.id, duration_minutes, cost, "telegram_message"))
 
         if balance < cost:
             await state.set_state(None)  # فكّ القفل - لم يُخصَم أي شيء إطلاقاً
@@ -312,7 +314,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         debited_free = deduction["debited_free"]
         debited_paid = deduction["debited_paid"]
 
-        asyncio.create_task(log_usage_event(call.from_user.id, "audio_transcription_confirmed", {
+        spawn(log_usage_event(call.from_user.id, "audio_transcription_confirmed", {
             "duration_minutes": duration_minutes, "cost": cost,
         }))
 
@@ -358,7 +360,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             free_refund, paid_refund, partial_refund_amount = compute_partial_refund(debited_free, debited_paid)
             if partial_refund_amount > 0:
                 await refund_user_points_split(call.from_user.id, free_refund, paid_refund)
-            asyncio.create_task(log_usage_event(call.from_user.id, "audio_transcription_truncated", {
+            spawn(log_usage_event(call.from_user.id, "audio_transcription_truncated", {
                 "duration_minutes": duration_minutes, "cost": cost, "partial_refund": partial_refund_amount,
             }))
 
@@ -374,7 +376,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         )
         await state.set_state(QuizState.waiting_for_audio_action)
 
-        asyncio.create_task(log_usage_event(call.from_user.id, "audio_transcription_completed", {
+        spawn(log_usage_event(call.from_user.id, "audio_transcription_completed", {
             "duration_minutes": duration_minutes, "cost": cost,
         }))
 
@@ -582,7 +584,7 @@ async def handle_audio_export_format(call: types.CallbackQuery, state: FSMContex
 @router.callback_query(QuizState.waiting_for_audio_action, F.data == "audio_act_quiz")
 async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> None:
     """ينقل نص المحاضرة المفرغ بسلاسة لخط أنابيب توليد الكويز في handlers/files.py -
-    _ask_question_count يتكفّل باستدعاء classify_subject والانتقال بعدها تلقائياً
+    ask_question_count يتكفّل باستدعاء classify_subject والانتقال بعدها تلقائياً
     لشاشة QuizState.waiting_for_quiz_options (أو شاشة اختيار الترجمة أولاً لو كان
     محتوى المحاضرة إنجليزياً)."""
     await call.answer()
@@ -593,7 +595,6 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
             await call.message.answer("❌ تعذر العثور على نص المحاضرة، يرجى إعادة إرسال الملف الصوتي.")
             return
 
-        from handlers.files import _ask_question_count  # تفادي استيراد دائري بين audio.py و files.py
 
         await state.update_data(
             pure_text=pure_text,
@@ -605,7 +606,7 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
             # handlers/files.py::handle_count_start حيث يُرحَّل هذا الحقل لحدث quiz_generated.
             content_source="audio_transcript",
         )
-        await _ask_question_count(
+        await ask_question_count(
             call.message,
             state,
             "✅ تم نقل نص المحاضرة بنجاح. كم سؤالاً تريد توليده من محتواها؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
@@ -618,16 +619,6 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
 
 # ==================== رفع محاضرة صوتية عبر صفحة الويب (Mini App) ====================
 
-def _build_state_for_chat(chat_id: int, user_id: int) -> FSMContext:
-    """
-    يبني FSMContext يدوياً لمستخدم/محادثة معيّنة خارج سياق رسالة تيليجرام عادية
-    (هون: من endpoint استقبال ويب). يستخدم نفس RedisStorage المُهيّأ أصلاً بـ
-    config.py (dp.storage)، فالحالة متوافقة 100% مع بقية تدفقات البوت العادية -
-    يعني بعد ما تخلص هاي الدالة، أي زر يضغطه الطالب (تلخيص/تصدير/كويز) من نفس
-    لوحة get_audio_action_keyboard الحالية بيشتغل عادي بدون أي تعديل عليه.
-    """
-    key = StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id)
-    return FSMContext(storage=dp.storage, key=key)
 
 
 async def process_web_uploaded_audio(
@@ -658,7 +649,7 @@ async def process_web_uploaded_audio(
       بالإلغاء (handle_audio_confirm_cancel) - نفس مبدأ "لا تخزين دائم" المطلوب،
       بس بعد ما يحسم الطالب قراره لا قبله.
     """
-    state = _build_state_for_chat(chat_id, user_id)
+    state = build_state_for_chat(chat_id, user_id)
 
     current_state = await state.get_state()
     if current_state == QuizState.answering_quiz:
@@ -743,7 +734,7 @@ async def process_web_uploaded_audio(
         user_info = await get_or_create_audio_user(fake_user)
         balance, _ = compute_balance_and_deficit(user_info, cost)
 
-        asyncio.create_task(log_audio_uploaded_event(user_id, duration_minutes, cost, "web_upload"))
+        spawn(log_audio_uploaded_event(user_id, duration_minutes, cost, "web_upload"))
 
         if balance < cost:
             await state.set_state(None)
@@ -757,7 +748,7 @@ async def process_web_uploaded_audio(
             # الحجب (راجع _send_insufficient_balance أعلى الملف) - هالمسار تحديداً (رفع محاضرة
             # عبر صفحة الويب) ما كان يمر أصلاً عبر تلك الدالة المشتركة (رسالة مختلفة/بدون
             # زر شحن) فكان النشاط هون غير مُتتبَّع إطلاقاً قبل هالإضافة.
-            asyncio.create_task(log_insufficient_balance_event(user_id, "audio_transcription_web", cost, balance, user_info))
+            spawn(log_insufficient_balance_event(user_id, "audio_transcription_web", cost, balance, user_info))
             await bot.send_message(
                 chat_id,
                 f"❌ رصيدك الحالي لا يكفي لتفريغ هذه المحاضرة.\n"

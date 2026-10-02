@@ -1,4 +1,4 @@
--- ✅ تم تطبيقها مباشرة على Supabase (مشروع pqawoanhbgvdtbdhnbod) عبر MCP - ما في شي
+-- ✅ تم تطبيقها مباشرة على Supabase (مشروع <project-ref>) عبر MCP - ما في شي
 -- مطلوب منك تشغيله يدوياً. مرفقة هون فقط للتوثيق ولو حبيت تطبقها ببيئة تانية.
 
 CREATE TABLE IF NOT EXISTS ai_model_pricing (

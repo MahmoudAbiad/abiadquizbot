@@ -1,5 +1,6 @@
 # Handlers/files.py
 import asyncio
+from task_utils import spawn
 import json
 import os
 import uuid
@@ -54,12 +55,13 @@ from validators import validate_file_size, validate_question_count
 
 # استيراد الخدمات الجديدة
 from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
-from services.subject_classifier import classify_subject, get_pending_classification_snapshot
+from services.subject_classifier import classify_subject, get_pending_classification_snapshot, SubjectClassification
 from services.quiz_service import (
     determine_execution_mode, build_transparency_text, refund_user_on_failure, execute_quiz_generation_workflow,
     combo_quiz_count, build_question_type_label, estimate_pages_from_text,
 )
-from handlers.audio import _build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لرفع الصوت عبر الويب
+from services.flow_state import build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لرفع الصوت عبر الويب
+from handlers.quiz_runner import start_loaded_quiz
 
 logger = get_logger(__name__)
 router = Router()
@@ -151,7 +153,7 @@ async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any
     # log_usage_event بهالملف).
     tracked_user_id = user_info.get("user_id")
     if tracked_user_id:
-        asyncio.create_task(log_usage_event(tracked_user_id, "insufficient_balance_blocked", {
+        spawn(log_usage_event(tracked_user_id, "insufficient_balance_blocked", {
             "action": action, "required_points": required, "current_balance": balance,
             "deficit_points": deficit, "free_points": float(user_info.get("free_points") or 0),
             "paid_points": float(user_info.get("paid_points") or 0),
@@ -264,7 +266,7 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
     # 🆕 اختبار جاهز (محلول/غير محلول): لا معنى لأزرار عدد جاهزة عشوائية (5/10/15/20) هنا -
-    # العدد محدَّد فعلياً بالمستند نفسه وتم رصده تلقائياً (راجع _show_question_count_screen
+    # العدد محدَّد فعلياً بالمستند نفسه وتم رصده تلقائياً (راجع show_question_count_screen
     # أدناه). كيبورد مخصص بزر تعديل يدوي (لو الرصد غير دقيق) + زر بدء الاستخراج فقط.
     subject_type = data.get("subject_type")
     if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
@@ -291,16 +293,16 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     await state.update_data(count_screen_chat_id=msg.chat.id, count_screen_message_id=msg.message_id)
 
 
-async def _show_question_count_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
+async def show_question_count_screen(reply_target: types.Message, state: FSMContext, edit: bool = False) -> None:
     """
     🆕 الخطوة الأخيرة المشتركة: عرض شاشة عدد الأسئلة المدمجة (اختيار + تكلفة + بدء
     التوليد بضغطة واحدة أخيرة، بدل شاشتين منفصلتين كما كان سابقاً). count_prompt_text
-    مخزَّن مسبقاً بالحالة (وُضع هناك من _ask_question_count عند نقطة الدخول الأصلية).
+    مخزَّن مسبقاً بالحالة (وُضع هناك من ask_question_count عند نقطة الدخول الأصلية).
 
     🆕 اختبار جاهز (محلول/غير محلول): لا نسأل الطالب "كم سؤالاً تريد؟" (لا معنى له - عدد
     الأسئلة محدَّد فعلياً بالمستند نفسه وليس اختياراً حراً). بدلاً من ذلك نستخدم العدد
     التقريبي المرصود آلياً (detected_question_count، وُضع بالحالة من classify_subject عبر
-    handlers/files.py._ask_question_count) كعدد افتراضي مباشر لحساب التكلفة، ونعرض نص
+    handlers/files.py.ask_question_count) كعدد افتراضي مباشر لحساب التكلفة، ونعرض نص
     "رصدنا ما يقارب N سؤال" بدل نص السؤال المعتاد - راجع get_quiz_detected_count_keyboard
     بـ keyboards.py للكيبورد المصاحب (بدون أزرار عدد جاهزة).
     """
@@ -348,7 +350,7 @@ async def _proceed_to_quiz_solved_screen(reply_target: types.Message, state: FSM
     🆕 اختبار محلول: يُخيَّر الطالب بين اعتماد الإجابات المدوّنة بالمستند كما هي، أو تجاهلها
     وحل الاختبار بالذكاء الاصطناعي بدلاً منها (راجع handle_quiz_extract_choice بالأسفل
     لمتابعة التدفق بعد اختياره). مستخرجة كدالة مستقلة لأنها تُستدعى من نقطتين: مباشرة من
-    _ask_question_count (اختبار غير لغوي)، أو من _apply_translation_choice بعد اختيار
+    ask_question_count (اختبار غير لغوي)، أو من _apply_translation_choice بعد اختيار
     الطالب لاختبار محلول بمادة إنجليزي/فرنسي - english_mode المختار يبقى محفوظاً بالحالة
     من نقطة الاستدعاء الثانية ولا يُلمس هنا إطلاقاً.
     """
@@ -372,10 +374,10 @@ async def _proceed_to_quiz_unsolved_screen(reply_target: types.Message, state: F
         quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE,
         quiz_detection_notice=MSG_QUIZ_UNSOLVED_DETECTED,
     )
-    await _show_question_count_screen(reply_target, state, edit=edit)
+    await show_question_count_screen(reply_target, state, edit=edit)
 
 
-async def _ask_question_count(
+async def ask_question_count(
     reply_target: types.Message, state: FSMContext, count_prompt_text: str, edit: bool = False,
     user_id: Optional[int] = None,
 ) -> None:
@@ -383,7 +385,7 @@ async def _ask_question_count(
     🆕 نقطة موحّدة تبدأ سلسلة الشاشات التالية للاستقبال (استقبال وسائط جديدة، استقبال نص
     مباشر، أو رفض الكاش واختيار توليد كويز جديد): تصنيف موحّد → [ترجمة إن كان إنجليزي] →
     شاشة نوع/صعوبة الأسئلة → شاشة عدد الأسئلة. count_prompt_text يُخزَّن بالحالة ليُستخدم
-    بالخطوة الأخيرة (_show_question_count_screen) بعد كل الشاشات الوسيطة.
+    بالخطوة الأخيرة (show_question_count_screen) بعد كل الشاشات الوسيطة.
 
     🆕 user_id: مُمرَّر صراحة (بدل الاعتماد حصراً على reply_target.from_user.id) لأنه لما
     تُستدعى هاي الدالة بمسار تعديل رسالة (edit=True من كولباك مثل handle_cache_no)،
@@ -450,7 +452,6 @@ async def _ask_question_count(
         classification = await classify_subject(detection_paths, detection_text, file_hash=data.get("file_hash"))
     except Exception as exc:
         log_error(logger, f"Subject classification failed, continuing with standard mode: {exc}")
-        from services.subject_classifier import SubjectClassification
         classification = SubjectClassification(subject=SUBJECT_OTHER, suggested_types=[])
 
     # 🆕 نخزّن نتيجة التصنيف + قيماً افتراضية لنوع/صعوبة الأسئلة (تُستبدل لاحقاً باختيار
@@ -501,7 +502,7 @@ async def _ask_question_count(
     if classification.subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
         # 🆕 نُخزّن العدد التقريبي المرصود آلياً (classification.question_count) بالحالة
         # فور معرفته، بغض النظر عن مسار الشاشات اللاحق (تخيير محلول/انتقال مباشر لغير
-        # محلول) - كلاهما ينتهي عند _show_question_count_screen التي تقرأه لاحقاً بدل
+        # محلول) - كلاهما ينتهي عند show_question_count_screen التي تقرأه لاحقاً بدل
         # سؤال الطالب "كم سؤالاً تريد؟" بأزرار عدد عشوائية (راجع التعليق هناك).
         detected_count = classification.question_count or DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
         detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
@@ -633,7 +634,7 @@ async def _finalize_media_processing(
     resolved_user_id = user_id if user_id is not None else (message.from_user.id if message.from_user else None)
     try:
         content_type = "album" if is_album else ("photo" if len(file_paths) == 1 and file_paths[0].lower().endswith((".jpg", ".jpeg", ".png")) else "document")
-        asyncio.create_task(log_usage_event(resolved_user_id, "content_uploaded", {
+        spawn(log_usage_event(resolved_user_id, "content_uploaded", {
             "content_type": content_type, "items_count": items, "is_album": is_album, "file_hash": file_hash,
         }))
 
@@ -666,7 +667,7 @@ async def _finalize_media_processing(
             return
 
         await state.update_data(**common_state)
-        await _ask_question_count(message, state, SUCCESS_MEDIA_RECEIVED)
+        await ask_question_count(message, state, SUCCESS_MEDIA_RECEIVED)
     except Exception as exc:
         for path in file_paths: safe_file_cleanup(path)
         log_error(logger, f"Finalize media failed: {exc}", exception=exc)
@@ -681,7 +682,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
         if current_state == QuizState.answering_quiz:
             data = await state.get_data()
             if data.get("attempt_id"):
-                asyncio.create_task(mark_quiz_attempt_stopped(data["attempt_id"]))
+                spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
             await _discard_pending_upload(state)
             await state.clear()
             await message.answer("ℹ️ <b>تم إيقاف اختبارك السابق تلقائياً وجاري معالجة المحتوى الجديد...</b>", parse_mode="HTML")
@@ -709,7 +710,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 await redis_client.expire(f"album_list:{group_id}", 30)
                 if await redis_client.set(f"album_lock:{group_id}", "1", nx=True, ex=15):
                     await message.answer("📥 جارٍ تجميع الصور ومعالجة الألبوم بالخلفية...")
-                    asyncio.create_task(process_album_background(message, state))
+                    spawn(process_album_background(message, state))
                 return
             else:
                 file_paths, err = await download_photos_service(message.from_user.id, [current])
@@ -760,7 +761,7 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         if len(text) >= 30:
             data = await state.get_data()
             if data.get("attempt_id"):
-                asyncio.create_task(mark_quiz_attempt_stopped(data["attempt_id"]))
+                spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
             await _discard_pending_upload(state)
             await state.clear()
             await message.answer("ℹ️ <b>تم إيقاف الاختبار السابق تلقائياً لبدء الكويز النصي الجديد...</b>", parse_mode="HTML")
@@ -776,7 +777,7 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         return
 
     # إصلاح التتبع: تسجيل حدث رفع النص المباشر
-    asyncio.create_task(log_usage_event(message.from_user.id, "content_uploaded", {
+    spawn(log_usage_event(message.from_user.id, "content_uploaded", {
         "content_type": "text", "text_length": len(text)
     }))
 
@@ -784,7 +785,7 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False,
         content_source="telegram_text",
     )
-    await _ask_question_count(
+    await ask_question_count(
         message, state,
         "✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة."
     )
@@ -797,7 +798,7 @@ async def _apply_translation_choice(reply_target: types.Message, state: FSMConte
     - مادة عادية (إنجليزي/فرنسي): شاشة نوع/صعوبة الأسئلة كالسابق (قوائم "قواعد/قراءة/اختبار
       عام" الخاصة بمادة الإنجليزي - راجع QUESTION_TYPE_OPTIONS).
     - 🆕 اختبار جاهز (محلول/غير محلول) بمادة إنجليزي/فرنسي (شاشة الترجمة هذه عُرضت له من
-      _ask_question_count قبل مسار الاختبار الجاهز مباشرة): يكمل لمسار الاختبار الجاهز
+      ask_question_count قبل مسار الاختبار الجاهز مباشرة): يكمل لمسار الاختبار الجاهز
       الصحيح (تخيير طريقة الاستخراج للمحلول، أو مباشرة شاشة العدد لغير المحلول) بدل شاشة
       نوع الأسئلة العادية التي لا معنى لها لاختبار جاهز أصلاً.
     """
@@ -846,9 +847,9 @@ async def handle_translate_choice_no(call: types.CallbackQuery, state: FSMContex
 async def _apply_quiz_extraction_choice(call: types.CallbackQuery, state: FSMContext, extraction_mode: str) -> None:
     """يحفظ اختيار الطالب (كما هي/حل بالذكاء الاصطناعي) بالحالة، ثم ينتقل مباشرة لشاشة
     تأكيد خصم النقاط (عدد الأسئلة) - بدون المرور بشاشة نوع/صعوبة الأسئلة (لا معنى لها هنا،
-    راجع التعليق الأصلي بـ _ask_question_count)."""
+    راجع التعليق الأصلي بـ ask_question_count)."""
     await state.update_data(quiz_extraction_mode=extraction_mode)
-    await _show_question_count_screen(call.message, state, edit=True)
+    await show_question_count_screen(call.message, state, edit=True)
 
 @router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_extract_as_is")
 async def handle_quiz_extract_as_is(call: types.CallbackQuery, state: FSMContext) -> None:
@@ -911,7 +912,7 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
             await _insufficient_balance(call.message, await _current_user(call.message, call.from_user), cost, action="cached_quiz_use")
             return
             
-        asyncio.create_task(log_usage_event(call.from_user.id, "cached_quiz_used", {
+        spawn(log_usage_event(call.from_user.id, "cached_quiz_used", {
             "quiz_id": quiz_uuid, "cost": cost,
             # 🆕 يُعرض الآن بلوحة "📊 سجل توليد الكويزات" (راجع admin_get_quiz_generation_log
             # وai_control.py) جنب توليد AI الفعلي - questions_generated هون هو نفس المفتاح
@@ -919,8 +920,7 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
             "questions_generated": len(selected_quiz["quiz_data"]),
         }))
 
-        from handlers.quiz_runner import _start_loaded_quiz
-        await _start_loaded_quiz(call, state, selected_quiz["quiz_data"], data.get("source_title", "كويز"), origin="cached_file", quiz_id=quiz_uuid)
+        await start_loaded_quiz(call, state, selected_quiz["quiz_data"], data.get("source_title", "كويز"), origin="cached_file", quiz_id=quiz_uuid)
         
         for path in data.get("file_paths", []):
             safe_file_cleanup(path)
@@ -931,7 +931,7 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
 @router.callback_query(QuizState.waiting_for_cache_decision, F.data == "cache_action_no")
 async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
     """في حال رفض الكاش ورغبة الطالب بتوليد كويز جديد كلياً"""
-    await _ask_question_count(
+    await ask_question_count(
         call.message, state,
         "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة.",
         edit=True,
@@ -1098,7 +1098,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await _insufficient_balance(call.message, user_info, cost, action="quiz_generation")
             return
 
-        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_generation_requested", {
+        spawn(log_usage_event(call.from_user.id, "quiz_generation_requested", {
             "requested_count": count, "items_count": items, "cost": cost, "mode": mode
         }))
 
@@ -1198,8 +1198,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         })
         await reward_referrer_if_eligible(call.from_user.id)
 
-        from handlers.quiz_runner import _start_loaded_quiz
-        await _start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
+        await start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
 
     except Exception as exc:
@@ -1223,7 +1222,7 @@ async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> 
             return
         
         # إصلاح التتبع: تسجيل حدث إلغاء الطلب
-        asyncio.create_task(log_usage_event(call.from_user.id, "request_cancelled", {"cancelled_from_state": str(current_state)}))
+        spawn(log_usage_event(call.from_user.id, "request_cancelled", {"cancelled_from_state": str(current_state)}))
         
         await _discard_pending_upload(state)
         await state.clear()
@@ -1287,7 +1286,7 @@ async def handle_classification_vote(call: types.CallbackQuery) -> None:
                 alert_text = MSG_CLASSIFICATION_VOTE_ADMIN_ALERT.format(
                     file_hash=file_hash, subject_label=subject_label, user_id=call.from_user.id,
                 )
-                asyncio.create_task(_notify_admin_safe(alert_text))
+                spawn(_notify_admin_safe(alert_text))
 
         # 🆕 تعديل رسالة التصويت نفسها مباشرة (بدل تركها بنصها الطويل الأصلي وعرض
         # تنبيه منبثق فقط) - تصير رسالة قصيرة "شكراً لمشاركتك!" وتُزال الأزرار منها،
@@ -1345,7 +1344,7 @@ async def process_web_uploaded_file(
     - بعد التحميل والفحص، التسليم لباقي خط الأنابيب هو _finalize_media_processing
       نفسه المستخدم بالمسار العادي بلا أي تعديل - راجع توثيق user_id بتوقيعها فوق.
     """
-    state = _build_state_for_chat(chat_id, user_id)
+    state = build_state_for_chat(chat_id, user_id)
 
     current_state = await state.get_state()
     if current_state == QuizState.answering_quiz:
@@ -1429,7 +1428,7 @@ async def process_web_uploaded_images(
     وitems_count=عدد الصور كافيان تماماً لأن نفس منطق التسعير المسطّح (نقطة/صورة)
     يشتغل تلقائياً بغض النظر عن العدد.
     """
-    state = _build_state_for_chat(chat_id, user_id)
+    state = build_state_for_chat(chat_id, user_id)
 
     current_state = await state.get_state()
     if current_state == QuizState.answering_quiz:

@@ -1,5 +1,6 @@
 # handlers/sharing.py
 import asyncio
+from task_utils import spawn
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
@@ -9,7 +10,7 @@ from helpers.supabase_helper import create_shared_quiz_id, save_shared_quiz, get
 from logger import get_logger, log_error
 
 # استيراد الوظيفة المشتركة لتشغيل الكويز الجاهز
-from handlers.quiz_runner import _start_loaded_quiz
+from handlers.quiz_runner import start_loaded_quiz
 
 logger = get_logger(__name__)
 router = Router()
@@ -65,7 +66,7 @@ async def share_quiz(call: types.CallbackQuery, state: FSMContext):
             [types.InlineKeyboardButton(text="📢 شارك مع قناة", callback_data=f"gqchl:{share_id}")],
         ])
 
-        asyncio.create_task(log_usage_event(call.from_user.id, "share_link_created", {"share_id": share_id}))
+        spawn(log_usage_event(call.from_user.id, "share_link_created", {"share_id": share_id}))
         await call.message.answer(old_style_text, disable_web_page_preview=True, reply_markup=group_kb)
         
     except Exception as e:
@@ -87,11 +88,11 @@ async def open_shared_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ انتهى رابط المشاركة أو غير موجود", show_alert=True)
             return
             
-        asyncio.create_task(log_usage_event(call.from_user.id, "shared_link_opened", {"share_id": share_id}))
+        spawn(log_usage_event(call.from_user.id, "shared_link_opened", {"share_id": share_id}))
 
         # تمرير الـ UUID المركزي الحقيقي (shared["id"]) لضمان عمل القيود وجدول النتائج بسلاسة
         quiz_title = shared.get("source_title") or "كويز مشترك"
-        await _start_loaded_quiz(
+        await start_loaded_quiz(
             call, state, shared["quiz_data"], 
             quiz_title, 
             origin="shared", 

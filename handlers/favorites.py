@@ -1,4 +1,5 @@
 import asyncio
+from task_utils import spawn
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -21,7 +22,7 @@ from keyboards import (
 from logger import get_logger, log_error
 
 # استيراد الوظائف المشتركة من ملف تشغيل الكويز لمنع التعارض الدائري
-from handlers.quiz_runner import _send_main_menu, _start_loaded_quiz
+from handlers.quiz_runner import send_main_menu, start_loaded_quiz
 
 logger = get_logger(__name__)
 router = Router()
@@ -214,7 +215,7 @@ async def favorites_sort_section(call: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "favorites_back")
 async def favorites_back(call: types.CallbackQuery):
     try: 
-        await _send_main_menu(call, call.from_user.id)
+        await send_main_menu(call, call.from_user.id)
     finally: 
         await call.answer()
 
@@ -272,13 +273,13 @@ async def open_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
         if fav_res.data:
             actual_quiz_id = fav_res.data[0]["quiz_id"]
             
-        await _start_loaded_quiz(
+        await start_loaded_quiz(
             call, state, favorite["quiz_data"], 
             favorite.get("title") or "كويز محفوظ", 
             origin="favorite",
             quiz_id=str(actual_quiz_id) if actual_quiz_id else "" # تمرير المعرف الفريد للمركزية
         )
-        asyncio.create_task(log_usage_event(call.from_user.id, "favorite_opened", {"favorite_id": fid}))
+        spawn(log_usage_event(call.from_user.id, "favorite_opened", {"favorite_id": fid}))
     except Exception as e: 
         log_error(logger, f"Error in open_favorite_quiz: {e}")
         await call.answer("❌ تعذر تشغيل واختبار هذا الكويز حالياً", show_alert=True)
@@ -291,7 +292,7 @@ async def delete_favorite_quiz(call: types.CallbackQuery, state: FSMContext):
         fid = call.data.replace("fav_del_", "", 1)
         if await remove_favorite_quiz(call.from_user.id, fid):
             await call.answer("🗑️ تم مسح الاختبار من قائمتك المفضلة وتفريغ مساحته.", show_alert=True)
-            asyncio.create_task(log_usage_event(call.from_user.id, "favorite_deleted", {"favorite_id": fid}))
+            spawn(log_usage_event(call.from_user.id, "favorite_deleted", {"favorite_id": fid}))
             await _send_favorites_menu(call, state)
         else: 
             await call.answer("❌ تعذر إتمام طلب الحذف", show_alert=True)

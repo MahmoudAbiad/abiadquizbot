@@ -2,6 +2,7 @@
 """معالجات تصدير الكويز إلى ملف Word أو PDF (من شاشة النتيجة أو من المفضلة).
 المسار: اختيار الستايل (بسيط/عصري/أكاديمي) → اختيار الصيغة (Word/PDF) → توليد الملف."""
 import asyncio
+from task_utils import spawn
 import re
 from typing import List, Optional
 
@@ -75,7 +76,7 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
         await call.message.answer_document(document=document, caption=caption)
         await status.delete()
 
-        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_exported", {
+        spawn(log_usage_event(call.from_user.id, "quiz_exported", {
             "format": fmt, "style": style, "title": title,
         }))
     except ExportError as e:

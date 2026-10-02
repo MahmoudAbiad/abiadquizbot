@@ -1,5 +1,6 @@
 # Handlers/quiz_runner.py
 import asyncio
+from task_utils import spawn
 import html
 import json
 from typing import Union, Optional, List, Dict, Any, Tuple
@@ -26,7 +27,7 @@ from keyboards import (
 from logger import get_logger, log_error, log_warning
 from services.latex_text import latex_to_plain
 from services.quiz_permissions import can_edit_quiz
-from handlers.audio import _build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لاستئناف الكويز من خلفية (محرر أسئلة الرياضيات عبر الويب)
+from services.flow_state import build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لاستئناف الكويز من خلفية (محرر أسئلة الرياضيات عبر الويب)
 from helpers.supabase_helper import (
     list_favorite_quizzes,
     save_favorite_quiz,
@@ -97,7 +98,7 @@ def _prepare_question_for_send(question: Optional[dict]) -> dict:
 # التي يجب أن تبقى مقيدة بحالة كويز فعلياً جارٍ.
 SAVE_WIZARD_STATES = ACTIVE_QUIZ_STATES + (None,)
 
-async def _send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
+async def send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
     bot_info = await bot.get_me()
     menu = await get_main_menu_keyboard(bot_info.username, user_id)
     text = "🏠 القائمة الرئيسية"
@@ -112,7 +113,7 @@ async def show_menu_after_first_quiz(call: types.CallbackQuery) -> None:
     تحت) - يُظهر القائمة الرئيسية عند الطلب فقط بدل إرفاقها تلقائياً، تخفيفاً للازدحام
     البصري. يزيل الزر نفسه من الرسالة بعد الضغط لتفادي ضغطه أكثر من مرة بلا داعٍ."""
     try:
-        await _send_main_menu(call, call.from_user.id)
+        await send_main_menu(call, call.from_user.id)
         try:
             await call.message.edit_reply_markup(reply_markup=None)
         except Exception:
@@ -122,10 +123,10 @@ async def show_menu_after_first_quiz(call: types.CallbackQuery) -> None:
     finally:
         await call.answer()
 
-async def _start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: Optional[str] = "") -> None:
+async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: Optional[str] = "") -> None:
     user_id = msg_or_call.from_user.id
     attempt_id = start_quiz_attempt(user_id, quiz_id or None, origin, len(quiz_data))
-    asyncio.create_task(log_usage_event(user_id, "quiz_started", {
+    spawn(log_usage_event(user_id, "quiz_started", {
         "origin": origin, "quiz_id": quiz_id, "questions": len(quiz_data),
     }))
 
@@ -284,13 +285,13 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
 
     # التمييز الدقيق في التتبع بين الكويز المكتمل والتوقف المبكر
     if stopped_early:
-        asyncio.create_task(mark_quiz_attempt_stopped(data.get("attempt_id")))
-        asyncio.create_task(log_usage_event(user_id, "quiz_stopped", {
+        spawn(mark_quiz_attempt_stopped(data.get("attempt_id")))
+        spawn(log_usage_event(user_id, "quiz_stopped", {
             "quiz_id": quiz_id, "score": score, "total": total, "percentage": round(percentage, 1),
         }))
     else:
-        asyncio.create_task(complete_quiz_attempt(data.get("attempt_id"), score))
-        asyncio.create_task(log_usage_event(user_id, "quiz_completed", {
+        spawn(complete_quiz_attempt(data.get("attempt_id"), score))
+        spawn(log_usage_event(user_id, "quiz_completed", {
             "quiz_id": quiz_id, "score": score, "total": total, "percentage": round(percentage, 1),
         }))
     await state.update_data(quiz_completed=True, is_switching_question=False)
@@ -509,7 +510,7 @@ async def apply_question_edit_and_resume(
         await state.set_state(QuizState.answering_quiz)
         return False, "❌ تعذر حفظ التعديل في قاعدة البيانات، ولم يتم تغيير الكويز."
 
-    asyncio.create_task(log_usage_event(user_id, "quiz_question_edited", {
+    spawn(log_usage_event(user_id, "quiz_question_edited", {
         "quiz_id": quiz_id,
         "question_index": question_index,
         "edit_type": edit_type,
@@ -543,7 +544,7 @@ async def fetch_question_for_edit_web(chat_id: int, user_id: int, quiz_id: str, 
     """
     🆕 تُستدعى من webhook_server.py (POST /api/question-edit/fetch) للتحقق من صلاحية
     جلسة تعديل سؤال رياضي عبر صفحة الويب، وإرجاع بيانات السؤال الحالية لتعبئة النموذج.
-    الحماية: نبني FSMContext الحقيقي لنفس المستخدم (نفس آلية _build_state_for_chat
+    الحماية: نبني FSMContext الحقيقي لنفس المستخدم (نفس آلية build_state_for_chat
     المستخدمة برفع الصوت/الملفات عبر الويب) ونتحقق أن الحالة الحالية بالضبط
     waiting_for_question_edit_choice (الحالة التي تدخلها request_question_edit فور
     الرد بنقطة)، وأن quiz_id/question_index مطابقان تماماً لما خزّنته تلك الدالة -
@@ -567,7 +568,7 @@ async def fetch_question_for_edit_web(chat_id: int, user_id: int, quiz_id: str, 
     مساري الجلب/الحفظ)، وبقية حالات الفشل (جلسة/تطابق) ترجع None للرسالة فتعرض
     الرسالة العامة الافتراضية كما كانت (هي فعلاً السبب الصحيح بتلك الحالات).
     """
-    state = _build_state_for_chat(chat_id, user_id)
+    state = build_state_for_chat(chat_id, user_id)
     current_state = await state.get_state()
     if current_state != QuizState.waiting_for_question_edit_choice:
         return None, None
@@ -602,7 +603,7 @@ async def save_question_edit_from_web(
     مصفوفات سوا بنداء واحد بدل التعديل المجزّأ داخل الشات). نفس تحقق الصلاحية
     المستخدم بـ fetch_question_for_edit_web أعلاه بالضبط - راجعها لتفاصيل الحماية.
     """
-    state = _build_state_for_chat(chat_id, user_id)
+    state = build_state_for_chat(chat_id, user_id)
     current_state = await state.get_state()
     if current_state != QuizState.waiting_for_question_edit_choice:
         return False, "❌ انتهت جلسة التعديل، ارجع للمحادثة وأرسل النقطة على السؤال من جديد."
@@ -799,7 +800,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         # بيانات المحاولة الأولى (النتيجة والمدة) بدل تسجيل محاولة مستقلة.
         user_id = call.from_user.id
         new_attempt_id = start_quiz_attempt(user_id, data.get("quiz_id") or None, data.get("quiz_origin", "shared"), len(questions))
-        asyncio.create_task(log_usage_event(user_id, "quiz_started", {
+        spawn(log_usage_event(user_id, "quiz_started", {
             "origin": data.get("quiz_origin", "shared"), "quiz_id": data.get("quiz_id"), "questions": len(questions),
         }))
         await state.update_data(
@@ -821,7 +822,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
 async def quiz_home(call: types.CallbackQuery, state: FSMContext):
     try:
         await state.clear()
-        await _send_main_menu(call, call.from_user.id)
+        await send_main_menu(call, call.from_user.id)
     finally:
         await call.answer()
 
@@ -837,7 +838,7 @@ async def rate_like_quiz(call: types.CallbackQuery):
         quiz_id = call.data.replace("rate_like_", "")
         success = await submit_quiz_vote(quiz_id, call.from_user.id, "like")
         if success:
-            asyncio.create_task(log_usage_event(call.from_user.id, "quiz_rated", {"quiz_id": quiz_id, "vote": "like"}))
+            spawn(log_usage_event(call.from_user.id, "quiz_rated", {"quiz_id": quiz_id, "vote": "like"}))
             await call.answer("👍 شكراً لك! تم تسجيل إعجابك وتحديث تقييم الاختبار بنجاح.", show_alert=True)
         else:
             await call.answer("⚠️ لقد قمت بالتصويت على هذا الاختبار مسبقاً!", show_alert=True)
@@ -851,7 +852,7 @@ async def rate_dislike_quiz(call: types.CallbackQuery):
         quiz_id = call.data.replace("rate_dislike_", "")
         success = await submit_quiz_vote(quiz_id, call.from_user.id, "dislike")
         if success:
-            asyncio.create_task(log_usage_event(call.from_user.id, "quiz_rated", {"quiz_id": quiz_id, "vote": "dislike"}))
+            spawn(log_usage_event(call.from_user.id, "quiz_rated", {"quiz_id": quiz_id, "vote": "dislike"}))
             await call.answer("👎 تم احتساب تقييمك السلبي. سيتولى النظام تصفية وحذف الاختبارات الرديئة تلقائياً.", show_alert=True)
         else:
             await call.answer("⚠️ لقد قمت بالتصويت على هذا الاختبار مسبقاً!", show_alert=True)
@@ -884,7 +885,7 @@ async def process_quiz_feedback(msg: types.Message, state: FSMContext):
         quiz_id = data.get("feedback_quiz_id")
         if quiz_id:
             await save_quiz_feedback(quiz_id, msg.from_user.id, comment[:500])
-            asyncio.create_task(log_usage_event(msg.from_user.id, "feedback_submitted", {"quiz_id": quiz_id}))
+            spawn(log_usage_event(msg.from_user.id, "feedback_submitted", {"quiz_id": quiz_id}))
             await msg.answer(MSG_FEEDBACK_SAVED, parse_mode="HTML")
         else:
             await msg.answer("❌ حدث خطأ داخلي، لم يتم العثور على المعرف المركزي لهذا الاختبار.")
@@ -982,7 +983,7 @@ async def handle_save_general(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ تعذر حفظ الكويز في المفضلة، حاول مجدداً.", show_alert=True)
             return
         await state.update_data(is_saved_in_session=True)
-        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_saved_favorite", {"quiz_id": quiz_id, "section": "عام"}))
+        spawn(log_usage_event(call.from_user.id, "quiz_saved_favorite", {"quiz_id": quiz_id, "section": "عام"}))
         await call.message.edit_text(f"✅ **تم الحفظ بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم: `عام`", parse_mode="Markdown")
         await state.set_state(None if data.get("quiz_completed") else QuizState.answering_quiz)
     except Exception as e:
@@ -1018,7 +1019,7 @@ async def handle_save_to_existing_section(call: types.CallbackQuery, state: FSMC
             await call.answer("❌ تعذر حفظ الكويز ضمن هذا القسم، حاول مجدداً.", show_alert=True)
             return
         await state.update_data(is_saved_in_session=True)
-        asyncio.create_task(log_usage_event(call.from_user.id, "quiz_saved_favorite", {"quiz_id": quiz_id, "section_id": section_id}))
+        spawn(log_usage_event(call.from_user.id, "quiz_saved_favorite", {"quiz_id": quiz_id, "section_id": section_id}))
         await call.message.edit_text(f"✅ **تم حفظ الاختبار بنجاح ضمن القسم المختار!**\n\n📦 الاسم: `{title}`", parse_mode="Markdown")
         await state.set_state(None if data.get("quiz_completed") else QuizState.answering_quiz)
     except Exception as e:
@@ -1055,7 +1056,7 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
             await state.set_state(None if data.get("quiz_completed") else QuizState.answering_quiz)
             return
         await state.update_data(is_saved_in_session=True)
-        asyncio.create_task(log_usage_event(user_id, "quiz_saved_favorite", {"quiz_id": quiz_id, "new_section": section_title}))
+        spawn(log_usage_event(user_id, "quiz_saved_favorite", {"quiz_id": quiz_id, "new_section": section_title}))
         await msg.answer(f"✅ **تم إنشاء القسم وحفظ الاختبار بنجاح!**\n\n📦 الاسم: `{title}`\n🗂 القسم الجديد: `{section_title}`", parse_mode="Markdown")
         await state.set_state(None if data.get("quiz_completed") else QuizState.answering_quiz)
     except Exception as e:
@@ -1067,7 +1068,7 @@ async def force_stop_previous_quiz_handler(call: types.CallbackQuery, state: FSM
     try:
         data = await state.get_data()
         if data.get("attempt_id"):
-            asyncio.create_task(mark_quiz_attempt_stopped(data["attempt_id"]))
+            spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
         await state.clear()
         try:
             await call.message.delete()
