@@ -1050,6 +1050,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             return
         processing_users.add(user_id)
     charged_this_attempt = False
+    data = {}
     try:
         data = await state.get_data()
         count = int(data.get("selected_question_count") or 0)
@@ -1124,13 +1125,16 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # راجع deduct_user_points_atomic) بجانب debited_cost الإجمالي، عشان أي ريفوند
         # لاحق (refund_user_on_failure بـservices/quiz_service.py) يرجع كل جزء لمصدره
         # الصحيح بدل ما يرجعه كله لـpaid_points.
+        #
+        # نحدّث النسخة المحلية أولاً قبل أي await على Redis. لو انقطع Redis مباشرةً
+        # بعد نجاح الخصم، يبقى لدينا سجل الخصم الحالي محلياً ونستطيع عمل refund صحيح.
+        data["debited_cost"] = cost
+        data["debited_free"] = deduction["debited_free"]
+        data["debited_paid"] = deduction["debited_paid"]
         await state.update_data(
             debited_cost=cost, calculated_cost=cost, requested_count=count, execution_mode=mode,
             debited_free=deduction["debited_free"], debited_paid=deduction["debited_paid"],
         )
-        data["debited_cost"] = cost  # 🩹 إصلاح خلل موجود مسبقاً: استرجاع النقاط كان يقرأ نسخة قديمة من الحالة بدون هذا الحقل، فيحسب دائماً صفراً
-        data["debited_free"] = deduction["debited_free"]
-        data["debited_paid"] = deduction["debited_paid"]
         try:
             await call.message.delete()
         except Exception:
@@ -1233,7 +1237,9 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
     except Exception as exc:
         log_error(logger, f"Quiz generation start failed: {exc}", exception=exc)
         if charged_this_attempt:
-            await refund_user_on_failure(call.from_user.id, await state.get_data())
+            # استخدم بيانات هذه المحاولة المحلية؛ لا تعتمد على Redis هنا لأن الخطأ
+            # نفسه قد يكون انقطاع Redis بعد الخصم مباشرة.
+            await refund_user_on_failure(call.from_user.id, data)
             charged_this_attempt = False
         await _clear_quiz_charge_markers(state)
         await state.set_state(None)
