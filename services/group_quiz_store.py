@@ -486,11 +486,13 @@ async def _enrich_sessions(sessions: List[Dict[str, Any]]) -> List[Dict[str, Any
         users_res = await supabase.table("users").select("user_id, username, first_name, last_name").in_("user_id", starter_ids).execute()
         starter_map = {int(r["user_id"]): r for r in (users_res.data or [])}
 
-    parts_res = await supabase.table("group_quiz_participants").select("session_id").in_("session_id", session_ids).execute()
-    participant_counts: Dict[str, int] = {}
-    for r in (parts_res.data or []):
-        sid = str(r["session_id"])
-        participant_counts[sid] = participant_counts.get(sid, 0) + 1
+    # عدّ دقيق لكل جلسة بـ count="exact" - الاستعلام الواحد المجمّع كان مقصوصاً عند ~1000 صف
+    # (8 جلسات × 200 مشارك مثلاً = أرقام ناقصة).
+    count_results = await asyncio.gather(*[
+        supabase.table("group_quiz_participants").select("id", count="exact").eq("session_id", sid).limit(1).execute()
+        for sid in session_ids
+    ])
+    participant_counts: Dict[str, int] = {sid: (r.count or 0) for sid, r in zip(session_ids, count_results)}
 
     for s in sessions:
         chat_info = chat_map.get(int(s["chat_id"]), {})
@@ -545,9 +547,11 @@ async def get_group_sessions_page(
 
 
 async def get_group_session_details(session_id: str) -> Optional[Dict[str, Any]]:
-    """تفاصيل جلسة واحدة كاملة للأدمن: الجلسة، الأدمن المشغّل، عضوية البوت بالمحادثة
-    (+ من رقّى البوت)، الكويز المستخدم، والمشاركون مع عدد إجاباتهم وصحيحها.
-    بترجّع `None` لو الجلسة مش موجودة (انحذفت بالتفريغ مثلاً) أو حصل خطأ."""
+    """تفاصيل جلسة واحدة للأدمن: الجلسة، الأدمن المشغّل، عضوية البوت بالمحادثة (+ من رقّى
+    البوت)، الكويز المستخدم، وعدد المشاركين والإجابات (`participants_total`،
+    `total_answers`، كلاهما `count="exact"` فما بيتقصّوا عند 1000 صف). قائمة المشاركين
+    نفسها بشاشة منفصلة - راجع `get_group_session_participants`. بترجّع `None` لو
+    الجلسة مش موجودة (انحذفت بالتفريغ مثلاً) أو حصل خطأ."""
     try:
         session = await get_session(session_id)
         if not session:
@@ -570,23 +574,55 @@ async def get_group_session_details(session_id: str) -> Optional[Dict[str, Any]]
             quiz_res = await supabase.table("quizzes").select("id, source_title, creator_id").eq("id", session["quiz_id"]).limit(1).execute()
             details["quiz"] = quiz_res.data[0] if quiz_res.data else None
 
-        parts_res = (await supabase.table("group_quiz_participants").select("*")
-                     .eq("session_id", session_id)
-                     .order("score", desc=True).order("total_answer_time_ms", desc=False).execute())
-        participants = parts_res.data or []
-
-        answers_res = await supabase.table("group_quiz_answers").select("user_id, is_correct").eq("session_id", session_id).execute()
-        answered: Dict[int, int] = {}
-        for a in (answers_res.data or []):
-            uid = int(a["user_id"])
-            answered[uid] = answered.get(uid, 0) + 1
-        for p in participants:
-            p["_answers_count"] = answered.get(int(p["user_id"]), 0)
-        details["participants"] = participants
-        details["total_answers"] = len(answers_res.data or [])
+        participants_res, answers_res = await asyncio.gather(
+            supabase.table("group_quiz_participants").select("id", count="exact").eq("session_id", session_id).limit(1).execute(),
+            supabase.table("group_quiz_answers").select("id", count="exact").eq("session_id", session_id).limit(1).execute(),
+        )
+        details["participants_total"] = participants_res.count or 0
+        details["total_answers"] = answers_res.count or 0
         return details
     except Exception as e:
         log_error(logger, f"Error loading group quiz session details {session_id}: {e}")
+        return None
+
+
+async def get_group_session_participants(
+    session_id: str, page: int = 0, page_size: int = 8
+) -> Optional[Dict[str, Any]]:
+    """صفحة من مشاركي جلسة (الأعلى نقاطاً أولاً، وعند التساوي الأسرع) مع عدد إجابات كل
+    مشارك (`_answers_count` بـ count="exact"). الصفحة بتنقصّ تلقائياً لآخر صفحة موجودة.
+    بترجّع `{"session", "participants", "total", "page"}` (`session` مُثرى بـ
+    `_chat_title`/`_quiz_title`)، أو `None` لو الجلسة مش موجودة أو حصل خطأ."""
+    try:
+        session = await get_session(session_id)
+        if not session:
+            return None
+        (session,) = await _enrich_sessions([session])
+
+        def _query():
+            return (supabase.table("group_quiz_participants").select("*", count="exact")
+                    .eq("session_id", session_id)
+                    .order("score", desc=True).order("total_answer_time_ms", desc=False))
+
+        page = max(0, int(page))
+        res = await _query().range(page * page_size, page * page_size + page_size - 1).execute()
+        total = res.count or 0
+        if not (res.data or []) and total and page > 0:
+            page = (total - 1) // page_size
+            res = await _query().range(page * page_size, page * page_size + page_size - 1).execute()
+        participants = res.data or []
+
+        answer_counts = await asyncio.gather(*[
+            supabase.table("group_quiz_answers").select("id", count="exact")
+            .eq("session_id", session_id).eq("user_id", p["user_id"]).limit(1).execute()
+            for p in participants
+        ])
+        for p, r in zip(participants, answer_counts):
+            p["_answers_count"] = r.count or 0
+
+        return {"session": session, "participants": participants, "total": total, "page": page}
+    except Exception as e:
+        log_error(logger, f"Error loading participants of group quiz session {session_id}: {e}")
         return None
 
 

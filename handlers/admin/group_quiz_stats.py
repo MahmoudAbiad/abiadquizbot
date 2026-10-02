@@ -7,7 +7,9 @@ MODULE: شاشة إحصائيات الكويز الجماعي بلوحة الأ�
 - 🟢 الكويزات النشطة الآن (waiting + active) بالغروبات/القنوات.
 - 🕐 سجل الجلسات (صفحات) + تفاصيل كل جلسة: الأدمن المشغّل (اسم/يوزر/ID)،
   الغروب/القناة (اسم/نوع/ID + يوزر وعدد الأعضاء لايف من تيليجرام)، الكويز المستخدم،
-  التوقيت الدقيق (إنشاء/بدء/انتهاء بالثواني)، وبيانات المشاركين المسجّلة.
+  التوقيت الدقيق (إنشاء/بدء/انتهاء بالثواني)، وأعداد المشاركين والإجابات.
+- 👤 زر "المشاركون" بالتفاصيل: شاشة منفصلة (بصفحات) فيها المشاركون المسجّلون بالجلسة بس.
+- ▶️ زر "شغّل الكويز عندي": تشغيل كويز الجلسة للأدمن بخاصه.
 - 🧹 تفريغ يدوي (بتأكيد) للجلسات المنتهية/الملغاة مع مشاركيها وإجاباتها.
 
 مبنية بنفس نمط handlers/admin/analytics.py (safe_edit_text، IsAdminFilter +
@@ -20,13 +22,17 @@ import html
 import uuid
 
 from aiogram import Router, types, F
+from aiogram.fsm.context import FSMContext
 
 from config import bot
+from helpers.supabase_helper import admin_get_quiz_by_id
+from handlers.quiz_runner import start_loaded_quiz, ACTIVE_QUIZ_STATES
 from constants import format_syria_time
 from keyboards import (
     get_group_quiz_stats_keyboard,
     get_group_quiz_sessions_keyboard,
     get_group_quiz_session_detail_keyboard,
+    get_group_quiz_participants_keyboard,
     get_group_quiz_purge_confirm_keyboard,
 )
 from logger import get_logger
@@ -34,6 +40,7 @@ from services.group_quiz_store import (
     get_group_quiz_overview_stats,
     get_group_sessions_page,
     get_group_session_details,
+    get_group_session_participants,
     count_ended_group_sessions,
     purge_ended_group_sessions,
     GROUP_SESSION_RETENTION_DAYS,
@@ -69,7 +76,8 @@ PACING_LABELS = {
     "burst": "دفعة واحدة",
 }
 MAX_MESSAGE_CHARS = 3900  # حد تيليجرام 4096 - هامش أمان
-MAX_PARTICIPANTS_SHOWN = 15
+PARTICIPANTS_PAGE_SIZE = 8
+MAX_NAME_CHARS = 40  # قصّ الأسماء الطويلة بالعرض فقط - حتى تضل الرسالة تحت حد تيليجرام
 LIVE_CHAT_TIMEOUT_SECONDS = 5
 
 
@@ -117,7 +125,7 @@ def _user_label(user: dict | None, user_id=None) -> str:
         p for p in (user.get("first_name"), user.get("last_name")) if p and p != "Unknown"
     ).strip()
     username = user.get("username")
-    parts = [html.escape(name) if name else "بلا اسم"]
+    parts = [html.escape(name[:MAX_NAME_CHARS]) if name else "بلا اسم"]
     if username and username != "Unknown":
         parts.append(f"@{html.escape(username)}")
     label = " · ".join(parts)
@@ -142,7 +150,7 @@ def _session_list_line(index: int, s: dict) -> str:
 async def _render_sessions_list(call: types.CallbackQuery, mode: str, page: int) -> None:
     """يعرض قائمة جلسات: `mode='a'` النشطة الآن (waiting+active)، `'r'` السجل الكامل."""
     if mode == "a":
-        data = await get_group_sessions_page(statuses=["active", "waiting"], page=0, page_size=SESSIONS_PAGE_SIZE)
+        data = await get_group_sessions_page(statuses=["active", "waiting"], page=page, page_size=SESSIONS_PAGE_SIZE)
         title = "🟢 <b>الكويزات النشطة الآن</b>"
         empty = "لا يوجد أي كويز جماعي نشط أو بانتظار الإعداد حالياً."
     else:
@@ -159,12 +167,10 @@ async def _render_sessions_list(call: types.CallbackQuery, mode: str, page: int)
         has_next = False
     else:
         pages = max(1, -(-total // SESSIONS_PAGE_SIZE))
-        header = f"{title}\n<i>الإجمالي: {total}" + (f" · صفحة {page + 1}/{pages}" if mode == "r" else "") + "</i>"
-        if mode == "a" and total > len(sessions):
-            header += f"\n<i>(يُعرض أحدث {len(sessions)} فقط)</i>"
+        header = f"{title}\n<i>الإجمالي: {total} · صفحة {page + 1}/{pages}</i>"
         body = "\n\n".join(_session_list_line(i, s) for i, s in enumerate(sessions, start=1))
         text = f"{header}\n\n{body}\n\n<i>اضغط رقم الجلسة لعرض تفاصيلها 👇</i>"
-        has_next = mode == "r" and (page + 1) * SESSIONS_PAGE_SIZE < total
+        has_next = (page + 1) * SESSIONS_PAGE_SIZE < total
 
     await safe_edit_text(
         call.message, text,
@@ -173,10 +179,14 @@ async def _render_sessions_list(call: types.CallbackQuery, mode: str, page: int)
     await call.answer()
 
 
-@router.callback_query(F.data == "admin_gq_active")
+@router.callback_query(F.data.startswith("admin_gq_active"))
 async def show_active_group_sessions(call: types.CallbackQuery):
     try:
-        await _render_sessions_list(call, "a", 0)
+        try:
+            page = int(call.data.split(":", 1)[1]) if ":" in call.data else 0
+        except ValueError:
+            page = 0
+        await _render_sessions_list(call, "a", page)
     except Exception as e:
         logger.error(f"Error rendering active group quiz sessions: {e}")
         await call.answer("❌ تعذر تحميل الكويزات النشطة حالياً.", show_alert=True)
@@ -292,48 +302,39 @@ def _build_session_details_text(d: dict, live: dict) -> str:
         f"┣ عرض الأسماء بالنتيجة: {'نعم' if s.get('show_names') else 'لا'}\n",
     ]
 
-    # --- المشاركون ---
-    participants = d.get("participants") or []
-    header = f"👤 <b>المشاركون المسجّلون</b> ({len(participants)}) · إجابات: <code>{d.get('total_answers', 0)}</code>"
-    lines.append(header)
-    if not participants:
+    # --- المشاركون (القائمة الكاملة بشاشة منفصلة عبر زر "المشاركون") ---
+    total_participants = d.get("participants_total", 0)
+    lines.append(f"👤 <b>المشاركون المسجّلون:</b> <code>{total_participants}</code> · إجابات: <code>{d.get('total_answers', 0)}</code>")
+    if not total_participants:
         lines.append("┣ <i>لا توجد بيانات مشاركين (الوضع المجهول بالكامل أو لم يجاوب أحد).</i>")
-    else:
-        text_so_far = "\n".join(lines)
-        shown = 0
-        for rank, p in enumerate(participants[:MAX_PARTICIPANTS_SHOWN], start=1):
-            answers = p.get("_answers_count", 0)
-            avg = (p.get("total_answer_time_ms", 0) / answers / 1000) if answers else 0
-            entry = (
-                f"┣ <b>{rank}.</b> {_user_label(p)}\n"
-                f"┃   🏆 {p.get('score', 0)} · ✅ {p.get('correct_count', 0)}/{answers} · ⏳ متوسط {avg:.1f}ث\n"
-                f"┃   🕐 أول مشاركة: {format_syria_time(p.get('joined_at'), EXACT_TIME_FMT)}"
-            )
-            if len(text_so_far) + len(entry) + 80 > MAX_MESSAGE_CHARS:
-                break
-            lines.append(entry)
-            text_so_far += "\n" + entry
-            shown += 1
-        if len(participants) > shown:
-            lines.append(f"┗ <i>… و{len(participants) - shown} مشارك إضافي غير معروض (ضيق مساحة الرسالة)</i>")
 
     lines.append(f"\n🆔 الجلسة: <code>{s['id']}</code>")
     return "\n".join(lines)
 
 
+def _parse_session_callback(data: str, extra_int: bool = False):
+    """`<prefix>:<uuid>:<mode><page>[:<n>]` -> (session_id, mode, page, n) أو None لو غير صالح.
+    `n` بس لشاشة المشاركين (رقم الصفحة)، والتفاصيل بتتجاهل أي جزء رابع (رسائل قديمة)."""
+    parts = data.split(":")
+    if len(parts) not in (3, 4) or parts[2][:1] not in ("a", "r"):
+        return None
+    try:
+        session_id = str(uuid.UUID(parts[1]))
+        mode, page = parts[2][0], int(parts[2][1:] or 0)
+        n = int(parts[3]) if (extra_int and len(parts) == 4) else 0
+    except ValueError:
+        return None
+    return session_id, mode, page, n
+
+
 @router.callback_query(F.data.startswith("admin_gq_s:"))
 async def show_group_session_details(call: types.CallbackQuery):
     try:
-        parts = call.data.split(":")
-        if len(parts) != 3 or parts[2][:1] not in ("a", "r"):
+        parsed = _parse_session_callback(call.data)
+        if not parsed:
             await call.answer("❌ طلب غير صالح.", show_alert=True)
             return
-        try:
-            session_id = str(uuid.UUID(parts[1]))
-            mode, page = parts[2][0], int(parts[2][1:] or 0)
-        except ValueError:
-            await call.answer("❌ طلب غير صالح.", show_alert=True)
-            return
+        session_id, mode, page, _ = parsed
 
         details = await get_group_session_details(session_id)
         if not details:
@@ -341,15 +342,109 @@ async def show_group_session_details(call: types.CallbackQuery):
             return
 
         live = await _fetch_live_chat_info(int(details["session"]["chat_id"]))
-        text = _build_session_details_text(details, live)
         await safe_edit_text(
-            call.message, text,
-            reply_markup=get_group_quiz_session_detail_keyboard(session_id, mode, page),
+            call.message, _build_session_details_text(details, live),
+            reply_markup=get_group_quiz_session_detail_keyboard(
+                session_id, mode, page,
+                participants_total=details["participants_total"],
+                quiz_id=str(details["quiz"]["id"]) if details.get("quiz") else None,
+            ),
         )
         await call.answer()
     except Exception as e:
         logger.error(f"Error rendering group quiz session details: {e}")
         await call.answer("❌ تعذر تحميل تفاصيل الجلسة حالياً.", show_alert=True)
+
+
+def _build_participants_text(data: dict) -> str:
+    s, participants = data["session"], data["participants"]
+    total, page = data["total"], data["page"]
+    pages = max(1, -(-total // PARTICIPANTS_PAGE_SIZE))
+    lines = [
+        f"👤 <b>مشاركو الجلسة</b> ({total})" + (f" · صفحة {page + 1}/{pages}" if total > PARTICIPANTS_PAGE_SIZE else ""),
+        f"📚 {html.escape(s['_quiz_title'])} · {CHAT_TYPE_LABELS.get(s.get('_chat_type'), '؟')} {html.escape(s['_chat_title'])}\n",
+    ]
+    text_so_far = "\n".join(lines)
+    for i, p in enumerate(participants):
+        rank = page * PARTICIPANTS_PAGE_SIZE + i + 1
+        answers = p.get("_answers_count", 0)
+        avg = (p.get("total_answer_time_ms", 0) / answers / 1000) if answers else 0
+        entry = (
+            f"<b>{rank}.</b> {_user_label(p)}\n"
+            f"┃  🏆 {p.get('score', 0)} · ✅ {p.get('correct_count', 0)}/{answers} · ⏳ متوسط {avg:.1f}ث\n"
+            f"┃  🕐 أول مشاركة: {format_syria_time(p.get('joined_at'), EXACT_TIME_FMT)}"
+        )
+        if len(text_so_far) + len(entry) + 80 > MAX_MESSAGE_CHARS:
+            lines.append("<i>… باقي مشاركي هالصفحة غير معروضين (ضيق مساحة الرسالة)</i>")
+            break
+        lines.append(entry)
+        text_so_far += "\n" + entry
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data.startswith("admin_gq_p:"))
+async def show_group_session_participants(call: types.CallbackQuery):
+    try:
+        parsed = _parse_session_callback(call.data, extra_int=True)
+        if not parsed:
+            await call.answer("❌ طلب غير صالح.", show_alert=True)
+            return
+        session_id, mode, page, ppage = parsed
+
+        data = await get_group_session_participants(session_id, page=ppage, page_size=PARTICIPANTS_PAGE_SIZE)
+        if not data:
+            await call.answer("⚠️ الجلسة غير موجودة (ربما انحذفت بالتفريغ).", show_alert=True)
+            return
+        if not data["participants"]:
+            await call.answer("لا يوجد مشاركون مسجّلون بهالجلسة.", show_alert=True)
+            return
+
+        ppage = data["page"]
+        await safe_edit_text(
+            call.message, _build_participants_text(data),
+            reply_markup=get_group_quiz_participants_keyboard(
+                session_id, mode, page, ppage,
+                has_prev=ppage > 0,
+                has_next=(ppage + 1) * PARTICIPANTS_PAGE_SIZE < data["total"],
+            ),
+        )
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Error rendering group quiz session participants: {e}")
+        await call.answer("❌ تعذر تحميل قائمة المشاركين حالياً.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_gq_try:"))
+async def try_group_session_quiz(call: types.CallbackQuery, state: FSMContext):
+    """يشغّل كويز الجلسة للأدمن نفسه بخاص البوت (نفس مسار 'تجربة الكويز' بملاحظات الطلاب:
+    origin=admin_test، ومحاولات الأدمن أصلاً ما بتنسجّل بجدول المحاولات)."""
+    try:
+        try:
+            quiz_id = str(uuid.UUID(call.data.split(":", 1)[1]))
+        except ValueError:
+            await call.answer("❌ طلب غير صالح.", show_alert=True)
+            return
+
+        # تفادي دعس كويز الأدمن الجاري (start_loaded_quiz بيستبدل الحالة بلا سؤال)
+        if await state.get_state() in {st.state for st in ACTIVE_QUIZ_STATES}:
+            await call.answer("⚠️ عندك كويز شغّال حالياً - أنهِه أولاً (أو أوقفه) قبل تشغيل كويز جديد.", show_alert=True)
+            return
+
+        quiz = await admin_get_quiz_by_id(quiz_id)
+        if not quiz or not quiz.get("quiz_data"):
+            await call.answer("❌ تعذّر تحميل الكويز، قد يكون محذوفاً.", show_alert=True)
+            return
+
+        await call.answer("🎯 جاري تشغيل الكويز عندك...")
+        await start_loaded_quiz(
+            call, state, quiz["quiz_data"],
+            quiz.get("source_title") or "كويز (تجربة إدارية)",
+            origin="admin_test",
+            quiz_id=quiz_id,
+        )
+    except Exception as e:
+        logger.error(f"Error starting group session quiz for admin: {e}")
+        await call.answer("❌ تعذر تشغيل الكويز.", show_alert=True)
 
 
 @router.callback_query(F.data == "admin_gq_purge")

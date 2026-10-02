@@ -685,9 +685,9 @@ def get_group_quiz_sessions_keyboard(sessions, mode: str, page: int, has_next: b
     """كيبورد قائمة جلسات الكويز الجماعي: أزرار أرقام (1..n) بتفتح تفاصيل الجلسة
     المقابلة بنص الرسالة، + تنقّل بين الصفحات + رجوع.
 
-    `mode`: `a` = قائمة النشطة الآن، `r` = سجل كل الجلسات. بيتحمّل بـ callback_data
-    للتفاصيل (`admin_gq_s:<uuid>:<mode><page>`) حتى زر الرجوع من التفاصيل يرجع لنفس
-    القائمة ونفس الصفحة."""
+    `mode`: `a` = النشطة الآن (waiting+active)، `r` = سجل كل الجلسات - الاتنين بصفحات.
+    بيتحمّل بـ callback_data للتفاصيل (`admin_gq_s:<uuid>:<mode><page>`) حتى زر الرجوع
+    من التفاصيل يرجع لنفس القائمة ونفس الصفحة."""
     kb = []
     row = []
     for i, s in enumerate(sessions, start=1):
@@ -699,27 +699,54 @@ def get_group_quiz_sessions_keyboard(sessions, mode: str, page: int, has_next: b
     if row:
         kb.append(row)
 
-    list_cb = "admin_gq_active" if mode == "a" else "admin_gq_recent:{}"
+    list_prefix = "admin_gq_active" if mode == "a" else "admin_gq_recent"
     nav = []
-    if mode == "r":
-        if page > 0:
-            nav.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=list_cb.format(page - 1)))
-        if has_next:
-            nav.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=list_cb.format(page + 1)))
+    if page > 0:
+        nav.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"{list_prefix}:{page - 1}"))
+    if has_next:
+        nav.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"{list_prefix}:{page + 1}"))
     if nav:
         kb.append(nav)
-    kb.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=list_cb.format(page) if mode == "r" else list_cb)])
+    kb.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{list_prefix}:{page}")])
     kb.append([types.InlineKeyboardButton(text="🔙 إحصائيات الكويز الجماعي", callback_data="admin_group_quiz_stats")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_group_quiz_session_detail_keyboard(session_id: str, mode: str, page: int) -> types.InlineKeyboardMarkup:
-    """كيبورد تفاصيل جلسة: تحديث + رجوع للقائمة اللي جاء منها الأدمن."""
-    back_cb = "admin_gq_active" if mode == "a" else f"admin_gq_recent:{page}"
-    kb = [
-        [types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"admin_gq_s:{session_id}:{mode}{page}")],
-        [types.InlineKeyboardButton(text="🔙 رجوع للقائمة", callback_data=back_cb)],
-    ]
+def get_group_quiz_session_detail_keyboard(
+    session_id: str, mode: str, page: int,
+    participants_total: int = 0, quiz_id: str | None = None,
+) -> types.InlineKeyboardMarkup:
+    """كيبورد تفاصيل جلسة: زر المشاركين (لو في مشاركون مسجّلون)، تشغيل الكويز عند الأدمن
+    (لو الكويز لسا موجود)، تحديث، ورجوع للقائمة اللي جاء منها الأدمن (نفس الصفحة)."""
+    base = f"admin_gq_s:{session_id}:{mode}{page}"
+    kb = []
+    if participants_total > 0:
+        kb.append([types.InlineKeyboardButton(
+            text=f"👤 المشاركون ({participants_total})", callback_data=f"admin_gq_p:{session_id}:{mode}{page}:0")])
+    if quiz_id:
+        kb.append([types.InlineKeyboardButton(text="▶️ شغّل الكويز عندي", callback_data=f"admin_gq_try:{quiz_id}")])
+    kb.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=base)])
+    back_cb = f"admin_gq_active:{page}" if mode == "a" else f"admin_gq_recent:{page}"
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للقائمة", callback_data=back_cb)])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_group_quiz_participants_keyboard(
+    session_id: str, mode: str, page: int, participants_page: int, has_prev: bool, has_next: bool,
+) -> types.InlineKeyboardMarkup:
+    """كيبورد قائمة مشاركي جلسة: تنقّل بين الصفحات، تحديث، ورجوع لتفاصيل الجلسة
+    (`admin_gq_p:<uuid>:<mode><page>:<participants_page>` أقصاه ~58 بايت من حد 64)."""
+    base = f"admin_gq_p:{session_id}:{mode}{page}"
+    kb = []
+    nav = []
+    if has_prev:
+        nav.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"{base}:{participants_page - 1}"))
+    if has_next:
+        nav.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"{base}:{participants_page + 1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{base}:{participants_page}")])
+    kb.append([types.InlineKeyboardButton(text="🔙 تفاصيل الجلسة", callback_data=f"admin_gq_s:{session_id}:{mode}{page}")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
