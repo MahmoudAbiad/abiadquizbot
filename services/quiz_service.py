@@ -327,11 +327,9 @@ async def execute_quiz_generation_workflow(
 
         # 2. جلب الأسئلة السابقة لمنع التكرار
         previous_questions = []
-        existing_uuids = set()
         if file_hash:
             old_quizzes = await get_file_quizzes(file_hash)
             for qz in old_quizzes:
-                existing_uuids.add(str(qz["id"]))
                 if "quiz_data" in qz and isinstance(qz["quiz_data"], list):
                     previous_questions.extend(qz["quiz_data"])
 
