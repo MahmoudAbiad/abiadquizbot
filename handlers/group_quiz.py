@@ -55,6 +55,10 @@ from keyboards import (
     get_group_pacing_keyboard,
     get_group_question_control_keyboard,
     get_group_timer_keyboard,
+    get_group_top_n_keyboard,
+    GROUP_TOP_N_MIN,
+    GROUP_TOP_N_MAX,
+    GROUP_TOP_N_DEFAULT,
 )
 from logger import get_logger, log_error, log_info
 from services.group_permissions import invalidate_group_admin_cache, is_group_admin
@@ -249,18 +253,27 @@ async def _start_session_setup(
     title = html.escape(shared.get("source_title") or shared.get("title") or "كويز")
     dest_label = "📢 القناة" if is_channel else "👥 الغروب"
     dest_line = f"{dest_label}: <b>{html.escape(dest_title)}</b>\n" if dest_title else ""
+    competitive_line = (
+        "🏆 <b>تنافسي</b>: نقاط وترتيب نهائي، بس أي عضو بالغروب يقدر يشوف \"من صوّت لمين\" "
+        "على كل سؤال (قيد من تيليجرام نفسها، مش قابل للتعطيل)."
+    )
     if is_channel:
-        # بلا أي ادّعاء عن مين بيشوف \"من صوّت لمين\" بالقنوات (ما تحقّقنا منه) - بس
-        # الحقيقة الثابتة: الاستفتاء غير المجهول = تيليجرام بتربط كل إجابة بصاحبها.
-        competitive_line = (
-            "🏆 <b>تنافسي</b>: نقاط وترتيب نهائي، بس الاستفتاء بيكون غير مجهول "
-            "(تيليجرام بتربط كل إجابة بصاحبها - قيد من تيليجرام نفسها، مش قابل للتعطيل)."
+        # قيد تيليجرام: استفتاءات القنوات مجهولة دايماً (ما بتقبل is_anonymous=False) -
+        # فما في خيار تنافسي هون. منثبّت المجهول بقاعدة البيانات ومنقفز لشاشة المؤقّت.
+        await update_session(str(session["id"]), {"poll_is_anonymous": True})
+        text = (
+            f"📚 <b>{title}</b>\n"
+            f"{dest_line}"
+            f"عدد الأسئلة: {len(questions)}\n\n"
+            "🙈 <b>القنوات بتدعم النمط المجهول فقط</b> (قيد من تيليجرام): بلا نقاط ولا ترتيب نهائي.\n\n"
+            "⏱ بدك مؤقّت داخلي لكل سؤال؟ (الاستفتاء بيسكّر لحاله لما يخلص الوقت)"
         )
-    else:
-        competitive_line = (
-            "🏆 <b>تنافسي</b>: نقاط وترتيب نهائي، بس أي عضو بالغروب يقدر يشوف \"من صوّت لمين\" "
-            "على كل سؤال (قيد من تيليجرام نفسها، مش قابل للتعطيل)."
+        await _safe_call(
+            lambda: ui_msg.answer(text, parse_mode="HTML", reply_markup=get_group_timer_keyboard(str(session["id"]))),
+            what="send channel timer screen",
         )
+        return
+
     text = (
         f"📚 <b>{title}</b>\n"
         f"{dest_line}"
@@ -400,6 +413,13 @@ async def _guard_config_callback(call: types.CallbackQuery, session_id: str) -> 
     return session
 
 
+async def _is_channel_chat(chat_id: int) -> bool:
+    """القنوات استفتاءاتها مجهولة دايماً بتيليجرام - المرجع `bot_chat_memberships.chat_type`
+    (chat_id وحده ما بيفرّق بين القناة والسوبرغروب - الاتنين -100...)."""
+    membership = await get_chat_membership(chat_id)
+    return bool(membership) and membership.get("chat_type") == "channel"
+
+
 @router.callback_query(F.data.startswith("gqa:"))
 async def choose_group_anonymity(call: types.CallbackQuery):
     try:
@@ -409,6 +429,10 @@ async def choose_group_anonymity(call: types.CallbackQuery):
             return
 
         is_anonymous = mode_code == "a"
+        if not is_anonymous and await _is_channel_chat(int(session["chat_id"])):
+            # حماية ضد callback_data قديم/مزوّر: القنوات مجهولة فقط (قيد تيليجرام).
+            await call.answer("⚠️ القنوات بتدعم النمط المجهول فقط (قيد من تيليجرام)", show_alert=True)
+            return
         await update_session(session_id, {"poll_is_anonymous": is_anonymous})
 
         if is_anonymous:
@@ -449,12 +473,64 @@ async def choose_group_names_privacy(call: types.CallbackQuery):
 
         hint = "👤 الأسماء رح تظهر بالترتيب" if show_names else "🙈 الأسماء رح تنخفى بالترتيب (لاعب ١، لاعب ٢...)"
         await call.message.edit_text(
-            f"{hint}\n\n⏱ وهلق: بدك مؤقّت داخلي لكل سؤال؟ (الاستفتاء بيسكّر لحاله لما يخلص الوقت)",
-            reply_markup=get_group_timer_keyboard(session_id),
+            f"{hint}\n\n{_TOP_N_PROMPT}",
+            reply_markup=get_group_top_n_keyboard(session_id, GROUP_TOP_N_DEFAULT),
         )
     except Exception as e:
         log_error(logger, f"Error in choose_group_names_privacy: {e}", exception=e)
     finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
+
+
+_TOP_N_PROMPT = (
+    f"🏅 كم متسابق بدك يظهر بالترتيب النهائي؟ ({GROUP_TOP_N_MIN}-{GROUP_TOP_N_MAX})\n"
+    "🥇 الأول ذهبي · 🥈 الثاني فضي · 🥉 الثالث برونزي"
+)
+
+
+@router.callback_query(F.data.startswith("gqk:"))
+async def choose_group_top_n(call: types.CallbackQuery):
+    """`gqk:<id>:n:<رقم>` تنقّل (إعادة رسم بلا حفظ) · `gqk:<id>:ok:<رقم>` تأكيد وحفظ · `gqk:<id>:noop`."""
+    try:
+        parts = call.data.split(":")
+        if len(parts) < 3:
+            await call.answer("❌ طلب غير صالح.", show_alert=True)
+            return
+        session_id, action = parts[1], parts[2]
+        if action == "noop":
+            await call.answer()
+            return
+        try:
+            n = int(parts[3])
+        except (IndexError, ValueError):
+            await call.answer("❌ طلب غير صالح.", show_alert=True)
+            return
+        if action not in ("n", "ok"):
+            await call.answer("❌ طلب غير صالح.", show_alert=True)
+            return
+        session = await _guard_config_callback(call, session_id)
+        if not session:
+            return
+        n = max(GROUP_TOP_N_MIN, min(GROUP_TOP_N_MAX, n))
+
+        if action == "n":
+            await call.message.edit_reply_markup(reply_markup=get_group_top_n_keyboard(session_id, n))
+            await call.answer()
+            return
+
+        await update_session(session_id, {"top_n": n})
+        await call.message.edit_text(
+            f"🏅 الترتيب النهائي بيعرض أول <b>{n}</b>.\n\n"
+            "⏱ وهلق: بدك مؤقّت داخلي لكل سؤال؟ (الاستفتاء بيسكّر لحاله لما يخلص الوقت)",
+            parse_mode="HTML",
+            reply_markup=get_group_timer_keyboard(session_id),
+        )
+        await call.answer()
+    except Exception as e:
+        log_error(logger, f"Error in choose_group_top_n: {e}", exception=e)
         try:
             await call.answer()
         except Exception:
@@ -513,12 +589,16 @@ async def choose_group_pacing(call: types.CallbackQuery):
             pacing_mode = "fixed_interval"
             interval = max(MIN_QUESTION_INTERVAL_SECONDS, int(raw_value))
 
-        updated = await update_session(session_id, {
+        start_fields = {
             "pacing_mode": pacing_mode,
             "question_interval_seconds": interval,
             "status": "active",
             "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        })
+        }
+        if not session.get("poll_is_anonymous") and await _is_channel_chat(int(session["chat_id"])):
+            # شبكة أمان أخيرة (جلسة قناة قديمة غير مجهولة): تيليجرام ما بتسمح بغير المجهول بالقنوات.
+            start_fields["poll_is_anonymous"] = True
+        updated = await update_session(session_id, start_fields)
         if not updated:
             await call.answer("❌ تعذّر بدء الجلسة", show_alert=True)
             return
@@ -1178,13 +1258,14 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             text = "🏁 انتهت الأسئلة. الاستفتاءات المرسلة ضلّت مفتوحة، أي حدا لسا يقدر يجاوب عليها."
         needs_manual_suffix = False
     else:
-        rows = await get_leaderboard(session_id)
+        top_n = max(GROUP_TOP_N_MIN, min(GROUP_TOP_N_MAX, int(session.get("top_n") or GROUP_TOP_N_MAX)))
+        rows = await get_leaderboard(session_id, limit=top_n)
         show_names = session.get("show_names", True)  # True لو العمود لسا مش مضاف (fail-open نفس نمط باقي الإعدادات بالمشروع)
         if not rows:
             text = "🏁 خلصت الجلسة - ما في أي إجابة مسجّلة."
         else:
             medals = ["🥇", "🥈", "🥉"]
-            lines = ["🏁 <b>انتهت الجلسة! الترتيب النهائي:</b>", ""]
+            lines = [f"🏁 <b>انتهت الجلسة! الترتيب النهائي (أول {top_n}):</b>", ""]
             for i, r in enumerate(rows):
                 if show_names:
                     raw_who = r.get("first_name") or (f"@{r['username']}" if r.get("username") else str(r["user_id"]))

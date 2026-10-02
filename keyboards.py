@@ -1027,6 +1027,35 @@ def get_group_names_privacy_keyboard(session_id: str) -> types.InlineKeyboardMar
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+GROUP_TOP_N_MIN, GROUP_TOP_N_MAX, GROUP_TOP_N_DEFAULT = 1, 20, 10
+GROUP_TOP_N_PRESETS = [3, 5, 10, 15, 20]
+
+
+def get_group_top_n_keyboard(session_id: str, n: int = GROUP_TOP_N_DEFAULT) -> types.InlineKeyboardMarkup:
+    """شاشة اختيار عدد الأوائل بالترتيب النهائي (1-20): أزرار جاهزة + ➖/➕ + تأكيد.
+
+    التنقّل (`gqk:<id>:n:<رقم>`) بيعيد رسم الأزرار بس بلا أي كتابة بقاعدة البيانات؛ الحفظ
+    الفعلي بالتأكيد (`gqk:<id>:ok:<رقم>`)."""
+    n = max(GROUP_TOP_N_MIN, min(GROUP_TOP_N_MAX, int(n)))
+    base = f"gqk:{session_id}"
+    presets = [
+        types.InlineKeyboardButton(text=(f"• {v} •" if v == n else str(v)), callback_data=f"{base}:n:{v}")
+        for v in GROUP_TOP_N_PRESETS
+    ]
+    stepper = [
+        types.InlineKeyboardButton(text="➖", callback_data=f"{base}:n:{max(GROUP_TOP_N_MIN, n - 1)}"),
+        types.InlineKeyboardButton(text=f"🏅 {n}", callback_data=f"{base}:noop"),
+        types.InlineKeyboardButton(text="➕", callback_data=f"{base}:n:{min(GROUP_TOP_N_MAX, n + 1)}"),
+    ]
+    rows = [
+        presets,
+        stepper,
+        [types.InlineKeyboardButton(text=f"✅ تأكيد (أول {n})", callback_data=f"{base}:ok:{n}")],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{session_id}")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def get_group_timer_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
     """الشاشة الأولى: هل في مؤقّت داخلي لكل سؤال؟ وكم؟"""
     rows = []

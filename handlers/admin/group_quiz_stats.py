@@ -299,7 +299,8 @@ def _build_session_details_text(d: dict, live: dict) -> str:
         "⚙️ <b>الإعدادات</b>",
         settings_line,
         f"┣ إخفاء هوية المصوّتين (استفتاء مجهول): {'نعم' if s.get('poll_is_anonymous') else 'لا'}",
-        f"┣ عرض الأسماء بالنتيجة: {'نعم' if s.get('show_names') else 'لا'}\n",
+        f"┣ عرض الأسماء بالنتيجة: {'نعم' if s.get('show_names') else 'لا'}",
+        f"┣ عدد الأوائل بالنتيجة: <code>{s.get('top_n') or 20}</code>\n",
     ]
 
     # --- المشاركون (القائمة الكاملة بشاشة منفصلة عبر زر "المشاركون") ---
