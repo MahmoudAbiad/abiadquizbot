@@ -26,7 +26,7 @@ from helpers.gemini_helper.media import (
     _build_contents_for_paths,
     _safe_delete_gemini_file,
     split_images_into_three_sync,
-    split_pdf_into_three_sync,
+    split_pdf_into_three_sync, split_pdf_without_orphans,
 )
 from helpers.gemini_helper.schemas import QuizResponse
 
@@ -152,17 +152,17 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
     if len(API_KEYS) < 3:
         log_error(logger, "Super processing requires three distinct GEMINI_API_KEYS")
         return None
-    chunk_paths = await asyncio.to_thread(split_pdf_into_three_sync, file_path)
-    # 🩹 FIX (memory-leak): fitz (PyMuPDF) يخصّص ذاكرة كبيرة أثناء فتح/تقسيم PDF
-    # ضخم؛ رغم إغلاق المستندات بـ try/finally (وهو صحيح)، glibc لا يعيد هذه
-    # الصفحات لنظام التشغيل تلقائيًا. نجبرها هنا فورًا بعد انتهاء التقسيم.
-    await asyncio.to_thread(release_memory_to_os)
-    if len(chunk_paths) != 3:
-        return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
-
-    base, remainder = divmod(count, 3)
-    question_counts = [base + (1 if index < remainder else 0) for index in range(3)]
+    chunk_paths = await split_pdf_without_orphans(file_path)
     try:
+        # 🩹 FIX (memory-leak): fitz (PyMuPDF) يخصّص ذاكرة كبيرة أثناء فتح/تقسيم PDF
+        # ضخم؛ رغم إغلاق المستندات بـ try/finally (وهو صحيح)، glibc لا يعيد هذه
+        # الصفحات لنظام التشغيل تلقائيًا. نجبرها هنا فورًا بعد انتهاء التقسيم.
+        await asyncio.to_thread(release_memory_to_os)
+        if len(chunk_paths) != 3:
+            return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
+
+        base, remainder = divmod(count, 3)
+        question_counts = [base + (1 if index < remainder else 0) for index in range(3)]
         tasks = [
             _execute_cascade(
                 _build_super_chunk_attempt_fn(
@@ -173,11 +173,11 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
             for chunk_path, question_count in zip(chunk_paths, question_counts)
             if question_count > 0
         ]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         # 🆕 لو جزء واحد استنفد السلسلة كاملة (كل موديل × كل مفتاح فشل معه)، _execute_cascade
         # يرجّع له None بدل رفع استثناء - نعامل فشل أي جزء كفشل كامل للطلب (نفس سلوك
         # asyncio.gather السابق عند رفع استثناء، لكن بشكل صريح هلق).
-        if any(result is None for result in results):
+        if any(result is None or isinstance(result, BaseException) for result in results):
             log_error(logger, "Super PDF: chunk exhausted the entire model/key cascade")
             return None
         questions = [question for result in results for question in result[0]]
@@ -216,7 +216,8 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
         return questions, total_tokens
     finally:
         for chunk_path in chunk_paths:
-            safe_file_cleanup(chunk_path)
+            if chunk_path != file_path:
+                safe_file_cleanup(chunk_path)
 
 
 async def _generate_super_images(

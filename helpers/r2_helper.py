@@ -27,6 +27,7 @@ R2 مناسب تماماً لهذا النمط.
 
 import asyncio
 import datetime
+import shutil
 import os
 import uuid
 from typing import Dict, List, Optional
@@ -108,21 +109,61 @@ def _head_object_size_sync(bucket: str, object_path: str) -> Optional[int]:
 
 
 def _download_object_sync(bucket: str, object_path: str, destination_path: str, max_size_bytes: Optional[int]) -> bool:
+    body = None
+    success = False
     try:
         client = _get_r2_client()
-        head = client.head_object(Bucket=bucket, Key=object_path)
-        size = int(head.get("ContentLength", 0))
-        if max_size_bytes is not None and size > max_size_bytes:
-            log_error(
-                logger,
-                f"R2 object '{bucket}/{object_path}' exceeds max allowed size ({size} > {max_size_bytes} bytes) - rejecting.",
-            )
+        response = client.get_object(Bucket=bucket, Key=object_path)
+        body = response["Body"]
+        size = int(response.get("ContentLength", 0))
+        if size <= 0 or (max_size_bytes is not None and size > max_size_bytes):
             return False
-        client.download_file(bucket, object_path, destination_path)
-        return True
+        from services.upload_validation import MIN_FREE_DISK_BYTES
+        if shutil.disk_usage(os.path.dirname(destination_path) or '.').free < size + MIN_FREE_DISK_BYTES:
+            return False
+        total = 0
+        with open(destination_path, "wb") as target:
+            while chunk := body.read(64 * 1024):
+                total += len(chunk)
+                if shutil.disk_usage(os.path.dirname(destination_path) or ".").free < len(chunk) + MIN_FREE_DISK_BYTES:
+                    return False
+                if max_size_bytes is not None and total > max_size_bytes:
+                    return False
+                target.write(chunk)
+        success = total == size
+        return success
     except Exception as e:
         log_error(logger, f"Could not download R2 object '{bucket}/{object_path}': {e}")
         return False
+    finally:
+        if body is not None:
+            try:
+                body.close()
+            except Exception:
+                pass
+        if not success:
+            try:
+                os.remove(destination_path)
+            except FileNotFoundError:
+                pass
+
+
+async def _download_without_orphan(bucket, object_path, destination_path, max_size_bytes):
+    # Cancellation does not stop a thread: wait for it before deleting its output.
+    task = asyncio.create_task(asyncio.to_thread(
+        _download_object_sync, bucket, object_path, destination_path, max_size_bytes
+    ))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        finally:
+            try:
+                os.remove(destination_path)
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def _delete_object_sync(bucket: str, object_path: str) -> None:
@@ -186,7 +227,7 @@ async def get_audio_temp_object_size(object_path: str) -> Optional[int]:
 
 
 async def download_audio_temp_to_file(object_path: str, destination_path: str, max_size_bytes: Optional[int] = None) -> bool:
-    return await asyncio.to_thread(_download_object_sync, R2_AUDIO_BUCKET, object_path, destination_path, max_size_bytes)
+    return await _download_without_orphan(R2_AUDIO_BUCKET, object_path, destination_path, max_size_bytes)
 
 
 async def delete_audio_temp(object_path: str) -> None:
@@ -229,7 +270,7 @@ async def get_file_temp_object_size(object_path: str) -> Optional[int]:
 
 
 async def download_file_temp_to_file(object_path: str, destination_path: str, max_size_bytes: Optional[int] = None) -> bool:
-    return await asyncio.to_thread(_download_object_sync, R2_FILE_BUCKET, object_path, destination_path, max_size_bytes)
+    return await _download_without_orphan(R2_FILE_BUCKET, object_path, destination_path, max_size_bytes)
 
 
 async def delete_file_temp(object_path: str) -> None:

@@ -59,34 +59,68 @@ def _combined_file_hash(paths: Sequence[str]) -> str:
 
 
 def get_pdf_page_count_sync(file_path: str) -> int:
-    """حساب عدد صفحات ملف الـ PDF ميكانيكياً."""
-    with fitz.open(file_path) as document:
-        return len(document)
+    from services.upload_validation import validate_document
+    return validate_document(file_path)
 
 
 def split_pdf_into_three_sync(file_path: str) -> List[str]:
-    """تقسيم ملف PDF إلى 3 أجزاء متساوية للمعالجة المتوازية في نمط Super PDF."""
-    source = fitz.open(file_path)
-    try:
+    """Bound chunk disk usage and remove partial output even when splitting fails."""
+    import shutil
+    from services.upload_validation import MAX_PDF_PARTS_BYTES, MIN_FREE_DISK_BYTES
+    get_pdf_page_count_sync(file_path)
+    base = Path(file_path)
+    # Source already occupies disk. Reserve space for parts + a safety margin.
+    if shutil.disk_usage(base.parent).free < MAX_PDF_PARTS_BYTES + MIN_FREE_DISK_BYTES:
+        raise ValueError("لا توجد مساحة مؤقتة كافية لمعالجة ملف PDF الكبير، حاول لاحقاً.")
+    chunk_paths: List[str] = []
+    with fitz.open(file_path) as source:
         page_count = len(source)
         if page_count < 3:
             return [file_path]
-        base = Path(file_path)
-        chunk_paths: List[str] = []
-        for index in range(3):
-            start = (page_count * index) // 3
-            end = (page_count * (index + 1)) // 3 - 1
-            chunk = fitz.open()
-            try:
-                chunk.insert_pdf(source, from_page=start, to_page=end)
+        try:
+            for index in range(3):
                 chunk_path = str(base.with_name(f"{base.stem}_{uuid.uuid4().hex}_part{index + 1}.pdf"))
-                chunk.save(chunk_path)
-                chunk_paths.append(chunk_path)
-            finally:
-                chunk.close()
-        return chunk_paths
-    finally:
-        source.close()
+                chunk_paths.append(chunk_path)  # Track before saving, including partial writes.
+                with fitz.open() as chunk:
+                    chunk.insert_pdf(source, from_page=(page_count * index) // 3,
+                                     to_page=(page_count * (index + 1)) // 3 - 1)
+                    remaining = MAX_PDF_PARTS_BYTES - sum(os.path.getsize(p) for p in chunk_paths[:-1])
+                    # MuPDF writes through a bounded file-like object, avoiding a giant RAM copy.
+                    with open(chunk_path, "wb") as output:
+                        class BoundedOutput:
+                            def write(self, data):
+                                if output.tell() + len(data) > remaining:
+                                    raise ValueError("PDF temporary parts exceed the disk budget")
+                                return output.write(data)
+                            def seek(self, *args):
+                                return output.seek(*args)
+                            def tell(self):
+                                return output.tell()
+                            def flush(self):
+                                return output.flush()
+                        chunk.save(BoundedOutput(), garbage=3, deflate=True)
+            return chunk_paths
+        except BaseException:
+            for path in chunk_paths:
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+            raise
+
+
+async def split_pdf_without_orphans(file_path):
+    task = asyncio.create_task(asyncio.to_thread(split_pdf_into_three_sync, file_path))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            paths = await task
+            for path in paths:
+                if path != file_path:
+                    os.remove(path)
+        finally:
+            raise
 
 
 async def _safe_delete_gemini_file(client: genai.Client, file_name: str) -> None:

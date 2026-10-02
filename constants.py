@@ -816,6 +816,7 @@ FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS = AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS
 # نفسها وليس رقماً اخترناه، فرفعه أعلى من كذا ممكن فقط عبر صفحة الويب.
 # ==============================================================================
 MAX_IMAGE_WEB_UPLOAD_COUNT = 50
+MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE = 100 * 1024 * 1024  # 100MB per batch, keep 50 small images
 MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE = 15 * 1024 * 1024  # 15MB لكل صورة على حدة
 
 # ==============================================================================

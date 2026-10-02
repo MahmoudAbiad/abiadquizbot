@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Tuple
 from config import bot
 from utils import calculate_file_hash, extract_text_from_file, safe_file_cleanup
 from validators import validate_file_size
+from services.upload_validation import validate_image
 
 DOWNLOADS_DIR = "downloads"
 
@@ -25,12 +26,15 @@ async def download_photos_service(message_user_id: int, photos: List[Dict[str, A
         for index, photo in enumerate(photos, start=1):
             valid, error = validate_file_size(photo.get("file_size") or 0, "photo")
             if not valid:
+                for previous in paths:
+                    safe_file_cleanup(previous)
                 return [], f"❌ الصورة رقم {index}: {error}"
             path = os.path.join(DOWNLOADS_DIR, f"{message_user_id}_{uuid.uuid4().hex}.jpg")
-            await bot.download(photo["file_id"], destination=path)
             paths.append(path)
+            await bot.download(photo["file_id"], destination=path)
+            await asyncio.to_thread(validate_image, path)
         return paths, ""
-    except Exception:
+    except BaseException:
         for path in paths:
             safe_file_cleanup(path)
         raise

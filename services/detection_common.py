@@ -67,6 +67,10 @@ def first_page_png_bytes_sync(file_path: str) -> Optional[bytes]:
             if doc.page_count < 1:
                 return None
             page = doc.load_page(0)
+            from services.upload_validation import MAX_IMAGE_PIXELS, MAX_IMAGE_DIMENSION
+            width, height = page.rect.width * 120 / 72, page.rect.height * 120 / 72
+            if max(width, height) > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
+                raise ValueError("PDF page raster dimensions exceed the memory budget")
             pixmap = page.get_pixmap(dpi=120)
             return pixmap.tobytes("png")
         finally:
