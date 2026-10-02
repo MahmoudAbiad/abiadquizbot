@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 import time
 import uuid
 
@@ -16,6 +17,9 @@ KEYS = [PREFIX + suffix for suffix in ('payload', 'pending', 'leased', 'owners',
 LEASE_SECONDS = 120
 MAX_ATTEMPTS = 5
 DONE_TTL = 7 * 86400
+# Safety-net poll (lease recovery only), every 5 min. Upstash bills each redis.call inside a Lua script,
+# so one empty CLAIM costs ~3 commands. Normal work is delivered by in-process wake-ups.
+POLL_INTERVAL = 300
 
 ENQUEUE = """-- webhook_enqueue
 if redis.call('EXISTS', KEYS[3]) == 1 or redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then return 0 end
@@ -69,15 +73,26 @@ return redis.call('ZADD', KEYS[2], 'XX', ARGV[3], ARGV[1])
 
 
 class WebhookQueue:
-    def __init__(self, redis, clock=time.time, lease_seconds=LEASE_SECONDS):
+    def __init__(self, redis, clock=time.time, lease_seconds=LEASE_SECONDS, poll_interval=POLL_INTERVAL):
         self.redis = redis
         self.clock = clock
         self.lease_seconds = lease_seconds
+        self.poll_interval = poll_interval
+        # Wake-up tokens: one per enqueued/retry-scheduled update. Idle workers sleep on
+        # this in-process queue instead of polling Redis (each poll is a billed command).
+        self._tokens = asyncio.Queue(maxsize=1000)
+
+    def _wake(self):
+        with contextlib.suppress(asyncio.QueueFull):
+            self._tokens.put_nowait(1)
 
     async def enqueue(self, update):
         identity = str(update['update_id'])
-        return bool(await self.redis.eval(ENQUEUE, 3, KEYS[0], KEYS[1], PREFIX+'done:'+identity,
-                                         identity, json.dumps(update, ensure_ascii=False), self.clock()))
+        added = bool(await self.redis.eval(ENQUEUE, 3, KEYS[0], KEYS[1], PREFIX+'done:'+identity,
+                                           identity, json.dumps(update, ensure_ascii=False), self.clock()))
+        if added:
+            self._wake()
+        return added
 
     async def claim(self):
         token = uuid.uuid4().hex
@@ -91,8 +106,13 @@ class WebhookQueue:
 
     async def finish(self, record, success):
         identity, _, attempt, token = record
-        return await self.redis.eval(FINISH, 7, *KEYS, PREFIX+'done:'+identity, identity, token,
-                                     'ok' if success else 'retry', self.clock()+min(2**attempt,60), DONE_TTL)
+        delay = min(2**attempt, 60)
+        result = await self.redis.eval(FINISH, 7, *KEYS, PREFIX+'done:'+identity, identity, token,
+                                       'ok' if success else 'retry', self.clock()+delay, DONE_TTL)
+        if result and not success:
+            # Wake a worker exactly when the retry becomes due (no idle polling needed).
+            asyncio.get_running_loop().call_later(delay + 0.1, self._wake)
+        return result
 
     async def _heartbeat(self, record, owner):
         try:
@@ -133,13 +153,34 @@ class WebhookQueue:
                 await renewal
         return True
 
-    async def worker(self, process):
+    async def _idle(self, sweeper):
+        """Sleep without touching Redis until work is signalled.
+
+        Only the sweeper also wakes every poll_interval to reclaim expired leases
+        (e.g. another process died) - one cheap poll instead of one per worker.
+        """
+        if sweeper:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._tokens.get(), self.poll_interval)
+        else:
+            await self._tokens.get()
+
+    async def worker(self, process, sweeper=True):
+        failures = 0
         while True:
             try:
-                if not await self.process_one(process):
-                    await asyncio.sleep(1)
+                if await self.process_one(process):
+                    failures = 0
+                    continue  # more work may be waiting; claim again immediately
+                failures = 0
+                await self._idle(sweeper)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception('Webhook queue worker failed; retrying')
-                await asyncio.sleep(2)
+                failures += 1
+                delay = min(2 ** failures, 60)
+                if failures == 1:
+                    logger.exception('Webhook queue worker failed; retrying')
+                else:
+                    logger.error('Webhook queue worker still failing (%s in a row); retry in %ss', failures, delay)
+                await asyncio.sleep(delay + random.random())

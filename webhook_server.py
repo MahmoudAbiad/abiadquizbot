@@ -217,7 +217,9 @@ async def lifespan(app: FastAPI):
 
     async def consume(payload):
         await process_update_safely(Update.model_validate(payload))
-    workers = [spawn(webhook_queue.worker(consume), name=f"telegram-queue-{i}")
+    # Only worker 0 also does the periodic safety-net poll; the rest sleep in-process
+    # until an update is enqueued (idle polling by all workers exhausted Upstash's quota).
+    workers = [spawn(webhook_queue.worker(consume, sweeper=(i == 0)), name=f"telegram-queue-{i}")
                for i in range(UPDATE_CONCURRENCY_LIMIT)]
     try:
         yield

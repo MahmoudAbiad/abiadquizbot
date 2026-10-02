@@ -79,3 +79,39 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         await self.queue.enqueue({'update_id':6})
         records=await asyncio.gather(*(self.queue.claim() for _ in range(10)))
         self.assertEqual(sum(r is not None for r in records),1)
+
+    async def test_idle_workers_do_not_poll_redis(self):
+        calls = 0
+        real_eval = self.redis.eval
+        async def counting_eval(*a, **kw):
+            nonlocal calls
+            calls += 1
+            return await real_eval(*a, **kw)
+        self.redis.eval = counting_eval
+        self.queue.poll_interval = 3600
+        process = AsyncMock()
+        workers = [asyncio.create_task(self.queue.worker(process, sweeper=(i == 0))) for i in range(15)]
+        await asyncio.sleep(0.3)
+        # One initial claim per worker at startup, then total silence while idle.
+        self.assertEqual(calls, 15)
+        await asyncio.sleep(1.2)
+        self.assertEqual(calls, 15)
+        # An enqueue wakes a worker without any polling interval elapsing.
+        await self.queue.enqueue({'update_id': 7})
+        await asyncio.sleep(0.3)
+        process.assert_awaited_once_with({'update_id': 7})
+        for w in workers:
+            w.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    async def test_worker_backs_off_when_redis_fails(self):
+        self.redis.eval = AsyncMock(side_effect=RuntimeError('max requests limit exceeded'))
+        with self.assertLogs('services.webhook_queue', level='ERROR'):
+            task = asyncio.create_task(self.queue.worker(AsyncMock()))
+            await asyncio.sleep(0.5)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        # Exponential backoff (2s, 4s, ...), not a tight retry loop.
+        self.assertEqual(self.redis.eval.await_count, 1)
+
