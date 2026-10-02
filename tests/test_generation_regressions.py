@@ -1,0 +1,159 @@
+import asyncio
+import os
+import tempfile
+import types
+import unittest
+from unittest.mock import AsyncMock, Mock
+
+from reliability_support import FakeRedis, load_functions
+from services.redis_reliability import UserLock
+
+
+class State:
+    def __init__(self, data=None):
+        self.data = dict(data or {})
+        self.status = 'waiting_for_count'
+        self.fail_update = False
+    async def get_state(self):return self.status
+    async def set_state(self, value):self.status=value
+    async def get_data(self):return dict(self.data)
+    async def set_data(self, value):self.data=dict(value)
+    async def update_data(self, **values):
+        if self.fail_update:raise ConnectionError('FSM unavailable after debit')
+        self.data.update(values)
+    async def clear(self):self.data={};self.status=None
+
+
+class DebitTests(unittest.IsolatedAsyncioTestCase):
+    def make(self):
+        status=types.SimpleNamespace(edit_text=AsyncMock(),delete=AsyncMock())
+        self.call=types.SimpleNamespace(answer=AsyncMock(),from_user=types.SimpleNamespace(id=1),message=types.SimpleNamespace(answer=AsyncMock(return_value=status),delete=AsyncMock()))
+        states=types.SimpleNamespace(waiting_for_count='waiting_for_count',processing_file_quiz='processing',answering_quiz='answering')
+        def spawn(coro):coro.close()
+        async def loaded(call,state,*a,**kw):await state.update_data(quiz_data=['result'],attempt_id='saved')
+        self.env=load_functions('handlers/files.py', {'handle_count_start','_clear_quiz_charge_markers'},
+            asyncio=asyncio, redis_client=FakeRedis(), UserLock=UserLock, QuizState=states,
+            _QUIZ_CHARGE_STATE_KEYS=('debited_cost','debited_free','debited_paid'),
+            validate_question_count=lambda count:(True,''), SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
+            calculate_quiz_points_cost=AsyncMock(return_value=2),determine_execution_mode=lambda *a,**kw:'Standard',
+            _current_user=AsyncMock(return_value={'points':100}),update_user_stats=AsyncMock(return_value={'debited_free':1.5,'debited_paid':0.5}),
+            log_usage_event=AsyncMock(),spawn=spawn,logger=Mock(),log_error=Mock(),log_warning=Mock(),
+            refund_user_on_failure=AsyncMock(), _insufficient_balance=AsyncMock(),MSG_PROCESSING='processing',
+            execute_quiz_generation_workflow=AsyncMock(return_value=([{'question':'ok'}],'own-id','',None)),
+            _run_processing_heartbeat=AsyncMock(), reward_referrer_if_eligible=AsyncMock(),start_loaded_quiz=loaded,safe_file_cleanup=Mock())
+        self.state=State({'selected_question_count':5,'items_count':1,'debited_cost':999,'debited_free':999,'debited_paid':999,'source_title':'keep'})
+        return self.env['handle_count_start']
+
+    async def test_stale_debit_does_not_refund(self):
+        fn=self.make();self.env['_current_user'].side_effect=ValueError('before deduction')
+        await fn(self.call,self.state)
+        self.env['refund_user_on_failure'].assert_not_awaited()
+
+    async def test_local_debit_survives_fsm_failure(self):
+        fn=self.make();self.state.fail_update=True
+        await fn(self.call,self.state)
+        refund=self.env['refund_user_on_failure'];refund.assert_awaited_once()
+        data=refund.call_args.args[1]
+        self.assertEqual((data['debited_cost'],data['debited_free'],data['debited_paid']),(2,1.5,0.5))
+
+    async def test_success_preserves_result_state_without_charge_markers(self):
+        fn=self.make();await fn(self.call,self.state)
+        self.assertEqual(self.state.data['quiz_data'],['result'])
+        self.assertEqual(self.state.data['attempt_id'],'saved')
+        self.assertEqual(self.state.data['source_title'],'keep')
+        self.assertTrue(all(key not in self.state.data for key in ('debited_cost','debited_free','debited_paid')))
+        self.env['refund_user_on_failure'].assert_not_awaited()
+
+    async def test_failed_ai_refunds_once_even_if_error_message_fails(self):
+        fn=self.make();self.env['execute_quiz_generation_workflow'].return_value=(None,None,'ai_failed',None)
+        self.call.message.answer.return_value.edit_text.side_effect=ValueError('Telegram failed')
+        await fn(self.call,self.state)
+        self.env['refund_user_on_failure'].assert_awaited_once()
+
+    async def test_saved_quiz_not_refunded_on_analytics_failure(self):
+        fn=self.make();self.env['log_usage_event'].side_effect=ValueError('analytics failure')
+        await fn(self.call,self.state)
+        self.env['refund_user_on_failure'].assert_not_awaited()
+
+    async def test_distributed_generation_lock_blocks_second_attempt(self):
+        fn=self.make();start=asyncio.Event();release=asyncio.Event()
+        async def generate(*args):start.set();await release.wait();return ([{}],'id','',None)
+        self.env['execute_quiz_generation_workflow'].side_effect=generate
+        task=asyncio.create_task(fn(self.call,self.state));await start.wait()
+        await fn(self.call,self.state)
+        release.set();await task
+        self.env['update_user_stats'].assert_awaited_once()
+
+
+class QuizIDTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_generations_use_their_insert_return_id(self):
+        def spawn(coro):coro.close()
+        arrived=0;ready=asyncio.Event()
+        async def save(**kwargs):
+            nonlocal arrived
+            arrived+=1
+            if arrived==2:ready.set()
+            await ready.wait()
+            return 'quiz-'+str(kwargs['creator_id'])
+        env=load_functions('services/quiz_service.py',{'execute_quiz_generation_workflow'},
+            asyncio=asyncio,os=os,_HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(2),
+            get_file_quizzes=AsyncMock(return_value=[]), SUBJECT_OTHER='other',SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
+            SUBJECT_MATH='math',SUBJECT_ENGLISH='english',SUBJECT_FRENCH='french',QUESTION_TYPE_GENERAL='general',DIFFICULTY_MEDIUM='medium',
+            resolve_generation_question_type_text=lambda *a:None,resolve_quiz_extraction_instruction=lambda *a:None,
+            generate_quiz_smart=AsyncMock(return_value=[{'question':'ok','options':['a','b']}]),get_last_generation_metadata=lambda:None,
+            log_ai_generation=AsyncMock(),spawn=spawn,shuffle_quiz_options=lambda x:x,save_file_quiz_multiple=save,build_question_type_label=lambda *a,**k:'label')
+        results=await asyncio.gather(*(env['execute_quiz_generation_workflow'](user,{'input_type':'text','file_hash':'same','pure_text':'text'},5,None) for user in [1,2]))
+        self.assertEqual([r[1] for r in results],['quiz-1','quiz-2'])
+        self.assertEqual(env['get_file_quizzes'].await_count,2)  # No post-insert ID guessing.
+
+
+class WebAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def run_audio(self, seconds):
+        import uuid
+        state=State();state.status=None
+        bot=types.SimpleNamespace(send_message=AsyncMock(return_value=types.SimpleNamespace(edit_text=AsyncMock())))
+        with tempfile.TemporaryDirectory() as directory:
+            async def download(obj,dest,**kw):
+                with open(dest,'wb') as target:target.write(b'test audio')
+                return True
+            env=load_functions('handlers/audio.py',{'process_web_uploaded_audio'},
+                asyncio=asyncio,os=os,uuid=uuid,build_state_for_chat=lambda *a:state,
+                QuizState=types.SimpleNamespace(answering_quiz='answering',processing_audio='audio',processing_file_quiz='quiz',processing_web_file='file',waiting_for_audio_confirm='confirm'),
+                bot=bot,ensure_directory_exists=lambda *a:None,DOWNLOADS_DIR=directory,MAX_AUDIO_WEB_UPLOAD_SIZE=250,
+                download_audio_temp_to_file=download,evaluate_audio_cost=AsyncMock(return_value=types.SimpleNamespace(probed_seconds=seconds,duration_minutes=1,exceeds_cap=False,cost=1)),
+                safe_file_cleanup=lambda p:os.remove(p) if os.path.exists(p) else None,delete_audio_temp=AsyncMock(),
+                logger=Mock(),log_error=Mock(),log_info=Mock(),get_or_create_audio_user=AsyncMock(return_value={'points':10}),
+                compute_balance_and_deficit=lambda *a:(10,0),get_audio_confirm_keyboard=lambda:None,
+                get_safe_mime_type=lambda p:'audio/mpeg',log_audio_uploaded_event=AsyncMock(),
+                spawn=lambda coro:coro.close(),
+                MSG_AUDIO_CONFIRM_TEMPLATE='{duration_minutes} {cost} {balance}')
+            await env['process_web_uploaded_audio'](1,1,'1/audio.mp3','audio.mp3')
+            if seconds is None:
+                self.assertEqual(os.listdir(directory),[])
+                env['delete_audio_temp'].assert_awaited()
+                self.assertNotIn('pending_audio_cost',state.data)
+            else:
+                self.assertEqual(state.status,'confirm')
+                self.assertEqual(state.data['pending_audio_cost'],1)
+
+    async def test_unprobeable_web_audio_rejected_and_cleaned(self):await self.run_audio(None)
+    async def test_normal_web_audio_reaches_confirmation(self):await self.run_audio(60)
+
+
+class AudioRefundTests(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_refund_not_repeated_after_failure_message_error(self):
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            destination=d+'/audio.mp3'
+            with open(destination,'wb') as f:f.write(b'audio')
+            state=State({'pending_audio_path':destination,'pending_audio_cost':2})
+            edits=AsyncMock(side_effect=[None,ValueError('Telegram UI failed'),None])
+            call=types.SimpleNamespace(from_user=types.SimpleNamespace(id=1),answer=AsyncMock(),message=types.SimpleNamespace(edit_text=edits,answer=AsyncMock()))
+            env=load_functions('handlers/audio.py',{'handle_audio_confirm_start'},asyncio=asyncio,os=os,time=time,
+                get_or_create_audio_user=AsyncMock(return_value={'points':10}),compute_balance_and_deficit=lambda *a:(10,0),
+                update_user_stats=AsyncMock(return_value={'debited_free':1,'debited_paid':1}),
+                spawn=lambda coro:coro.close(),log_usage_event=AsyncMock(),transcribe_audio_lecture=AsyncMock(return_value=None),
+                refund_user_points_split=AsyncMock(),safe_file_cleanup=lambda p:os.remove(p) if os.path.exists(p) else None,
+                logger=Mock(),log_info=Mock(),log_error=Mock())
+            await env['handle_audio_confirm_start'](call,state)
+            env['refund_user_points_split'].assert_awaited_once_with(1,1,1)
