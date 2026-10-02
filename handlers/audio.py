@@ -706,7 +706,22 @@ async def process_web_uploaded_audio(
         # reported_duration_seconds - لا توجد مدة مُعلَنة من تيليجرام بمسار الويب أصلاً).
         cost_result: AudioCostResult = await evaluate_audio_cost(destination)
         if cost_result.probed_seconds is None:
-            log_error(logger, f"Could not probe duration for web-uploaded audio '{destination}' - defaulting to 1 minute charge.")
+            # مسار الويب لا يملك مدة موثوقة من Telegram؛ التسعير كدقيقة واحدة عند
+            # فشل القياس قد يسمح بملف طويل جداً بتكلفة غير صحيحة. نرفضه بدل التخمين.
+            log_error(logger, f"Could not probe duration for web-uploaded audio '{destination}' - rejecting upload.")
+            await state.set_state(None)
+            safe_file_cleanup(destination)
+            await delete_audio_temp(object_path)
+            try:
+                await status_msg.edit_text(
+                    "❌ تعذر قراءة مدة الملف الصوتي بشكل موثوق. جرّب تحويله إلى MP3 أو M4A ثم أعد رفعه."
+                )
+            except Exception:
+                await bot.send_message(
+                    chat_id,
+                    "❌ تعذر قراءة مدة الملف الصوتي بشكل موثوق. جرّب تحويله إلى MP3 أو M4A ثم أعد رفعه."
+                )
+            return
         duration_minutes = cost_result.duration_minutes
 
         # 🆕 سقف مدة فعلية - نفس المنطق المطبَّق بالمسار المباشر بـ handle_audio_message،
