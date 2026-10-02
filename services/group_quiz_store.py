@@ -460,46 +460,134 @@ async def get_group_quiz_overview_stats() -> Dict[str, Any]:
     return stats
 
 
+async def _enrich_sessions(sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """يضيف لكل جلسة حقول العرض (بادئتها `_`): اسم/نوع المحادثة (من
+    `bot_chat_memberships`)، عنوان الكويز (من `quizzes`)، عدد المشاركين، وبيانات
+    الأدمن المشغّل (من `users`) - مجمّعة يدوياً بمكالمات منفصلة (ما في joins
+    جاهزة بـ Supabase query builder)."""
+    if not sessions:
+        return sessions
+
+    chat_ids = list({int(s["chat_id"]) for s in sessions})
+    quiz_ids = list({s["quiz_id"] for s in sessions if s.get("quiz_id")})
+    starter_ids = list({int(s["started_by"]) for s in sessions if s.get("started_by") is not None})
+    session_ids = [str(s["id"]) for s in sessions]
+
+    chats_res = await supabase.table("bot_chat_memberships").select("chat_id, chat_title, chat_type").in_("chat_id", chat_ids).execute()
+    chat_map = {int(r["chat_id"]): r for r in (chats_res.data or [])}
+
+    quiz_map: Dict[str, str] = {}
+    if quiz_ids:
+        quizzes_res = await supabase.table("quizzes").select("id, source_title").in_("id", quiz_ids).execute()
+        quiz_map = {r["id"]: (r.get("source_title") or "كويز") for r in (quizzes_res.data or [])}
+
+    starter_map: Dict[int, Dict[str, Any]] = {}
+    if starter_ids:
+        users_res = await supabase.table("users").select("user_id, username, first_name, last_name").in_("user_id", starter_ids).execute()
+        starter_map = {int(r["user_id"]): r for r in (users_res.data or [])}
+
+    parts_res = await supabase.table("group_quiz_participants").select("session_id").in_("session_id", session_ids).execute()
+    participant_counts: Dict[str, int] = {}
+    for r in (parts_res.data or []):
+        sid = str(r["session_id"])
+        participant_counts[sid] = participant_counts.get(sid, 0) + 1
+
+    for s in sessions:
+        chat_info = chat_map.get(int(s["chat_id"]), {})
+        s["_chat_title"] = chat_info.get("chat_title") or f"محادثة {s['chat_id']}"
+        s["_chat_type"] = chat_info.get("chat_type") or "؟"
+        s["_quiz_title"] = quiz_map.get(s.get("quiz_id"), "كويز")
+        s["_participant_count"] = participant_counts.get(str(s["id"]), 0)
+        s["_starter"] = starter_map.get(int(s["started_by"])) if s.get("started_by") is not None else None
+    return sessions
+
+
 async def get_recent_group_sessions(limit: int = 10) -> List[Dict[str, Any]]:
     """آخر `limit` جلسة (بغض النظر عن حالتها)، مع اسم المحادثة (من
-    `bot_chat_memberships`)، عنوان الكويز (من `quizzes`)، وعدد المشاركين -
-    مجمّعة يدوياً بمكالمات منفصلة (نفس نمط `get_leaderboard`/`bump_participant`،
-    ما في joins جاهزة بـ Supabase query builder)."""
+    `bot_chat_memberships`)، عنوان الكويز (من `quizzes`)، وعدد المشاركين."""
     try:
         res = (await supabase.table("group_quiz_sessions").select("*")
                .order("created_at", desc=True).limit(limit).execute())
-        sessions = res.data or []
-        if not sessions:
-            return sessions
-
-        chat_ids = list({int(s["chat_id"]) for s in sessions})
-        quiz_ids = list({s["quiz_id"] for s in sessions if s.get("quiz_id")})
-        session_ids = [str(s["id"]) for s in sessions]
-
-        chats_res = await supabase.table("bot_chat_memberships").select("chat_id, chat_title, chat_type").in_("chat_id", chat_ids).execute()
-        chat_map = {int(r["chat_id"]): r for r in (chats_res.data or [])}
-
-        quiz_map: Dict[str, str] = {}
-        if quiz_ids:
-            quizzes_res = await supabase.table("quizzes").select("id, source_title").in_("id", quiz_ids).execute()
-            quiz_map = {r["id"]: (r.get("source_title") or "كويز") for r in (quizzes_res.data or [])}
-
-        parts_res = await supabase.table("group_quiz_participants").select("session_id").in_("session_id", session_ids).execute()
-        participant_counts: Dict[str, int] = {}
-        for r in (parts_res.data or []):
-            sid = str(r["session_id"])
-            participant_counts[sid] = participant_counts.get(sid, 0) + 1
-
-        for s in sessions:
-            chat_info = chat_map.get(int(s["chat_id"]), {})
-            s["_chat_title"] = chat_info.get("chat_title") or f"محادثة {s['chat_id']}"
-            s["_chat_type"] = chat_info.get("chat_type") or "؟"
-            s["_quiz_title"] = quiz_map.get(s.get("quiz_id"), "كويز")
-            s["_participant_count"] = participant_counts.get(str(s["id"]), 0)
-        return sessions
+        return await _enrich_sessions(res.data or [])
     except Exception as e:
         log_error(logger, f"Error loading recent group quiz sessions: {e}")
         return []
+
+
+async def get_group_sessions_page(
+    statuses: Optional[List[str]] = None,
+    page: int = 0,
+    page_size: int = 8,
+) -> Dict[str, Any]:
+    """صفحة من الجلسات (الأحدث أولاً) مع العدد الكلي - `statuses=None` يعني كل
+    الحالات. بترجّع `{"sessions", "total", "page", "error"}` والصفحة بتنقصّ
+    تلقائياً لآخر صفحة موجودة (مثلاً بعد تفريغ يدوي)."""
+    out: Dict[str, Any] = {"sessions": [], "total": 0, "page": 0, "error": False}
+    try:
+        page = max(0, int(page))
+
+        def _base():
+            q = supabase.table("group_quiz_sessions").select("*", count="exact")
+            return q.in_("status", list(statuses)) if statuses else q
+
+        res = await _base().order("created_at", desc=True).range(page * page_size, page * page_size + page_size - 1).execute()
+        total = res.count or 0
+        if not (res.data or []) and total and page > 0:
+            page = (total - 1) // page_size
+            res = await _base().order("created_at", desc=True).range(page * page_size, page * page_size + page_size - 1).execute()
+        out["total"] = total
+        out["page"] = page
+        out["sessions"] = await _enrich_sessions(res.data or [])
+    except Exception as e:
+        log_error(logger, f"Error loading group quiz sessions page (statuses={statuses}, page={page}): {e}")
+        out["error"] = True
+    return out
+
+
+async def get_group_session_details(session_id: str) -> Optional[Dict[str, Any]]:
+    """تفاصيل جلسة واحدة كاملة للأدمن: الجلسة، الأدمن المشغّل، عضوية البوت بالمحادثة
+    (+ من رقّى البوت)، الكويز المستخدم، والمشاركون مع عدد إجاباتهم وصحيحها.
+    بترجّع `None` لو الجلسة مش موجودة (انحذفت بالتفريغ مثلاً) أو حصل خطأ."""
+    try:
+        session = await get_session(session_id)
+        if not session:
+            return None
+
+        details: Dict[str, Any] = {"session": session}
+
+        starter_res = await supabase.table("users").select("user_id, username, first_name, last_name").eq("user_id", session["started_by"]).limit(1).execute()
+        details["starter"] = starter_res.data[0] if starter_res.data else None
+
+        details["membership"] = await get_chat_membership(int(session["chat_id"]))
+        added_by = (details["membership"] or {}).get("added_by")
+        details["added_by_user"] = None
+        if added_by is not None:
+            added_res = await supabase.table("users").select("user_id, username, first_name, last_name").eq("user_id", added_by).limit(1).execute()
+            details["added_by_user"] = added_res.data[0] if added_res.data else {"user_id": added_by}
+
+        details["quiz"] = None
+        if session.get("quiz_id"):
+            quiz_res = await supabase.table("quizzes").select("id, source_title, creator_id").eq("id", session["quiz_id"]).limit(1).execute()
+            details["quiz"] = quiz_res.data[0] if quiz_res.data else None
+
+        parts_res = (await supabase.table("group_quiz_participants").select("*")
+                     .eq("session_id", session_id)
+                     .order("score", desc=True).order("total_answer_time_ms", desc=False).execute())
+        participants = parts_res.data or []
+
+        answers_res = await supabase.table("group_quiz_answers").select("user_id, is_correct").eq("session_id", session_id).execute()
+        answered: Dict[int, int] = {}
+        for a in (answers_res.data or []):
+            uid = int(a["user_id"])
+            answered[uid] = answered.get(uid, 0) + 1
+        for p in participants:
+            p["_answers_count"] = answered.get(int(p["user_id"]), 0)
+        details["participants"] = participants
+        details["total_answers"] = len(answers_res.data or [])
+        return details
+    except Exception as e:
+        log_error(logger, f"Error loading group quiz session details {session_id}: {e}")
+        return None
 
 
 # ==================== سياسة الاحتفاظ / التنظيف الدوري ====================
@@ -556,6 +644,66 @@ async def cleanup_old_group_quiz_data() -> Dict[str, int]:
             )
     except Exception as e:
         log_error(logger, f"Error cleaning up old group quiz data: {e}")
+    return deleted
+
+
+ENDED_STATUSES = ("finished", "cancelled")
+_PURGE_BATCH_SIZE = 200
+_PURGE_MAX_BATCHES = 50  # سقف أمان: 10,000 جلسة بالضغطة الواحدة، وإن بقي شي بيكمّلها الضغط التالي
+
+
+async def count_ended_group_sessions() -> Dict[str, int]:
+    """عدد الجلسات المنتهية والملغاة حالياً (للشاشة التأكيدية قبل التفريغ اليدوي)."""
+    counts = {"finished": 0, "cancelled": 0, "error": 0}
+    try:
+        for status in ENDED_STATUSES:
+            res = await supabase.table("group_quiz_sessions").select("id", count="exact").eq("status", status).execute()
+            counts[status] = res.count or 0
+    except Exception as e:
+        log_error(logger, f"Error counting ended group quiz sessions: {e}")
+        counts["error"] = 1
+    return counts
+
+
+async def purge_ended_group_sessions() -> Dict[str, Any]:
+    """تفريغ يدوي: يحذف **كل** الجلسات المنتهية (`finished`) والملغاة (`cancelled`)
+    بغض النظر عن عمرها، مع مشاركيها وإجاباتها. بعكس `cleanup_old_group_quiz_data`
+    (الدورية، حدّ 90 يوم).
+
+    ⚠️ ما بتلمس `active`/`waiting` إطلاقاً: الاختيار بالحالة، وحذف الجلسات نفسه بيعيد
+    اشتراط الحالة (`status IN (finished, cancelled)`) بنفس لحظة الحذف. الحذف على دفعات
+    لأنه Supabase بيقصّ أي استعلام عند ~1000 صف. الصفوف التابعة بتنحذف صراحةً
+    (الـ FK بالقاعدة الحية `ON DELETE CASCADE` أصلاً، بس ما منعتمد عليه).
+    بترجّع عدد المحذوف بكل جدول + `error` لو توقّف بنص الطريق (اللي انحذف قبل الخطأ
+    ما بيرجع، والضغط مرة تانية بيكمّل الباقي)."""
+    deleted: Dict[str, Any] = {"sessions": 0, "participants": 0, "answers": 0, "error": False}
+    try:
+        for _ in range(_PURGE_MAX_BATCHES):
+            ids_res = (await supabase.table("group_quiz_sessions").select("id")
+                       .in_("status", list(ENDED_STATUSES)).limit(_PURGE_BATCH_SIZE).execute())
+            session_ids = [r["id"] for r in (ids_res.data or [])]
+            if not session_ids:
+                break
+
+            ans_res = await supabase.table("group_quiz_answers").delete().in_("session_id", session_ids).execute()
+            part_res = await supabase.table("group_quiz_participants").delete().in_("session_id", session_ids).execute()
+            sess_res = (await supabase.table("group_quiz_sessions").delete()
+                        .in_("id", session_ids).in_("status", list(ENDED_STATUSES)).execute())
+
+            deleted["answers"] += len(ans_res.data or [])
+            deleted["participants"] += len(part_res.data or [])
+            batch_deleted = len(sess_res.data or [])
+            deleted["sessions"] += batch_deleted
+            if batch_deleted == 0:
+                break  # ما انحذف شي (حالة غير متوقعة) - لا نكرّر للأبد
+        log_info(
+            logger,
+            f"Manual group quiz purge: deleted {deleted['sessions']} session(s), "
+            f"{deleted['participants']} participant row(s), {deleted['answers']} answer row(s).",
+        )
+    except Exception as e:
+        log_error(logger, f"Error during manual group quiz purge: {e}", exception=e)
+        deleted["error"] = True
     return deleted
 
 

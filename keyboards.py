@@ -669,12 +669,65 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
 
 
 def get_group_quiz_stats_keyboard() -> types.InlineKeyboardMarkup:
-    """كيبورد شاشة إحصائيات الكويز الجماعي: زر لآخر الجلسات + رجوع للنظرة العامة
-    (نفس الزر شغّال كـ"تحديث" بالشاشتين لأنه بيعيد استعلام الأرقام من جديد)."""
+    """كيبورد شاشة إحصائيات الكويز الجماعي: الكويزات النشطة الآن، سجل الجلسات
+    (بتفاصيل كل جلسة)، التفريغ اليدوي للمنتهية/الملغاة، + تحديث/رجوع."""
     kb = [
-        [types.InlineKeyboardButton(text="🕐 آخر الجلسات", callback_data="admin_group_quiz_recent")],
+        [types.InlineKeyboardButton(text="🟢 الكويزات النشطة الآن", callback_data="admin_gq_active")],
+        [types.InlineKeyboardButton(text="🕐 سجل الجلسات (تفاصيل كل جلسة)", callback_data="admin_gq_recent:0")],
+        [types.InlineKeyboardButton(text="🧹 تفريغ المنتهية والملغاة", callback_data="admin_gq_purge")],
         [types.InlineKeyboardButton(text="🔄 نظرة عامة", callback_data="admin_group_quiz_stats")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_group_quiz_sessions_keyboard(sessions, mode: str, page: int, has_next: bool) -> types.InlineKeyboardMarkup:
+    """كيبورد قائمة جلسات الكويز الجماعي: أزرار أرقام (1..n) بتفتح تفاصيل الجلسة
+    المقابلة بنص الرسالة، + تنقّل بين الصفحات + رجوع.
+
+    `mode`: `a` = قائمة النشطة الآن، `r` = سجل كل الجلسات. بيتحمّل بـ callback_data
+    للتفاصيل (`admin_gq_s:<uuid>:<mode><page>`) حتى زر الرجوع من التفاصيل يرجع لنفس
+    القائمة ونفس الصفحة."""
+    kb = []
+    row = []
+    for i, s in enumerate(sessions, start=1):
+        row.append(types.InlineKeyboardButton(
+            text=str(i), callback_data=f"admin_gq_s:{s['id']}:{mode}{page}"))
+        if len(row) == 4:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+
+    list_cb = "admin_gq_active" if mode == "a" else "admin_gq_recent:{}"
+    nav = []
+    if mode == "r":
+        if page > 0:
+            nav.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=list_cb.format(page - 1)))
+        if has_next:
+            nav.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=list_cb.format(page + 1)))
+    if nav:
+        kb.append(nav)
+    kb.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=list_cb.format(page) if mode == "r" else list_cb)])
+    kb.append([types.InlineKeyboardButton(text="🔙 إحصائيات الكويز الجماعي", callback_data="admin_group_quiz_stats")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_group_quiz_session_detail_keyboard(session_id: str, mode: str, page: int) -> types.InlineKeyboardMarkup:
+    """كيبورد تفاصيل جلسة: تحديث + رجوع للقائمة اللي جاء منها الأدمن."""
+    back_cb = "admin_gq_active" if mode == "a" else f"admin_gq_recent:{page}"
+    kb = [
+        [types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"admin_gq_s:{session_id}:{mode}{page}")],
+        [types.InlineKeyboardButton(text="🔙 رجوع للقائمة", callback_data=back_cb)],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_group_quiz_purge_confirm_keyboard() -> types.InlineKeyboardMarkup:
+    """تأكيد التفريغ اليدوي (حذف نهائي للجلسات المنتهية/الملغاة)."""
+    kb = [
+        [types.InlineKeyboardButton(text="✅ نعم، احذف نهائياً", callback_data="admin_gq_purge_yes")],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_group_quiz_stats")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
