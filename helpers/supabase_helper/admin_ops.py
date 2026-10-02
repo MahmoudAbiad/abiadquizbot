@@ -53,3 +53,28 @@ async def admin_search_user(query: str) -> Optional[list]:
     except Exception as e:
         return None
 
+
+def _admin_users_query(query: str = ""):
+    request = supabase.table("users").select("*", count="exact")
+    query = query.strip().lstrip("@")
+    if query:
+        if query.isdigit():
+            request = request.eq("user_id", int(query))
+        else:
+            # Telegram underscores are literal username characters, not SQL wildcards.
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            request = request.ilike("username", f"%{escaped}%")
+    return request.order("joined_at", desc=True).order("user_id", desc=True)
+
+
+async def admin_get_users_page(page: int = 1, query: str = "", page_size: int = 5):
+    """Fetch one database page with an exact count; never preload the full registry."""
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), 100))
+    start = (page - 1) * page_size
+    response = await _admin_users_query(query).range(start, start + page_size - 1).execute()
+    total = response.count or 0
+    pages = max(1, (total + page_size - 1) // page_size)
+    if page > pages:
+        return await admin_get_users_page(pages, query, page_size)
+    return response.data or [], total, page, pages

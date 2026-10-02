@@ -3,6 +3,7 @@ import asyncio
 import io
 import csv
 import html
+import uuid
 from constants import USER_QUIZZES_PAGE_SIZE, format_syria_time as _format_syria_time
 from helpers.supabase_helper import admin_get_user_quizzes
 from .admin_utils import sanitize_csv_value
@@ -17,7 +18,8 @@ from helpers.supabase_helper import (
     supabase, 
     admin_add_points, 
     admin_get_global_stats, 
-    admin_search_user
+    admin_search_user,
+    admin_get_users_page
 )
 from keyboards import (
     get_admin_dashboard_keyboard,
@@ -52,13 +54,19 @@ def user_total_points(user: dict) -> float:
 
 
 async def fetch_users_async():
-    """جلب سجل الطلاب المسجلين مرتبين من الأحدث بناءً على joined_at مباشرة."""
-    try:
-        res = await supabase.table("users").select("*").order("joined_at", desc=True).execute()
-        return res.data or []
-    except Exception as e:
-        logger.error(f"Error fetching users: {e}")
-        return []
+    """Fetch all users in bounded requests for export and confirmed broadcasts."""
+    users = []
+    last_id = None
+    while True:
+        request = supabase.table("users").select("*").order("user_id").limit(500)
+        if last_id is not None:
+            request = request.gt("user_id", last_id)
+        response = await request.execute()
+        batch = response.data or []
+        if not batch:
+            return users
+        users.extend(batch)
+        last_id = batch[-1]["user_id"]
 
 
 async def send_points_notification(target_id: int, amount: int, new_balance: int):
@@ -85,8 +93,14 @@ async def render_users_page(event, page: int = 1):
         except TelegramBadRequest:
             pass
 
-    users = await fetch_users_async()
-    if not users:
+    try:
+        page_users, total_users, page, total_pages = await admin_get_users_page(page)
+    except Exception:
+        logger.exception("Error fetching admin user page")
+        message = event.message if isinstance(event, types.CallbackQuery) else event
+        await message.answer("❌ تعذر تحميل المستخدمين، حاول مجدداً.")
+        return
+    if not total_users:
         text = "📭 لا يوجد أي طلاب مسجلين حالياً."
         if isinstance(event, types.Message):
             await event.answer(text, reply_markup=get_admin_dashboard_keyboard(), parse_mode="HTML")
@@ -94,23 +108,16 @@ async def render_users_page(event, page: int = 1):
             await safe_edit_text(event.message, text, reply_markup=get_admin_dashboard_keyboard())
         return
 
-    total_users = len(users)
-    per_page = 5
-    total_pages = max(1, (total_users + per_page - 1) // per_page)
-    
-    page = max(1, min(page, total_pages))
-    start_idx = (page - 1) * per_page
-    end_idx = start_idx + per_page
-    page_users = users[start_idx:end_idx]
-    
+    start_idx = (page - 1) * 5
+
     report = f"👥 <b>سجل الطلاب المسجلين ({page} من {total_pages}):</b>\n\n"
     for idx, u in enumerate(page_users, start=start_idx + 1):
-        username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
+        username_str = f"@{html.escape(str(u['username']))}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
         joined_time = _short_syria_time(u.get('joined_at'))
         report += (
             f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
-            f"┣ 📝 الاسم: <b>{u.get('first_name', 'Unknown')} {u.get('last_name', 'Unknown')}</b>\n"
+            f"┣ 📝 الاسم: <b>{html.escape(str(u.get('first_name') or '')[:100])} {html.escape(str(u.get('last_name') or '')[:100])}</b>\n"
             f"┣ 🕒 انضم: <code>{joined_time}</code>\n"
             f"┣ 🎁 المجاني: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
             f"┣ 💳 المدفوع: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
@@ -143,7 +150,7 @@ async def render_users_page(event, page: int = 1):
 @router.message(Command("searchuser"))
 async def admin_cmd_search(msg: types.Message, state: FSMContext):
     await state.set_state(AdminState.waiting_for_search_query)
-    await msg.answer("🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
+    await msg.answer("🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username أو جزء منه):", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
 
 
 @router.message(Command("dbstats"))
@@ -514,7 +521,12 @@ async def process_confirm_broadcast(call: types.CallbackQuery, state: FSMContext
     text_to_send = data.get("broadcast_text")
     await state.clear()
 
-    users = await fetch_users_async()
+    try:
+        users = await fetch_users_async()
+    except Exception:
+        logger.exception("Error fetching broadcast recipients")
+        await safe_edit_text(call.message, "❌ تعذر تحميل قائمة المستخدمين. لم تُرسل الرسالة، حاول مجدداً.", reply_markup=get_admin_dashboard_keyboard())
+        return
     if not users:
         await safe_edit_text(call.message, "📭 لا يوجد طلاب مسجلين لإرسال الرسالة إليهم.", reply_markup=get_admin_dashboard_keyboard())
         return
@@ -613,12 +625,12 @@ async def admin_callback_users_page(call: types.CallbackQuery):
 
 
 def _format_user_profile_report(u: dict) -> str:
-    username_str = f"@{u['username']}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
+    username_str = f"@{html.escape(str(u['username']))}" if u.get('username') and u['username'] != "Unknown" else "بدون يوزر"
     return (
         "👤 <b>معلومات المستخدم:</b>\n"
         f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
         f"┣ 👤 اليوزر: {username_str}\n"
-        f"┣ 📝 الاسم: <b>{u.get('first_name', '')} {u.get('last_name', '')}</b>\n"
+        f"┣ 📝 الاسم: <b>{html.escape(str(u.get('first_name') or '')[:100])} {html.escape(str(u.get('last_name') or '')[:100])}</b>\n"
         f"┣ 🎁 النقاط المجانية: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
         f"┣ 💳 النقاط المدفوعة: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
         f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
@@ -666,28 +678,71 @@ async def callback_user_profile(call: types.CallbackQuery):
 @router.callback_query(F.data == "admin_search_prompt")
 async def callback_search_prompt(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminState.waiting_for_search_query)
-    await safe_edit_text(call.message, "🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username):", reply_markup=get_cancel_keyboard())
+    await safe_edit_text(call.message, "🔍 <b>بحث عن مستخدم</b>\n\nأرسل الآن (الآيدي ID) أو (معرف المستخدم @Username أو جزء منه):", reply_markup=get_cancel_keyboard())
     try:
         await call.answer()
     except TelegramBadRequest:
         pass
 
 
+async def render_user_search_page(event, query: str, token: str, page: int = 1):
+    try:
+        users, total, page, pages = await admin_get_users_page(page, query)
+    except Exception:
+        logger.exception("Error fetching admin search page")
+        message = event.message if isinstance(event, types.CallbackQuery) else event
+        await message.answer("❌ تعذر إجراء البحث، حاول مجدداً.")
+        return
+    if not total:
+        report = "❌ لم يتم العثور على أي مستخدم بهذا البحث."
+    else:
+        report = (f"🔍 <b>نتائج البحث: {html.escape(query[:100])}</b>\n"
+                  f"👥 {total} مستخدم — الصفحة {page} من {pages}\n\n")
+    keyboard = []
+    for index, user in enumerate(users, start=(page - 1) * 5 + 1):
+        username = str(user.get("username") or "بدون يوزر")[:64]
+        name = " ".join(str(user.get(field) or "") for field in ("first_name", "last_name"))[:100]
+        report += (f"<b>{index}. {html.escape(name)}</b>\n"
+                   f"👤 {html.escape(username)} — 🆔 <code>{user['user_id']}</code>\n\n")
+        keyboard.append([types.InlineKeyboardButton(
+            text=f"👤 {index}. {username}", callback_data=f"admin_user_profile_{user['user_id']}")])
+    navigation = []
+    if page > 1:
+        navigation.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"admin_search_page_{token}_{page-1}"))
+    if page < pages:
+        navigation.append(types.InlineKeyboardButton(text="التالي ➡️", callback_data=f"admin_search_page_{token}_{page+1}"))
+    if navigation:
+        keyboard.append(navigation)
+    keyboard.append([types.InlineKeyboardButton(text="🔍 بحث جديد", callback_data="admin_search_prompt")])
+    keyboard.append([types.InlineKeyboardButton(text="🔙 إدارة المستخدمين", callback_data="admin_users_menu")])
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    if isinstance(event, types.CallbackQuery):
+        await safe_edit_text(event.message, report, reply_markup=markup)
+    else:
+        await event.answer(report, reply_markup=markup, parse_mode="HTML")
+
+
 @router.message(AdminState.waiting_for_search_query)
 async def process_search_user(msg: types.Message, state: FSMContext):
-    query = msg.text.strip()
-    users_data = await admin_search_user(query)
-
-    if users_data:
-        u = users_data[0]
-        await msg.answer(
-            _format_user_profile_report(u),
-            reply_markup=get_admin_user_actions_keyboard(u['user_id'], username=u.get('username')),
-            parse_mode="HTML"
-        )
-    else:
-        await msg.answer("❌ لم يتم العثور على أي مستخدم بهذا البحث.", reply_markup=get_cancel_keyboard(), parse_mode="HTML")
+    query = (msg.text or "").strip().lstrip("@").strip()
+    if not query:
+        await msg.answer("⚠️ أرسل الآيدي أو المعرف أو جزءاً من المعرف.")
+        return
+    token = uuid.uuid4().hex[:12]
     await state.clear()
+    await state.update_data(admin_user_search=query, admin_user_search_token=token)
+    await render_user_search_page(msg, query, token)
+
+
+@router.callback_query(F.data.startswith("admin_search_page_"))
+async def callback_user_search_page(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    parts = call.data.split("_")
+    if len(parts) != 5 or parts[3] != data.get("admin_user_search_token") or not parts[4].isdigit():
+        await call.answer("انتهت جلسة البحث، ابدأ بحثاً جديداً.", show_alert=True)
+        return
+    await call.answer()
+    await render_user_search_page(call, data["admin_user_search"], parts[3], int(parts[4]))
 
 
 @router.callback_query(F.data.startswith("admin_charge_menu_"))
