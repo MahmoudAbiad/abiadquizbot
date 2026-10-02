@@ -69,6 +69,19 @@ DOWNLOADS_DIR = "downloads"
 processing_users_lock = asyncio.Lock()
 processing_users: set[int] = set()
 
+_QUIZ_CHARGE_STATE_KEYS = ("debited_cost", "debited_free", "debited_paid")
+
+async def _clear_quiz_charge_markers(state: FSMContext) -> None:
+    """يمسح فقط بيانات عملية الخصم الحالية من FSM بدون حذف بيانات الكويز/النتيجة الأخرى."""
+    current_data = await state.get_data()
+    changed = False
+    for key in _QUIZ_CHARGE_STATE_KEYS:
+        if key in current_data:
+            current_data.pop(key, None)
+            changed = True
+    if changed:
+        await state.set_data(current_data)
+
 PENDING_REQUEST_STATES = (
     QuizState.waiting_for_count, 
     QuizState.waiting_for_cache_decision, 
@@ -1036,6 +1049,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await call.message.answer("⏳ طلبك قيد المعالجة بالفعل، الرجاء الانتظار حتى ينتهي قبل الضغط مجدداً.")
             return
         processing_users.add(user_id)
+    charged_this_attempt = False
     try:
         data = await state.get_data()
         count = int(data.get("selected_question_count") or 0)
@@ -1098,6 +1112,10 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await _insufficient_balance(call.message, user_info, cost, action="quiz_generation")
             return
 
+        # من هذه اللحظة فقط يحق لهذا التنفيذ أن يعمل refund. هذا يمنع أي بيانات
+        # debited_* قديمة بقيت في FSM من عملية سابقة من التسبب باسترجاع مضاعف.
+        charged_this_attempt = True
+
         spawn(log_usage_event(call.from_user.id, "quiz_generation_requested", {
             "requested_count": count, "items_count": items, "cost": cost, "mode": mode
         }))
@@ -1136,12 +1154,18 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             heartbeat_task.cancel()
 
         if error_code == "unreadable_office":
-            await refund_user_on_failure(call.from_user.id, data)
+            if charged_this_attempt:
+                await refund_user_on_failure(call.from_user.id, data)
+                charged_this_attempt = False
+            await _clear_quiz_charge_markers(state)
             await state.set_state(None)
             await status_msg.edit_text("⚠️ <b>تعذر استخراج نص مفيد من المستند!</b> يرجى التأكد من أنه يحتوي على نصوص وليس صوراً. تم إرجاع نقاطك.", parse_mode="HTML")
             return
         elif error_code == "ai_failed" or not quiz_data:
-            await refund_user_on_failure(call.from_user.id, data)
+            if charged_this_attempt:
+                await refund_user_on_failure(call.from_user.id, data)
+                charged_this_attempt = False
+            await _clear_quiz_charge_markers(state)
             await state.set_state(None)
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
             return
@@ -1198,12 +1222,20 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         })
         await reward_referrer_if_eligible(call.from_user.id)
 
+        # التوليد وحفظ الكويز نجحا؛ لا تبقِ بيانات الخصم القديمة في FSM ولا تسمح
+        # لأي خطأ UI/Telegram لاحق أن يحوّل نجاحاً فعلياً إلى refund خاطئ.
+        charged_this_attempt = False
+        await _clear_quiz_charge_markers(state)
+
         await start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
 
     except Exception as exc:
         log_error(logger, f"Quiz generation start failed: {exc}", exception=exc)
-        await refund_user_on_failure(call.from_user.id, await state.get_data())
+        if charged_this_attempt:
+            await refund_user_on_failure(call.from_user.id, await state.get_data())
+            charged_this_attempt = False
+        await _clear_quiz_charge_markers(state)
         await state.set_state(None)
         await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً.")
     finally:
