@@ -420,7 +420,7 @@ async def admin_get_quiz_generation_log(limit: int = 200, days: int = 7) -> List
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
         query = supabase.table("usage_events") \
             .select("user_id, metadata, created_at, event_type") \
-            .in_("event_type", ["quiz_generated", "cached_quiz_used"]) \
+            .in_("event_type", ["quiz_generated", "cached_quiz_used", "audio_transcription_completed", "audio_summary_completed"]) \
             .gte("created_at", since)
         if ADMIN_ID:
             query = query.neq("user_id", ADMIN_ID)

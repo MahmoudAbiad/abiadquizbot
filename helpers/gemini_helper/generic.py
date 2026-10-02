@@ -5,12 +5,15 @@ helpers/gemini_helper/generic.py
 
 from typing import Any, List, Optional, Tuple
 import asyncio
+import time
 
 from google import genai
 from google.genai import types
 
 from constants import AI_REQUEST_TIMEOUT
-from helpers.gemini_helper.state import _record_token_usage
+from helpers.gemini_helper.state import (
+    _record_token_usage, _last_model_used_var, _last_token_usage_var, _last_generation_metadata_var,
+)
 from helpers.gemini_helper.parsing import _parse_structured_gemini_response
 from helpers.gemini_helper.cascade import _execute_cascade
 
@@ -74,6 +77,10 @@ async def generate_text_with_cascade(
     المسموح بالإخراج، وليس لأنه انتهى من المهمة فعلاً. على المستدعي (caller) معاملة
     truncated=True كـ"نجاح جزئي" لا نجاح كامل (تنبيه صريح + استرجاع نسبي للنقاط مثلاً)
     بدل تسليمها للمستخدم بصمت وكأنها نتيجة كاملة."""
+    _last_model_used_var.set(None)
+    _last_token_usage_var.set(None)
+    _last_generation_metadata_var.set(None)
+    started_at = time.monotonic()
     final_contents: List[Any] = ([prompt_instruction] if prompt_instruction else []) + list(contents)
 
     async def _attempt(client: genai.Client, key_index: int, model: str, cascade_rank: int, cascade_total: int) -> Tuple[str, int, bool]:
@@ -100,4 +107,11 @@ async def generate_text_with_cascade(
 
         return text, int(token_count), truncated
 
-    return await _execute_cascade(_attempt)
+    result = await _execute_cascade(_attempt)
+    if result:
+        metadata = dict(_last_model_used_var.get() or {})
+        metadata.update(_last_token_usage_var.get() or {})
+        metadata["duration_seconds"] = time.monotonic() - started_at
+        metadata["mode"] = "text"
+        _last_generation_metadata_var.set(metadata)
+    return result

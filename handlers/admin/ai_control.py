@@ -8,6 +8,7 @@ from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from html import escape as html_escape
+from services.ai_audit import input_channel_label
 
 from keyboards import (
     get_ai_control_keyboard,
@@ -331,7 +332,7 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
 
         rows = await admin_get_quiz_generation_log(limit=QUIZ_GEN_LOG_FETCH_LIMIT, days=QUIZ_GEN_LOG_DAYS)
         if not rows:
-            await call.answer(f"✅ لا توجد أي كويزات مولَّدة خلال آخر {QUIZ_GEN_LOG_DAYS} أيام.", show_alert=True)
+            await call.answer(f"✅ لا توجد عمليات مسجلة خلال آخر {QUIZ_GEN_LOG_DAYS} أيام.", show_alert=True)
             return
 
         total = len(rows)
@@ -377,6 +378,7 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
         for idx, row in enumerate(page_items, start=start + 1):
             meta = row.get("metadata") or {}
             user = row.get("user") or {}
+            channel_line = f" ┣ 🌐 طريقة الإدخال: {input_channel_label(meta.get('input_channel'))}\n"
             username_str = f"@{user['username']}" if user.get("username") and user['username'] != "Unknown" else "بدون يوزر"
             name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "بدون اسم"
 
@@ -388,6 +390,7 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
                 report_lines.append(
                     f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{row.get('user_id')}</code>\n"
                     f" ┣ 🧩 نوع العملية: 🗃️ من الكاش\n"
+                    f"{channel_line}"
                     f" ┣ 🧮 {q_count} سؤال — 💳 {meta.get('cost', '؟')} نقطة\n"
                     f" ┗ 🕒 <code>{row.get('time_str')}</code>\n"
                 )
@@ -445,7 +448,13 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
                 "super_pdf": "🚀 سوبر — PDF",
                 "super_images": "🚀 سوبر — صور",
             }
-            if gen_mode in super_labels:
+            audio_operation = {
+                "audio_transcription_completed": "🎙️ تفريغ صوتي",
+                "audio_summary_completed": "📝 تلخيص محاضرة صوتية",
+            }.get(row.get("event_type"))
+            if audio_operation:
+                mode_text = audio_operation
+            elif gen_mode in super_labels:
                 mode_text = super_labels[gen_mode]
             elif business_mode == "Over-Limit":
                 mode_text = "📈 موسّع"
@@ -453,7 +462,7 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
                 mode_text = "⚡ Groq السريع"
             else:
                 mode_text = "➡️ عادي"
-            mode_line = f" ┣ 🧩 نوع العملية: {mode_text}\n"
+            mode_line = f" ┣ 🧩 نوع العملية: {mode_text}\n" + channel_line
 
             # 🆕 FIX: سبب تخطّي Groq الاستباقي (راجع _generate_text_quiz بـgemini_helper.py) -
             # يُميّز صراحة "تخطّي استباقي بسبب طول النص" عن أي فشل Groq فعلي بنداء حقيقي (413/
@@ -478,6 +487,7 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
                 "images": "🖼️ صور",
                 "telegram_text": "⌨️ نص مباشر (تيليجرام)",
                 "audio_transcript": "🎙️ تفريغ محاضرة صوتية",
+                "audio": "🎙️ ملف صوتي",
                 # 🆕 امتداد مستند نادر خارج الأنواع الأربعة المدعومة فعلياً (راجع
                 # _document_content_source بـhandlers/files.py) - ليس من القيم السبع
                 # الأساسية المطلوبة، لكن مُعرَّف صراحة هون بدل قيمة خام غير مفهومة بالعرض.
@@ -513,11 +523,14 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
             else:
                 rank_line = mode_line
 
+            work_amount = f"🎙️ {meta.get('duration_minutes', '؟')} دقيقة صوت" if audio_operation else f"🧮 {q_count} سؤال"
+            if audio_operation and meta.get('truncated'):
+                work_amount += " — نتيجة جزئية"
             report_lines.append(
                 f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{row.get('user_id')}</code>\n"
                 f" ┣ 🤖 <code>[{provider}] {html_escape(str(model))}</code>\n"
                 f"{rank_line}"
-                f" ┣ ⏱ {duration_str} — 🧮 {q_count} سؤال\n"
+                f" ┣ ⏱ {duration_str} — {work_amount}\n"
                 f"{token_cost_row}"
                 f" ┗ 🕒 <code>{row.get('time_str')}</code>\n"
             )
@@ -538,7 +551,7 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
             f"📊 <b>سجل توليد الكويزات (آخر {QUIZ_GEN_LOG_DAYS} أيام)</b>\n"
             f"إجمالي: <code>{total}</code> | متوسط زمن التوليد: <code>{avg_duration}</code> | صفحة {page}/{total_pages}\n"
             f"💰 تكلفة تقديرية إجمالية: <code>{cost_str}</code>"
-            + (" (⚠️ يشمل أسعار غير مؤكدة أو كويزات بلا سعر معروف)" if (any_unverified or has_unpriced) else "") + "\n"
+            + (" (⚠️ يشمل أسعار غير مؤكدة أو عمليات بلا سعر معروف)" if (any_unverified or has_unpriced) else "") + "\n"
             f"───────────────────\n\n" +
             "\n".join(report_lines)
         )
