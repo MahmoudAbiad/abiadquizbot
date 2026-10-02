@@ -71,12 +71,14 @@ from services.group_quiz_store import (
     get_session,
     get_session_questions,
     list_postable_channels,
+    list_postable_groups,
     record_answer,
     bump_participant,
     update_session,
     upsert_chat_membership,
 )
 from services.quiz_engine import send_quiz_poll
+from task_utils import spawn
 from helpers.supabase_helper import check_or_add_user, get_shared_quiz
 
 logger = get_logger(__name__)
@@ -107,6 +109,16 @@ router.callback_query.filter(F.message.chat.type.in_({"group", "supergroup", "pr
 # أعلى قيمة تلقائياً.
 HEARTBEAT_INTERVAL_SECONDS = 12  # 👈 نفس الرقم يُستخدم كـ default لـ group_quiz_heartbeat_loop تحت - مصدر حقيقة واحد
 MIN_QUESTION_INTERVAL_SECONDS = max(8, HEARTBEAT_INTERVAL_SECONDS)
+
+# 🚀 وضع burst ("كل الأسئلة دفعة واحدة"): فاصل ثابت بين سؤال وسؤال. سقف تيليجرام ≈20
+# رسالة/دقيقة لنفس المحادثة، وسؤال الرياضيات = رسالتين (صورة + poll) -> 6 ثواني تبقينا
+# تحت السقف حتى بأسوأ حالة (و`_safe_call` بيعالج TelegramRetryAfter كخط دفاع أخير).
+BURST_GAP_SECONDS = 6
+# `next_question_due_at` بوضع burst بتنحجز لهالمدة بعد كل سؤال: المنفّذ (`run_burst_session`)
+# بيسبقها دايماً، فالنبضة ما بتتدخّل إلا لو العملية انقطعت (إعادة تشغيل) - وقتها بتعيد
+# تشغيل المنفّذ ويكمّل من `questions_sent`.
+BURST_RECOVERY_SECONDS = 45
+_BURST_RUNNING: set = set()
 
 # آخر poll مفتوح لكل جلسة (chat_id + message_id) - `bot.stop_poll` بحاجة
 # message_id مش poll_id، وهاد مش مخزَّن بجدول group_quiz_sessions أصلاً (ولا
@@ -235,7 +247,8 @@ async def _start_session_setup(
     # ⚠️ `source_title`/`title` نص حر من المستخدم ومنحطّه جوا parse_mode=HTML -
     # لازم escape (نفس عائلة بق أسماء الطلاب بـ finish_group_session).
     title = html.escape(shared.get("source_title") or shared.get("title") or "كويز")
-    dest_line = f"📢 القناة: <b>{html.escape(dest_title)}</b>\n" if (is_channel and dest_title) else ""
+    dest_label = "📢 القناة" if is_channel else "👥 الغروب"
+    dest_line = f"{dest_label}: <b>{html.escape(dest_title)}</b>\n" if dest_title else ""
     if is_channel:
         # بلا أي ادّعاء عن مين بيشوف \"من صوّت لمين\" بالقنوات (ما تحقّقنا منه) - بس
         # الحقيقة الثابتة: الاستفتاء غير المجهول = تيليجرام بتربط كل إجابة بصاحبها.
@@ -263,16 +276,61 @@ async def _start_session_setup(
 
 
 async def _begin_group_session(msg: types.Message, share_id: str) -> None:
-    """مسار الغروب: الرسالة نفسها جوا الغروب الهدف (`/start gq_<id>` أو `/groupquiz`)."""
+    """مسار الغروب (`/start gq_<id>` أو `/groupquiz`): **الإعداد بالكامل بخاص البوت**.
+
+    الأمر جوا الغروب بس بيحدّد الغروب الهدف؛ شاشات الإعداد بتنبعت لخاص الأدمن (نفس مسار
+    القنوات). لو الأدمن ما فتح البوت بالخاص أبداً (تيليجرام بتمنع البوت يبدأ محادثة)
+    بنطلب منه يضغط Start وبعدين يعيد الأمر.
+    """
     user = msg.from_user
     if not user:
         return
+    chat = msg.chat
+    if not await is_group_admin(chat.id, user.id):
+        await _safe_call(lambda: msg.reply("⛔ فقط أدمن الغروب يقدر يشغّل كويز جماعي هون."), what="reply not-admin")
+        return
+
+    # البوت موجود بالغروب أكيد (وصله الأمر)، بس ممكن ما يكون مسجَّل بـ bot_chat_memberships
+    # (انضاف قبل تفعيل my_chat_member) - منسجّله هون حتى يظهر بلائحة الغروبات لاحقاً.
+    membership = await get_chat_membership(chat.id)
+    if not membership or membership.get("status") not in ("member", "administrator"):
+        await upsert_chat_membership(
+            chat_id=chat.id, chat_type=chat.type, chat_title=chat.title,
+            status="member", can_post_messages=None,
+        )
+
+    title = chat.title or "الغروب"
+    dm = await _safe_call(
+        lambda: bot.send_message(
+            chat_id=user.id,
+            text=f"👥 الغروب: <b>{html.escape(title)}</b>\nكمّل إعداد الكويز من هون 👇",
+            parse_mode="HTML",
+        ),
+        what=f"DM setup start to {user.id}",
+    )
+    if dm is None:
+        username = await _get_bot_username()
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+            types.InlineKeyboardButton(text="📩 افتح البوت بالخاص", url=f"https://t.me/{username}")
+        ]])
+        await _safe_call(
+            lambda: msg.reply(
+                "📩 إعداد الكويز صار من خاص البوت. افتحه واضغط Start، وبعدها أعد كتابة الأمر هون.",
+                reply_markup=kb,
+            ),
+            what="reply open-bot-privately",
+        )
+        return
+
+    await _safe_call(lambda: msg.reply("📩 كمّل إعداد الكويز من خاص البوت."), what="reply setup-in-dm")
     await _start_session_setup(
-        ui_msg=msg,
-        chat_id=msg.chat.id,
+        ui_msg=dm,
+        chat_id=chat.id,
         user=user,
         share_id=share_id,
         message_thread_id=msg.message_thread_id,
+        is_channel=False,
+        dest_title=title,
     )
 
 
@@ -437,7 +495,14 @@ async def choose_group_pacing(call: types.CallbackQuery):
         if not session:
             return
 
-        if mode_code == "c":
+        if mode_code == "b":
+            if session.get("question_timer_seconds"):
+                # حماية ضد callback_data مزوّر: مع مؤقّت داخلي الاستفتاءات الأولى بتسكّر
+                # قبل ما الطلاب يوصلولها.
+                await call.answer("⚠️ هالوضع بلا مؤقّت داخلي فقط", show_alert=True)
+                return
+            pacing_mode, interval = "burst", BURST_GAP_SECONDS
+        elif mode_code == "c":
             if not session.get("question_timer_seconds"):
                 # حماية ضد callback_data مزوّر: chain_to_timer بلا مؤقّت = جلسة
                 # بتعلّق للأبد (ما في حدث إغلاق poll يشغّل السؤال التالي).
@@ -458,6 +523,16 @@ async def choose_group_pacing(call: types.CallbackQuery):
             await call.answer("❌ تعذّر بدء الجلسة", show_alert=True)
             return
 
+        if pacing_mode == "burst":
+            total = int(updated.get("total_questions") or 0)
+            minutes = max(1, -(-(total * BURST_GAP_SECONDS) // 60))
+            await call.message.edit_text(
+                f"🚀 انطلقت الجلسة! كل الأسئلة ({total}) رح تنبعت دفعة وحدة، بفاصل {BURST_GAP_SECONDS} ثواني "
+                f"بين كل سؤال والتاني (حوالي {minutes} دقيقة) لتفادي حدود تيليجرام.\nبالتوفيق للجميع 🎯"
+            )
+            log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} (burst)")
+            spawn(run_burst_session(session_id), name=f"gq_burst_{session_id}")
+            return
         label = "فور انتهاء مؤقّت كل سؤال" if pacing_mode == "chain_to_timer" else f"كل {interval} ثانية"
         await call.message.edit_text(f"🚀 انطلقت الجلسة! الأسئلة بتوصل {label}.\nبالتوفيق للجميع 🎯")
         log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} ({pacing_mode})")
@@ -589,7 +664,33 @@ async def _notify_channel_ready(update: types.ChatMemberUpdated, *, new_status: 
     """
     chat = update.chat
     user = update.from_user
-    if chat.type != "channel" or new_status != "administrator" or not user:
+    if not user:
+        return
+
+    # 👥 غروب: أي انضمام فعلي للبوت (مش عضو -> عضو/أدمن) من المستخدم اللي فاتح شاشة الغروبات.
+    if chat.type in ("group", "supergroup"):
+        active = ("member", "administrator")
+        if new_status not in active or old_status in active:
+            return
+        share_id = await _pop_pending_channel_intent(user.id, consume=True)
+        if not share_id:
+            return
+        await invalidate_group_admin_cache(chat.id, user.id)
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+            types.InlineKeyboardButton(text="🚀 ابدأ على هالغروب", callback_data=f"gqchp:{share_id}:{chat.id}")
+        ]])
+        await _safe_call(
+            lambda: bot.send_message(
+                chat_id=user.id,
+                text=f"✅ تمام! البوت انضاف لغروب <b>{html.escape(chat.title or 'الغروب')}</b>.\nبدك تشغّل الكويز عليه هلق؟",
+                parse_mode="HTML",
+                reply_markup=kb,
+            ),
+            what=f"notify user {user.id} group {chat.id} ready",
+        )
+        return
+
+    if chat.type != "channel" or new_status != "administrator":
         return
 
     old_can_post = getattr(update.old_chat_member, "can_post_messages", None) if old_status == "administrator" else None
@@ -707,32 +808,69 @@ async def _build_channel_screen(share_id: str, user_id: int):
     return text, get_group_channel_picker_keyboard(share_id, mine, add_url=add_url)
 
 
+async def _build_group_screen(share_id: str, user_id: int):
+    """نص + كيبورد شاشة الغروبات: غروباتك (البوت فيها + أنت أدمن لايف) + زر إضافة البوت لغروب."""
+    candidates = await list_postable_groups()
+    mine = await _filter_channels_user_admins(candidates, user_id)
+    username = await _get_bot_username()
+    add_url = f"https://t.me/{username}?startgroup=gqadd"
+    ready = "✅ <b>غروباتك الجاهزة</b> (البوت فيها): اختر وحدة من الأزرار تحت.\n\n" if mine else ""
+    text = (
+        "👥 <b>تشغيل الكويز بغروب</b>\n\n"
+        f"{ready}"
+        "الإعداد كله بيصير <b>هون بخاص البوت</b> - ما بتحتاج تفتح الغروب.\n\n"
+        "➕ <b>غروب جديد؟</b>\n"
+        "1️⃣ اضغط «➕ أضف البوت لغروب» تحت واختر الغروب.\n"
+        "2️⃣ أكّد الإضافة، وارجع لهون - رح يوصلك زر «🚀 ابدأ» تلقائياً (أو اضغط «🔄 تحديث»).\n\n"
+        "⚠️ لازم تكون أدمن بالغروب.\n"
+        "📌 البوت موجود أصلاً بالغروب ومش ظاهر باللائحة؟ اكتب داخل الغروب مرة وحدة:\n"
+        f"<code>/groupquiz {html.escape(share_id)}</code>"
+    )
+    kb = get_group_channel_picker_keyboard(
+        share_id, mine, add_url=add_url, refresh_prefix="gqgr", add_text="➕ أضف البوت لغروب",
+    )
+    return text, kb
+
+
 @router.callback_query(F.data.startswith("gqg:"))
 async def show_group_share_steps(call: types.CallbackQuery):
-    """زر \"👥 شغّل الكويز ضمن غروب\": خطوات صريحة + زر اختيار الغروب (`?startgroup=`)."""
+    """زر \"👥 شغّل الكويز ضمن غروب\": لائحة غروباتك الجاهزة + إضافة البوت لغروب جديد.
+    بعدها اختيار الغروب (`gqchp:`) بيبدأ الإعداد هون بالخاص (نفس مسار القنوات)."""
     try:
         if call.message.chat.type != "private":
             await call.answer("افتح البوت بالخاص.", show_alert=True)
             return
         share_id = call.data.split(":", 1)[1]
-        username = await _get_bot_username()
-        text = (
-            "👥 <b>تشغيل الكويز بغروب</b>\n\n"
-            "1️⃣ اضغط «➕ اختر الغروب» تحت وحدّد الغروب من قائمة تيليجرام.\n"
-            "2️⃣ أكّد إضافة البوت (إذا مش موجود أصلاً بالغروب).\n"
-            "3️⃣ بعد الإضافة البوت بيبدأ شاشة الإعداد جوا الغروب - <b>لازم تكون أدمن</b> بالغروب.\n"
-            "4️⃣ اختر نمط الجلسة والمؤقّت واضغط ابدأ.\n\n"
-            "📌 البوت موجود أصلاً بالغروب، أو الغروب فيه توبيكات وبدك توبيك معيّن؟ "
-            "اكتب داخل الغروب (أو داخل التوبيك المطلوب):\n"
-            f"<code>/groupquiz {html.escape(share_id)}</code>\n\n"
-            "⚠️ إذا مش أدمن بالغروب، ابعت الأمر السابق لأدمن الغروب."
-        )
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[[
-            types.InlineKeyboardButton(text="➕ اختر الغروب", url=f"https://t.me/{username}?startgroup=gq_{share_id}")
-        ]])
+        await _set_pending_channel_intent(call.from_user.id, share_id)
+        text, kb = await _build_group_screen(share_id, call.from_user.id)
         await call.message.answer(text, parse_mode="HTML", reply_markup=kb)
     except Exception as e:
         log_error(logger, f"Error in show_group_share_steps: {e}", exception=e)
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("gqgr:"))
+async def refresh_groups_screen(call: types.CallbackQuery):
+    """زر \"🔄 تحديث\" بشاشة الغروبات - بتتعدّل بمكانها."""
+    try:
+        if call.message.chat.type != "private":
+            await call.answer("افتح البوت بالخاص.", show_alert=True)
+            return
+        share_id = call.data.split(":", 1)[1]
+        await _set_pending_channel_intent(call.from_user.id, share_id)
+        text, kb = await _build_group_screen(share_id, call.from_user.id)
+        try:
+            await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            await call.answer("ما في جديد بعد.", show_alert=False)
+            log_info(logger, f"refresh_groups_screen: unchanged ({e})")
+            return
+    except Exception as e:
+        log_error(logger, f"Error in refresh_groups_screen: {e}", exception=e)
     finally:
         try:
             await call.answer()
@@ -804,22 +942,31 @@ async def pick_channel_for_share(call: types.CallbackQuery):
         # نكتشف الفشل بعد إرسال أول سؤال. ما بيغطّي كل الحالات (السجل ممكن يكون
         # قديم لو فاتنا تحديث) - فشل الإرسال الفعلي = بند 5 (لسا ما انكتب).
         membership = await get_chat_membership(chat_id)
-        if (not membership
-                or membership.get("chat_type") != "channel"
-                or membership.get("status") != "administrator"):
-            await call.answer("⚠️ البوت مش أدمن بهالقناة حالياً.", show_alert=True)
-            return
-        if membership.get("can_post_messages") is not True:
-            await call.answer("⚠️ البوت ما عنده صلاحية «نشر الرسائل» بهالقناة.", show_alert=True)
+        chat_type = (membership or {}).get("chat_type")
+        is_channel = chat_type == "channel"
+        if is_channel:
+            if membership.get("status") != "administrator":
+                await call.answer("⚠️ البوت مش أدمن بهالقناة حالياً.", show_alert=True)
+                return
+            if membership.get("can_post_messages") is not True:
+                await call.answer("⚠️ البوت ما عنده صلاحية «نشر الرسائل» بهالقناة.", show_alert=True)
+                return
+        elif chat_type in ("group", "supergroup"):
+            if membership.get("status") not in ("member", "administrator"):
+                await call.answer("⚠️ البوت مش عضو بهالغروب حالياً.", show_alert=True)
+                return
+        else:
+            await call.answer("⚠️ هالمحادثة غير معروفة للبوت.", show_alert=True)
             return
         if not await is_group_admin(chat_id, user.id):
-            await call.answer("⛔ لازم تكون أدمن بهالقناة.", show_alert=True)
+            await call.answer("⛔ لازم تكون أدمن بهالمحادثة.", show_alert=True)
             return
 
-        title = membership.get("chat_title") or "القناة"
+        title = membership.get("chat_title") or ("القناة" if is_channel else "الغروب")
         try:
             # يمنع ضغطتين متتاليتين (الثانية كانت رح تنرفض بـ session-exists على أي حال)
-            await call.message.edit_text(f"📢 القناة المختارة: <b>{html.escape(title)}</b>", parse_mode="HTML")
+            picked_label = "📢 القناة المختارة" if is_channel else "👥 الغروب المختار"
+            await call.message.edit_text(f"{picked_label}: <b>{html.escape(title)}</b>", parse_mode="HTML")
         except Exception:
             pass
         await _start_session_setup(
@@ -828,7 +975,7 @@ async def pick_channel_for_share(call: types.CallbackQuery):
             user=user,
             share_id=share_id,
             message_thread_id=None,
-            is_channel=True,
+            is_channel=is_channel,
             dest_title=title,
         )
     except Exception as e:
@@ -884,17 +1031,18 @@ async def _cancel_session_on_first_send_failure(session: Dict[str, Any], error: 
         "تأكد إنه البوت عنده صلاحية إرسال الاستفتاءات (Send Polls) بالغروب، وبعدها ابدأ الجلسة من جديد."
         f"{reason_line}"
     )
+    # الإعداد صار بخاص البوت: منبلّغ الأدمن بالخاص أولاً، وإذا فشل (ما فتح البوت) منبلّغ الغروب.
     sent = await _safe_call(
-        lambda: bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="HTML",
-            message_thread_id=session.get("message_thread_id"),
-        ),
-        what=f"notify group of cancelled session {session_id}",
+        lambda: bot.send_message(chat_id=started_by, text=text, parse_mode="HTML"),
+        what=f"notify admin of cancelled session {session_id}",
     )
     if sent is None:
         await _safe_call(
-            lambda: bot.send_message(chat_id=started_by, text=text, parse_mode="HTML"),
-            what=f"notify admin (DM fallback) of cancelled session {session_id}",
+            lambda: bot.send_message(
+                chat_id=chat_id, text=text, parse_mode="HTML",
+                message_thread_id=session.get("message_thread_id"),
+            ),
+            what=f"notify group (fallback) of cancelled session {session_id}",
         )
 
 
@@ -931,6 +1079,8 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
         wait_seconds = session.get("question_interval_seconds")
     elif pacing_mode == "chain_to_timer":
         wait_seconds = session.get("question_timer_seconds")
+    elif pacing_mode == "burst":
+        wait_seconds = BURST_RECOVERY_SECONDS
     else:
         wait_seconds = None
     next_due = _utc_iso(int(wait_seconds)) if wait_seconds else None
@@ -1000,7 +1150,8 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
     await clear_session_questions_cache(session_id)
 
     open_poll = await _pop_open_poll(session_id)
-    if open_poll:
+    # وضع burst: كل الاستفتاءات لازم تضل مفتوحة (آخر سؤال كمان) - بلا stop_poll.
+    if open_poll and session.get("pacing_mode") != "burst":
         try:
             await bot.stop_poll(chat_id=open_poll["chat_id"], message_id=open_poll["message_id"])
         except Exception as e:
@@ -1177,6 +1328,38 @@ async def handle_group_poll_closed(poll: types.Poll):
     await send_next_group_question(session)
 
 
+# ==================== وضع burst: كل الأسئلة دفعة واحدة ====================
+async def run_burst_session(session_id: str) -> None:
+    """يرسل كل أسئلة الجلسة تباعاً بفاصل `BURST_GAP_SECONDS` بين السؤال والتاني.
+
+    - الحجز الذرّي (`claim_question_slot`) جوا `send_next_group_question` بيضمن ما في إرسال
+      مزدوج حتى لو اشتغل منفّذان بالغلط.
+    - بيوقف لما الجلسة تخلص/تنلغى (زر "إنهاء الآن" أو فشل أول سؤال)، أو لما ما يصير تقدّم؛
+      بهالحالة الأخيرة النبضة بتعيد تشغيله لاحقاً (`group_quiz_heartbeat_tick`).
+    - بعد آخر سؤال بياخد استدعاء إضافي بينهي الجلسة وبينشر رسالة النهاية (استفتاءات مفتوحة).
+    """
+    if session_id in _BURST_RUNNING:
+        return
+    _BURST_RUNNING.add(session_id)
+    try:
+        while True:
+            session = await get_session(session_id)
+            if not session or session.get("status") != "active" or session.get("pacing_mode") != "burst":
+                return
+            before = int(session.get("questions_sent") or 0)
+            sent = await send_next_group_question(session)
+            if not sent:
+                fresh = await get_session(session_id)
+                # خلصت/انلغت، أو ما صار أي تقدّم -> نوقف (النبضة بتتولّى الاستئناف لو لزم)
+                if not fresh or fresh.get("status") != "active" or int(fresh.get("questions_sent") or 0) <= before:
+                    return
+            await asyncio.sleep(BURST_GAP_SECONDS)
+    except Exception as e:
+        log_error(logger, f"Burst runner failed for session {session_id}: {e}", exception=e)
+    finally:
+        _BURST_RUNNING.discard(session_id)
+
+
 # ==================== النبضة الدورية: وضع fixed_interval ====================
 async def group_quiz_heartbeat_tick() -> None:
     """دورة واحدة: يجلب كل الجلسات اللي حان دورها (بكلا الوضعين `fixed_interval`
@@ -1191,6 +1374,12 @@ async def group_quiz_heartbeat_tick() -> None:
     sessions = await get_due_sessions()
     for session in sessions:
         try:
+            if session.get("pacing_mode") == "burst":
+                # منفّذ burst انقطع (إعادة تشغيل مثلاً) - نعيد تشغيله ويكمّل من questions_sent.
+                sid = str(session["id"])
+                if sid not in _BURST_RUNNING:
+                    spawn(run_burst_session(sid), name=f"gq_burst_{sid}")
+                continue
             await send_next_group_question(session)
         except Exception as e:
             log_error(logger, f"Heartbeat failed for session {session.get('id')}: {e}", exception=e)

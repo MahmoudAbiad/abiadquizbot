@@ -975,6 +975,14 @@ def get_group_pacing_keyboard(session_id: str, timer_enabled: bool) -> types.Inl
             text="⚡️ فور انتهاء مؤقّت السؤال",
             callback_data=f"gqp:{session_id}:c:0",
         )])
+    else:
+        # 🚀 كل الأسئلة دفعة واحدة (burst): بفاصل قصير ثابت بين سؤال وسؤال لتفادي حدود
+        # تيليجرام. بلا مؤقّت فقط - مع مؤقّت داخلي كانت الاستفتاءات الأولى رح تسكّر
+        # قبل ما الطلاب يوصلولها.
+        rows.append([types.InlineKeyboardButton(
+            text="🚀 كل الأسئلة دفعة واحدة",
+            callback_data=f"gqp:{session_id}:b:0",
+        )])
     row = []
     for seconds in GROUP_INTERVAL_PRESETS:
         label = f"⏳ كل {seconds} ثانية" if seconds < 60 else f"⏳ كل {seconds // 60} دقيقة"
@@ -996,7 +1004,14 @@ def get_group_question_control_keyboard(session_id: str) -> types.InlineKeyboard
     ]])
 
 
-def get_group_channel_picker_keyboard(share_id: str, channels: list, add_url: Optional[str] = None) -> types.InlineKeyboardMarkup:
+def get_group_channel_picker_keyboard(
+    share_id: str,
+    channels: list,
+    add_url: Optional[str] = None,
+    *,
+    refresh_prefix: str = "gqchr",
+    add_text: str = "➕ أضف البوت لقناة",
+) -> types.InlineKeyboardMarkup:
     """شاشة \"📢 شارك مع قناة\": زر لكل قناة جاهزة (البوت أدمن فيها + عنده صلاحية نشر +
     المستخدم نفسه أدمن فيها - الفلترة الأخيرة بيعملها المستدعي لايف)، وتحتها:
 
@@ -1014,11 +1029,12 @@ def get_group_channel_picker_keyboard(share_id: str, channels: list, add_url: Op
         title = (ch.get("chat_title") or "قناة بلا اسم").strip()
         if len(title) > 40:
             title = title[:39] + "…"
+        icon = "📢" if ch.get("chat_type") == "channel" else "👥"
         rows.append([types.InlineKeyboardButton(
-            text=f"📢 {title}",
+            text=f"{icon} {title}",
             callback_data=f"gqchp:{share_id}:{int(ch['chat_id'])}",
         )])
     if add_url:
-        rows.append([types.InlineKeyboardButton(text="➕ أضف البوت لقناة", url=add_url)])
-    rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"gqchr:{share_id}")])
+        rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
+    rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)

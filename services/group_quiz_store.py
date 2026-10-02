@@ -127,7 +127,7 @@ async def get_due_sessions(limit: int = 50) -> List[Dict[str, Any]]:
     try:
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         res = (await supabase.table("group_quiz_sessions").select("*")
-               .eq("status", "active").in_("pacing_mode", ["fixed_interval", "chain_to_timer"])
+               .eq("status", "active").in_("pacing_mode", ["fixed_interval", "chain_to_timer", "burst"])
                .lte("next_question_due_at", now_iso)
                .limit(limit).execute())
         return res.data or []
@@ -399,6 +399,23 @@ async def list_postable_channels(limit: int = _CHANNEL_CANDIDATES_LIMIT) -> List
         return res.data or []
     except Exception as e:
         log_error(logger, f"Error listing postable channels: {e}")
+        return []
+
+
+async def list_postable_groups(limit: int = _CHANNEL_CANDIDATES_LIMIT) -> List[Dict[str, Any]]:
+    """كل الغروبات (group/supergroup) اللي البوت عضو أو أدمن فيها.
+
+    ⚠️ نفس تحذير `list_postable_channels`: لائحة *كل* غروبات البوت لكل المستخدمين -
+    المستدعي لازم يفلترها بـ `is_group_admin` لايف قبل العرض.
+    """
+    try:
+        res = (await supabase.table("bot_chat_memberships").select("*")
+               .in_("chat_type", ["group", "supergroup"])
+               .in_("status", ["member", "administrator"])
+               .order("updated_at", desc=True).limit(limit).execute())
+        return res.data or []
+    except Exception as e:
+        log_error(logger, f"Error listing postable groups: {e}")
         return []
 
 
