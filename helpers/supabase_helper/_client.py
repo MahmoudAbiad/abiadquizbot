@@ -46,17 +46,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 try:
     client_or_coro = create_async_client(SUPABASE_URL, os.getenv("SUPABASE_KEY"))
     
-    if asyncio.iscoroutine(client_or_coro):
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                supabase = loop.run_until_complete(client_or_coro)
-            else:
-                supabase = asyncio.run(client_or_coro)
-        except RuntimeError:
-            supabase = asyncio.run(client_or_coro)
-    else:
-        supabase = client_or_coro
+    from services.async_client_init import resolve_client
+    supabase = resolve_client(client_or_coro)
 
     log_info(logger, "Supabase Async client initialized successfully with centralized schema mapping")
 except Exception as e:

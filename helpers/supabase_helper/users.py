@@ -91,6 +91,15 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
 
         return _balance_payload(welcome_points, 0, status="new", referrer=actual_referrer)
     except Exception as e:
+        # A simultaneous first request may have inserted this user already.
+        # Re-read only on a unique-constraint conflict; never overwrite balances.
+        if getattr(e, "code", None) == "23505":
+            try:
+                existing = await supabase.table("users").select("*").eq("user_id", user_id).execute()
+                if existing.data:
+                    return await _check_daily_renewal(user_id, existing.data[0], today)
+            except Exception as retry_error:
+                log_error(logger, f"Could not re-read concurrently created user: {retry_error}")
         log_error(logger, f"Error adding new user: {e}", exception=e)
         return _balance_payload(status="error", referrer=None)
 
