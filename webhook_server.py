@@ -268,11 +268,11 @@ async def webhook(request: Request):
 
     try:
         update_data = await request.json()
-        update = Update.model_validate(update_data)
+        Update.model_validate(update_data)  # validation only
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid Telegram update") from exc
     try:
-        await webhook_queue.enqueue(update.model_dump(mode="json", exclude_none=True))
+        await webhook_queue.enqueue(update_data)  # raw payload; model_dump chokes on aiogram Default sentinels
     except Exception as exc:
         logger.error("Cannot enqueue Telegram update; returning 503 for Telegram retry", exc_info=True)
         raise HTTPException(status_code=503, detail="Update queue unavailable") from exc
