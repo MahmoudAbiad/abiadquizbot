@@ -75,7 +75,7 @@ class UploadEndpointTests(unittest.IsolatedAsyncioTestCase):
             FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS=10, AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS=10,
             FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS=20, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS=60,
             MAX_FILE_WEB_UPLOAD_SIZE=100, MAX_AUDIO_WEB_UPLOAD_SIZE=250,
-            MAX_IMAGE_WEB_UPLOAD_COUNT=50, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE=15, MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE=100,
+            MAX_IMAGE_WEB_UPLOAD_COUNT=50, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE=15, MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE=500,
             _enforce_upload_rate_limit=AsyncMock(), _enforce_audio_upload_rate_limit=AsyncMock(),
             create_image_upload_targets=AsyncMock(return_value=[{'path':'x'}]), create_file_upload_target=AsyncMock(return_value={'path':'x'}),
             get_file_temp_object_size=AsyncMock(return_value=10), get_audio_temp_object_size=AsyncMock(return_value=10),
@@ -85,15 +85,16 @@ class UploadEndpointTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_init_total_and_per_file(self):
         env=self.env()
-        for sizes in [[16], [15]*7]:
+        for sizes in [[16], [15]*34]:
             with self.assertRaises(HTTPError) as exc:
                 await env['image_upload_init'](types.SimpleNamespace(init_data='', file_sizes=sizes, file_names=['x.jpg']*len(sizes)))
             self.assertEqual(exc.exception.status_code,413)
         await env['image_upload_init'](types.SimpleNamespace(init_data='', file_sizes=[1]*50, file_names=['x.jpg']*50))
+        await env['image_upload_init'](types.SimpleNamespace(init_data='', file_sizes=[10]*50, file_names=['x.jpg']*50))
 
     async def test_actual_aggregate_rejects_entire_batch(self):
         env=self.env(); env['get_file_temp_object_size'].return_value=15
-        paths=[f'1/{"a"*32}/{i}.jpg' for i in range(7)]
+        paths=[f'1/{"a"*32}/{i}.jpg' for i in range(34)]
         with self.assertRaises(HTTPError):
             await env['image_upload_complete'](types.SimpleNamespace(init_data='', object_paths=paths))
         env['delete_file_temp_batch'].assert_awaited_once_with(paths)

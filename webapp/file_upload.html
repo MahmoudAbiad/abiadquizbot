@@ -142,7 +142,7 @@ const warningBox = document.getElementById("warningBox");
 if (IS_IMAGES) {
   pageTitle.textContent = "🖼️ رفع ألبوم صور كبير";
   pageHint.textContent = `اختر حتى ${MAX_IMAGE_COUNT} صورة سوا وسيبدأ رفعها مباشرة. بعد اكتمال الرفع رح ترجع تلقائياً للمحادثة، والبوت رح يجهّز الكويز من الألبوم كامل.`;
-  warningBox.innerHTML = `⚠️ الحد الأقصى: <b>${MAX_IMAGE_COUNT} صورة</b> سوا، وكل صورة لحالها حتى <b>15 ميغابايت</b>، ومجموع الدفعة حتى <b>100 ميغابايت</b>.`;
+  warningBox.innerHTML = `⚠️ الحد الأقصى: <b>${MAX_IMAGE_COUNT} صورة</b> سوا، وكل صورة لحالها حتى <b>15 ميغابايت</b>، ومجموع الدفعة حتى <b>500 ميغابايت</b>.`;
   dropZoneText.textContent = "📁 اضغط هون لاختيار الصور (يمكن اختيار أكتر من صورة سوا)";
   fileInput.setAttribute("accept", "image/*");
   fileInput.setAttribute("multiple", "multiple");
@@ -258,8 +258,8 @@ async function handleDocument(file) {
 
 async function handleImages(files) {
   clearError();
-  if (files.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
-    showError("❌ الحجم الإجمالي للصور يتجاوز 100 ميغابايت. اختر صوراً أصغر أو قسّمها إلى دفعات.");
+  if (files.reduce((sum, file) => sum + file.size, 0) > 500 * 1024 * 1024) {
+    showError("❌ الحجم الإجمالي للصور يتجاوز 500 ميغابايت. اختر صوراً أصغر أو قسّمها إلى دفعات.");
     return;
   }
 

@@ -6,7 +6,7 @@ The old checkpoint and `main` were not changed. No deployment or production conf
 
 ## Upload and resource behavior
 
-- Web image batches retain 50 images / 15 MiB per image, with a new 100 MiB total.
+- Web image batches retain 50 images / 15 MiB per image, with a 500 MiB total, as requested by the project owner.
   This matches the existing web document budget and supports many small images.
   Browser, init, actual R2 sizes at complete, and cumulative bounded local download all enforce it.
 - Document allowlist: PDF, DOCX, PPTX, UTF-8 TXT. Legacy DOC/PPT were advertised

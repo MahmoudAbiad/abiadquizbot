@@ -33,12 +33,12 @@ class ResourcesTests(unittest.IsolatedAsyncioTestCase):
                 asyncio=asyncio,os=os,uuid=uuid,build_state_for_chat=lambda *a:state,
                 QuizState=types.SimpleNamespace(answering_quiz='answering',processing_web_file='web',processing_file_quiz='quiz'),
                 PENDING_REQUEST_STATES=[],bot=types.SimpleNamespace(send_message=AsyncMock(return_value=types.SimpleNamespace(delete=AsyncMock()))),
-                ensure_directory_exists=lambda *a:None,DOWNLOADS_DIR=d,MAX_IMAGE_WEB_UPLOAD_COUNT=50,MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE=100,MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE=15,
+                ensure_directory_exists=lambda *a:None,DOWNLOADS_DIR=d,MAX_IMAGE_WEB_UPLOAD_COUNT=50,MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE=500,MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE=15,
                 download_file_temp_to_file=download,validate_image=lambda p:None,delete_file_temp_batch=AsyncMock(),
                 safe_file_cleanup=lambda p:os.remove(p) if os.path.exists(p) else None,
                 _reject_web_upload=AsyncMock(),logger=Mock(),log_error=Mock())
-            await env['process_web_uploaded_images'](1,1,[f'1/{i}.jpg' for i in range(7)])
-            self.assertEqual(downloaded,[15]*6+[10])
+            await env['process_web_uploaded_images'](1,1,[f'1/{i}.jpg' for i in range(34)])
+            self.assertEqual(downloaded,[15]*33+[5])
             self.assertEqual(os.listdir(d),[])
             env['_reject_web_upload'].assert_awaited_once()
 
