@@ -22,7 +22,7 @@ from constants import (
     AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS, AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
     MAX_FILE_WEB_UPLOAD_SIZE, FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
     FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
-    MAX_IMAGE_WEB_UPLOAD_COUNT, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE,
+    MAX_IMAGE_WEB_UPLOAD_COUNT, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE, MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE,
     QUESTION_EDIT_INIT_DATA_MAX_AGE_SECONDS, QUESTION_EDIT_RATE_LIMIT_MAX_REQUESTS,
     QUESTION_EDIT_RATE_LIMIT_WINDOW_SECONDS, QUESTION_EDIT_MAX_QUESTION_LEN,
     QUESTION_EDIT_MAX_OPTION_LEN, QUESTION_EDIT_MAX_CELL_LEN, QUESTION_EDIT_MAX_TABLE_ROWS,
@@ -30,6 +30,31 @@ from constants import (
     QUESTION_EDIT_MAX_MATRIX_COLS,
 )
 from telegram_webapp_auth import verify_telegram_init_data
+from services.redis_reliability import complete_once
+from services.webhook_queue import WebhookQueue
+from services.upload_validation import cleanup_stale_downloads, supported_extension, DOCUMENT_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS
+import re
+
+
+def _upload_extension(name, allowed):
+    try:
+        return supported_extension(name, allowed)
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+
+
+def _object_extension(path, declared_name, allowed):
+    ext = _upload_extension(path, allowed)
+    if declared_name and _upload_extension(declared_name, allowed) != ext:
+        raise HTTPException(status_code=415, detail="صيغة الملف لا تطابق جلسة الرفع.")
+    return ext
+
+
+async def _complete_once(kind, identity, start):
+    try:
+        return await complete_once(redis_client, kind, identity, start)
+    except (RedisConnectionError, RedisTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail="تعذر تأكيد الرفع حالياً، يرجى إعادة المحاولة.") from exc
 
 # 🆕 دوال التحليلات وتنظيف قاعدة البيانات تضل من Supabase (Postgres) - لا علاقة لها
 # بمشكلة سقف الـ50MB (تلك خاصة بـStorage فقط، مو بقاعدة البيانات).
@@ -60,20 +85,13 @@ logger = get_logger(__name__)
 # السقف يحوّل الذروة من "غير محدودة" إلى رقم صريح مضبوط حسب اختبار الحمل الفعلي.
 UPDATE_CONCURRENCY_LIMIT = 15
 _update_semaphore = asyncio.Semaphore(UPDATE_CONCURRENCY_LIMIT)
+webhook_queue = WebhookQueue(redis_client)
 
 
 async def process_update_safely(update: Update):
-    """
-    معالجة التحديث الخاص بـ Telegram في الخلفية مع التقاط الأخطاء
-    لضمان عدم توقف المهمة أو ضياع السجلات عند حدوث استثناء.
+    """Keep local concurrency throttling and one fast Redis retry.
 
-    🩹 محاولة إعادة واحدة عند أخطاء اتصال Redis العابرة (ConnectionError/TimeoutError):
-    الـ webhook أصلاً بيرد على تيليجرام بـ 200 OK فوراً (راجع endpoint /webhook تحت)
-    قبل ما توصل هالدالة هون، فتيليجرام ما رح يعيد إرسال نفس التحديث أبداً لو فشلت
-    المعالجة هون - يعني أي استثناء غير مُعالَج = رسالة المستخدم ضاعت نهائياً بصمت بدون
-    أي رد أو خطأ ظاهر له. إعادة محاولة واحدة فورية (بعد ما الـ connection pool يكون
-    استبدل الاتصال الميت تلقائياً) كافية عملياً لأغلب حالات انقطاع Redis العابرة
-    (راجع نفس الإصلاح بـ config.py::redis_client لتقليل تكرارها من الأساس).
+    Final failure propagates to the durable queue for bounded retry/recovery.
     """
     async with _update_semaphore:
         try:
@@ -84,8 +102,10 @@ async def process_update_safely(update: Update):
                 await dp.feed_update(bot, update)
             except Exception as retry_exc:
                 logger.error(f"Error processing update after retry: {retry_exc}", exc_info=True)
+                raise
         except Exception as e:
             logger.error(f"Error processing update in background task: {e}", exc_info=True)
+            raise
 
 
 async def scheduled_analytics_batch_loop():
@@ -108,8 +128,11 @@ async def scheduled_cleanup_loop():
     """
     while True:
         try:
-            # تم تعديل اسم الدالة للاستدعاء الصحيح من supabase_helper
+            await asyncio.to_thread(cleanup_stale_downloads)
             await auto_cleanup_old_analytics_data()
+        except Exception as e:
+            logger.error(f"Analytics/local cleanup failed: {e}")
+        try:
             # 🆕 شبكة أمان: حذف أي ملفات صوتية مؤقتة تبقّت بـ R2 لأكثر من ساعة
             # (معالجة انقطعت استثنائياً قبل الوصول لـ finally)
             deleted = await cleanup_stale_audio_uploads(older_than_seconds=3600)
@@ -138,12 +161,10 @@ async def lifespan(app: FastAPI):
         from main import configure_thread_pool
         configure_thread_pool()
 
-        # تنظيف وجرف مجلد التحميلات بالكامل عند إقلاع السيرفر على Railway
-        import shutil
-        if os.path.exists("downloads"):
-            shutil.rmtree("downloads")
+        # A restart must not delete files still referenced by live Redis FSM sessions.
         os.makedirs("downloads", exist_ok=True)
-        
+        await asyncio.to_thread(cleanup_stale_downloads)
+
         webhook_url = os.getenv("WEBHOOK_URL")
         if webhook_url:
             full_webhook_url = f"{webhook_url.rstrip('/')}{WEBHOOK_PATH}"
@@ -152,10 +173,10 @@ async def lifespan(app: FastAPI):
                 raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is not configured")
             
             # تنظيف الـ Webhook القديم وتفعيل الجديد
-            await bot.delete_webhook(drop_pending_updates=True)
+            await bot.delete_webhook(drop_pending_updates=False)
             await bot.set_webhook(
                 url=full_webhook_url,
-                drop_pending_updates=True,
+                drop_pending_updates=False,
                 allowed_updates=["message", "callback_query", "poll_answer", "poll", "my_chat_member"],
                 secret_token=TELEGRAM_WEBHOOK_SECRET,
             )
@@ -194,7 +215,16 @@ async def lifespan(app: FastAPI):
         # ليفشل الإقلاع بشكل واضح وتعيد المنصة تشغيل الحاوية/تظهر المشكلة بالـ logs.
         raise
 
-    yield  # هنا يعمل السيرفر ويستقبل الطلبات...
+    async def consume(payload):
+        await process_update_safely(Update.model_validate(payload))
+    workers = [spawn(webhook_queue.worker(consume), name=f"telegram-queue-{i}")
+               for i in range(UPDATE_CONCURRENCY_LIMIT)]
+    try:
+        yield
+    finally:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
     # [حدث الـ Shutdown]: يتم تنفيذه عند إغلاق السيرفر
     try:
@@ -221,10 +251,7 @@ async def health_check():
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
-    """
-    استقبال التحديثات من تلغرام والتحقق منها، ثم إحالتها للمعالجة في الخلفية
-    والرد فوراً لـ Telegram بـ OK لمنع الـ Retries والبطء.
-    """
+    """Validate and enqueue before acknowledging Telegram."""
     # 🔒 Fail-closed: لو السر غير مضبوط نرفض كل الطلبات بدل ما نقبل أي تحديث مزوّر
     # (كان الفحص يتخطى نفسه بصمت لما TELEGRAM_WEBHOOK_SECRET فاضي).
     if not TELEGRAM_WEBHOOK_SECRET:
@@ -240,14 +267,13 @@ async def webhook(request: Request):
     try:
         update_data = await request.json()
         update = Update.model_validate(update_data)
-        
-        # ⚡ تشغيل المعالجة الكاملة للتحديث في الخلفية دون انتظار
-        spawn(process_update_safely(update))
-        
-    except Exception as e:
-        logger.error(f"Error parsing incoming webhook update: {e}", exc_info=True)
-
-    # الرد فوراً بـ OK لتلغرام لإنهاء طلب الـ HTTP بلمح البصر
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid Telegram update") from exc
+    try:
+        await webhook_queue.enqueue(update.model_dump(mode="json", exclude_none=True))
+    except Exception as exc:
+        logger.error("Cannot enqueue Telegram update; returning 503 for Telegram retry", exc_info=True)
+        raise HTTPException(status_code=503, detail="Update queue unavailable") from exc
     return {"ok": True}
 
 # ==================== Audio Web Upload (Telegram Mini App) ====================
@@ -321,7 +347,7 @@ async def audio_upload_init(payload: AudioUploadInitRequest):
     # 🆕 دفاع ثانٍ من طرف السيرفر - لا نثق بفحص الحجم من طرف المتصفح وحده
     if payload.file_size <= 0 or payload.file_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="حجم الملف يتجاوز الحد المسموح (250 ميغابايت).")
-    ext = os.path.splitext(payload.file_name)[1] if payload.file_name else ""
+    ext = _upload_extension(payload.file_name, AUDIO_EXTENSIONS)
 
     upload_target = await create_audio_upload_target(user_id, ext)
     if not upload_target or not upload_target.get("path"):
@@ -360,21 +386,26 @@ async def audio_upload_complete(payload: AudioUploadCompleteRequest):
     # لـ Supabase (وليس فقط الحجم الذي صرّح به العميل بمرحلة /init، والذي لم يمر
     # أصلاً عبر سيرفرنا). يُرفض الملف ويُحذف فوراً لو تجاوز الحد أو تعذّر التحقق
     # من حجمه (متساهل=رفض، وليس العكس، لأننا لا نستطيع التأكد أنه آمن).
-    actual_size = await get_audio_temp_object_size(payload.object_path)
-    if actual_size is None or actual_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
-        await delete_audio_temp(payload.object_path)
-        raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
+    if not re.fullmatch(r"[0-9]+/[0-9a-f]{32}\.[a-zA-Z0-9]+", payload.object_path):
+        raise HTTPException(status_code=400, detail="مسار الرفع غير صالح.")
+    _object_extension(payload.object_path, payload.file_name, AUDIO_EXTENSIONS)
 
-    spawn(
-        process_web_uploaded_audio(
-            user_id=user_id,
-            chat_id=user_id,  # محادثة خاصة - chat_id يساوي user_id بالبوتات الفردية
-            object_path=payload.object_path,
-            declared_file_name=payload.file_name,
+    async def start():
+        actual_size = await get_audio_temp_object_size(payload.object_path)
+        if actual_size is None or actual_size <= 0 or actual_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
+            await delete_audio_temp(payload.object_path)
+            raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
+
+        spawn(
+            process_web_uploaded_audio(
+                user_id=user_id,
+                chat_id=user_id,  # محادثة خاصة - chat_id يساوي user_id بالبوتات الفردية
+                object_path=payload.object_path,
+                declared_file_name=payload.file_name,
+            )
         )
-    )
 
-    return {"ok": True}
+    return await _complete_once("audio", payload.object_path, start)
 
 
 # ==================== 🆕 File Web Upload (Telegram Mini App) ====================
@@ -406,7 +437,7 @@ async def file_upload_init(payload: FileUploadInitRequest):
 
     if payload.file_size <= 0 or payload.file_size > MAX_FILE_WEB_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="حجم الملف يتجاوز الحد المسموح (100 ميغابايت).")
-    ext = os.path.splitext(payload.file_name)[1] if payload.file_name else ""
+    ext = _upload_extension(payload.file_name, DOCUMENT_EXTENSIONS)
 
     upload_target = await create_file_upload_target(user_id, ext)
     if not upload_target or not upload_target.get("path"):
@@ -433,20 +464,25 @@ async def file_upload_complete(payload: FileUploadCompleteRequest):
     if not payload.object_path.startswith(f"{user_id}/"):
         raise HTTPException(status_code=403, detail="غير مسموح.")
 
-    actual_size = await get_file_temp_object_size(payload.object_path)
-    if actual_size is None or actual_size > MAX_FILE_WEB_UPLOAD_SIZE:
-        await delete_file_temp(payload.object_path)
-        raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
+    if not re.fullmatch(r"[0-9]+/[0-9a-f]{32}\.[a-zA-Z0-9]+", payload.object_path):
+        raise HTTPException(status_code=400, detail="مسار الرفع غير صالح.")
+    _object_extension(payload.object_path, payload.file_name, DOCUMENT_EXTENSIONS)
 
-    spawn(
-        process_web_uploaded_file(
-            user_id=user_id,
-            chat_id=user_id,
-            object_path=payload.object_path,
-            declared_file_name=payload.file_name,
+    async def start():
+        actual_size = await get_file_temp_object_size(payload.object_path)
+        if actual_size is None or actual_size <= 0 or actual_size > MAX_FILE_WEB_UPLOAD_SIZE:
+            await delete_file_temp(payload.object_path)
+            raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
+
+        spawn(
+            process_web_uploaded_file(
+                user_id=user_id,
+                chat_id=user_id,
+                object_path=payload.object_path,
+                declared_file_name=payload.file_name,
+            )
         )
-    )
-    return {"ok": True}
+    return await _complete_once("file", payload.object_path, start)
 
 
 # ==================== 🆕 Images Web Upload (ألبوم صور كبير عبر Mini App) ====================
@@ -483,10 +519,11 @@ async def image_upload_init(payload: ImageUploadInitRequest):
     if any(size <= 0 or size > MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE for size in payload.file_sizes):
         raise HTTPException(status_code=413, detail="حجم إحدى الصور يتجاوز الحد المسموح لكل صورة (15 ميغابايت).")
 
-    extensions = [
-        os.path.splitext(payload.file_names[i])[1] if i < len(payload.file_names) and payload.file_names[i] else ".jpg"
-        for i in range(count)
-    ]
+    if sum(payload.file_sizes) > MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE:
+        raise HTTPException(status_code=413, detail="الحجم الإجمالي للصور يتجاوز 100 ميغابايت.")
+    if len(payload.file_names) != count:
+        raise HTTPException(status_code=400, detail="يرجى تحديد اسم كل صورة.")
+    extensions = [_upload_extension(name, IMAGE_EXTENSIONS) for name in payload.file_names]
     targets = await create_image_upload_targets(user_id, extensions)
     if not targets:
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
@@ -515,20 +552,29 @@ async def image_upload_complete(payload: ImageUploadCompleteRequest):
     if any(not path.startswith(f"{user_id}/") for path in object_paths):
         raise HTTPException(status_code=403, detail="غير مسموح.")
 
-    for object_path in object_paths:
-        actual_size = await get_file_temp_object_size(object_path)
-        if actual_size is None or actual_size > MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE:
-            await delete_file_temp_batch(object_paths)
-            raise HTTPException(status_code=413, detail="حجم إحدى الصور يتجاوز الحد المسموح أو تعذر التحقق منه.")
+    if len(set(object_paths)) != len(object_paths):
+        raise HTTPException(status_code=400, detail="لا يمكن تكرار الصورة ضمن الدفعة.")
+    if any(not re.fullmatch(r"[0-9]+/[0-9a-f]{32}/[0-9]+\.[a-zA-Z0-9]+", path) for path in object_paths):
+        raise HTTPException(status_code=400, detail="مسار الرفع غير صالح.")
+    sessions = {path.rsplit('/', 1)[0] for path in object_paths}
+    if len(sessions) != 1:
+        raise HTTPException(status_code=400, detail="الصور يجب أن تنتمي إلى جلسة رفع واحدة.")
+    for path in object_paths:
+        _upload_extension(path, IMAGE_EXTENSIONS)
 
-    spawn(
-        process_web_uploaded_images(
-            user_id=user_id,
-            chat_id=user_id,
-            object_paths=object_paths,
-        )
-    )
-    return {"ok": True}
+    async def start():
+        total = 0
+        for object_path in object_paths:
+            actual_size = await get_file_temp_object_size(object_path)
+            if actual_size is None or actual_size <= 0 or actual_size > MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE:
+                await delete_file_temp_batch(object_paths)
+                raise HTTPException(status_code=413, detail="حجم إحدى الصور يتجاوز الحد المسموح أو تعذر التحقق منه.")
+            total += actual_size
+        if total > MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE:
+            await delete_file_temp_batch(object_paths)
+            raise HTTPException(status_code=413, detail="الحجم الإجمالي للصور يتجاوز 100 ميغابايت.")
+        spawn(process_web_uploaded_images(user_id=user_id, chat_id=user_id, object_paths=object_paths))
+    return await _complete_once("images", next(iter(sessions)), start)
 
 
 # ==================== 🆕 محرر أسئلة الرياضيات الكامل (نص + جدول + مصفوفات) ====================

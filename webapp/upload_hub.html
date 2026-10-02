@@ -193,7 +193,7 @@ const MODES = {
     hint: "اختر الملف وسيبدأ الرفع مباشرة. بعد اكتمال الرفع رح ترجع تلقائياً للمحادثة، والبوت رح يكمل معك من هناك.",
     warning: "⚠️ الحد الأقصى: <b>150 صفحة</b> أو <b>100 ميغابايت</b> (أيهما أسبق).",
     dropText: "📁 اضغط هون لاختيار الملف",
-    accept: ".pdf,.doc,.docx,.ppt,.pptx,.txt",
+    accept: ".pdf,.docx,.pptx,.txt",
     multiple: false,
     maxSize: 100 * 1024 * 1024,
     initEndpoint: "/api/file-upload/init",
@@ -202,12 +202,13 @@ const MODES = {
   images: {
     title: "🖼️ رفع ألبوم صور كبير",
     hint: "اختر حتى 50 صورة سوا وسيبدأ رفعها مباشرة. بعد اكتمال الرفع رح ترجع تلقائياً للمحادثة، والبوت رح يجهّز الكويز من الألبوم كامل.",
-    warning: "⚠️ الحد الأقصى: <b>50 صورة</b> سوا، وكل صورة لحالها حتى <b>15 ميغابايت</b>.",
+    warning: "⚠️ الحد الأقصى: <b>50 صورة</b> سوا، وكل صورة لحالها حتى <b>15 ميغابايت</b>، ومجموع الدفعة حتى <b>100 ميغابايت</b>.",
     dropText: "📁 اضغط هون لاختيار الصور (يمكن اختيار أكتر من صورة سوا)",
     accept: "image/*",
     multiple: true,
     maxCount: 50,
     maxSizePerImage: 15 * 1024 * 1024,
+    maxTotalSize: 100 * 1024 * 1024,
     initEndpoint: "/api/image-upload/init",
     completeEndpoint: "/api/image-upload/complete",
   },
@@ -385,6 +386,11 @@ async function handleSingleFile(file) {
 
 async function handleImages(files) {
   clearError();
+  if (files.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
+    showError("❌ الحجم الإجمالي للصور يتجاوز 100 ميغابايت. اختر صوراً أصغر أو قسّمها إلى دفعات.");
+    return;
+  }
+
   const cfg = MODES.images;
 
   if (files.length > cfg.maxCount) {

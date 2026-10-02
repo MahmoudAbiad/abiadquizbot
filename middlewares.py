@@ -87,6 +87,8 @@ class ErrorTrackingMiddleware(BaseMiddleware):
                     await tg_event.answer("⚠️ عذراً، حدث خطأ غير متوقع أثناء تنفيذ طلبك. الرجاء المحاولة مرة أخرى.")
             except Exception:
                 pass
+            # The durable queue must see failures instead of acknowledging a lost update.
+            raise
         finally:
             reset_error_context(token)
 
@@ -129,4 +131,10 @@ class ThrottlingMiddleware(BaseMiddleware):
             # إضافة المستخدم للكاش
             self.cache[user_id] = True
             
-        return await handler(event, data)
+        try:
+            return await handler(event, data)
+        except BaseException:
+            # Failed processing is retried by the durable queue; do not suppress it as spam.
+            if isinstance(event, (Message, CallbackQuery)):
+                self.cache.pop(event.from_user.id, None)
+            raise

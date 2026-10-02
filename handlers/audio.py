@@ -28,6 +28,9 @@ from typing import Any, Dict
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 
+from services.redis_reliability import user_locked
+from helpers.gemini_helper import get_last_generation_metadata
+from services.ai_audit import build_audio_audit_metadata
 from config import QuizState, bot
 from constants import (
     ADMIN_CONTACT, MAX_AUDIO_WEB_UPLOAD_SIZE,
@@ -111,6 +114,7 @@ async def _send_insufficient_balance(
 # ==================== استقبال ومعالجة الرسالة الصوتية ====================
 
 @router.message(F.voice | F.audio)
+@user_locked()
 async def handle_audio_message(message: types.Message, state: FSMContext) -> None:
     """يستقبل محاضرة صوتية، يتحقق من الحجم، يحمّلها، يتحقق من مدتها الفعلية، ثم يعرض
     شاشة تأكيد واحدة (🆕 QuizState.waiting_for_audio_confirm) تجمع: إقرار الطالب بأنه
@@ -227,6 +231,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
         await state.update_data(
             pending_audio_path=destination,
             pending_audio_object_path=None,
+            pending_audio_input_channel="telegram",
             pending_audio_mime_type=mime_type,
             pending_audio_duration_minutes=duration_minutes,
             pending_audio_cost=cost,
@@ -252,6 +257,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
 # ==================== 🆕 تنفيذ التفريغ الفعلي بعد شاشة التأكيد ====================
 
 @router.callback_query(QuizState.waiting_for_audio_confirm, F.data == "audio_confirm_start")
+@user_locked()
 async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContext) -> None:
     """🆕 التنفيذ الفعلي (خصم نقاط + تفريغ) بعد ضغط الطالب على زر التأكيد بشاشة
     الحقوق/المدة/التكلفة. مشترك بين مسار رسالة تيليجرام المباشرة ومسار رفع الويب
@@ -340,6 +346,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
 
         if not pure_text or not pure_text.strip():
             await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
+            charged = False
             await state.set_state(None)
             await call.message.edit_text(
                 "⚠️ <b>تعذر تفريغ المحاضرة الصوتية!</b> يرجى التأكد من وضوح الصوت والمحاولة مجدداً. تم إرجاع نقاطك.",
@@ -360,6 +367,8 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             free_refund, paid_refund, partial_refund_amount = compute_partial_refund(debited_free, debited_paid)
             if partial_refund_amount > 0:
                 await refund_user_points_split(call.from_user.id, free_refund, paid_refund)
+                debited_free -= free_refund
+                debited_paid -= paid_refund
             spawn(log_usage_event(call.from_user.id, "audio_transcription_truncated", {
                 "duration_minutes": duration_minutes, "cost": cost, "partial_refund": partial_refund_amount,
             }))
@@ -370,15 +379,19 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             source_title=final_title,
             duration_minutes=duration_minutes,
             audio_debited_cost=cost - partial_refund_amount,
+            input_channel=data.get("pending_audio_input_channel"),
             input_type="text",
             items_count=1,
             is_album=False,
         )
         await state.set_state(QuizState.waiting_for_audio_action)
+        charged = False
 
-        spawn(log_usage_event(call.from_user.id, "audio_transcription_completed", {
-            "duration_minutes": duration_minutes, "cost": cost,
-        }))
+        spawn(log_usage_event(call.from_user.id, "audio_transcription_completed", build_audio_audit_metadata(
+            get_last_generation_metadata(), "audio_transcription", data.get("pending_audio_input_channel"),
+            duration_minutes=duration_minutes, cost=cost - partial_refund_amount, truncated=truncated,
+            duration_seconds=elapsed,
+        )))
 
         if truncated:
             await call.message.edit_text(
@@ -406,6 +419,11 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             await call.message.edit_text(error_text)
         except Exception:
             await call.message.answer(error_text)
+    except asyncio.CancelledError:
+        if charged:
+            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
+        await state.set_state(None)
+        raise
     finally:
         safe_file_cleanup(destination)
         if object_path:
@@ -413,6 +431,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
 
 
 @router.callback_query(QuizState.waiting_for_audio_confirm, F.data == "cancel_upload_request")
+@user_locked()
 async def handle_audio_confirm_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
     """🆕 إلغاء نظيف من شاشة التأكيد نفسها: يحذف الملف الصوتي المؤقت (محلياً + من
     Supabase Storage لو كان الطلب قادماً من رفع ويب) بدون أي استرجاع نقاط، لأنه لم
@@ -440,6 +459,7 @@ async def handle_audio_confirm_cancel(call: types.CallbackQuery, state: FSMConte
 # ==================== إلغاء الطلب من داخل شاشة إجراءات المحاضرة ====================
 
 @router.callback_query(QuizState.waiting_for_audio_action, F.data == "cancel_upload_request")
+@user_locked()
 async def handle_audio_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
     """إلغاء نظيف لطلب المحاضرة الصوتية المعلّق (النقاط لا تُسترجع هنا لأن التفريغ
     تم فعلياً بنجاح واستُهلكت الخدمة بالكامل - الإلغاء هنا فقط للتخلص من النص المؤقت)."""
@@ -486,6 +506,7 @@ async def handle_audio_send_text(call: types.CallbackQuery, state: FSMContext) -
 
 
 @router.callback_query(QuizState.waiting_for_audio_action, F.data == "audio_act_summarize")
+@user_locked()
 async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -> None:
     """يلخّص النص المفرغ ويعيد صياغته أكاديمياً عبر summarize_lecture_text، ثم يعرض
     نفس لوحة الإجراءات مجدداً لتمكين الطالب من تصدير الملخص أو توليد كويز منه."""
@@ -506,6 +527,10 @@ async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -
         summary, summary_truncated = summary_result
 
         await state.update_data(summary_text=summary)
+        spawn(log_usage_event(call.from_user.id, "audio_summary_completed", build_audio_audit_metadata(
+            get_last_generation_metadata(), "audio_summary", data.get("input_channel"),
+            duration_minutes=data.get("duration_minutes"), cost=0, truncated=summary_truncated,
+        )))
 
         truncated_note = (
             "\n\n⚠️ <i>ملاحظة: النص طويل جداً وتوقف التلخيص قبل تغطية كامل المحاضرة.</i>"
@@ -582,6 +607,7 @@ async def handle_audio_export_format(call: types.CallbackQuery, state: FSMContex
 
 
 @router.callback_query(QuizState.waiting_for_audio_action, F.data == "audio_act_quiz")
+@user_locked()
 async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> None:
     """ينقل نص المحاضرة المفرغ بسلاسة لخط أنابيب توليد الكويز في handlers/files.py -
     ask_question_count يتكفّل باستدعاء classify_subject والانتقال بعدها تلقائياً
@@ -605,6 +631,7 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
             # 🆕 مصدر/نوع المحتوى الصريح لسجل توليد الكويزات بلوحة الأدمن - راجع
             # handlers/files.py::handle_count_start حيث يُرحَّل هذا الحقل لحدث quiz_generated.
             content_source="audio_transcript",
+            input_channel=data.get("input_channel"),
         )
         await ask_question_count(
             call.message,
@@ -621,6 +648,7 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
 
 
 
+@user_locked(web_kind="audio")
 async def process_web_uploaded_audio(
     user_id: int,
     chat_id: int,
@@ -639,11 +667,7 @@ async def process_web_uploaded_audio(
       MAX_AUDIO_WEB_UPLOAD_SIZE (250MB) بمرحلة /api/audio-upload/init.
     - لا يوجد "مدة معلَنة" من تيليجرام لملف مرفوع عبر الويب - الاعتماد الكامل على
       القياس الفعلي بعد التحميل المحلي (services.audio_flow_service.evaluate_audio_cost
-      بلا reported_duration_seconds). ⚠️ قرار معلّق: لو تعذّر القياس (mutagen فشل)،
-      الكود حالياً يفترض دقيقة واحدة فقط كحد أدنى (نفس سلوك duration_minutes =
-      max(1, ...) بالتدفق العادي) - هاد ممكن يعني دفع أقل من التكلفة الحقيقية
-      لمحاضرة طويلة بصيغة غير مدعومة. راجع PROJECT_STATUS.md قبل الإنتاج لتقرر إذا
-      بدك رفض الملف بدل هيك بهالحالة تحديداً.
+      بلا reported_duration_seconds). إذا تعذر القياس يُرفض الملف ويُنظّف، ولا يُسعّر بدقيقة تخمينية.
     - نسخة Supabase Storage المؤقتة (object_path) تُخزَّن بـ state data بدل حذفها
       فوراً، وتُحذف لاحقاً إما بالتأكيد (handle_audio_confirm_start.finally) أو
       بالإلغاء (handle_audio_confirm_cancel) - نفس مبدأ "لا تخزين دائم" المطلوب،
@@ -652,6 +676,10 @@ async def process_web_uploaded_audio(
     state = build_state_for_chat(chat_id, user_id)
 
     current_state = await state.get_state()
+    if current_state in (QuizState.processing_file_quiz, QuizState.processing_web_file):
+        await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
+        await delete_audio_temp(object_path)
+        return
     if current_state == QuizState.answering_quiz:
         await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع محاضرة صوتية جديدة.")
         await delete_audio_temp(object_path)
@@ -681,13 +709,14 @@ async def process_web_uploaded_audio(
     extension = os.path.splitext(declared_file_name)[1] or os.path.splitext(object_path)[1] or ".mp3"
     destination = os.path.join(DOWNLOADS_DIR, f"audio_web_{user_id}_{uuid.uuid4().hex}{extension}")
 
-    status_msg = await bot.send_message(
-        chat_id,
-        "🎙️ <b>تم استلام الملف، جارٍ تجهيزه للمعالجة...</b>",
-        parse_mode="HTML",
-    )
+    status_msg = None
 
     try:
+        status_msg = await bot.send_message(
+            chat_id,
+            "🎙️ <b>تم استلام الملف، جارٍ تجهيزه للمعالجة...</b>",
+            parse_mode="HTML",
+        )
         # 1) تنزيل الملف من التخزين المؤقت بـ Supabase للقرص المحلي
         # 🆕 max_size_bytes: خط دفاع ثانٍ يرفض أي محتوى تم تحميله فعلياً يتجاوز
         # الحد المسموح، حتى لو مرّ فحص الحجم الأول (metadata) بـ webhook_server.py
@@ -779,6 +808,7 @@ async def process_web_uploaded_audio(
         await state.update_data(
             pending_audio_path=destination,
             pending_audio_object_path=object_path,
+            pending_audio_input_channel="web_upload",
             pending_audio_mime_type=mime_type,
             pending_audio_duration_minutes=duration_minutes,
             pending_audio_cost=cost,
@@ -791,11 +821,16 @@ async def process_web_uploaded_audio(
             parse_mode="HTML",
             reply_markup=get_audio_confirm_keyboard(),
         )
-    except Exception as exc:
-        log_error(logger, f"Web-uploaded audio preparation failed: {exc}", exception=exc)
-        await state.set_state(None)
+    except asyncio.CancelledError:
         safe_file_cleanup(destination)
         await delete_audio_temp(object_path)
+        await state.set_state(None)
+        raise
+    except Exception as exc:
+        log_error(logger, f"Web-uploaded audio preparation failed: {exc}", exception=exc)
+        safe_file_cleanup(destination)
+        await delete_audio_temp(object_path)
+        await state.set_state(None)
         error_text = "❌ حدث خطأ غير متوقع أثناء تجهيز المحاضرة الصوتية."
         try:
             await status_msg.edit_text(error_text)

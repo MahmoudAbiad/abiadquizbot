@@ -22,7 +22,7 @@ from constants import (
     MSG_FRENCH_CONTENT_DETECTED, SUBJECT_FRENCH, MSG_DETECTING_CONTENT,
     QUESTION_TYPE_GENERAL, DIFFICULTY_MEDIUM, MSG_QUIZ_TYPE_PROMPT,
     MAX_DOC_SIZE, MAX_FILE_WEB_UPLOAD_SIZE, MAX_FILE_WEB_UPLOAD_PAGES,
-    MAX_IMAGE_WEB_UPLOAD_COUNT, MSG_REDIRECT_TO_WEB_UPLOAD,
+    MAX_IMAGE_WEB_UPLOAD_COUNT, MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE, MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE, MSG_REDIRECT_TO_WEB_UPLOAD,
     # 🆕 اختبار محلول/غير محلول (SUBJECT_QUIZ_SOLVED/SUBJECT_QUIZ_UNSOLVED)
     SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
     QUIZ_EXTRACTION_MODE_AS_IS, QUIZ_EXTRACTION_MODE_AI_SOLVE,
@@ -52,6 +52,8 @@ from helpers.supabase_helper import (
 from helpers.r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, short_token_to_hash
 from validators import validate_file_size, validate_question_count
+from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS
+from services.redis_reliability import UserLock, user_locked
 
 # استيراد الخدمات الجديدة
 from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
@@ -66,8 +68,7 @@ from handlers.quiz_runner import start_loaded_quiz
 logger = get_logger(__name__)
 router = Router()
 DOWNLOADS_DIR = "downloads"
-processing_users_lock = asyncio.Lock()
-processing_users: set[int] = set()
+
 
 _QUIZ_CHARGE_STATE_KEYS = ("debited_cost", "debited_free", "debited_paid")
 
@@ -194,9 +195,9 @@ async def _current_user(message: types.Message, user: Any = None) -> Dict[str, A
 
 # ==================== Background Album Processor ====================
 
+@user_locked(delay=1.5, wait_seconds=2)
 async def process_album_background(message: types.Message, state: FSMContext):
     try:
-        await asyncio.sleep(1.5)
         group_id = message.media_group_id
         list_key = f"album_list:{group_id}"
         
@@ -634,7 +635,7 @@ async def handle_cache_filter_difficulty(call: types.CallbackQuery, state: FSMCo
 
 async def _finalize_media_processing(
     message: types.Message, state: FSMContext, file_paths: List[str], title: str, items: int,
-    is_album: bool, file_hash: str, content_source: str, user_id: Optional[int] = None,
+    is_album: bool, file_hash: str, content_source: str, user_id: Optional[int] = None, input_channel: str = "telegram",
 ):
     """
     🆕 user_id: مُمرَّر صراحة (بدل الاعتماد حصراً على message.from_user.id) لأنه لما
@@ -648,7 +649,7 @@ async def _finalize_media_processing(
     try:
         content_type = "album" if is_album else ("photo" if len(file_paths) == 1 and file_paths[0].lower().endswith((".jpg", ".jpeg", ".png")) else "document")
         spawn(log_usage_event(resolved_user_id, "content_uploaded", {
-            "content_type": content_type, "items_count": items, "is_album": is_album, "file_hash": file_hash,
+            "content_type": content_type, "items_count": items, "is_album": is_album, "file_hash": file_hash, "input_channel": input_channel,
         }))
 
         cached_quizzes = await get_file_quizzes(file_hash)
@@ -659,6 +660,7 @@ async def _finalize_media_processing(
             # الاستقبال الفعلية (handle_media/process_web_uploaded_file/_images)، يُرحَّل
             # لاحقاً لسجل حدث quiz_generated بـhandle_count_start.
             "content_source": content_source,
+            "input_channel": input_channel,
         }
         
         if cached_quizzes:
@@ -689,7 +691,10 @@ async def _finalize_media_processing(
 # ==================== Handlers ====================
 
 @router.message(F.document | F.photo)
+@user_locked(wait_seconds=2)
 async def handle_media(message: types.Message, state: FSMContext) -> None:
+    destination = None
+    transferred = False
     try:
         current_state = await state.get_state()
         if current_state == QuizState.answering_quiz:
@@ -746,11 +751,12 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 else:
                     await message.answer(error)
                 return
-            title, extension = os.path.splitext(message.document.file_name or "document")
+            extension = supported_extension(message.document.file_name, DOCUMENT_EXTENSIONS)
+            title = os.path.splitext(message.document.file_name)[0]
             destination = os.path.join(DOWNLOADS_DIR, f"{message.from_user.id}_{uuid.uuid4().hex}{extension}")
             await bot.download(message.document, destination=destination)
             
-            items = 1
+            items = await asyncio.to_thread(validate_document, destination)
             if destination.lower().endswith(".pdf"):
                 items = await asyncio.to_thread(get_pdf_page_count_sync, destination)
                 if items > MAX_SUPER_PAGES:
@@ -763,11 +769,17 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 content_source=_document_content_source(extension),
             )
 
+            transferred = True
+
     except Exception as exc:
         log_error(logger, f"Media handling failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
+    finally:
+        if destination and not transferred:
+            safe_file_cleanup(destination)
 
 @router.message(StateFilter(None, QuizState.answering_quiz), F.text, ~F.text.startswith("/"), F.text != ".")
+@user_locked()
 async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     text = message.text.strip()
     if await state.get_state() == QuizState.answering_quiz:
@@ -796,7 +808,7 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
 
     await state.update_data(
         pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False,
-        content_source="telegram_text",
+        content_source="telegram_text", input_channel="telegram",
     )
     await ask_question_count(
         message, state,
@@ -931,6 +943,8 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
             # وai_control.py) جنب توليد AI الفعلي - questions_generated هون هو نفس المفتاح
             # المستخدَم بصف quiz_generated العادي، لعرض عدد الأسئلة بنفس السطر بلا فرع خاص.
             "questions_generated": len(selected_quiz["quiz_data"]),
+            "input_channel": data.get("input_channel"),
+            "content_source": data.get("content_source"),
         }))
 
         await start_loaded_quiz(call, state, selected_quiz["quiz_data"], data.get("source_title", "كويز"), origin="cached_file", quiz_id=quiz_uuid)
@@ -1039,19 +1053,25 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
     على نفس ملفات state.file_paths. أول تنفيذ ينتهي (نجاحاً أو فشلاً) كان يحذف الملفات
     عبر finally بالأسفل، بينما التنفيذ الثاني لسا يرفعها فعلياً لـ Gemini بمنتصف الـ
     cascade - يفشل فوراً بخطأ "is not a valid file path" عبر كل زوج (مفتاح، موديل).
-    processing_users/processing_users_lock (معرّفين مسبقاً بأعلى الملف) كانا مُعدّين
-    لمنع بالضبط هذا التداخل لكن لم يُستخدما فعلياً بأي معالج - القفل هون يفعّلهما.
+    قفل Redis بملكية محددة ومدة صلاحية متجددة يمنع التداخل بين العمليات والنسخ المختلفة.
     """
     await call.answer()
     user_id = call.from_user.id
-    async with processing_users_lock:
-        if user_id in processing_users:
-            await call.message.answer("⏳ طلبك قيد المعالجة بالفعل، الرجاء الانتظار حتى ينتهي قبل الضغط مجدداً.")
-            return
-        processing_users.add(user_id)
+    lock = UserLock(redis_client, user_id)
+    try:
+        acquired = await lock.acquire()
+    except Exception:
+        await call.message.answer("❌ تعذر بدء المعالجة حالياً، يرجى إعادة المحاولة بعد قليل.")
+        return
+    if not acquired:
+        await call.message.answer("⏳ طلبك قيد المعالجة بالفعل، الرجاء الانتظار حتى ينتهي قبل الضغط مجدداً.")
+        return
     charged_this_attempt = False
+    refunded_this_attempt = False
     data = {}
     try:
+        if await state.get_state() != QuizState.waiting_for_count:
+            return
         data = await state.get_data()
         count = int(data.get("selected_question_count") or 0)
         valid, error = validate_question_count(count)
@@ -1161,6 +1181,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             if charged_this_attempt:
                 await refund_user_on_failure(call.from_user.id, data)
                 charged_this_attempt = False
+                refunded_this_attempt = True
             await _clear_quiz_charge_markers(state)
             await state.set_state(None)
             await status_msg.edit_text("⚠️ <b>تعذر استخراج نص مفيد من المستند!</b> يرجى التأكد من أنه يحتوي على نصوص وليس صوراً. تم إرجاع نقاطك.", parse_mode="HTML")
@@ -1169,6 +1190,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             if charged_this_attempt:
                 await refund_user_on_failure(call.from_user.id, data)
                 charged_this_attempt = False
+                refunded_this_attempt = True
             await _clear_quiz_charge_markers(state)
             await state.set_state(None)
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
@@ -1181,50 +1203,57 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # المصدر يلي بيتغذّى منه ai_generation_log بـ services/quiz_service.py) - إضافتها
         # هون بتخلي شاشة "سجل توليد الكويزات" تعرض التفصيل + التكلفة التقديرية لكل كويز
         # بدون أي حاجة لربط جدولين بالوقت/المستخدم (طريقة هشة كنا رح نتجنبها).
-        generation_meta = generation_meta or {}
-        await log_usage_event(call.from_user.id, "quiz_generated", {
-            "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost,
-            "ai_provider": generation_meta.get("provider"),
-            "ai_model": generation_meta.get("model"),
-            "generation_seconds": generation_meta.get("duration_seconds"),
-            "input_tokens": generation_meta.get("input_tokens", 0),
-            "output_tokens": generation_meta.get("output_tokens", 0),
-            "thoughts_tokens": generation_meta.get("thoughts_tokens", 0),
-            "total_tokens": generation_meta.get("total_tokens", 0),
-            "cascade_rank": generation_meta.get("cascade_rank"),
-            "cascade_total": generation_meta.get("cascade_total"),
-            "generation_mode": generation_meta.get("mode"),
-            # 🆕 FIX: سبب تخطّي Groq الاستباقي لو صار ("text_too_long") - None بالحالة
-            # العادية (راجع gemini_helper._generate_text_quiz + _finalize بـ generate_quiz_smart).
-            "groq_skip_reason": generation_meta.get("groq_skip_reason"),
-            # 🆕 تفصيل كل جزء بمسار Super PDF/Images (موديل + مفتاح + رتبته بالكاسكيد لحظة
-            # نجاحه) - None لأي مسار غير super (راجع gemini_helper._generate_super_pdf/
-            # _generate_super_images). يُعرض بلوحة الأدمن "📊 سجل توليد الكويزات".
-            "chunk_details": generation_meta.get("chunk_details"),
-            # 🆕 تصنيف "مستوى الطلب" الحقيقي (Standard/Over-Limit/Super-PDF/Super-Images -
-            # راجع determine_execution_mode بـ services/quiz_service.py) - محسوب أصلاً
-            # فوق بهذه الدالة (متغيّر `mode`) قبل التوليد لغرض التسعير، ونُرفقه هنا أيضاً
-            # لأن `generation_mode` وحده (من gemini_helper) لا يفرّق بين Standard وOver-Limit:
-            # الاتنين ينفَّذان عبر _generate_regular بالضبط (نفس مسار الكود)، فـ
-            # `generation_mode` بيرجع "regular" لكليهما. لوحة الأدمن (ai_control.py) بتعتمد
-            # `generation_mode` كمصدر حقيقة أساسي لـ"سوبر" (فعلي 100%)، وبترجع لهذا الحقل
-            # فقط للتفريق بين عادي/موسّع بالحالة غير-السوبر.
-            "business_mode": mode,
-            # 🆕 عدد "الصفحات" الفعلي/المُقدَّر المُستخدَم بحساب التصنيف/التسعير أعلاه -
-            # لم يكن مُسجَّلاً بهذا السجل إطلاقاً سابقاً (راجع services/quiz_service.py:
-            # estimate_pages_from_text لتفاصيل كيف يُقدَّر لمصادر بلا صفحات فعلية).
-            "items_count": items,
-            # 🆕 None لملف PDF/صورة حقيقي (له عدد صفحات/صور فعلي، لا تقدير). رقم فعلي فقط
-            # لمصادر نصية بلا مفهوم صفحة (نص مباشر، تفريغ صوتي، مستندات أوفيس) - وجوده هو
-            # إشارة "items_count أعلاه تقدير من كلمات، لا عدّ فعلي" تُعرض صراحة بلوحة الأدمن.
-            "estimated_word_count": data.get("estimated_word_count"),
-            # 🆕 نوع/مصدر المحتوى الصريح (pdf/docx/pptx/txt/images/telegram_text/
-            # audio_transcript) - مُحدَّد صراحة عند نقطة الاستقبال الفعلية (راجع
-            # _document_content_source وhandle_pure_text/handle_audio_to_quiz)، لا استنتاجاً
-            # لاحقاً هون. None لأي كويز قديم قبل هذا التحديث (لوحة الأدمن تعرضه "غير مسجَّل").
-            "content_source": data.get("content_source"),
-        })
-        await reward_referrer_if_eligible(call.from_user.id)
+        # Saved quiz is successful; auxiliary errors must not cause a refund.
+        charged_this_attempt = False
+        await _clear_quiz_charge_markers(state)
+        try:
+            generation_meta = generation_meta or {}
+            await log_usage_event(call.from_user.id, "quiz_generated", {
+                "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost,
+                "ai_provider": generation_meta.get("provider"),
+                "ai_model": generation_meta.get("model"),
+                "generation_seconds": generation_meta.get("duration_seconds"),
+                "input_tokens": generation_meta.get("input_tokens", 0),
+                "output_tokens": generation_meta.get("output_tokens", 0),
+                "thoughts_tokens": generation_meta.get("thoughts_tokens", 0),
+                "total_tokens": generation_meta.get("total_tokens", 0),
+                "cascade_rank": generation_meta.get("cascade_rank"),
+                "cascade_total": generation_meta.get("cascade_total"),
+                "generation_mode": generation_meta.get("mode"),
+                # 🆕 FIX: سبب تخطّي Groq الاستباقي لو صار ("text_too_long") - None بالحالة
+                # العادية (راجع gemini_helper._generate_text_quiz + _finalize بـ generate_quiz_smart).
+                "groq_skip_reason": generation_meta.get("groq_skip_reason"),
+                # 🆕 تفصيل كل جزء بمسار Super PDF/Images (موديل + مفتاح + رتبته بالكاسكيد لحظة
+                # نجاحه) - None لأي مسار غير super (راجع gemini_helper._generate_super_pdf/
+                # _generate_super_images). يُعرض بلوحة الأدمن "📊 سجل توليد الكويزات".
+                "chunk_details": generation_meta.get("chunk_details"),
+                # 🆕 تصنيف "مستوى الطلب" الحقيقي (Standard/Over-Limit/Super-PDF/Super-Images -
+                # راجع determine_execution_mode بـ services/quiz_service.py) - محسوب أصلاً
+                # فوق بهذه الدالة (متغيّر `mode`) قبل التوليد لغرض التسعير، ونُرفقه هنا أيضاً
+                # لأن `generation_mode` وحده (من gemini_helper) لا يفرّق بين Standard وOver-Limit:
+                # الاتنين ينفَّذان عبر _generate_regular بالضبط (نفس مسار الكود)، فـ
+                # `generation_mode` بيرجع "regular" لكليهما. لوحة الأدمن (ai_control.py) بتعتمد
+                # `generation_mode` كمصدر حقيقة أساسي لـ"سوبر" (فعلي 100%)، وبترجع لهذا الحقل
+                # فقط للتفريق بين عادي/موسّع بالحالة غير-السوبر.
+                "business_mode": mode,
+                # 🆕 عدد "الصفحات" الفعلي/المُقدَّر المُستخدَم بحساب التصنيف/التسعير أعلاه -
+                # لم يكن مُسجَّلاً بهذا السجل إطلاقاً سابقاً (راجع services/quiz_service.py:
+                # estimate_pages_from_text لتفاصيل كيف يُقدَّر لمصادر بلا صفحات فعلية).
+                "items_count": items,
+                # 🆕 None لملف PDF/صورة حقيقي (له عدد صفحات/صور فعلي، لا تقدير). رقم فعلي فقط
+                # لمصادر نصية بلا مفهوم صفحة (نص مباشر، تفريغ صوتي، مستندات أوفيس) - وجوده هو
+                # إشارة "items_count أعلاه تقدير من كلمات، لا عدّ فعلي" تُعرض صراحة بلوحة الأدمن.
+                "estimated_word_count": data.get("estimated_word_count"),
+                # 🆕 نوع/مصدر المحتوى الصريح (pdf/docx/pptx/txt/images/telegram_text/
+                # audio_transcript) - مُحدَّد صراحة عند نقطة الاستقبال الفعلية (راجع
+                # _document_content_source وhandle_pure_text/handle_audio_to_quiz)، لا استنتاجاً
+                # لاحقاً هون. None لأي كويز قديم قبل هذا التحديث (لوحة الأدمن تعرضه "غير مسجَّل").
+                "content_source": data.get("content_source"),
+                "input_channel": data.get("input_channel"),
+            })
+            await reward_referrer_if_eligible(call.from_user.id)
+        except Exception as exc:
+            log_warning(logger, f"Post-generation analytics/referral failed: {exc}")
 
         # التوليد وحفظ الكويز نجحا؛ لا تبقِ بيانات الخصم القديمة في FSM ولا تسمح
         # لأي خطأ UI/Telegram لاحق أن يحوّل نجاحاً فعلياً إلى refund خاطئ.
@@ -1241,16 +1270,29 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             # نفسه قد يكون انقطاع Redis بعد الخصم مباشرة.
             await refund_user_on_failure(call.from_user.id, data)
             charged_this_attempt = False
+            refunded_this_attempt = True
         await _clear_quiz_charge_markers(state)
         await state.set_state(None)
-        await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً.")
+        await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً." if refunded_this_attempt else "❌ تعذر إكمال عرض النتيجة، يرجى إعادة المحاولة من البوت.")
+    except asyncio.CancelledError:
+        if charged_this_attempt:
+            await refund_user_on_failure(user_id, data)
+        try:
+            await _clear_quiz_charge_markers(state)
+            await state.set_state(None)
+        finally:
+            raise
     finally:
-        processing_users.discard(user_id)
-        for path in (await state.get_data()).get("file_paths", []):
+        for path in data.get("file_paths", []):
             safe_file_cleanup(path)
+        try:
+            await lock.release()
+        except Exception as exc:
+            log_warning(logger, f"Could not release processing lock (TTL will expire): {exc}")
 
 
 @router.callback_query(F.data == "cancel_upload_request")
+@user_locked()
 async def handle_cancel_upload(call: types.CallbackQuery, state: FSMContext) -> None:
     """معالج التراجع والضغط على زر إلغاء الطلب"""
     try:
@@ -1365,6 +1407,7 @@ async def _reject_web_upload(chat_id: int, state: FSMContext, status_msg: Option
     await bot.send_message(chat_id, text, parse_mode="HTML")
 
 
+@user_locked(web_kind="file")
 async def process_web_uploaded_file(
     user_id: int, chat_id: int, object_path: str, declared_file_name: str = "",
 ) -> None:
@@ -1411,9 +1454,11 @@ async def process_web_uploaded_file(
     extension = os.path.splitext(declared_file_name)[1] or os.path.splitext(object_path)[1] or ".pdf"
     destination = os.path.join(DOWNLOADS_DIR, f"file_web_{user_id}_{uuid.uuid4().hex}{extension}")
 
-    status_msg = await bot.send_message(chat_id, "📥 <b>تم استلام الملف، جارٍ تجهيزه...</b>", parse_mode="HTML")
+    status_msg = None
+
 
     try:
+        status_msg = await bot.send_message(chat_id, "📥 <b>تم استلام الملف، جارٍ تجهيزه...</b>", parse_mode="HTML")
         # 🆕 خط دفاع ثانٍ: تحقق فعلي من حجم المحتوى المُنزَّل نفسه (وليس فقط الحجم
         # المُصرَّح به بمرحلة /init) - نفس منطق download_audio_temp_to_file تماماً.
         downloaded = await download_file_temp_to_file(object_path, destination, max_size_bytes=MAX_FILE_WEB_UPLOAD_SIZE)
@@ -1422,9 +1467,8 @@ async def process_web_uploaded_file(
             await _reject_web_upload(chat_id, state, status_msg, "❌ تعذر تحميل الملف المرفوع أو أنه يتجاوز الحجم المسموح، يرجى إعادة المحاولة من البوت.")
             return
 
-        items = 1
+        items = await asyncio.to_thread(validate_document, destination)
         if destination.lower().endswith(".pdf"):
-            items = await asyncio.to_thread(get_pdf_page_count_sync, destination)
             if items > MAX_FILE_WEB_UPLOAD_PAGES:
                 safe_file_cleanup(destination)
                 await delete_file_temp(object_path)
@@ -1443,8 +1487,13 @@ async def process_web_uploaded_file(
         await status_msg.delete()
         await _finalize_media_processing(
             status_msg, state, [destination], title, items, False, file_hash,
-            content_source=_document_content_source(extension), user_id=user_id,
+            content_source=_document_content_source(extension), user_id=user_id, input_channel="web_upload",
         )
+    except asyncio.CancelledError:
+        safe_file_cleanup(destination)
+        await delete_file_temp(object_path)
+        await state.set_state(None)
+        raise
     except Exception as exc:
         log_error(logger, f"Web-uploaded file preparation failed: {exc}", exception=exc)
         safe_file_cleanup(destination)
@@ -1452,6 +1501,7 @@ async def process_web_uploaded_file(
         await _reject_web_upload(chat_id, state, status_msg, "❌ حدث خطأ غير متوقع أثناء تجهيز الملف.")
 
 
+@user_locked(web_kind="images")
 async def process_web_uploaded_images(
     user_id: int, chat_id: int, object_paths: List[str],
 ) -> None:
@@ -1493,26 +1543,33 @@ async def process_web_uploaded_images(
     await state.set_state(QuizState.processing_web_file)
     ensure_directory_exists(DOWNLOADS_DIR)
 
-    status_msg = await bot.send_message(
-        chat_id, f"📥 <b>تم استلام {len(object_paths)} صورة، جارٍ تجهيزها...</b>", parse_mode="HTML",
-    )
+    status_msg = None
+
 
     local_paths: List[str] = []
+    total_downloaded = 0
     try:
+        status_msg = await bot.send_message(
+            chat_id, f"📥 <b>تم استلام {len(object_paths)} صورة، جارٍ تجهيزها...</b>", parse_mode="HTML",
+        )
+        if not object_paths or len(object_paths) > MAX_IMAGE_WEB_UPLOAD_COUNT:
+            raise ValueError("عدد الصور يتجاوز الحد المسموح")
         for index, object_path in enumerate(object_paths):
             ext = os.path.splitext(object_path)[1] or ".jpg"
             destination = os.path.join(DOWNLOADS_DIR, f"images_web_{user_id}_{uuid.uuid4().hex}_{index}{ext}")
-            # 🆕 نفس حد الحجم لكل صورة على حدة (MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE) -
-            # مستورد ضمن MAX_FILE_WEB_UPLOAD_SIZE هون كسقف كلي احترازي إضافي فقط
-            # (الفحص الدقيق لكل صورة صار مسبقاً بمرحلة /api/image-upload/complete).
-            downloaded = await download_file_temp_to_file(object_path, destination, max_size_bytes=MAX_FILE_WEB_UPLOAD_SIZE)
-            if not downloaded:
-                for path in local_paths:
-                    safe_file_cleanup(path)
-                await delete_file_temp_batch(object_paths)
-                await _reject_web_upload(chat_id, state, status_msg, "❌ تعذر تحميل إحدى الصور المرفوعة، يرجى إعادة المحاولة من البوت.")
-                return
             local_paths.append(destination)
+            remaining = MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE - total_downloaded
+            if remaining <= 0:
+                raise ValueError("الحجم الإجمالي للصور يتجاوز 100 ميغابايت")
+            downloaded = await download_file_temp_to_file(
+                object_path, destination, max_size_bytes=min(MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE, remaining)
+            )
+            if not downloaded:
+                raise ValueError("تعذر تحميل إحدى الصور أو تجاوزت الحجم المسموح")
+            total_downloaded += os.path.getsize(destination)
+            if total_downloaded > MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE:
+                raise ValueError("الحجم الإجمالي للصور يتجاوز 100 ميغابايت")
+            await asyncio.to_thread(validate_image, destination)
 
         await delete_file_temp_batch(object_paths)
 
@@ -1524,8 +1581,14 @@ async def process_web_uploaded_images(
         await status_msg.delete()
         await _finalize_media_processing(
             status_msg, state, local_paths, title, len(local_paths), is_album, file_hash,
-            content_source="images", user_id=user_id,
+            content_source="images", user_id=user_id, input_channel="web_upload",
         )
+    except asyncio.CancelledError:
+        for path in local_paths:
+            safe_file_cleanup(path)
+        await delete_file_temp_batch(object_paths)
+        await state.set_state(None)
+        raise
     except Exception as exc:
         log_error(logger, f"Web-uploaded images preparation failed: {exc}", exception=exc)
         for path in local_paths:
