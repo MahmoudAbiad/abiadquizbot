@@ -7,6 +7,7 @@ import html
 import os
 import hashlib
 import unicodedata
+import zipfile
 from logger import get_logger, log_error, log_info
 
 logger = get_logger(__name__)
@@ -80,6 +81,41 @@ def format_file_size(size_bytes: int) -> str:
         size_bytes /= 1024.0
     return f"{size_bytes:.2f} TB"
 
+_MAX_OFFICE_ARCHIVE_ENTRIES = 10000
+_MAX_OFFICE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+_MAX_OFFICE_SINGLE_ENTRY_BYTES = 256 * 1024 * 1024
+_MAX_OFFICE_SUSPICIOUS_RATIO = 200.0
+_MAX_OFFICE_RATIO_CHECK_BYTES = 50 * 1024 * 1024
+
+
+def _validate_office_archive(file_path: str) -> None:
+    """رفض ملفات DOCX/PPTX ذات بنية ZIP مرضية قبل تمريرها لمكتبات التحليل."""
+    try:
+        with zipfile.ZipFile(file_path) as archive:
+            infos = archive.infolist()
+            if len(infos) > _MAX_OFFICE_ARCHIVE_ENTRIES:
+                raise ValueError("Office archive contains too many entries")
+
+            total_uncompressed = 0
+            total_compressed = 0
+            for info in infos:
+                if info.file_size < 0 or info.compress_size < 0:
+                    raise ValueError("Office archive contains invalid entry sizes")
+                if info.file_size > _MAX_OFFICE_SINGLE_ENTRY_BYTES:
+                    raise ValueError("Office archive contains an oversized entry")
+                total_uncompressed += info.file_size
+                total_compressed += info.compress_size
+                if total_uncompressed > _MAX_OFFICE_UNCOMPRESSED_BYTES:
+                    raise ValueError("Office archive expands beyond the safe limit")
+
+            if total_uncompressed >= _MAX_OFFICE_RATIO_CHECK_BYTES:
+                ratio = total_uncompressed / max(total_compressed, 1)
+                if ratio > _MAX_OFFICE_SUSPICIOUS_RATIO:
+                    raise ValueError("Office archive has a suspicious compression ratio")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Invalid Office archive") from exc
+
+
 def _normalize_extracted_text(text: str) -> str:
     """🩹 FIX: بعض ملفات Word (عادةً محوَّلة أصلاً من PDF عبر أدوات تحويل ضعيفة) بتخزّن
     الحروف العربية كأشكال عرض توافقية (Unicode Presentation Forms، نطاق U+FE70-U+FEFF -
@@ -104,6 +140,7 @@ def extract_text_from_file(file_path: str) -> str | None:
 
         # 2. مستندات Word الحديثة فقط
         elif ext == ".docx":
+            _validate_office_archive(file_path)
             import docx
             doc = docx.Document(file_path)
             full_text = []
@@ -125,6 +162,7 @@ def extract_text_from_file(file_path: str) -> str | None:
 
         # 3. عروض PowerPoint الحديثة فقط
         elif ext == ".pptx":
+            _validate_office_archive(file_path)
             from pptx import Presentation
             prs = Presentation(file_path)
             text_runs = []
