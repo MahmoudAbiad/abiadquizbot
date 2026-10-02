@@ -455,8 +455,12 @@ async def execute_quiz_generation_workflow(
         # 🆕 نخزّن الآن تركيبة (subject_type, question_type, difficulty) كاملة مع كل
         # كويز - راجع migration_quiz_options.sql - ليُعرض بتفاصيله الصحيحة لاحقاً
         # ويُحسب بشكل صحيح ضمن سقف تركيبته المستقلة (combo_quiz_count أعلاه).
+        # 4.1 نستخدم الـ UUID الذي يرجعه INSERT نفسه مباشرةً. إعادة جلب كل كويزات
+        # الملف ثم اختيار "أول ID جديد" كانت تسمح بسباق بين توليدين متزامنين لنفس
+        # الملف، فيلتقط أحد الطلبين UUID الكويز الذي أنشأه الطلب الآخر.
+        new_quiz_id = None
         if file_hash and quiz_data:
-            await save_file_quiz_multiple(
+            saved_quiz_id = await save_file_quiz_multiple(
                 file_hash=file_hash,
                 creator_id=user_id,
                 source_title=data.get("source_title", "كويز من مستند"),
@@ -471,16 +475,8 @@ async def execute_quiz_generation_workflow(
                 ),
                 difficulty=difficulty,
             )
-
-        # 5. استخراج الـ UUID للكويز الجديد
-        new_quiz_id = None
-        if file_hash:
-            await asyncio.sleep(0.5)
-            updated_quizzes = await get_file_quizzes(file_hash)
-            for uq in updated_quizzes:
-                if str(uq["id"]) not in existing_uuids:
-                    new_quiz_id = str(uq["id"])
-                    break
+            if saved_quiz_id is not None:
+                new_quiz_id = str(saved_quiz_id)
 
         # 🆕 راجع تعليق _prefetch_math_quiz_images أعلاه - يشمل فقط كويزات رياضية بمعرّف
         # UUID صالح فعلياً (بدونه save_question_image_url لن يجد صفاً ليحدّثه لاحقاً).
