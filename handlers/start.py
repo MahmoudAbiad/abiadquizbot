@@ -264,7 +264,8 @@ async def show_recharge_info(call: types.CallbackQuery):
     try:
         recharge_text = (
             "🔋 <b>شحن النقاط</b>\n\n"
-            "اختر الباقة المطلوبة، ثم اضغط «تواصل للشحن» لمعرفة طريقة الدفع."
+            "اختر الباقة المطلوبة، ثم اضغط «تواصل للشحن» لمعرفة طريقة الدفع.\n\n"
+            "💵 الأسعار بالدولار الأمريكي، ويمكن الدفع بما يعادلها بالليرة السورية."
         )
         await call.message.answer(
             recharge_text, parse_mode="HTML", reply_markup=get_recharge_keyboard()
