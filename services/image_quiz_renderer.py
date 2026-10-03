@@ -31,6 +31,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.font_manager as fm
+import numpy as np
+from matplotlib import cbook
 # 🩹 FIX (memory-leak): استبدلنا matplotlib.pyplot بالواجهة الكائنية المباشرة
 # (Figure + FigureCanvasAgg). render_question_image يُستدعى عبر asyncio.to_thread
 # من quiz_engine.py و export_service.py - أي أن طلاب مختلفين يمكن أن يرسموا صورًا
@@ -621,6 +623,30 @@ def _draw_matrices(ax, matrices_data: List[Dict[str, Any]], x_left: float, y_top
 
 
 # ==================== الرسم الفعلي ====================
+def _line_ink_metrics(line: str, font_prop: fm.FontProperties, renderer, lp_h: float, lp_d: float) -> Tuple[float, float, float]:
+    """يرجّع (base_off, ink_above, ink_below) بالبكسل لسطر يُرسم بـ ax.text(va="top"):
+    base_off = بعد خط الأساس عن أعلى صندوق النص، ink_above/ink_below = امتداد الحبر الفعلي
+    فوق/تحت خط الأساس. نفس معادلة matplotlib الداخلية (Text._get_layout: ارتفاع السطر =
+    max(h, ارتفاع "lp")) وتم التحقق منها على النقطة بالبكسل (انحراف ≤ 2px)."""
+    try:
+        if cbook.is_math_text(line):
+            p = _MATH_PARSER.parse(line, dpi=DPI, prop=font_prop)
+            h, d = float(p.height), float(p.depth)
+            img = np.asarray(p.image)
+            rows = np.where(img.reshape(img.shape[0], -1).max(axis=1) > 40)[0] if img.size else np.array([])
+            if rows.size:
+                base_row = h - d
+                above, below = base_row - float(rows.min()), float(rows.max() + 1) - base_row
+            else:
+                above, below = h - d, d
+        else:
+            _, h, d = renderer.get_text_width_height_descent(line, font_prop, False)
+            above, below = h - d, d
+        return max(h, lp_h) - max(d, lp_d), above, below
+    except Exception:
+        return OPTION_LINE_HEIGHT_PX * 0.7, OPTION_LINE_HEIGHT_PX * 0.5, OPTION_LINE_HEIGHT_PX * 0.2
+
+
 def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
     """غلاف رقيق يُسلسل كل استدعاء عبر _RENDER_LOCK (راجع تعليق _RENDER_LOCK أعلاه) -
     ضروري لأن هذه الدالة تُستدعى من asyncio.to_thread على خيوط OS منفصلة فعليًا،
@@ -762,6 +788,9 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         y -= MATRIX_BOTTOM_GAP_PX
 
     y -= OPTION_GAP_PX
+    _renderer = canvas.get_renderer()
+    _, _lp_h, _lp_d = _renderer.get_text_width_height_descent("lp", opt_font_prop, False)
+    max_shift = 0.0
     for i, (block, heights) in enumerate(zip(option_render_blocks, option_block_heights)):
         if i > 0:
             sep_y = y + OPTION_GAP_PX / 2
@@ -781,9 +810,23 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
             dot_offset = _m.height / 2 - 0.13 * OPTION_FONT_SIZE * DPI / 72
         except Exception:
             dot_offset = OPTION_LINE_HEIGHT_PX * 0.4
-        ax.scatter([badge_x], [y - dot_offset], s=90, color=color, zorder=3, clip_on=False)
+        # 🆕 توسيط الخيار عمودياً داخل خليته (بين الخط الفاصل العلوي والسفلي): نقيس حدود
+        # الحبر الفعلية لأول/آخر سطر، ثم ننزّل الكتلة كلها (النص + النقطة) بمقدار نصف
+        # الفرق بين المسافة فوقها وتحتها، فتصير المسافتان متساويتين. المعادلات ذات الكسور
+        # الطويلة تحتل مساحة أكبر فتنزل أقل، والخيارات القصيرة تنزل أكثر - كلها بنفس القاعدة.
+        cell_top = y + OPTION_GAP_PX / 2
+        cell_bottom = y - sum(heights) - OPTION_GAP_PX / 2
+        base_off_0, above_0, _ = _line_ink_metrics(block[0], opt_font_prop, _renderer, _lp_h, _lp_d)
+        ink_top = (y - base_off_0) + above_0
+        last_top = y - sum(heights[:-1])
+        base_off_n, _, below_n = _line_ink_metrics(block[-1], opt_font_prop, _renderer, _lp_h, _lp_d)
+        ink_bottom = (last_top - base_off_n) - below_n
+        shift = ((ink_bottom - cell_bottom) - (cell_top - ink_top)) / 2
+        shift = max(0.0, shift)   # لا نرفع النص أبداً فوق موضعه الأصلي (تفادي التصاقه بالفاصل العلوي)
+        max_shift = max(max_shift, shift)
+        ax.scatter([badge_x], [y - shift - dot_offset], s=90, color=color, zorder=3, clip_on=False)
         for line, line_h in zip(block, heights):
-            ax.text(x, y, line, ha=align, va="top",
+            ax.text(x, y - shift, line, ha=align, va="top",
                     fontsize=OPTION_FONT_SIZE, color="#2c2c2c",
                     fontproperties=_font_prop(is_ar))
             y -= line_h
