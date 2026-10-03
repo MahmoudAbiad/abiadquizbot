@@ -265,7 +265,7 @@ async def show_recharge_info(call: types.CallbackQuery):
         recharge_text = (
             "🔋 <b>شحن النقاط</b>\n\n"
             "اختر الباقة المطلوبة، ثم اضغط «تواصل للشحن» لمعرفة طريقة الدفع.\n\n"
-            "💵 الأسعار بالدولار الأمريكي، ويمكن الدفع بما يعادلها بالليرة السورية."
+            "💵 الأسعار بالليرة السورية."
         )
         await call.message.answer(
             recharge_text, parse_mode="HTML", reply_markup=get_recharge_keyboard()
@@ -279,14 +279,14 @@ async def show_recharge_info(call: types.CallbackQuery):
     finally:
         await call.answer()
 
-RECHARGE_PACKAGES = {"200": "0.5", "500": "1", "1000": "2"}
+RECHARGE_PACKAGES = {"200": "65", "500": "130", "1000": "260"}
 
 
 def get_recharge_keyboard(selected_package: Optional[str] = None):
     """Keep the selected package in this message's keyboard, without changing quiz state."""
     rows = [
         [types.InlineKeyboardButton(
-            text=f"{'✅' if points == selected_package else '◯'} {points} نقطة — {price}$",
+            text=f"{'✅' if points == selected_package else '◯'} {points} نقطة — {price} ل.س",
             callback_data=f"recharge_package:{points}",
         )]
         for points, price in RECHARGE_PACKAGES.items()
@@ -294,7 +294,7 @@ def get_recharge_keyboard(selected_package: Optional[str] = None):
     if selected_package in RECHARGE_PACKAGES:
         price = RECHARGE_PACKAGES[selected_package]
         draft = (
-            f"مرحباً، أرغب بشحن باقة {selected_package} نقطة مقابل {price}$. ما طريقة الدفع؟"
+            f"مرحباً، أرغب بشحن باقة {selected_package} نقطة مقابل {price} ل.س. ما طريقة الدفع؟"
         )
         contact_button = types.InlineKeyboardButton(
             text="💬 تواصل للشحن",
