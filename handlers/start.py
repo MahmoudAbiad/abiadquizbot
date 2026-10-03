@@ -1,7 +1,9 @@
 import asyncio
 from task_utils import spawn
 from typing import Optional
+from urllib.parse import urlencode
 from aiogram import Router, types, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from config import bot, QuizState
@@ -13,7 +15,6 @@ from helpers.supabase_helper import (
 from logger import get_logger, log_info
 from handlers.quiz_runner import start_loaded_quiz
 from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
-from helpers.settings_helper import get_setting
 from utils import safe_title
 
 logger = get_logger(__name__)
@@ -261,30 +262,72 @@ async def ack_new_user_start(call: types.CallbackQuery):
 @router.callback_query(F.data == "recharge_info")
 async def show_recharge_info(call: types.CallbackQuery):
     try:
-        daily_renewal_points = await get_setting("daily_renewal_points")
         recharge_text = (
-            "🔋 <b>شحن النقاط وزيادة الرصيد</b>\n\n"
-            "هل استهلكت نقاطك المجانية وتحتاج للمزيد? لا تقلق! "
-            "يمكنك شحن رصيدك بكميات مخصصة لتوليد اختبارات بلا حدود والتحضير للامتحانات بكل راحة. 📚\n\n"
-            # 🩹 UX: نذكّر بالبديل المجاني قبل الدفع مباشرة — الشحن مفيد فقط لمن يحتاج
-            # نقاطاً أكثر الآن، لا لمن يستطيع الانتظار ليوم واحد فقط.
-            f"💡 <b>تذكير:</b> نقاطك المجانية تتجدد تلقائياً كل يوم بـ <b>{daily_renewal_points:.0f} نقطة</b> "
-            "بدون أي مقابل — الشحن اختياري فقط إن كنت بحاجة الى نقاط إضافية الآن.\n\n"
-            "لطلب الشحن، كل ما عليك هو التواصل مباشرة مع الدعم والإدارة عبر الرابط التالي:\n"
-            f"👉 <b>{ADMIN_CONTACT}</b>\n\n"
-            "📝 <b>طريقة الشحن:</b>\n"
-            "1️⃣ تواصل معنا وحدد عدد النقاط التي تحتاجها.\n"
-            "2️⃣ سيتم تأكيد وتفعيل النقاط في حسابك فوراً.\n"
-            "3️⃣ يمكنك العودة ومتابعة المذاكرة وتوليد الكويزات دون أي انقطاع! 🚀\n"
-            "<b>الاسعار تبدأ من 0.5$ فقط ! 💰</b>\n\n"
+            "🔋 <b>شحن النقاط</b>\n\n"
+            "اختر الباقة المطلوبة، ثم اضغط «تواصل للشحن» لمعرفة طريقة الدفع."
         )
-        await call.message.answer(recharge_text, parse_mode="HTML")
+        await call.message.answer(
+            recharge_text, parse_mode="HTML", reply_markup=get_recharge_keyboard()
+        )
         log_info(logger, f"User {call.from_user.id} requested recharge info")
         
         # تسجيل حدث طلب معلومات الشحن
         spawn(log_usage_event(call.from_user.id, "recharge_info_viewed"))
     except Exception as e:
         logger.error(f"Error in show_recharge_info: {e}")
+    finally:
+        await call.answer()
+
+RECHARGE_PACKAGES = {"200": "0.5", "500": "1", "1000": "2"}
+
+
+def get_recharge_keyboard(selected_package: Optional[str] = None):
+    """Keep the selected package in this message's keyboard, without changing quiz state."""
+    rows = [
+        [types.InlineKeyboardButton(
+            text=f"{'✅' if points == selected_package else '◯'} {points} نقطة — {price}$",
+            callback_data=f"recharge_package:{points}",
+        )]
+        for points, price in RECHARGE_PACKAGES.items()
+    ]
+    if selected_package in RECHARGE_PACKAGES:
+        price = RECHARGE_PACKAGES[selected_package]
+        draft = (
+            f"مرحباً، أرغب بشحن باقة {selected_package} نقطة مقابل {price}$. ما طريقة الدفع؟"
+        )
+        contact_button = types.InlineKeyboardButton(
+            text="💬 تواصل للشحن",
+            url=f"https://t.me/{ADMIN_CONTACT.lstrip('@')}?{urlencode({'text': draft})}",
+        )
+    else:
+        contact_button = types.InlineKeyboardButton(
+            text="💬 تواصل للشحن", callback_data="recharge_choose_package"
+        )
+    rows.append([contact_button])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "recharge_choose_package")
+async def prompt_recharge_package(call: types.CallbackQuery):
+    await call.answer("اختر الباقة المطلوبة أولاً 👆", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("recharge_package:"))
+async def select_recharge_package(call: types.CallbackQuery):
+    package = call.data.split(":", 1)[1]
+    if package not in RECHARGE_PACKAGES:
+        await call.answer("هذه الباقة غير متاحة. افتح قائمة الشحن مجدداً.", show_alert=True)
+        return
+    try:
+        keyboard = get_recharge_keyboard(package)
+        if call.message.reply_markup != keyboard:
+            await call.message.edit_reply_markup(reply_markup=keyboard)
+    except TelegramBadRequest as e:
+        # Repeated taps can reach Telegram after the same markup was already applied.
+        if "message is not modified" not in str(e).lower():
+            logger.error(f"Error in select_recharge_package: {e}")
+    except Exception as e:
+        logger.error(f"Error in select_recharge_package: {e}")
     finally:
         await call.answer()
 
