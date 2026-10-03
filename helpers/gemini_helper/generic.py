@@ -10,7 +10,7 @@ import time
 from google import genai
 from google.genai import types
 
-from constants import AI_REQUEST_TIMEOUT
+from helpers.settings_helper import get_ai_request_timeout
 from helpers.gemini_helper.state import (
     _record_token_usage, _last_model_used_var, _last_token_usage_var, _last_generation_metadata_var,
 )
@@ -49,7 +49,7 @@ async def generate_structured_with_cascade(
                     response_schema=response_schema,
                 ),
             ),
-            timeout=AI_REQUEST_TIMEOUT,
+            timeout=await get_ai_request_timeout(),
         )
         parsed = _parse_structured_gemini_response(response, response_schema, model)
         token_count = _record_token_usage(response)
@@ -89,7 +89,7 @@ async def generate_text_with_cascade(
                 model=model,
                 contents=final_contents,
             ),
-            timeout=AI_REQUEST_TIMEOUT,
+            timeout=await get_ai_request_timeout(),
         )
         text = getattr(response, "text", None)
         if not text or not text.strip():

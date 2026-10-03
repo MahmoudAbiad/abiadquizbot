@@ -17,6 +17,8 @@ from helpers.settings_helper import (
     update_app_setting,
     SETTING_LABELS,
     SETTING_MIN_VALUES,
+    SETTING_MAX_VALUES,
+    AI_SETTING_KEYS,
     SETTING_TO_FEATURE_FLAG,
     POINTS_SETTING_LABELS,
     format_setting_value,
@@ -141,8 +143,9 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
         await msg.answer(f"❌ القيمة أقل من الحد الأدنى المسموح ({format_setting_value(min_value)}).", reply_markup=get_cancel_keyboard())
         return
 
-    if new_value > 100000:
-        await msg.answer("❌ القيمة كبيرة جداً. الحد الأقصى هو 100,000.", reply_markup=get_cancel_keyboard())
+    max_value = SETTING_MAX_VALUES.get(setting_key, 100000)
+    if new_value > max_value:
+        await msg.answer(f"❌ القيمة كبيرة جداً. الحد الأقصى هو {format_setting_value(max_value)}.", reply_markup=get_cancel_keyboard())
         return
 
     updated_value = await update_app_setting(setting_key, new_value)
@@ -163,7 +166,10 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
     # للوحة تفاصيل تلك الميزة ضمن "مفاتيح التحكم" بدل لوحة "إعدادات النقاط" - لأنه
     # فعلياً جاء من هناك (راجع settings_helper.SETTING_TO_FEATURE_FLAG).
     feature_key = SETTING_TO_FEATURE_FLAG.get(setting_key)
-    if feature_key:
+    if setting_key in AI_SETTING_KEYS:
+        from .ai_control import _render_ai_menu
+        await _render_ai_menu(msg)
+    elif feature_key:
         from .feature_flags import render_feature_detail
         await render_feature_detail(msg, feature_key)
     else:

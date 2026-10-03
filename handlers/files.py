@@ -34,6 +34,7 @@ from constants import (
     MSG_CLASSIFICATION_VOTE_EDITED_YES, MSG_CLASSIFICATION_VOTE_EDITED_NO,
     MSG_CLASSIFICATION_VOTE_ALREADY, MSG_CLASSIFICATION_VOTE_ERROR,
     MSG_CLASSIFICATION_LOCKED_SUFFIX, MSG_CLASSIFICATION_VOTE_ADMIN_ALERT,
+    MSG_UPLOAD_FILE_MISSING,
 )
 from helpers.gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
@@ -50,9 +51,9 @@ from helpers.supabase_helper import (
     has_user_voted_on_classification, is_feature_enabled,
 )
 from helpers.r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
-from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, short_token_to_hash
+from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, safe_title, short_token_to_hash
 from validators import validate_file_size, validate_question_count
-from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS
+from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, InvalidUploadError
 from services.redis_reliability import UserLock, user_locked
 
 # استيراد الخدمات الجديدة
@@ -121,6 +122,19 @@ async def _discard_pending_upload(state: FSMContext) -> int:
     file_paths = data.get("file_paths", []) or []
     removed = sum(1 for path in file_paths if safe_file_cleanup(path))
     return removed
+
+
+def _missing_upload_paths(data: Dict[str, Any]) -> List[str]:
+    """يرجع المسارات المحلية المفقودة من القرص لطلب ملف قيد التنفيذ (قائمة فارغة = كل شيء
+    سليم أو لا حاجة للملف). مصدر الفقد الشائع: إعادة تشغيل الـ dyno (نظام ملفات مؤقت) أو
+    تنظيف الملفات القديمة بينما حالة الطالب (FSM) ما زالت محفوظة بـ Redis. نص مباشر لا
+    يحتاج ملفاً، ومستند أوفيس استُخرج نصه مسبقاً (cached_office_text) لا يُعاد فتحه."""
+    if data.get("input_type") != "media" or data.get("cached_office_text"):
+        return []
+    paths = data.get("file_paths") or []
+    if not paths:
+        return ["<no-file-paths>"]
+    return [path for path in paths if not os.path.exists(path)]
 
 
 async def _run_processing_heartbeat(status_msg: types.Message, interval_seconds: int = 20) -> None:
@@ -1068,6 +1082,12 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         return
     charged_this_attempt = False
     refunded_this_attempt = False
+    # 🩹 يبقى True عندما نعود لحالة waiting_for_count بانتظار إعادة محاولة الطالب (رصيد غير
+    # كافٍ / عدد أسئلة غير صالح): الملف المرفوع لا يُحذف حينها، وإلا بقيت الحالة تشير لملف
+    # محذوف فيفشل التوليد لاحقاً عند الضغط مجدداً (راجع finally بنهاية الدالة). الحذف يصير
+    # فقط عند الإلغاء/استبدال الطلب (handle_cancel_upload/handle_media) أو انتهاء التوليد.
+    preserve_upload = False
+    quiz_ready = False  # True بعد نجاح التوليد (لتمييز "فشل بالعرض" عن "فشل قبل/أثناء التوليد")
     data = {}
     try:
         if await state.get_state() != QuizState.waiting_for_count:
@@ -1076,6 +1096,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         count = int(data.get("selected_question_count") or 0)
         valid, error = validate_question_count(count)
         if not valid:
+            preserve_upload = True
             await call.message.answer(f"❌ {error}")
             return
 
@@ -1093,6 +1114,15 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # بعد كل هالنداءات البطيئة. (راجع أيضاً استرجاع الحالة على مسارات الخروج المبكر
         # تحت - وإلا الطالب بيعلق بحالة processing_file_quiz بدون أي توليد فعلي شغال).
         await state.set_state(QuizState.processing_file_quiz)
+
+        # 🩹 فحص وجود الملف *قبل* أي خصم: لو حُذف من القرص (إعادة تشغيل السيرفر مثلاً) لا
+        # معنى لمتابعة الخصم ثم الفشل ثم الاسترجاع - نُبلغ الطالب بسبب الفشل الحقيقي
+        # ونمسح الطلب ليرسل الملف من جديد.
+        if _missing_upload_paths(data):
+            log_warning(logger, f"Upload file missing before generation start (user {user_id}): {data.get('file_paths')}")
+            await state.clear()
+            await call.message.answer(f"{MSG_UPLOAD_FILE_MISSING}\nلم يتم خصم أي نقاط.", parse_mode="HTML")
+            return
 
         items = int(data.get("items_count") or 1)
         is_album = bool(data.get("is_album"))
@@ -1130,6 +1160,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             # (بدل ما تضل عالقة بـ processing_file_quiz بلا أي توليد شغال فعلياً) حتى
             # يقدر الطالب يلغي الطلب أو يستبدله بملف جديد عادي.
             await state.set_state(QuizState.waiting_for_count)
+            preserve_upload = True  # الطالب سيشحن/ينتظر التجديد ثم يعيد الضغط على نفس الملف
             await _insufficient_balance(call.message, user_info, cost, action="quiz_generation")
             return
 
@@ -1205,6 +1236,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # بدون أي حاجة لربط جدولين بالوقت/المستخدم (طريقة هشة كنا رح نتجنبها).
         # Saved quiz is successful; auxiliary errors must not cause a refund.
         charged_this_attempt = False
+        quiz_ready = True
         await _clear_quiz_charge_markers(state)
         try:
             generation_meta = generation_meta or {}
@@ -1263,6 +1295,25 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         await start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
 
+    except (FileNotFoundError, InvalidUploadError) as exc:
+        # 🩹 رسالة تطابق السبب الفعلي بدل رسالة عامة: ملف مفقود من القرص، أو PDF محمي/تالف.
+        # الخصم (إن حصل) يُسترجع، والحالة تُمسح لأن هذا الطلب لا يمكن إكماله بهذا الملف.
+        log_error(logger, f"Quiz generation aborted, unusable upload: {exc!r}", exception=exc)
+        if charged_this_attempt:
+            await refund_user_on_failure(call.from_user.id, data)
+            charged_this_attempt = False
+            refunded_this_attempt = True
+        await _clear_quiz_charge_markers(state)
+        await state.set_state(None)
+        money_note = "تم إرجاع نقاطك." if refunded_this_attempt else "لم يتم خصم أي نقاط."
+        if isinstance(exc, FileNotFoundError):
+            reason = f"{MSG_UPLOAD_FILE_MISSING}\n{money_note}"
+        else:
+            reason = f"⚠️ <b>تعذر معالجة الملف:</b> {safe_title(str(exc))}\n{money_note}"
+        try:
+            await call.message.answer(reason, parse_mode="HTML")
+        except Exception as send_exc:
+            log_warning(logger, f"Could not send file-error message: {send_exc}")
     except Exception as exc:
         log_error(logger, f"Quiz generation start failed: {exc}", exception=exc)
         if charged_this_attempt:
@@ -1273,7 +1324,15 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             refunded_this_attempt = True
         await _clear_quiz_charge_markers(state)
         await state.set_state(None)
-        await call.message.answer("❌ حدث خطأ، تم إعادة شحن رصيدك تلقائياً." if refunded_this_attempt else "❌ تعذر إكمال عرض النتيجة، يرجى إعادة المحاولة من البوت.")
+        # 🩹 الرسالة تطابق ما حصل فعلاً (بدل رسالة "تعذر عرض النتيجة" لكل الحالات):
+        if refunded_this_attempt:
+            failure_text = "❌ حدث خطأ أثناء التوليد، وتم إرجاع نقاطك تلقائياً. أعد المحاولة بعد قليل."
+        elif quiz_ready:
+            failure_text = ("⚠️ تم توليد الكويز لكن تعذر عرضه بسبب خطأ تقني، ولم يُسترجع رصيدك لأن التوليد تم فعلاً. "
+                            "جرّب إعادة إرسال الملف، وإن لم يظهر الكويز تواصل مع الدعم.")
+        else:
+            failure_text = "❌ تعذر بدء الطلب بسبب خطأ تقني، ولم يتم خصم أي نقاط. أعد المحاولة بعد قليل."
+        await call.message.answer(failure_text)
     except asyncio.CancelledError:
         if charged_this_attempt:
             await refund_user_on_failure(user_id, data)
@@ -1283,8 +1342,9 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         finally:
             raise
     finally:
-        for path in data.get("file_paths", []):
-            safe_file_cleanup(path)
+        if not preserve_upload:
+            for path in data.get("file_paths", []):
+                safe_file_cleanup(path)
         try:
             await lock.release()
         except Exception as exc:

@@ -33,8 +33,11 @@ function redis.call(cmd, k, ...)
  if cmd=='ZADD' then
   db[k]=db[k] or {}; local i=1
   if a[1]=='XX' then i=2; if not db[k][a[3]] then return 0 end end
-  db[k][a[i+1]]=tonumber(a[i]); return 1
+  -- Real Redis: reply counts only NEWLY ADDED members; updating an existing score returns 0.
+  local existed=db[k][a[i+1]]~=nil
+  db[k][a[i+1]]=tonumber(a[i]); return existed and 0 or 1
  end
+ if cmd=='ZSCORE' then return db[k] and db[k][a[1]] or false end
  if cmd=='ZREM' then if db[k] then db[k][a[1]]=nil end; return 1 end
  if cmd=='ZRANGEBYSCORE' then
   local min=a[1]=='-inf' and -math.huge or tonumber(a[1]);local max=tonumber(a[2]);local r={}

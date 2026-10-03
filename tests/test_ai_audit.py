@@ -56,7 +56,7 @@ class AIAuditTests(unittest.IsolatedAsyncioTestCase):
             return result
         env=load_functions('helpers/gemini_helper/generic.py',{'generate_text_with_cascade'},asyncio=asyncio,time=time,
             _last_model_used_var=model,_last_token_usage_var=usage,_last_generation_metadata_var=metadata,
-            _execute_cascade=cascade,_record_token_usage=record,AI_REQUEST_TIMEOUT=1)
+            _execute_cascade=cascade,_record_token_usage=record,get_ai_request_timeout=AsyncMock(return_value=1))
         result=await env['generate_text_with_cascade'](['audio'])
         self.assertEqual(result,('transcript',30,False))
         self.assertEqual(metadata.get()['model'],'audio-model')

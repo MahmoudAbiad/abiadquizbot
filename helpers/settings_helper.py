@@ -15,7 +15,7 @@ from typing import Dict, Optional
 from logger import get_logger, log_error
 from constants import (
     WELCOME_POINTS, DAILY_RENEWAL_POINTS, REFERRAL_BONUS_POINTS,
-    CLASSIFICATION_VOTE_THRESHOLD,
+    CLASSIFICATION_VOTE_THRESHOLD, AI_REQUEST_TIMEOUT,
 )
 
 logger = get_logger(__name__)
@@ -39,6 +39,8 @@ _DEFAULTS: Dict[str, float] = {
     # مرتبطة أيضاً بقرار التنفيذ الفعلي is_super_pdf/is_super_images بـ gemini_helper.py).
     "quiz_standard_rate": 1.0,
     "quiz_overage_rate": 1.5,
+    # 🆕 مهلة كل محاولة توليد (مفتاح × موديل) بالثواني - كانت AI_REQUEST_TIMEOUT ثابتاً بالكود.
+    "ai_request_timeout": float(AI_REQUEST_TIMEOUT),
 }
 
 # تسميات عرض للوحة الإدارة (تُستخدم في الرسائل والأزرار).
@@ -49,6 +51,7 @@ SETTING_LABELS: Dict[str, str] = {
     "classification_vote_threshold": "🗳 عتبة تثبيت تصنيف المادة (عدد الأصوات)",
     "quiz_standard_rate": "💎 سعر الكويز العادي (نقطة/وحدة)",
     "quiz_overage_rate": "🚀 سعر التجاوز/السوبر (نقطة/وحدة)",
+    "ai_request_timeout": "⏱ مهلة طلب الذكاء الاصطناعي (ثانية)",
 }
 
 # 🩹 حد أدنى مخصص لبعض الإعدادات (0 معقول لنقاط/مكافآت، لكن غير منطقي هنا: عتبة=0
@@ -59,7 +62,20 @@ SETTING_MIN_VALUES: Dict[str, float] = {
     # 🆕 تفادياً لتصفير سعر الكويز بالغلط (0 حد أدنى افتراضي كان سيسمح بذلك تماماً).
     "quiz_standard_rate": 0.1,
     "quiz_overage_rate": 0.1,
+    # 🆕 أقل من 30 ثانية يقتل أي طلب ملف حقيقي (الملفات الممسوحة تحتاج 40-90 ثانية عادة)
+    # ويحظر الزوج (مفتاح، موديل) دقيقة كاملة لكل مهلة منتهية.
+    "ai_request_timeout": 30,
 }
+
+# 🆕 حدود قصوى مخصصة (الحد العام لكل الإعدادات 100000 بـ handlers/admin/settings.py - غير
+# منطقي لمهلة شبكة: 600 ثانية = 10 دقائق سقف معقول لطلب واحد).
+SETTING_MAX_VALUES: Dict[str, float] = {
+    "ai_request_timeout": 600,
+}
+
+# إعدادات الذكاء الاصطناعي: تُعرض بلوحة "التحكم بالذكاء الاصطناعي" لا بلوحة النقاط،
+# ويرجع الأدمن لتلك اللوحة بعد التعديل.
+AI_SETTING_KEYS = frozenset({"ai_request_timeout"})
 
 # 🩹 عتبة تصنيف المادة إعداد خاص بميزة "رسالة التحقق المجتمعي من التصنيف"
 # (classification_vote_prompt بـ constants.FEATURE_FLAGS_REGISTRY) وليست إعداد نقاط -
@@ -77,7 +93,8 @@ SETTING_TO_FEATURE_FLAG: Dict[str, str] = {
 # (keyboards.get_admin_settings_keyboard عبر handlers/admin/settings.py) حتى لا يظهر
 # فيها إعداد لا علاقة له بالنقاط.
 POINTS_SETTING_LABELS: Dict[str, str] = {
-    key: label for key, label in SETTING_LABELS.items() if key not in SETTING_TO_FEATURE_FLAG
+    key: label for key, label in SETTING_LABELS.items()
+    if key not in SETTING_TO_FEATURE_FLAG and key not in AI_SETTING_KEYS
 }
 
 
@@ -160,3 +177,12 @@ async def update_app_setting(key: str, value: float) -> Optional[float]:
     except Exception as e:
         log_error(logger, f"Error updating app_setting '{key}' to {value}: {e}", exception=e)
         return None
+
+
+async def get_ai_request_timeout() -> float:
+    """مهلة المحاولة الواحدة بالثواني، تُقرأ عند كل محاولة (كاش 30 ثانية) فتسري فوراً على
+    الطلبات الجديدة بلا إعادة نشر. محصورة بحدود آمنة حتى لو خُزِّنت قيمة شاذة بالجدول."""
+    value = await get_setting("ai_request_timeout")
+    low = SETTING_MIN_VALUES["ai_request_timeout"]
+    high = SETTING_MAX_VALUES["ai_request_timeout"]
+    return max(low, min(high, float(value)))

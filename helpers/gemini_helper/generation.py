@@ -10,7 +10,7 @@ from google import genai
 from google.genai import types
 
 from task_utils import spawn
-from constants import AI_REQUEST_TIMEOUT
+from helpers.settings_helper import get_ai_request_timeout
 from logger import get_logger, log_error
 from mem_utils import release_memory_to_os
 from utils import safe_file_cleanup
@@ -57,7 +57,7 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[Tuple
                         response_schema=QuizResponse,
                     ),
                 ),
-                timeout=AI_REQUEST_TIMEOUT,
+                timeout=await get_ai_request_timeout(),
             )
             parsed = _parse_structured_gemini_response(response, QuizResponse, model)
             if not hasattr(parsed, "questions"):
@@ -117,7 +117,7 @@ def _build_super_chunk_attempt_fn(
                         response_schema=QuizResponse,
                     ),
                 ),
-                timeout=AI_REQUEST_TIMEOUT,
+                timeout=await get_ai_request_timeout(),
             )
             parsed = _parse_structured_gemini_response(response, QuizResponse, model)
             if not hasattr(parsed, "questions"):

@@ -62,9 +62,12 @@ async def _render_ai_menu(event, state: FSMContext = None):
         "🧠 <b>سلسلة توليد الأسئلة:</b> ترتيب الموديلات، تفعيل/تعطيل، إضافة أو حذف موديل\n"
         "🔍 <b>فحص المحتوى السريع:</b> الموديل المستخدم لفحص الرياضيات وتصنيف المادة\n"
         "⚡ <b>موديل Groq السريع:</b> المسار السريع لتوليد الأسئلة من نص صريح\n"
-        "📊 <b>سجل توليد الكويزات:</b> وقت كل عملية توليد + الموديل المستخدم فيها"
+        "📊 <b>سجل توليد الكويزات:</b> وقت كل عملية توليد + الموديل المستخدم فيها\n"
+        "⏱ <b>مهلة الطلب:</b> أقصى انتظار لكل محاولة (مفتاح × موديل) قبل الانتقال للتالي"
     )
-    reply_markup = get_ai_control_keyboard()
+    from helpers.settings_helper import get_app_settings
+    settings = await get_app_settings(force_refresh=True)
+    reply_markup = get_ai_control_keyboard(settings.get("ai_request_timeout"))
 
     if isinstance(event, types.Message):
         await event.answer(text, reply_markup=reply_markup, parse_mode="HTML")

@@ -46,17 +46,41 @@ def validate_image(path):
             image.verify()
 
 
+class InvalidUploadError(ValueError):
+    """ملف مرفوع غير صالح لسبب محدد - رسالته (str) موجّهة للطالب مباشرة وجاهزة للعرض.
+    ترث من ValueError لتبقى متوافقة مع أي كود يلتقط ValueError."""
+
+
+MSG_PDF_PASSWORD_PROTECTED = 'ملف PDF محمي بكلمة مرور. أزل الحماية ثم أعد إرساله.'
+MSG_PDF_INVALID = 'ملف PDF غير صالح أو فارغ من الصفحات.'
+MSG_PDF_UNREADABLE = 'تعذر قراءة ملف PDF، قد يكون تالفاً. جرّب إعادة تصديره ثم أرسله من جديد.'
+
+
 def validate_document(path):
     ext = supported_extension(path, DOCUMENT_EXTENSIONS)
     if ext == '.pdf':
         import fitz
+        # الملف المفقود من القرص ليس "PDF تالفاً/محمياً" - نرفع FileNotFoundError صراحة
+        # (fitz يرفع استثناءً خاصاً به لا يرث من FileNotFoundError المدمج) ليميّزه المستدعي.
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
         try:
             with fitz.open(path) as pdf:
-                if not pdf.is_pdf or pdf.needs_pass or len(pdf) < 1:
-                    raise ValueError('ملف PDF غير صالح أو محمي بكلمة مرور.')
+                if not pdf.is_pdf:
+                    raise InvalidUploadError(MSG_PDF_INVALID)
+                if pdf.needs_pass:
+                    raise InvalidUploadError(MSG_PDF_PASSWORD_PROTECTED)
+                if len(pdf) < 1:
+                    raise InvalidUploadError(MSG_PDF_INVALID)
                 return len(pdf)
+        except InvalidUploadError:
+            raise
+        except FileNotFoundError:
+            raise
         except Exception as exc:
-            raise ValueError('تعذر قراءة ملف PDF، تأكد أنه صالح وغير محمي بكلمة مرور.') from exc
+            if not os.path.exists(path):  # حُذف الملف أثناء الفتح
+                raise FileNotFoundError(path) from exc
+            raise InvalidUploadError(MSG_PDF_UNREADABLE) from exc
     if ext in {'.docx', '.pptx'}:
         from utils import _validate_office_archive
         import zipfile

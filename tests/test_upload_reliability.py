@@ -153,6 +153,46 @@ class FormatTests(unittest.TestCase):
             for name in ['encrypted.pdf','bad.pdf']:
                 with self.assertRaises(ValueError):validate_document(d+'/'+name)
 
+    def test_pdf_errors_name_the_real_cause(self):
+        """رسالة الخطأ تطابق السبب: مفقود / محمي بكلمة مرور / غير صالح / تالف (fitz وهمي لعدم توفره)."""
+        import sys, types as _t
+        from services.upload_validation import InvalidUploadError, MSG_PDF_PASSWORD_PROTECTED, MSG_PDF_INVALID, MSG_PDF_UNREADABLE
+        class FakePdf:
+            def __init__(self,is_pdf=True,needs_pass=False,pages=3):
+                self.is_pdf,self.needs_pass,self._pages=is_pdf,needs_pass,pages
+            def __enter__(self):return self
+            def __exit__(self,*a):return False
+            def __len__(self):return self._pages
+        behaviours={}
+        def fake_open(path):
+            result=behaviours[os.path.basename(path)]
+            if isinstance(result,Exception):raise result
+            return result
+        fake=_t.ModuleType('fitz');fake.open=fake_open
+        previous=sys.modules.get('fitz');sys.modules['fitz']=fake
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                for name,behaviour in {'ok.pdf':FakePdf(),'locked.pdf':FakePdf(needs_pass=True),
+                                       'notpdf.pdf':FakePdf(is_pdf=False),'empty.pdf':FakePdf(pages=0),
+                                       'broken.pdf':RuntimeError('cannot open broken document')}.items():
+                    behaviours[name]=behaviour;Path(d+'/'+name).write_bytes(b'x')
+                self.assertEqual(validate_document(d+'/ok.pdf'),3)
+                for name,message in [('locked.pdf',MSG_PDF_PASSWORD_PROTECTED),('notpdf.pdf',MSG_PDF_INVALID),
+                                     ('empty.pdf',MSG_PDF_INVALID),('broken.pdf',MSG_PDF_UNREADABLE)]:
+                    with self.assertRaises(InvalidUploadError) as caught:validate_document(d+'/'+name)
+                    self.assertEqual(str(caught.exception),message)
+                # ملف غير موجود على القرص: ليس "محمياً/تالفاً" - FileNotFoundError صريح
+                with self.assertRaises(FileNotFoundError):validate_document(d+'/gone.pdf')
+                # حُذف أثناء الفتح
+                behaviours['race.pdf']=RuntimeError('open failed');Path(d+'/race.pdf').write_bytes(b'x')
+                def racing_open(path):
+                    os.remove(path);raise RuntimeError('open failed')
+                fake.open=racing_open
+                with self.assertRaises(FileNotFoundError):validate_document(d+'/race.pdf')
+        finally:
+            if previous is None:sys.modules.pop('fitz',None)
+            else:sys.modules['fitz']=previous
+
     def test_image_dimension_guard(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as d:

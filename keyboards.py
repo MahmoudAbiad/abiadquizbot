@@ -810,7 +810,7 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
 
 # ==================== 🆕 AI Models Control Panel Keyboards ====================
 
-def get_ai_control_keyboard() -> types.InlineKeyboardMarkup:
+def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboardMarkup:
     """اللوحة الرئيسية للتحكم بالذكاء الاصطناعي: نقطة الدخول لكل الأقسام الفرعية
     (سلسلة التوليد، موديل الفحص السريع، موديل Groq السريع، سجل التوليد).
     ملاحظة: إعدادات النقاط ما عادت هون - انتقلت لقسم "الإعدادات العامة" المستقل
@@ -820,8 +820,14 @@ def get_ai_control_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
         [types.InlineKeyboardButton(text="⚡ موديل Groq السريع", callback_data="admin_ai_slot_groq_fast")],
         [types.InlineKeyboardButton(text="📊 سجل توليد الكويزات (الوقت + الموديل)", callback_data="admin_quiz_gen_log")],
-        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
+    if request_timeout is not None:
+        from helpers.settings_helper import format_setting_value
+        kb.append([types.InlineKeyboardButton(
+            text=f"⏱ مهلة طلب الذكاء الاصطناعي: {format_setting_value(request_timeout)} ث",
+            callback_data="admin_setting_edit_ai_request_timeout",
+        )])
+    kb.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 

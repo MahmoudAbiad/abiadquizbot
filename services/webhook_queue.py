@@ -68,7 +68,11 @@ return 1
 """
 RENEW = """-- webhook_renew
 if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then return 0 end
-return redis.call('ZADD', KEYS[2], 'XX', ARGV[3], ARGV[1])
+if not redis.call('ZSCORE', KEYS[2], ARGV[1]) then return 0 end
+-- NOTE: ZADD XX returns 0 when it only UPDATES an existing member's score, so its reply
+-- can't signal success. Ownership + membership are verified above; return 1 explicitly.
+redis.call('ZADD', KEYS[2], 'XX', ARGV[3], ARGV[1])
+return 1
 """
 
 

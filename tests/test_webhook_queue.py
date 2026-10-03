@@ -63,6 +63,19 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.now+=11
         recovered=AsyncMock();await self.queue.process_one(recovered);recovered.assert_awaited_once()
 
+    async def test_long_job_survives_lease_renewals(self):
+        # Regression: ZADD XX replies 0 when it only updates a score, so RENEW used to be read
+        # as "lease lost" and any job outliving lease_seconds/3 was cancelled mid-flight.
+        queue = WebhookQueue(self.redis, clock=lambda: self.now, lease_seconds=0.3)
+        await queue.enqueue({'update_id': 20})
+        finished = asyncio.Event()
+        async def process(payload):
+            await asyncio.sleep(0.5)  # several heartbeat ticks (every 0.1s)
+            finished.set()
+        self.assertTrue(await queue.process_one(process))
+        self.assertTrue(finished.is_set())
+        self.assertFalse(await queue.enqueue({'update_id': 20}))  # acked as done, not retried
+
     async def test_redis_failed_enqueue_never_acknowledged(self):
         queue=types.SimpleNamespace(enqueue=AsyncMock(side_effect=ConnectionError('unavailable')))
         update=types.SimpleNamespace(model_dump=lambda **kw:{'update_id':5})

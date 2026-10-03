@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 from reliability_support import FakeRedis, load_functions
 from services.redis_reliability import UserLock
+from services.upload_validation import InvalidUploadError
 
 
 class State:
@@ -31,7 +32,7 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
         states=types.SimpleNamespace(waiting_for_count='waiting_for_count',processing_file_quiz='processing',answering_quiz='answering')
         def spawn(coro):coro.close()
         async def loaded(call,state,*a,**kw):await state.update_data(quiz_data=['result'],attempt_id='saved')
-        self.env=load_functions('handlers/files.py', {'handle_count_start','_clear_quiz_charge_markers'},
+        self.env=load_functions('handlers/files.py', {'handle_count_start','_clear_quiz_charge_markers','_missing_upload_paths'},
             asyncio=asyncio, redis_client=FakeRedis(), UserLock=UserLock, QuizState=states,
             _QUIZ_CHARGE_STATE_KEYS=('debited_cost','debited_free','debited_paid'),
             validate_question_count=lambda count:(True,''), SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
@@ -39,6 +40,8 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
             _current_user=AsyncMock(return_value={'points':100}),update_user_stats=AsyncMock(return_value={'debited_free':1.5,'debited_paid':0.5}),
             log_usage_event=AsyncMock(),spawn=spawn,logger=Mock(),log_error=Mock(),log_warning=Mock(),
             refund_user_on_failure=AsyncMock(), _insufficient_balance=AsyncMock(),MSG_PROCESSING='processing',
+            os=os,Dict=dict,List=list,Any=object,InvalidUploadError=InvalidUploadError,safe_title=lambda t:t,
+            MSG_UPLOAD_FILE_MISSING='FILE-MISSING',
             execute_quiz_generation_workflow=AsyncMock(return_value=([{'question':'ok'}],'own-id','',None)),
             _run_processing_heartbeat=AsyncMock(), reward_referrer_if_eligible=AsyncMock(),start_loaded_quiz=loaded,safe_file_cleanup=Mock())
         self.state=State({'selected_question_count':5,'items_count':1,'debited_cost':999,'debited_free':999,'debited_paid':999,'source_title':'keep'})
@@ -83,6 +86,93 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
         await fn(self.call,self.state)
         release.set();await task
         self.env['update_user_stats'].assert_awaited_once()
+
+
+class UploadRetentionTests(DebitTests):
+    """الملف المرفوع لا يُحذف عند رصيد غير كافٍ/عدد غير صالح، والرسائل تطابق السبب الفعلي."""
+    def make_with_file(self, directory, **extra):
+        fn=self.make()
+        path=os.path.join(directory,'u.pdf')
+        with open(path,'wb') as handle:handle.write(b'%PDF')
+        self.env['safe_file_cleanup']=Mock(side_effect=lambda p:os.remove(p) if os.path.exists(p) else False)
+        self.state.data.update({'input_type':'media','file_paths':[path],**extra})
+        return fn,path
+
+    async def test_insufficient_balance_keeps_file_and_waiting_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn,path=self.make_with_file(d)
+            self.env['_current_user'].return_value={'points':0}
+            await fn(self.call,self.state)
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(self.state.status,'waiting_for_count')
+            self.env['_insufficient_balance'].assert_awaited_once()
+            self.env['update_user_stats'].assert_not_awaited()
+            # شحن الرصيد ثم إعادة المحاولة بنفس الملف تنجح (هذا بالضبط ما كان يفشل سابقاً)
+            self.env['_current_user'].return_value={'points':100}
+            await fn(self.call,self.state)
+            self.env['execute_quiz_generation_workflow'].assert_awaited_once()
+            self.assertFalse(os.path.exists(path))  # بعد انتهاء التوليد فقط
+
+    async def test_invalid_question_count_keeps_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn,path=self.make_with_file(d)
+            self.env['validate_question_count']=lambda c:(False,'bad count')
+            await fn(self.call,self.state)
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(self.state.status,'waiting_for_count')
+            self.call.message.answer.assert_awaited_with('❌ bad count')
+
+    async def test_missing_file_checked_before_any_debit(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn,path=self.make_with_file(d);os.remove(path)
+            await fn(self.call,self.state)
+            self.env['update_user_stats'].assert_not_awaited()
+            self.env['execute_quiz_generation_workflow'].assert_not_awaited()
+            self.assertIsNone(self.state.status)
+            text=self.call.message.answer.call_args.args[0]
+            self.assertIn('FILE-MISSING',text);self.assertIn('لم يتم خصم',text)
+
+    async def test_file_vanishing_mid_generation_refunds_with_specific_message(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn,path=self.make_with_file(d)
+            self.env['execute_quiz_generation_workflow'].side_effect=FileNotFoundError(path)
+            await fn(self.call,self.state)
+            self.env['refund_user_on_failure'].assert_awaited_once()
+            text=self.call.message.answer.call_args.args[0]
+            self.assertIn('FILE-MISSING',text);self.assertIn('تم إرجاع نقاطك',text)
+            self.assertNotIn('تعذر معالجة الملف',text)
+
+    async def test_protected_pdf_shows_its_own_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn,path=self.make_with_file(d)
+            self.env['execute_quiz_generation_workflow'].side_effect=InvalidUploadError('PDF protected msg')
+            await fn(self.call,self.state)
+            self.env['refund_user_on_failure'].assert_awaited_once()
+            text=self.call.message.answer.call_args.args[0]
+            self.assertIn('PDF protected msg',text);self.assertNotIn('FILE-MISSING',text)
+
+    async def test_generic_error_before_charge_says_no_points_deducted(self):
+        fn=self.make();self.env['_current_user'].side_effect=ValueError('db down')
+        await fn(self.call,self.state)
+        self.assertIn('لم يتم خصم',self.call.message.answer.call_args.args[0])
+
+    async def test_generic_error_after_charge_says_refunded(self):
+        fn=self.make();self.env['execute_quiz_generation_workflow'].side_effect=RuntimeError('boom')
+        await fn(self.call,self.state)
+        self.assertIn('تم إرجاع نقاطك',self.call.message.answer.call_args.args[0])
+
+    async def test_error_after_successful_generation_not_reported_as_refund(self):
+        fn=self.make()
+        async def broken(*a,**k):raise RuntimeError('telegram send failed')
+        self.env['start_loaded_quiz']=broken
+        await fn(self.call,self.state)
+        self.env['refund_user_on_failure'].assert_not_awaited()
+        self.assertIn('تم توليد الكويز',self.call.message.answer.call_args.args[0])
+
+
+# الاختبارات الموروثة من DebitTests لا تُعاد تشغيلها ضمن UploadRetentionTests
+for _name in [n for n in dir(DebitTests) if n.startswith('test_')]:
+    setattr(UploadRetentionTests,_name,None)
 
 
 class QuizIDTests(unittest.IsolatedAsyncioTestCase):
