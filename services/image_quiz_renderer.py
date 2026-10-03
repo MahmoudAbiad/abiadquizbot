@@ -769,7 +769,19 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         color = BADGE_COLORS[i % len(BADGE_COLORS)]
         # نقطة ملوّنة صغيرة بجانب كل خيار لتمييزه بصرياً (بدون تكرار الحرف - موجود أصلاً بالنص)
         badge_x = MARGIN_PX - 20 if not is_ar else FIG_WIDTH_PX - MARGIN_PX + 20
-        ax.scatter([badge_x], [y + 10], s=90, color=color, zorder=3, clip_on=False)
+        # 🛠️ FIX (محاذاة): النقطة كانت تُرسم عند y+10 (أي فوق بداية السطر)، فتظهر أعلى
+        # من الخيار. نحسب الارتفاع الفعلي (بدون هامش الأمان) لأول سطر بالخيار ونضع
+        # النقطة عند منتصفه العمودي تماماً، فتبقى بنص الخيار حتى مع الكسور/الجذور.
+        first_line = block[0] if block else ""
+        try:
+            _m = _MATH_PARSER.parse(first_line, dpi=DPI, prop=opt_font_prop)
+            # نعتمد على الارتفاع فوق خط الأساس (height) فقط، بدون العمق (depth): العمق يشمل
+            # مساحة تحت السطر فارغة غالباً فكان يُنزل النقطة تحت منتصف النص بحوالي 14px.
+            # الخصم (~0.13em) يضع النقطة عند مستوى علامة "=" (محور الرياضيات) بصرياً.
+            dot_offset = _m.height / 2 - 0.13 * OPTION_FONT_SIZE * DPI / 72
+        except Exception:
+            dot_offset = OPTION_LINE_HEIGHT_PX * 0.4
+        ax.scatter([badge_x], [y - dot_offset], s=90, color=color, zorder=3, clip_on=False)
         for line, line_h in zip(block, heights):
             ax.text(x, y, line, ha=align, va="top",
                     fontsize=OPTION_FONT_SIZE, color="#2c2c2c",
