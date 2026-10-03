@@ -259,7 +259,10 @@ def _measure_line_height_px(text: str, font_prop: fm.FontProperties, fallback_px
 def _wrap_tokens(tokens: List[str], max_width_px: float, is_ar: bool, font_prop: fm.FontProperties) -> List[str]:
     """يلف الكلمات على أسطر بالاعتماد على العرض الفعلي بالبكسل (مش عدد الحروف)،
     مع تشكيل أي كلمة عربية قبل قياسها عشان القياس يطابق شكلها الحقيقي وقت الرسم."""
-    space_w = _measure_px(" ", font_prop)
+    # 🛠️ FIX (overflow): mathtext يقصّ المسافة المنفردة (parse(" ") يرجّع ~2px بدل ~13px
+    # فعلياً)، فكان عرض كل سطر يُقدَّر أقل من الحقيقي بحوالي (عدد المسافات × 10px) ويفيض
+    # عن الصورة. نقيس المسافة بالفرق بين "a b" و"ab" فتطلع قيمتها الحقيقية.
+    space_w = max(_measure_px("a b", font_prop) - _measure_px("ab", font_prop), 1.0)
     lines: List[str] = []
     current: List[str] = []
     current_w = 0.0
@@ -309,10 +312,25 @@ def _shape_line(line: str) -> str:
 
 
 def _wrap_and_shape(text: str, is_ar: bool, max_width_px: float, font_prop: fm.FontProperties) -> List[str]:
-    lines = _wrap_tokens(_tokenize_mixed(text), max_width_px, is_ar, font_prop)
-    if is_ar:
-        return [_shape_line(line) for line in lines]
-    return lines
+    tokens = _tokenize_mixed(text)
+    wrap_w = max_width_px
+    lines: List[str] = []
+    shaped: List[str] = []
+    # 🛠️ FIX (overflow): الالتفاف يعتمد على قياس كل كلمة لحالها، بينما الرسم الفعلي يرسم
+    # السطر كاملاً (تشكيل + mathtext) بعرض قد يختلف. فنتحقق من العرض الحقيقي للسطر
+    # النهائي (بنفس مسار الرسم: shape ثم sanitize ثم قياس)، ولو تجاوز الحد نُضيّق عرض
+    # الالتفاف بمقدار الزيادة ونعيد المحاولة (حد أقصى 6 محاولات؛ كلمة واحدة أعرض من الحد
+    # لا يمكن كسرها فتتوقف الحلقة بعد المحاولات ويتكفّل بها fallback الأسفل).
+    for _ in range(6):
+        lines = _wrap_tokens(tokens, wrap_w, is_ar, font_prop)
+        shaped = [_shape_line(line) for line in lines] if is_ar else lines
+        worst = max(_measure_px(_sanitize_line_for_mathtext(l), font_prop) for l in shaped)
+        if worst <= max_width_px:
+            break
+        wrap_w -= (worst - max_width_px) + 4
+        if wrap_w <= 0:
+            break
+    return shaped
 
 
 def _sanitize_line_for_mathtext(line: str) -> str:
