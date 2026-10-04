@@ -262,6 +262,11 @@ async def ack_new_user_start(call: types.CallbackQuery):
 @router.callback_query(F.data == "recharge_info")
 async def show_recharge_info(call: types.CallbackQuery):
     try:
+        # 💳 الشحن الذاتي (فلاغ payments_enabled + باقات نشطة بجدول payment_packages). لو غير متاح
+        # نكمل بشاشة الباقات اليدوية (RECHARGE_PACKAGES) أدناه عبر الدعم.
+        from handlers.payments import try_show_payment_packages
+        if await try_show_payment_packages(call):
+            return
         recharge_text = (
             "🔋 <b>شحن النقاط</b>\n\n"
             "اختر الباقة المطلوبة، ثم اضغط «تواصل للشحن» لمعرفة طريقة الدفع.\n\n"

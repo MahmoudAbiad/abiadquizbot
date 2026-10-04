@@ -686,6 +686,29 @@ WEBHOOK_PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 
+# ==================== 💳 الشحن الذاتي (شام كاش + MacroDroid) ====================
+# راجع services/payment_service.py و handlers/payments.py و db/migrations/0006_payments.sql
+# السر الذي يرسله MacroDroid بالـ header X-Payment-Secret. PAYMENT_WEBHOOK_SECRET_NEXT اختياري
+# لتدوير السر بدون توقف (يُقبل السران معاً أثناء الانتقال). فاضي = الـ endpoint مغلق (503).
+PAYMENT_WEBHOOK_SECRET = os.getenv("PAYMENT_WEBHOOK_SECRET", "")
+PAYMENT_WEBHOOK_SECRET_NEXT = os.getenv("PAYMENT_WEBHOOK_SECRET_NEXT", "")
+try:
+    PAYMENT_ADMIN_GROUP_ID = int(os.getenv("PAYMENT_ADMIN_GROUP_ID", "0") or 0)
+except ValueError:
+    PAYMENT_ADMIN_GROUP_ID = 0
+# معرّفات إضافية (مفصولة بفواصل) مسموح لها بالضغط على أزرار الشحن بمجموعة الأدمن؛ ADMIN_ID مسموح دائماً.
+PAYMENT_ADMIN_IDS_EXTRA = os.getenv("PAYMENT_ADMIN_IDS", "")
+# بيانات استلام شام كاش (تُعرض للطالب): كود التحويل اليدوي + صورة QR اختيارية.
+SHAMCASH_TRANSFER_CODE = os.getenv("SHAMCASH_TRANSFER_CODE", "")
+SHAMCASH_QR_PATH = os.getenv("SHAMCASH_QR_PATH", "assets/shamcash_qr.jpg")
+
+PAYMENT_ORDER_TTL_MINUTES = 60          # صلاحية الطلب المفتوح
+PAYMENT_NOTIFICATION_ORPHAN_MINUTES = 5  # إشعار وصل ولم يتبعه حدث سجل خلال هالمدة -> تنبيه للمجموعة
+PAYMENT_EVENT_RETENTION_DAYS = 14       # حذف الأحداث الخام (قد تحوي أسماء أطراف أخرى)
+PAYMENT_WEBHOOK_RATE_LIMIT = 60         # طلبات/دقيقة كحد أقصى للـ endpoint
+PAYMENT_WEBHOOK_MAX_BODY_BYTES = 256 * 1024
+PAYMENT_HEARTBEAT_TTL_SECONDS = 15 * 60
+
 # ==================== Channel & Support Configuration ====================
 
 # 🔗 استبدل YourSupportBotUsername بيوزر بوت الدعم الخاص بك
@@ -907,6 +930,7 @@ MSG_REDIRECT_TO_WEB_UPLOAD = (
 # ==============================================================================
 FEATURE_FLAGS_REGISTRY = {
     "classification_vote_prompt": "🗳️ رسالة التحقق المجتمعي من تصنيف الملف (نعم/لا)",
+    "payments_enabled": "💳 الشحن الذاتي عبر شام كاش (إيقافه يرجع شاشة الشحن عبر الدعم)",
 }
 
 # 🩹 الملف المرفوع لم يعد موجوداً على السيرفر وقت بدء التوليد (إعادة تشغيل/تنظيف) - الحالة

@@ -29,6 +29,7 @@ from handlers import (
     audio_router,
     quiz_delete_router,
     group_quiz_router,
+    payments_router,
 )
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
 
@@ -73,6 +74,7 @@ def main():
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
         # (معالج poll_answer العام هناك بيوقف الانتشار) - راجع handlers/group_quiz.py
         group_quiz_router,
+        payments_router,  # 💳 أزرار الشحن الذاتي (pay:*) - راجع handlers/payments.py
         start_router,
         admin_router,
         sharing_router,

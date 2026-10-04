@@ -28,6 +28,8 @@ from constants import (
     QUESTION_EDIT_MAX_OPTION_LEN, QUESTION_EDIT_MAX_CELL_LEN, QUESTION_EDIT_MAX_TABLE_ROWS,
     QUESTION_EDIT_MAX_TABLE_COLS, QUESTION_EDIT_MAX_MATRICES, QUESTION_EDIT_MAX_MATRIX_ROWS,
     QUESTION_EDIT_MAX_MATRIX_COLS,
+    PAYMENT_WEBHOOK_SECRET, PAYMENT_WEBHOOK_SECRET_NEXT, PAYMENT_WEBHOOK_RATE_LIMIT,
+    PAYMENT_WEBHOOK_MAX_BODY_BYTES,
 )
 from telegram_webapp_auth import verify_telegram_init_data
 from services.redis_reliability import complete_once
@@ -207,6 +209,12 @@ async def lifespan(app: FastAPI):
         spawn(group_quiz_cleanup_loop())
         print("🧹 تم جدولة تنظيف بيانات الكويز الجماعي القديمة كل 12 ساعة.")
 
+        # 💳 watchdog الشحن الذاتي: إنهاء الطلبات المنتهية + تنبيه الإشعارات اليتيمة (راجع
+        # services/payment_service.py). آمنة وهي مطفية: لا تفعل شيئاً بدون طلبات/أحداث.
+        from services.payment_service import payment_watchdog_loop
+        spawn(payment_watchdog_loop())
+        print("💳 تم جدولة watchdog الشحن الذاتي كل 60 ثانية.")
+
     except Exception as e:
         print(f"❌ فشل تفعيل الـ Webhook أو المهام الدورية أثناء تشغيل السيرفر: {e}")
         logger.critical(f"Failed to set webhook or tasks on startup: {e}", exc_info=True)
@@ -277,6 +285,93 @@ async def webhook(request: Request):
         logger.error("Cannot enqueue Telegram update; returning 503 for Telegram retry", exc_info=True)
         raise HTTPException(status_code=503, detail="Update queue unavailable") from exc
     return {"ok": True}
+
+# ==================== 💳 Payment Webhook (MacroDroid) ====================
+
+def _payment_secret_ok(request: Request) -> bool:
+    """يتحقق من سر الجهاز بالـ header (X-Payment-Secret أو Authorization: Bearer) بمقارنة ثابتة
+    الزمن. يقبل السر الحالي والتالي (تدوير بدون توقف). fail-closed لو لا سر مضبوط."""
+    given = request.headers.get("x-payment-secret") or ""
+    if not given:
+        auth = request.headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            given = auth[7:].strip()
+    if not given:
+        return False
+    ok = False
+    for secret in (PAYMENT_WEBHOOK_SECRET, PAYMENT_WEBHOOK_SECRET_NEXT):
+        if secret and hmac.compare_digest(given.encode("utf-8"), secret.encode("utf-8")):
+            ok = True
+    return ok
+
+
+def _parse_payment_body(raw: bytes, content_type: str) -> Dict[str, Any]:
+    """MacroDroid قد يرسل JSON أو form أو نصاً خاماً (وقد تكسر علامة اقتباس بالنص العربي JSON).
+    لا نرفض أبداً بسبب شكل الجسم: JSON -> form -> نص خام يُعامل كـ screen_data."""
+    import json
+    from urllib.parse import parse_qs
+    text = raw.decode("utf-8", errors="replace")
+    if "text/plain" in content_type:
+        # نص خام صريح (الأسلم من MacroDroid: لا JSON يتكسر ولا form يتفكك بسبب & أو =).
+        return {"event_type": "screen", "screen_data": text, "raw_text": text, "malformed_body": True}
+    if "json" in content_type or text.lstrip().startswith("{"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except ValueError:
+            pass
+    if "x-www-form-urlencoded" in content_type or ("=" in text and "\n" not in text.strip()[:200]):
+        parsed = {k: v[0] for k, v in parse_qs(text, keep_blank_values=True).items()}
+        if parsed:
+            return parsed
+    return {"event_type": "screen", "screen_data": text, "raw_text": text, "malformed_body": True}
+
+
+def _apply_payment_query(payload: Dict[str, Any], query) -> Dict[str, Any]:
+    """يسمح بتحديد event_type وdevice_id من الـ URL (?event_type=notification&device_id=phone1)
+    فيصير جسم الطلب نصاً خاماً بسيطاً بلا أي صيغة قابلة للكسر. النص الخام يُوجَّه للحقل الصحيح
+    حسب نوع الحدث (إشعار/طلب يدوي -> notification_text، وغير ذلك -> screen_data)."""
+    event_type = (query.get("event_type") or "").strip().lower()[:40]
+    device_id = (query.get("device_id") or "").strip()[:80]
+    if device_id and not payload.get("device_id"):
+        payload["device_id"] = device_id
+    if not event_type:
+        return payload
+    payload["event_type"] = event_type
+    raw = payload.get("raw_text")
+    if raw is not None:
+        payload.pop("screen_data", None)
+        target = "notification_text" if event_type in ("notification", "manual_request") else "screen_data"
+        payload[target] = raw
+    return payload
+
+
+@app.post("/api/payments/macrodroid")
+async def payments_macrodroid(request: Request):
+    """يستقبل أحداث الجوال (notification / screen / manual_request / heartbeat). يسجّل الحدث خاماً
+    ويرد 200 فوراً، والمعالجة بالخلفية. راجع services/payment_service.py."""
+    if not (PAYMENT_WEBHOOK_SECRET or PAYMENT_WEBHOOK_SECRET_NEXT):
+        logger.error("Payment webhook rejected: PAYMENT_WEBHOOK_SECRET is not configured")
+        raise HTTPException(status_code=503, detail="Payments not configured")
+    if not _payment_secret_ok(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    await _enforce_upload_rate_limit(0, "payment_hook", PAYMENT_WEBHOOK_RATE_LIMIT, 60)
+
+    raw = await request.body()
+    if len(raw) > PAYMENT_WEBHOOK_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Payload too large")
+    payload = _parse_payment_body(raw, (request.headers.get("content-type") or "").lower())
+    payload = _apply_payment_query(payload, request.query_params)
+
+    from services.payment_service import handle_incoming_event
+    try:
+        return await handle_incoming_event(payload)
+    except Exception as exc:
+        logger.error(f"payment event could not be recorded: {exc}", exc_info=True)
+        # 503 => الجوال يعتبرها فشلاً (MacroDroid يمكنه إعادة المحاولة/التحويل للمعالجة اليدوية).
+        raise HTTPException(status_code=503, detail="Could not record event") from exc
+
 
 # ==================== Audio Web Upload (Telegram Mini App) ====================
 
