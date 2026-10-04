@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.payment_parser import (  # noqa: E402
     CODE_LENGTH, SYRIA_TZ, find_codes_in_note, generate_code, looks_like_transfers_screen,
-    make_unique_code, normalize_digits, parse_cards,
+    clean_screen_text, make_unique_code, normalize_digits, parse_cards,
 )
 
 # أشكال حقيقية من لقطات شاشة MacroDroid (screen_data)
@@ -39,9 +39,36 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(find_codes_in_note("8771"), [])  # 4 خانات
         self.assertEqual(find_codes_in_note("#413833019"), [])  # رقم عملية 9 خانات
         self.assertEqual(find_codes_in_note(None), [])
+        self.assertEqual(find_codes_in_note("[123456$]: 482913"), ["482913"])
 
 
 class ParseCardsTests(unittest.TestCase):
+    def test_macrodroid_prefix_on_counterparty(self):
+        for prefix in ("[5$]: ", "[12$] ", "[٥$]: "):
+            with self.subTest(prefix=prefix):
+                (card,) = parse_cards(prefix + CARD_OUT_WITH_NOTE)
+                self.assertEqual(card.counterparty, "ضحى طالب حريري")
+                self.assertEqual(card.amount, Decimal("5"))
+                self.assertEqual(card.currency, "SYP")
+                self.assertEqual(card.note, "8771")
+
+    def test_indexed_lines_keep_cards_and_codes_separate(self):
+        raw = "آخر التحويلات\n" + CARD_IN_250 + "\n482913\n" + CARD_OUT_WITH_NOTE
+        indexed = "\n".join(f"[{i}$]: {line}" for i, line in enumerate(raw.splitlines()))
+        for screen in (indexed, json.dumps([indexed])):
+            with self.subTest(screen=screen):
+                cards = parse_cards(screen)
+                self.assertEqual([c.counterparty for c in cards], ["زكي نعيم جولجي", "ضحى طالب حريري"])
+                self.assertEqual([c.amount for c in cards], [Decimal("250"), Decimal("5")])
+                self.assertEqual([c.note for c in cards], ["482913", "8771"])
+                self.assertEqual(find_codes_in_note(cards[0].note), ["482913"])
+
+    def test_cleanup_preserves_actual_text_and_currency(self):
+        for text in ("5$", "$5", "[VIP] أحمد", "أحمد [5$]", "شحن 482913", "65 ل.س"):
+            self.assertEqual(clean_screen_text(text), text)
+        self.assertEqual(clean_screen_text("[5$]: <أحمد & علي>"), "<أحمد & علي>")
+        self.assertEqual(clean_screen_text(None), "")
+
     def test_single_card_json_item(self):
         (card,) = parse_cards(json.dumps([CARD_OUT_100]))
         self.assertEqual(card.tx_id, "461226096")

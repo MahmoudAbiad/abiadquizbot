@@ -154,6 +154,18 @@ class Base(unittest.IsolatedAsyncioTestCase):
 
 
 class IngestTests(Base):
+    async def test_stored_receipt_display_cleans_prefixes_and_escapes_html(self):
+        receipt = {"id": 1, "tx_id": "123456789", "amount": 65, "currency": "SYP",
+                   "counterparty": "[5$]: <ضحى & طالب>", "note": "[8$]: 833658"}
+        await ps._notify_receipt(receipt, "")
+        text, _ = self.sent()[-1]
+        self.assertNotIn("[5$]", text)
+        self.assertNotIn("[8$]", text)
+        self.assertIn("&lt;ضحى &amp; طالب&gt;", text)
+        self.assertIn("833658", text)
+        self.assertIn("65 ل.س", text)
+        self.assertEqual(receipt["counterparty"], "[5$]: <ضحى & طالب>")
+
     async def test_first_run_baselines_old_cards_without_alerting_per_card(self):
         old = NOW - datetime.timedelta(days=3)
         raw = screen(card_text("أ", "111111111", 100, old), card_text("ب", "222222222", 250, old))

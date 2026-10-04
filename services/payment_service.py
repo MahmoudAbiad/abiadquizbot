@@ -32,7 +32,7 @@ from constants import (
 from helpers.supabase_helper import supabase
 from logger import get_logger
 from services.payment_parser import (
-    ParsedCard, find_codes_in_note, looks_like_transfers_screen, make_unique_code, parse_cards,
+    ParsedCard, clean_screen_text, find_codes_in_note, looks_like_transfers_screen, make_unique_code, parse_cards,
 )
 from task_utils import spawn
 
@@ -459,9 +459,9 @@ async def _notify_receipt(receipt: Dict[str, Any], notification_text: str) -> No
         "",
         f"🔢 رقم العملية: <code>#{receipt['tx_id']}</code>",
         f"💰 المبلغ: <b>{format_money(receipt.get('amount'), receipt.get('currency'))}</b>",
-        f"👤 الطرف الآخر: {html.escape(receipt.get('counterparty') or '-')}",
+        f"👤 الطرف الآخر: {html.escape(clean_screen_text(receipt.get('counterparty')) or '-')}",
         f"🕒 وقت الحوالة: {html.escape(format_payment_time(tx_time))}",
-        f"📝 الملاحظة: <code>{html.escape(receipt.get('note') or '-')}</code>",
+        f"📝 الملاحظة: <code>{html.escape(clean_screen_text(receipt.get('note')) or '-')}</code>",
     ]
     if notification_text:
         lines.append(f"\n🔔 نص الإشعار:\n<code>{html.escape(notification_text[:500])}</code>")

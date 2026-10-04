@@ -46,6 +46,18 @@ _AMOUNT_RE = re.compile(r"^[+\-–−]?\s*[\d][\d,\.]*$")
 _CODE_IN_NOTE_RE = re.compile(rf"(?<!\d)\d{{{CODE_LENGTH}}}(?!\d)")
 _ITEM_SEP = "\n\u241e\n"
 
+# MacroDroid's text dump can prefix screen items with an index, e.g. [5$]:.
+# Only remove this exact leading marker, never dollar amounts or arbitrary brackets.
+_SCREEN_PREFIX_RE = re.compile(r"^\s*\[\s*\d+\s*\$\s*\]\s*[:：]?\s*")
+
+
+def clean_screen_text(text: Optional[str]) -> str:
+    """Strip extraction prefixes per line; preserve the actual field contents."""
+    return "\n".join(
+        _SCREEN_PREFIX_RE.sub("", line).strip()
+        for line in (text or "").splitlines()
+    ).strip()
+
 
 def normalize_digits(text: str) -> str:
     """يحوّل الأرقام العربية-الهندية والفارسية للغربية."""
@@ -71,7 +83,7 @@ def make_unique_code(existing: Iterable[str], length: int = CODE_LENGTH, attempt
 def find_codes_in_note(note: Optional[str]) -> List[str]:
     """كل المرشحين للكود (6 أرقام مستقلة) داخل الملاحظة بعد التطبيع. لا يلتقط أرقام العمليات
     (9 خانات) ولا المبالغ الأطول/الأقصر لأن الشرط أرقام 6 بالضبط محاطة بغير أرقام."""
-    return _CODE_IN_NOTE_RE.findall(normalize_digits(note or ""))
+    return _CODE_IN_NOTE_RE.findall(normalize_digits(clean_screen_text(note)))
 
 
 @dataclass
@@ -135,7 +147,7 @@ def looks_like_transfers_screen(raw: str) -> bool:
 
 
 def _clean_lines(block: str) -> List[str]:
-    return [ln.strip() for ln in block.replace("\r", "").split("\n") if ln.strip()]
+    return [ln for ln in clean_screen_text(block).splitlines() if ln]
 
 
 def _card_from_lines(before: List[str], tx_id: str, after: List[str], raw: str) -> ParsedCard:
