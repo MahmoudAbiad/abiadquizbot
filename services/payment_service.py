@@ -20,6 +20,7 @@ import html
 import os
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
+from zoneinfo import ZoneInfo
 
 from aiogram import types
 
@@ -58,6 +59,24 @@ def _iso(dt: datetime.datetime) -> str:
 
 
 # ==================== أدوات عرض ====================
+
+def format_payment_time(value: Any) -> str:
+    """Display stored receipt timestamps in Syria's timezone; storage remains UTC."""
+    if not value:
+        return "غير متوفر"
+    try:
+        dt = value if isinstance(value, datetime.datetime) else datetime.datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        local = dt.astimezone(ZoneInfo("Asia/Damascus"))
+    except (ValueError, TypeError):
+        return "وقت غير صالح"
+    period = "صباحًا" if local.hour < 12 else "مساءً"
+    clock = f"{local.hour % 12 or 12}:{local.minute:02d}:{local.second:02d}"
+    return f"{local:%d/%m/%Y} — {clock} {period} (بتوقيت سوريا)"
+
 
 def format_money(amount: Any, currency: Optional[str]) -> str:
     try:
@@ -441,7 +460,7 @@ async def _notify_receipt(receipt: Dict[str, Any], notification_text: str) -> No
         f"🔢 رقم العملية: <code>#{receipt['tx_id']}</code>",
         f"💰 المبلغ: <b>{format_money(receipt.get('amount'), receipt.get('currency'))}</b>",
         f"👤 الطرف الآخر: {html.escape(receipt.get('counterparty') or '-')}",
-        f"🕒 الوقت: {html.escape(str(tx_time)[:19])}",
+        f"🕒 وقت الحوالة: {html.escape(format_payment_time(tx_time))}",
         f"📝 الملاحظة: <code>{html.escape(receipt.get('note') or '-')}</code>",
     ]
     if notification_text:
