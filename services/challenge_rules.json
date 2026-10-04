@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "questions_per_attack": 10,
+  "question_seconds": 30,
+  "attack_seconds": 900,
+  "star_thresholds": [0.6, 0.8, 1.0],
+  "accuracy_points": 95,
+  "speed_bonus": 5,
+  "xp_per_correct": 10,
+  "trophies_per_star": 5,
+  "loss_trophies": 0,
+  "target_cooldown_seconds": 21600,
+  "daily_attack_limit": 20,
+  "daily_xp_limit": 300,
+  "daily_trophy_limit": 60,
+  "repeat_content_seconds": 86400,
+  "tower_level_base_xp": 100,
+  "max_tower_level": 20,
+  "matchmaking_range": 500,
+  "online_seconds": 120,
+  "notification_cooldown_seconds": 600
+}
