@@ -16,9 +16,9 @@ FEATURE_EXTRA_SETTINGS أدناه + settings_helper.SETTING_TO_FEATURE_FLAG."""
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 
-from constants import FEATURE_FLAGS_REGISTRY
+from constants import FEATURE_FLAGS_REGISTRY, FEATURE_SUBFLAGS_REGISTRY
 from keyboards import get_feature_flags_keyboard, get_feature_detail_keyboard
-from helpers.supabase_helper import get_all_feature_flags, set_feature_flag
+from helpers.supabase_helper import get_all_feature_flags, is_feature_enabled, set_feature_flag
 from helpers.settings_helper import get_app_settings, SETTING_LABELS, format_setting_value
 from logger import get_logger
 from .dashboard import IsAdminFilter, safe_edit_text
@@ -86,6 +86,13 @@ async def render_feature_detail(event, flag_key: str) -> None:
                 format_setting_value(value),
             ))
 
+    # المفاتيح الفرعية (مثل "شحن تلقائي"): مطفية افتراضياً عند غياب الصف، لذا تُقرأ بـ default=False
+    # وليس بقيمة الرئيسية، كي لا تظهر مفعّلة بالخطأ قبل أن يشغّلها الأدمن صراحةً.
+    sub_flags = []
+    for sub_key, (parent, sub_label) in FEATURE_SUBFLAGS_REGISTRY.items():
+        if parent == flag_key:
+            sub_flags.append((sub_key, sub_label, await is_feature_enabled(sub_key, default=False)))
+
     status_line = "✅ مفعّلة حالياً" if enabled else "🚫 موقوفة حالياً"
     text = (
         f"🧩 <b>{label}</b>\n"
@@ -93,7 +100,13 @@ async def render_feature_detail(event, flag_key: str) -> None:
         f"الحالة: {status_line}\n\n"
         "اضغط لتشغيل/إيقاف الميزة، أو لتعديل أي إعداد خاص بها أدناه."
     )
-    reply_markup = get_feature_detail_keyboard(flag_key, enabled, extra_settings)
+    if any(on for _, _, on in sub_flags):
+        text += (
+            "\n\n🤖 <b>الشحن التلقائي مفعّل:</b> تُصادَق تلقائياً فقط الدفعات المكتملة الصحة "
+            "(كود وحيد مطابق + مبلغ مطابق + وقت ضمن عمر الطلب)، "
+            "وأي دفعة ناقصة تبقى للتأكيد اليدوي."
+        )
+    reply_markup = get_feature_detail_keyboard(flag_key, enabled, extra_settings, sub_flags)
 
     if isinstance(event, types.CallbackQuery):
         await safe_edit_text(event.message, text, reply_markup=reply_markup)
@@ -120,12 +133,17 @@ async def open_flag_detail(call: types.CallbackQuery, state: FSMContext) -> None
 @router.callback_query(F.data.startswith("admin_flag_toggle_"))
 async def toggle_flag(call: types.CallbackQuery) -> None:
     key = call.data.replace("admin_flag_toggle_", "", 1)
-    if key not in FEATURE_FLAGS_REGISTRY:
+    sub_parent = FEATURE_SUBFLAGS_REGISTRY.get(key, (None, None))[0]
+    if key not in FEATURE_FLAGS_REGISTRY and not sub_parent:
         await call.answer("❌ مفتاح غير معروف.", show_alert=True)
         return
     try:
-        flags = await get_all_feature_flags(FEATURE_FLAGS_REGISTRY)
-        new_value = not flags.get(key, True)
+        if sub_parent:
+            # مفتاح فرعي: يُبدَّل بقيمته الفعلية (الافتراضية "موقوف") ثم تُعاد لوحة الميزة الأم.
+            new_value = not await is_feature_enabled(key, default=False)
+        else:
+            flags = await get_all_feature_flags(FEATURE_FLAGS_REGISTRY)
+            new_value = not flags.get(key, True)
         saved = await set_feature_flag(key, new_value)
         if not saved:
             await call.answer("❌ تعذر حفظ التغيير، حاول مجدداً.", show_alert=True)
@@ -133,7 +151,7 @@ async def toggle_flag(call: types.CallbackQuery) -> None:
         # 🩹 التبديل بيصير الآن من داخل لوحة تفاصيل الميزة نفسها (بعد فتحها عبر
         # admin_flag_detail_)، فبنرجّع نفس اللوحة بحالتها المحدَّثة بدل الرجوع
         # للقائمة الرئيسية كما كان سابقاً.
-        await render_feature_detail(call, key)
+        await render_feature_detail(call, sub_parent or key)
         await call.answer("✅ تم التفعيل" if new_value else "🚫 تم الإيقاف")
     except Exception as e:
         logger.error(f"Error toggling feature flag '{key}': {e}")

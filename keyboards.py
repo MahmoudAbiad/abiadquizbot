@@ -975,16 +975,23 @@ def get_feature_flags_keyboard(flags: dict, registry: dict) -> types.InlineKeybo
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_feature_detail_keyboard(flag_key: str, enabled: bool, extra_settings: list) -> types.InlineKeyboardMarkup:
+def get_feature_detail_keyboard(flag_key: str, enabled: bool, extra_settings: list,
+                                sub_flags: list = None) -> types.InlineKeyboardMarkup:
     """لوحة تفاصيل ميزة واحدة ضمن "مفاتيح التحكم": زر تشغيل/إيقاف الميزة نفسها +
     زر تعديل لكل إعداد إضافي خاص بها (extra_settings)، بدل الاكتفاء بالتشغيل/الإيقاف
     فقط كما كانت get_feature_flags_keyboard قديماً. extra_settings: قائمة عناصر
     (setting_key, label, value_text) جاهزة للعرض - راجع
     handlers/admin/feature_flags.py (FEATURE_EXTRA_SETTINGS + render_feature_detail)
-    لمصدرها."""
+    لمصدرها. sub_flags: قائمة (key, label, enabled) لمفاتيح فرعية
+    (constants.FEATURE_SUBFLAGS_REGISTRY) تظهر كأزرار تبديل تحت زر الميزة نفسها."""
     kb = []
     toggle_text = "🚫 إيقاف الميزة" if enabled else "✅ تشغيل الميزة"
     kb.append([types.InlineKeyboardButton(text=toggle_text, callback_data=f"admin_flag_toggle_{flag_key}")])
+    for sub_key, sub_label, sub_enabled in (sub_flags or []):
+        kb.append([types.InlineKeyboardButton(
+            text=f"{sub_label}: {'✅ مفعّل' if sub_enabled else '🚫 موقوف'}",
+            callback_data=f"admin_flag_toggle_{sub_key}"
+        )])
     for setting_key, label, value_text in extra_settings:
         kb.append([types.InlineKeyboardButton(
             text=f"{label}: {value_text}",

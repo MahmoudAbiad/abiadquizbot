@@ -112,6 +112,15 @@ REDIS = FakeRedis()
 sys.modules["config"] = types.SimpleNamespace(ADMIN_ID=111, bot=BOT, redis_client=REDIS)
 _helpers = types.ModuleType("helpers"); _helpers.__path__ = []
 _sh = types.ModuleType("helpers.supabase_helper"); _sh.supabase = DB
+FLAGS = {}  # مفاتيح التحكم الوهمية؛ الغائب يأخذ default الذي يمرره الكود (نفس سلوك الحقيقي)
+
+
+async def _fake_is_feature_enabled(key, default=True):
+    return FLAGS.get(key, default)
+
+
+_sh.is_feature_enabled = _fake_is_feature_enabled
+_sh.log_usage_event = AsyncMock()
 sys.modules["helpers"], sys.modules["helpers.supabase_helper"] = _helpers, _sh
 
 import constants  # noqa: E402
@@ -138,6 +147,7 @@ class Base(unittest.IsolatedAsyncioTestCase):
         DB.__init__()
         BOT.send_message.reset_mock()
         REDIS.values.clear()
+        FLAGS.clear()
 
     def sent(self):
         return [(c.args[1], c.kwargs.get("reply_markup")) for c in BOT.send_message.call_args_list]
@@ -255,6 +265,134 @@ class IngestTests(Base):
         finally:
             ps.parse_cards = original
         self.assertIn("خطأ داخلي", self.sent()[-1][0])
+
+
+class AutoConfirmTests(Base):
+    """🤖 المصادقة التلقائية: تُشحن الدفعة المكتملة الصحة فقط، وأي نقص يبقيها يدوية بأزرارها."""
+
+    def setUp(self):
+        super().setUp()
+        FLAGS.update({"payments_enabled": True, "payments_auto_confirm": True})
+        self.credit = AsyncMock(return_value={"result": "ok", "order_user_id": 5, "credited_points": 100,
+                                              "new_total_points": 150.0})
+        self._orig_credit, ps.credit_order = ps.credit_order, self.credit
+        BOT.edit_message_reply_markup = AsyncMock()
+
+    def tearDown(self):
+        ps.credit_order = self._orig_credit
+
+    async def order(self, **kw):
+        order = await self.make_order(**kw)
+        for row in DB.tables["payment_orders"]:  # الطلب أُنشئ قبل 5 دقائق (لا بعد الحوالة)
+            row["created_at"] = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)).isoformat()
+        DB.tables["payment_receipts"].append({"id": 99, "tx_id": "000000001", "status": "baseline"})  # ليست أول مرة
+        return order
+
+    async def arrive(self, amount=5000, note="482913", minutes_ago=0.5, tx="444444444"):
+        when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes_ago)
+        await ps.process_event(2, "screen", "d", "", screen(card_text("طالب", tx, amount, when, note)))
+
+    def manual_card(self):
+        return [t for t, m in self.sent() if m and any(d.startswith("pay:ok:") for d in self.buttons(m))]
+
+    async def test_fully_valid_payment_is_credited_automatically(self):
+        order = await self.order()
+        await self.arrive()
+        rid = [r for r in DB.tables["payment_receipts"] if r["tx_id"] == "444444444"][0]["id"]
+        self.credit.assert_awaited_once_with(order["id"], rid, "auto:shamcash")
+        self.assertEqual(self.manual_card(), [])
+        texts = [t for t, _ in self.sent()]
+        self.assertTrue(any("أخبار سارة" in t for t in texts))      # الطالب أُبلغ
+        self.assertTrue(any("شحن تلقائي" in t for t in texts))      # المجموعة أُبلغت
+
+    async def test_awaiting_verification_order_is_also_auto_credited(self):
+        await self.order(status="awaiting_verification")
+        await self.arrive()
+        self.credit.assert_awaited_once()
+
+    async def test_flag_off_keeps_manual_flow(self):
+        FLAGS["payments_auto_confirm"] = False
+        await self.order()
+        await self.arrive()
+        self.credit.assert_not_awaited()
+        self.assertEqual(len(self.manual_card()), 1)
+        self.assertNotIn("الشحن التلقائي مفعّل", self.manual_card()[0])
+
+    async def test_flag_missing_defaults_to_off(self):
+        del FLAGS["payments_auto_confirm"]
+        await self.order()
+        await self.arrive()
+        self.credit.assert_not_awaited()
+
+    async def test_parent_feature_off_blocks_auto(self):
+        FLAGS["payments_enabled"] = False
+        await self.order()
+        await self.arrive()
+        self.credit.assert_not_awaited()
+        self.assertEqual(len(self.manual_card()), 1)
+
+    async def test_each_missing_condition_falls_back_to_manual_with_reason(self):
+        cases = {
+            "amount differs": dict(amount=3000),
+            "no code in note": dict(note=""),
+            "two different codes": dict(note="482913 111222"),
+            "wrong code": dict(note="999999"),
+            "transfer older than the order": dict(minutes_ago=30),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                DB.__init__(); BOT.send_message.reset_mock(); self.credit.reset_mock()
+                await self.order()
+                await self.arrive(**kwargs)
+                self.credit.assert_not_awaited()
+                if name not in ("no code in note", "wrong code"):
+                    self.assertEqual(len(self.manual_card()), 1, name)
+                    self.assertIn("لم تُصادَق هذه الدفعة تلقائياً", self.manual_card()[0])
+
+    async def test_direction_is_not_checked_a_notification_is_not_needed(self):
+        await self.order()
+        await self.arrive()  # لا إشعار إطلاقاً
+        self.credit.assert_awaited_once()
+        self.assertEqual(DB.tables["payment_events"], [])
+
+    async def test_expired_order_is_never_auto_credited(self):
+        await self.order(status="expired")
+        await self.arrive()
+        self.credit.assert_not_awaited()
+        self.assertEqual(len(self.manual_card()), 1)
+
+    async def test_atomic_function_refusal_falls_back_to_manual(self):
+        self.credit.return_value = {"result": "already_paid"}
+        await self.order()
+        await self.arrive()
+        self.assertEqual(len(self.manual_card()), 1)
+        self.assertFalse(any("أخبار سارة" in t for t, _ in self.sent()))
+
+    async def test_exception_while_crediting_falls_back_to_manual(self):
+        self.credit.side_effect = RuntimeError("db down")
+        await self.order()
+        await self.arrive()
+        self.assertEqual(len(self.manual_card()), 1)
+
+    async def test_failure_after_crediting_never_reopens_manual_flow(self):
+        BOT.send_message.side_effect = RuntimeError("telegram down")
+        try:
+            await self.order()
+            await self.arrive()
+        finally:
+            BOT.send_message.side_effect = None
+        self.credit.assert_awaited_once()
+
+    async def test_first_run_never_auto_credits(self):
+        await self.make_order()  # بلا إيصالات سابقة = أول تشغيل
+        await self.arrive()
+        self.credit.assert_not_awaited()
+
+    async def test_group_buttons_of_claim_card_are_removed_after_auto_credit(self):
+        order = await self.order(status="awaiting_verification")
+        DB.tables["payment_orders"][0].update({"group_chat_id": -100, "group_message_id": 55})
+        await self.arrive()
+        BOT.edit_message_reply_markup.assert_awaited_once_with(chat_id=-100, message_id=55, reply_markup=None)
 
 
 class EventEntryTests(Base):

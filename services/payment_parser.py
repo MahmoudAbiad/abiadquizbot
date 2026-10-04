@@ -219,3 +219,52 @@ def parse_cards(raw_screen: str) -> List[ParsedCard]:
             card_raw = "\n".join(lines[max(prev_pos + 1, 0):end])
             cards.append(_card_from_lines(before, tx_id, after, card_raw))
     return cards
+
+
+# ==================== المصادقة التلقائية (منطق نقي) ====================
+
+def _to_datetime(value) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def auto_confirm_verdict(order: Optional[dict], receipt: dict, now: datetime, *,
+                         grace_before_minutes: int = 2, grace_after_minutes: int = 2) -> "tuple[bool, str]":
+    """يقرر هل تُصادَق الدفعة تلقائياً. يرجع (True, "") فقط لو تحققت *كل* الشروط، وإلا (False, السبب).
+    لا يلمس أي شبكة/قاعدة بيانات: القرار قابل للاختبار بالكامل. الشروط:
+      1) طلب مطابق بالكود، والملاحظة تحوي كوداً واحداً فقط (لا لبس) وهو كود هذا الطلب.
+      2) الطلب مفتوح فعلاً وغير منتهٍ (pending/awaiting_verification؛ المنتهي والمراجعة اليدوية يدويان دائماً).
+      3) المبلغ والعملة مطابقان للطلب تماماً.
+      4) وقت الحوالة معلوم وضمن عمر الطلب (مع سماحية صغيرة) وليس بالمستقبل.
+    ⚠️ الاتجاه (وارد/صادر) لا يُفحص عمداً (قرار صاحب المشروع): كود الطلب سري ويُصدر لصاحب الطلب فقط،
+    فوجوده بالملاحظة كافٍ."""
+    if not order:
+        return False, "لا طلب مطابق بالكود"
+    codes = set(find_codes_in_note(receipt.get("note")))
+    if len(codes) != 1 or order.get("code") not in codes:
+        return False, "الملاحظة لا تحوي كود هذا الطلب وحده"
+    if order.get("status") not in ("pending", "awaiting_verification"):
+        return False, "الطلب ليس بحالة تسمح بالمصادقة التلقائية"
+    amount = receipt.get("amount")
+    if amount is None or not receipt.get("currency"):
+        return False, "المبلغ أو العملة غير معروفين"
+    if receipt["currency"] != order.get("currency") or Decimal(str(amount)) != Decimal(str(order.get("amount"))):
+        return False, "المبلغ أو العملة لا يطابقان الطلب"
+    tx_time = _to_datetime(receipt.get("tx_time"))
+    created = _to_datetime(order.get("created_at"))
+    expires = _to_datetime(order.get("expires_at"))
+    if not (tx_time and created and expires):
+        return False, "وقت الحوالة أو الطلب غير معروف"
+    if tx_time < created - timedelta(minutes=grace_before_minutes):
+        return False, "الحوالة أقدم من الطلب"
+    if tx_time > expires + timedelta(minutes=grace_after_minutes):
+        return False, "الحوالة بعد انتهاء صلاحية الطلب"
+    if tx_time > now + timedelta(minutes=5):
+        return False, "وقت الحوالة بالمستقبل"
+    return True, ""

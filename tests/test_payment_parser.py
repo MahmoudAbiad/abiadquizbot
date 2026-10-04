@@ -146,3 +146,46 @@ class EscapedJsonTests(unittest.TestCase):
         self.assertNotIn("آخر التحويلات", raw)
         self.assertTrue(looks_like_transfers_screen(raw))
         self.assertEqual(parse_cards(raw)[0].tx_id, "461226096")
+
+
+class AutoConfirmLogicTests(unittest.TestCase):
+    """auto_confirm_verdict (منطق نقي): لا يفحص اتجاه الحوالة، يكفي كود الطلب بالملاحظة."""
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        self.now = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
+        self.order = {"id": 1, "code": "482913", "status": "pending", "amount": 5000, "currency": "SYP",
+                      "created_at": "2026-10-04T11:50:00+00:00", "expires_at": "2026-10-04T12:50:00+00:00"}
+        self.receipt = {"note": "482913", "amount": 5000.0, "currency": "SYP", "tx_time": "2026-10-04T11:58:00+00:00"}
+
+    def verdict(self, order=None, **receipt_changes):
+        from services.payment_parser import auto_confirm_verdict
+        return auto_confirm_verdict(self.order if order is None else order, {**self.receipt, **receipt_changes}, self.now)
+
+    def test_fully_valid_payment_passes_without_any_notification(self):
+        self.assertEqual(self.verdict(), (True, ""))
+        self.assertTrue(self.verdict(order={**self.order, "status": "awaiting_verification"})[0])
+        self.assertTrue(self.verdict(note="[8$]: 482913")[0])
+
+    def test_no_order_or_wrong_state(self):
+        from services.payment_parser import auto_confirm_verdict
+        self.assertFalse(auto_confirm_verdict(None, self.receipt, self.now)[0])
+        for status in ("expired", "manual_review", "paid", "rejected", "cancelled"):
+            self.assertFalse(self.verdict(order={**self.order, "status": status})[0], status)
+
+    def test_code_must_be_single_and_equal_to_order_code(self):
+        self.assertFalse(self.verdict(note="")[0])
+        self.assertFalse(self.verdict(note="999999")[0])
+        self.assertFalse(self.verdict(note="482913 111222")[0])
+
+    def test_amount_and_currency_must_match_exactly(self):
+        self.assertFalse(self.verdict(amount=4999.0)[0])
+        self.assertFalse(self.verdict(amount=5000.5)[0])
+        self.assertFalse(self.verdict(currency="USD")[0])
+        self.assertFalse(self.verdict(amount=None)[0])
+
+    def test_transfer_time_must_be_inside_order_lifetime(self):
+        self.assertFalse(self.verdict(tx_time=None)[0])
+        self.assertFalse(self.verdict(tx_time="2026-10-04T11:40:00+00:00")[0])   # قبل إنشاء الطلب
+        self.assertFalse(self.verdict(tx_time="2026-10-04T13:30:00+00:00")[0])   # بعد الانتهاء/مستقبل
+        self.assertTrue(self.verdict(tx_time="2026-10-04T11:49:00+00:00")[0])    # ضمن سماحية الدقيقتين

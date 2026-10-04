@@ -8,8 +8,10 @@ services/payment_service.py
      إشعار وصل ولم يتبعه حدث سجل، وتنهي الطلبات منتهية الصلاحية.
   2) لا شيء يضيع: كل حدث وارد يُسجَّل خاماً بـ payment_events قبل أي تحليل، وكل بطاقة جديدة
      بالسجل تصل المجموعة.
-  3) Fail-closed: المرحلة الأولى لا تشحن أي نقطة تلقائياً. الشحن فقط بضغطة أدمن على زر،
-     وعبر الدالة الذرية payment_credit_order (تمنع الشحن المزدوج بقفل الطلب والإيصال).
+  3) Fail-closed: الأصل أنّ الشحن بضغطة أدمن على زر فقط، عبر الدالة الذرية payment_credit_order
+     (تمنع الشحن المزدوج بقفل الطلب والإيصال). الاستثناء الوحيد: مفتاح payments_auto_confirm
+     ("شحن تلقائي" بلوحة الأدمن، مطفي افتراضياً) يصادق تلقائياً على الدفعة المكتملة الصحة فقط
+     (راجع payment_parser.auto_confirm_verdict)؛ أي شك = تبقى للتأكيد اليدوي بأزرارها المعتادة.
   4) Supabase مصدر الحقيقة الوحيد؛ Redis للـ heartbeat فقط (ضياعه غير مؤثر).
 ==============================================================================
 """
@@ -26,13 +28,14 @@ from aiogram import types
 
 from config import ADMIN_ID, bot, redis_client
 from constants import (
-    PAYMENT_ADMIN_GROUP_ID, PAYMENT_ADMIN_IDS_EXTRA, PAYMENT_EVENT_RETENTION_DAYS,
+    PAYMENT_ADMIN_GROUP_ID, PAYMENT_ADMIN_IDS_EXTRA, PAYMENT_AUTO_TX_GRACE_AFTER_MINUTES, PAYMENT_AUTO_TX_GRACE_BEFORE_MINUTES, PAYMENT_EVENT_RETENTION_DAYS,
     PAYMENT_HEARTBEAT_TTL_SECONDS, PAYMENT_NOTIFICATION_ORPHAN_MINUTES, PAYMENT_ORDER_TTL_MINUTES,
 )
-from helpers.supabase_helper import supabase
+from helpers.supabase_helper import is_feature_enabled, log_usage_event, supabase
 from logger import get_logger
 from services.payment_parser import (
-    ParsedCard, clean_screen_text, find_codes_in_note, looks_like_transfers_screen, make_unique_code, parse_cards,
+    ParsedCard, auto_confirm_verdict, clean_screen_text, find_codes_in_note, looks_like_transfers_screen,
+    make_unique_code, parse_cards,
 )
 from task_utils import spawn
 
@@ -44,6 +47,7 @@ NOTIFICATION_MAX_CHARS = 4000
 SCREEN_MAX_CHARS = 20000
 BASELINE_FRESH_WINDOW_MINUTES = 10
 _HEARTBEAT_KEY = "payment:heartbeat"
+AUTO_CONFIRM_ACTOR = "auto:shamcash"
 
 
 class OpenOrderExists(Exception):
@@ -427,8 +431,14 @@ async def _ingest_cards(cards: List[ParsedCard], event_id: int, notification_tex
         await send_admin_message(
             f"🧱 <b>تهيئة نظام الدفع</b>\nسُجّلت {baseline_count} حوالة قديمة كخط أساس ولن تُعرض كدفعات."
         )
+    auto_on = False if first_run else await _auto_confirm_enabled()
     for receipt in new_receipts:
-        await _notify_receipt(receipt, notification_text)
+        auto_note = None
+        if auto_on:
+            done, auto_note = await _try_auto_confirm(receipt)
+            if done:
+                continue
+        await _notify_receipt(receipt, notification_text, auto_note=auto_note)
 
 
 async def match_orders(receipt: Dict[str, Any]) -> Dict[str, Any]:
@@ -450,7 +460,83 @@ async def match_orders(receipt: Dict[str, Any]) -> Dict[str, Any]:
     return {"by_code": by_code, "by_amount": by_amount[:3]}
 
 
-async def _notify_receipt(receipt: Dict[str, Any], notification_text: str) -> None:
+# ==================== 🤖 المصادقة التلقائية ====================
+
+async def _auto_confirm_enabled() -> bool:
+    """الشحن التلقائي يتطلب تشغيل الشحن الذاتي نفسه + مفتاح payments_auto_confirm صراحةً (مطفي افتراضياً)."""
+    try:
+        return (await is_feature_enabled("payments_enabled", default=False)
+                and await is_feature_enabled("payments_auto_confirm", default=False))
+    except Exception as exc:
+        logger.error(f"auto-confirm flag check failed (treated as off): {exc}")
+        return False
+
+
+async def _try_auto_confirm(receipt: Dict[str, Any]) -> "tuple[bool, Optional[str]]":
+    """يحاول مصادقة الإيصال تلقائياً. يرجع (True, None) لو شُحن، وإلا (False, السبب) فيكمل المسار اليدوي.
+    الشحن نفسه دائماً عبر credit_order الذرية (قفل الطلب والإيصال)، فالاستدعاء المتكرر لا يشحن مرتين."""
+    try:
+        order = (await match_orders(receipt))["by_code"]
+        ok, reason = auto_confirm_verdict(
+            order, receipt, _now(),
+            grace_before_minutes=PAYMENT_AUTO_TX_GRACE_BEFORE_MINUTES,
+            grace_after_minutes=PAYMENT_AUTO_TX_GRACE_AFTER_MINUTES,
+        )
+        if not ok:
+            return False, reason
+        result = await credit_order(order["id"], receipt["id"], AUTO_CONFIRM_ACTOR)
+        if result.get("result") != "ok":
+            return False, f"رفضت الدالة الذرية الشحن ({result.get('result')})"
+    except Exception as exc:
+        logger.error(f"auto-confirm failed before crediting, falling back to manual: {exc}", exc_info=True)
+        return False, "خطأ داخلي أثناء المصادقة التلقائية"
+
+    # بعد هذه النقطة النقاط أُضيفت فعلاً: أي فشل بالإشعارات يُسجَّل فقط ولا يعيد الدفعة للمسار اليدوي.
+    try:
+        points = int(result["credited_points"])
+        total = int(result.get("new_total_points") or 0)
+        user_id = int(result["order_user_id"])
+        await _notify_user_credited(user_id, points, total)
+        spawn(log_usage_event(user_id, "payment_credited", {"order_id": order["id"], "points": points, "by": AUTO_CONFIRM_ACTOR}))
+        await _strip_group_buttons(order)
+        await send_admin_message(
+            f"🤖 <b>شحن تلقائي — طلب #{order['id']}</b>\n"
+            f"👤 {await _user_label(user_id)}\n"
+            f"✅ أُضيف <b>{points}</b> نقطة (المبلغ {format_money(receipt.get('amount'), receipt.get('currency'))})\n"
+            f"🔢 رقم العملية: <code>#{receipt['tx_id']}</code> — 🔑 الكود: <code>{order['code']}</code>"
+        )
+    except Exception as exc:
+        logger.error(f"auto-confirm credited order {order['id']} but a follow-up step failed: {exc}", exc_info=True)
+    return True, None
+
+
+async def _notify_user_credited(user_id: int, points: int, total: int) -> None:
+    try:
+        await bot.send_message(
+            user_id,
+            "🎉 <b>أخبار سارة! تم تحديث رصيدك</b>\n\n"
+            f"عزيزي الطالب، تم إضافة <code>{points}</code> نقاط جديدة إلى حسابك بنجاح. ✨\n\n"
+            f"🟢 <b>الكمية المضافة:</b> <code>+{points}</code>\n"
+            f"💰 <b>رصيدك الحالي أصبح:</b> <code>{total}</code> نقطة\n\n"
+            "نتمنى لك رحلة تعليمية ممتعة ومليئة بالتوفيق والنجاح! 🚀",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        logger.error(f"could not notify user {user_id} about auto top-up: {exc}")
+
+
+async def _strip_group_buttons(order: Dict[str, Any]) -> None:
+    """يشيل أزرار بطاقة 'طالب أكّد الدفع' (لو وُجدت) حتى لا تبقى أزرار تأكيد قابلة للضغط لطلب مشحون."""
+    if not order.get("group_chat_id") or not order.get("group_message_id"):
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=order["group_chat_id"], message_id=order["group_message_id"], reply_markup=None)
+    except Exception:
+        pass
+
+
+async def _notify_receipt(receipt: Dict[str, Any], notification_text: str, auto_note: Optional[str] = None) -> None:
     matches = await match_orders(receipt)
     tx_time = receipt.get("tx_time") or ""
     lines = [
@@ -465,6 +551,8 @@ async def _notify_receipt(receipt: Dict[str, Any], notification_text: str) -> No
     ]
     if notification_text:
         lines.append(f"\n🔔 نص الإشعار:\n<code>{html.escape(notification_text[:500])}</code>")
+    if auto_note:
+        lines.append(f"\n🤖 <i>الشحن التلقائي مفعّل لكن لم تُصادَق هذه الدفعة تلقائياً: {html.escape(auto_note)}. المراجعة يدوية.</i>")
 
     rows: List[List[types.InlineKeyboardButton]] = []
     order = matches["by_code"]
