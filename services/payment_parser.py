@@ -40,7 +40,12 @@ _DIGITS_TRANSLATION = str.maketrans(
     "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
     "01234567890123456789",
 )
-_TX_RE = re.compile(r"#\s*(\d{9})(?!\d)")
+# ⚠️ رقم العملية يُقبل كحد بطاقة فقط لو كان سطراً مستقلاً بالكامل (#+9 أرقام). أي نص مشابه داخل
+# ملاحظة أو اسم لا يُعدّ بطاقة (حقن بطاقة وهمية عبر الملاحظة).
+_TX_LINE_RE = re.compile(r"#\s*(\d{9})")
+# فواصل أسطر غير \n (splitlines() كانت تقطع عليها فتسمح بتزوير سطور داخل ملاحظة من سطر واحد).
+_EXOTIC_LINE_BREAKS_RE = re.compile(r"[\u2028\u2029\u0085\x0b\x0c\x1c\x1d\x1e]")
+_NUMBER_TOKEN_RE = re.compile(r"[+\-–−]?\s*\d[\d,\.]*")
 _DATETIME_RE = re.compile(r"(\d{4})/(\d{2})/(\d{2})\s*-\s*(\d{2}):(\d{2}):(\d{2})")
 _AMOUNT_RE = re.compile(r"^[+\-–−]?\s*[\d][\d,\.]*$")
 _CODE_IN_NOTE_RE = re.compile(rf"(?<!\d)\d{{{CODE_LENGTH}}}(?!\d)")
@@ -52,11 +57,11 @@ _SCREEN_PREFIX_RE = re.compile(r"^\s*\[\s*\d+\s*\$\s*\]\s*[:：]?\s*")
 
 
 def clean_screen_text(text: Optional[str]) -> str:
-    """Strip extraction prefixes per line; preserve the actual field contents."""
-    return "\n".join(
-        _SCREEN_PREFIX_RE.sub("", line).strip()
-        for line in (text or "").splitlines()
-    ).strip()
+    """Strip extraction prefixes per line; preserve the actual field contents.
+    التقسيم على \\n فقط: فواصل الأسطر الغريبة (U+2028 ...) تُستبدل بمسافة حتى لا تُنتج سطوراً مزيفة."""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = _EXOTIC_LINE_BREAKS_RE.sub(" ", text)
+    return "\n".join(_SCREEN_PREFIX_RE.sub("", line).strip() for line in text.split("\n")).strip()
 
 
 def normalize_digits(text: str) -> str:
@@ -107,6 +112,12 @@ def _parse_amount(line: str) -> Optional[Decimal]:
     return value if value >= 0 else None
 
 
+def _parse_amount_in_line(line: str) -> Optional[Decimal]:
+    """مبلغ ملتصق بالعملة بنفس السطر مثل \"65 ل.س\"؛ None لو لا أرقام (سطر عملة فقط)."""
+    m = _NUMBER_TOKEN_RE.search(normalize_digits(line))
+    return _parse_amount(m.group()) if m else None
+
+
 def _parse_currency(line: str) -> Optional[str]:
     low = line.strip().lower()
     if "ل.س" in low or "ليرة" in low or "syp" in low or "s.p" in low:
@@ -147,7 +158,7 @@ def looks_like_transfers_screen(raw: str) -> bool:
 
 
 def _clean_lines(block: str) -> List[str]:
-    return [ln for ln in clean_screen_text(block).splitlines() if ln]
+    return [ln for ln in clean_screen_text(block).split("\n") if ln]
 
 
 def _card_from_lines(before: List[str], tx_id: str, after: List[str], raw: str) -> ParsedCard:
@@ -163,6 +174,7 @@ def _card_from_lines(before: List[str], tx_id: str, after: List[str], raw: str) 
                 continue
             cur = _parse_currency(ln)
             if cur:  # المبلغ والعملة بنفس السطر مثل "100 ل.س"
+                amount = _parse_amount_in_line(ln)
                 currency = cur
                 stage = "datetime"
                 continue
@@ -201,7 +213,7 @@ def parse_cards(raw_screen: str) -> List[ParsedCard]:
     seen: Set[str] = set()
     for item in split_items(raw_screen):
         lines = _clean_lines(item)
-        tx_positions = [(i, m.group(1)) for i, ln in enumerate(lines) for m in [_TX_RE.search(normalize_digits(ln))] if m]
+        tx_positions = [(i, m.group(1)) for i, ln in enumerate(lines) for m in [_TX_LINE_RE.fullmatch(normalize_digits(ln).strip())] if m]
         for idx, (pos, tx_id) in enumerate(tx_positions):
             if tx_id in seen:
                 continue
@@ -235,13 +247,14 @@ def _to_datetime(value) -> Optional[datetime]:
 
 
 def auto_confirm_verdict(order: Optional[dict], receipt: dict, now: datetime, *,
-                         grace_before_minutes: int = 2, grace_after_minutes: int = 2) -> "tuple[bool, str]":
+                         grace_before_minutes: int = 2, grace_after_minutes: int = 2,
+                         max_age_minutes: Optional[int] = None) -> "tuple[bool, str]":
     """يقرر هل تُصادَق الدفعة تلقائياً. يرجع (True, "") فقط لو تحققت *كل* الشروط، وإلا (False, السبب).
     لا يلمس أي شبكة/قاعدة بيانات: القرار قابل للاختبار بالكامل. الشروط:
       1) طلب مطابق بالكود، والملاحظة تحوي كوداً واحداً فقط (لا لبس) وهو كود هذا الطلب.
       2) الطلب مفتوح فعلاً وغير منتهٍ (pending/awaiting_verification؛ المنتهي والمراجعة اليدوية يدويان دائماً).
       3) المبلغ والعملة مطابقان للطلب تماماً.
-      4) وقت الحوالة معلوم وضمن عمر الطلب (مع سماحية صغيرة) وليس بالمستقبل.
+      4) وقت الحوالة معلوم وضمن عمر الطلب (مع سماحية صغيرة) وليس بالمستقبل ولا أقدم من max_age_minutes.
     ⚠️ الاتجاه (وارد/صادر) لا يُفحص عمداً (قرار صاحب المشروع): كود الطلب سري ويُصدر لصاحب الطلب فقط،
     فوجوده بالملاحظة كافٍ."""
     if not order:
@@ -267,4 +280,6 @@ def auto_confirm_verdict(order: Optional[dict], receipt: dict, now: datetime, *,
         return False, "الحوالة بعد انتهاء صلاحية الطلب"
     if tx_time > now + timedelta(minutes=5):
         return False, "وقت الحوالة بالمستقبل"
+    if max_age_minutes is not None and tx_time < now - timedelta(minutes=max_age_minutes):
+        return False, "الحوالة قديمة (المصادقة التلقائية للحوالات الطازجة فقط)"
     return True, ""

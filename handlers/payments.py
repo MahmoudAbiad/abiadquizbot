@@ -24,7 +24,7 @@ from constants import (
     SHAMCASH_QR_PATH, SHAMCASH_TRANSFER_CODE,
 )
 from handlers.admin.users import send_points_notification
-from helpers.supabase_helper import is_feature_enabled, log_usage_event
+from helpers.supabase_helper import is_feature_enabled, log_usage_event, set_feature_flag
 from logger import get_logger
 from services import payment_service as ps
 from task_utils import spawn
@@ -77,7 +77,7 @@ async def try_show_payment_packages(call: types.CallbackQuery) -> bool:
         return False
 
 
-def _order_text(order: dict) -> str:
+def _order_text(order: dict, auto: bool = False) -> str:
     lines = [
         "💳 <b>الدفع عبر شام كاش</b>",
         "",
@@ -97,8 +97,12 @@ def _order_text(order: dict) -> str:
         "3️⃣ بعد التحويل اضغط «✅ دفعت».",
         "",
         f"⏳ الطلب صالح {PAYMENT_ORDER_TTL_MINUTES} دقيقة. بدون الرمز في الملاحظة يتأخر شحنك لحين المراجعة اليدوية.",
-        "⏱️ بعد تأكيد الدفع، تستغرق معالجة وإتمام عملية الشحن عادةً من ساعة إلى 48 ساعة.",
     ]
+    if auto:
+        lines.append("⚡ عند تحويل المبلغ بالضبط مع الرمز بالملاحظة يُضاف رصيدك عادةً تلقائياً خلال دقائق. "
+                     "وإن لم يتحقق ذلك تُراجَع الدفعة يدوياً وقد يستغرق الأمر من ساعة إلى 48 ساعة.")
+    else:
+        lines.append("⏱️ بعد تأكيد الدفع، تستغرق معالجة وإتمام عملية الشحن عادةً من ساعة إلى 48 ساعة.")
     return "\n".join(lines)
 
 
@@ -110,7 +114,7 @@ def _order_keyboard(order: dict) -> types.InlineKeyboardMarkup:
 
 
 async def _send_order_screen(chat_id: int, order: dict, bot_obj) -> None:
-    text = _order_text(order)
+    text = _order_text(order, auto=await ps.auto_confirm_active())
     markup = _order_keyboard(order)
     if SHAMCASH_QR_PATH and os.path.exists(SHAMCASH_QR_PATH):
         try:
@@ -187,12 +191,27 @@ async def create_order_for_method(call: types.CallbackQuery):
         await call.answer()
 
 
+async def _already_paid_for_user(call: types.CallbackQuery, order_id: int) -> bool:
+    """الشحن التلقائي قد يشحن الطلب قبل ضغط الطالب «دفعت/إلغاء»: نخبره بالحقيقة ونزيل الأزرار الباقية."""
+    order = await ps.get_order(order_id)
+    if not order or order.get("user_id") != call.from_user.id or order.get("status") != "paid":
+        return False
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await call.answer("✅ تم شحن رصيدك بالفعل.", show_alert=True)
+    return True
+
+
 @router.callback_query(F.data.startswith("pay:paid:"))
 async def user_claims_paid(call: types.CallbackQuery):
     try:
         order_id = int(call.data.split(":")[2])
         order = await ps.claim_order(order_id, call.from_user.id)
         if not order:
+            if await _already_paid_for_user(call, order_id):
+                return
             await call.answer("لا يمكن تأكيد هذا الطلب (منتهٍ أو مؤكد مسبقاً).", show_alert=True)
             return
         try:
@@ -221,6 +240,8 @@ async def user_cancels(call: types.CallbackQuery):
                 pass
             await call.message.answer("تم إلغاء الطلب. يمكنك بدء طلب جديد بأي وقت من «شحن الرصيد».")
         else:
+            if await _already_paid_for_user(call, order_id):
+                return
             await call.answer("لا يمكن إلغاء هذا الطلب (مؤكد مسبقاً أو منتهٍ).", show_alert=True)
             return
     except Exception as exc:
@@ -279,12 +300,13 @@ async def admin_confirm(call: types.CallbackQuery):
             "already_paid": "هذا الطلب مشحون مسبقاً — لم يُضف شيء.",
             "not_creditable": "الطلب مرفوض أو ملغى — لا يمكن شحنه.",
             "receipt_used": "هذا الإيصال استُخدم بالفعل لشحن طلب آخر.",
+            "receipt_not_creditable": "هذا الإيصال معلَّم كتجاهل/خط أساس — لا يمكن استخدامه للشحن.",
             "receipt_not_found": "الإيصال غير موجود.",
             "user_not_found": "حساب الطالب غير موجود.",
             "not_found": "الطلب غير موجود.",
         }
         await call.answer(messages.get(status, "تعذّر تنفيذ الشحن، راجع السجلات."), show_alert=True)
-        if status in ("already_paid", "not_creditable", "receipt_used"):
+        if status in ("already_paid", "not_creditable", "receipt_used", "receipt_not_creditable"):
             await _finish_group_message(call, f"ℹ️ {messages[status]}")
     except Exception as exc:
         logger.error(f"admin_confirm failed: {exc}", exc_info=True)
@@ -332,4 +354,22 @@ async def admin_ignore(call: types.CallbackQuery):
         await call.answer("تم التجاهل")
     except Exception as exc:
         logger.error(f"admin_ignore failed: {exc}", exc_info=True)
+        await call.answer("حدث خطأ غير متوقع.", show_alert=True)
+
+
+@router.callback_query(F.data == "pay:autooff")
+async def admin_auto_off(call: types.CallbackQuery):
+    """زر الطوارئ تحت رسالة «شحن تلقائي»: يوقف المفتاح الفرعي فوراً (يعود كل شيء للتأكيد اليدوي)."""
+    if not ps.is_payment_admin(call.from_user.id):
+        await call.answer("غير مصرّح لك.", show_alert=True)
+        return
+    try:
+        if not await set_feature_flag("payments_auto_confirm", False):
+            await call.answer("تعذّر حفظ الإيقاف، أوقفه من لوحة الأدمن.", show_alert=True)
+            return
+        who = html.escape(call.from_user.full_name or str(call.from_user.id))
+        await _finish_group_message(call, f"🛑 <b>أُوقف الشحن التلقائي</b> بواسطة {who}")
+        await call.answer("أُوقف الشحن التلقائي")
+    except Exception as exc:
+        logger.error(f"admin_auto_off failed: {exc}", exc_info=True)
         await call.answer("حدث خطأ غير متوقع.", show_alert=True)

@@ -108,6 +108,7 @@ REVOKE ALL ON public.payment_packages, public.payment_orders,
               public.payment_events,   public.payment_receipts FROM anon, authenticated;
 
 -- ---------- 6) دالة الشحن الذرية ----------
+-- ⚠️ حُدِّثت بـ 0007_payment_credit_hardening.sql (باراميتر رابع). لا تُعد تشغيل هذا القسم بعد تطبيق 0007.
 -- تقفل الطلب (FOR UPDATE)، تتحقق من الحالة والإيصال، تضيف paid_points، وتعلّم الطلب والإيصال
 -- كلها بمعاملة واحدة. آمنة لإعادة الاستدعاء: الاستدعاء الثاني يرجع 'already_paid' بلا إضافة.
 -- يُسمح بشحن طلب 'expired' (دفعة متأخرة وافق عليها الأدمن يدوياً) لكن ليس rejected/cancelled.

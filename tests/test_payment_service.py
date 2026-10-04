@@ -299,7 +299,7 @@ class AutoConfirmTests(Base):
         order = await self.order()
         await self.arrive()
         rid = [r for r in DB.tables["payment_receipts"] if r["tx_id"] == "444444444"][0]["id"]
-        self.credit.assert_awaited_once_with(order["id"], rid, "auto:shamcash")
+        self.credit.assert_awaited_once_with(order["id"], rid, "auto:shamcash", require_match=True)
         self.assertEqual(self.manual_card(), [])
         texts = [t for t, _ in self.sent()]
         self.assertTrue(any("أخبار سارة" in t for t in texts))      # الطالب أُبلغ
@@ -395,6 +395,106 @@ class AutoConfirmTests(Base):
         BOT.edit_message_reply_markup.assert_awaited_once_with(chat_id=-100, message_id=55, reply_markup=None)
 
 
+class AutoConfirmHardeningTests(AutoConfirmTests):
+    """سقوف + الأحدث فقط + زر الطوارئ. (ترث setUp/helpers؛ اختبارات الأم تُعاد وهذا مقصود: نفس السلوك الأساسي)."""
+
+    async def test_only_the_newest_card_is_auto_credited(self):
+        order = await self.order()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        newest = card_text("آخر", "555000001", 777, now - datetime.timedelta(seconds=10))
+        older = card_text("طالب", "555000002", 5000, now - datetime.timedelta(seconds=30), "482913")
+        await ps.process_event(2, "screen", "d", "", screen(newest, older))
+        self.credit.assert_not_awaited()
+        manual = self.manual_card()
+        self.assertTrue(manual)
+        self.assertIn("ليست أحدث بطاقة", manual[-1])
+
+    async def test_forged_card_in_note_is_not_credited(self):
+        order = await self.order()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        forged_note = card_text("فلان", "900000001", 5000, now, "482913")
+        real = card_text("مهاجم", "100000009", 1, now, "x\n" + forged_note)
+        await ps.process_event(2, "screen", "d", "", screen(real))
+        self.credit.assert_not_awaited()
+        # البطاقة المحقونة تبقى للمراجعة اليدوية فقط، وتحمل تحذير «ليست أحدث بطاقة» للأدمن.
+        forged = [t for t, m in self.sent() if "900000001" in t]
+        self.assertTrue(forged)
+        self.assertIn("ليست أحدث بطاقة", forged[-1])
+
+    async def test_per_order_points_cap_falls_back_to_manual(self):
+        order = await self.order(points=5000)
+        await self.arrive()
+        self.credit.assert_not_awaited()
+        self.assertIn("سقف", self.sent()[-1][0])
+
+    async def test_daily_points_cap_falls_back_to_manual(self):
+        order = await self.order()
+        DB.tables["payment_orders"].append({"id": 50, "user_id": 9, "status": "paid", "points": 4950, "code": "999999",
+                                            "decided_by": "auto:shamcash",
+                                            "paid_at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+        await self.arrive()
+        self.credit.assert_not_awaited()
+        self.assertIn("اليومي", self.sent()[-1][0])
+
+    async def test_old_auto_credits_do_not_count_toward_daily_cap(self):
+        order = await self.order()
+        DB.tables["payment_orders"].append({"id": 50, "user_id": 9, "status": "paid", "points": 4950, "code": "999999",
+                                            "decided_by": "auto:shamcash",
+                                            "paid_at": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=30)).isoformat()})
+        await self.arrive()
+        self.credit.assert_awaited_once()
+
+    async def test_manual_credits_do_not_count_toward_daily_cap(self):
+        order = await self.order()
+        DB.tables["payment_orders"].append({"id": 50, "user_id": 9, "status": "paid", "points": 4950, "code": "999999",
+                                            "decided_by": "tg:111",
+                                            "paid_at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+        await self.arrive()
+        self.credit.assert_awaited_once()
+
+    async def test_stale_receipt_is_not_auto_credited(self):
+        order = await self.order()
+        for row in DB.tables["payment_orders"]:
+            row["created_at"] = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=50)).isoformat()
+        await self.arrive(minutes_ago=30)
+        self.credit.assert_not_awaited()
+
+    async def test_auto_confirm_message_has_kill_switch_button(self):
+        order = await self.order()
+        await self.arrive()
+        markups = [m for t, m in self.sent() if m]
+        self.assertTrue(any("pay:autooff" in self.buttons(m) for m in markups))
+
+    async def test_unreadable_card_alerts_instead_of_silently_dropping(self):
+        order = await self.order()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        bad = f"غامض\n#777000001\nل.س\n{now.astimezone(SYR).strftime('%Y/%m/%d - %H:%M:%S')}"
+        await ps.process_event(2, "screen", "d", "", screen(bad, card_text("طالب", "777000002", 5000, now, "482913")))
+        self.assertTrue(any("تعذّرت قراءة مبلغها" in t for t, _ in self.sent()))
+        self.credit.assert_not_awaited()  # الأحدث (الأولى) غير مقروءة => لا مصادقة تلقائية لغيرها
+
+
+class RequireMatchParamTests(Base):
+    async def test_param_sent_only_when_requested(self):
+        calls = []
+
+        class Rpc:
+            def __init__(self, params): self.params = params
+            async def execute(self): calls.append(self.params); return Result([{"result": "ok"}])
+
+        original, DB.rpc = getattr(DB, "rpc", None), (lambda name, params: Rpc(params))
+        try:
+            await ps.credit_order(1, 2, "tg:1")
+            await ps.credit_order(1, 2, "auto:shamcash", require_match=True)
+        finally:
+            if original is None:
+                del DB.rpc
+            else:
+                DB.rpc = original
+        self.assertNotIn("p_require_match", calls[0])
+        self.assertTrue(calls[1]["p_require_match"])
+
+
 class EventEntryTests(Base):
     async def test_heartbeat_records_and_creates_no_event(self):
         out = await ps.handle_incoming_event({"event_type": "heartbeat", "device_id": "phone1"})
@@ -419,6 +519,15 @@ class EventEntryTests(Base):
         spawned[0].close()
         self.assertEqual(DB.tables["payment_events"][0]["event_type"], "screen")
         self.assertIn("event_id", out)
+
+    async def test_screen_event_stays_unprocessed_until_processing_finishes(self):
+        out = await ps.handle_incoming_event({"event_type": "screen", "screen_data": "x"})
+        row = DB.tables["payment_events"][0]
+        self.assertFalse(row["processed"] and out.get("event_id") is None)
+        await asyncio.sleep(0)  # يسمح للمهمة الخلفية بالعمل
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        self.assertTrue(DB.tables["payment_events"][0]["processed"])
 
     async def test_large_texts_are_truncated(self):
         await ps.handle_incoming_event({"event_type": "notification", "notification_text": "ا" * 10000})
@@ -450,6 +559,33 @@ class WatchdogTests(Base):
         self.assertEqual([o["id"] for o in expired], [1])
         self.assertEqual({o["id"]: o["status"] for o in DB.tables["payment_orders"]},
                          {1: "expired", 2: "awaiting_verification", 3: "pending"})
+
+
+class StalledAndExpiryTests(Base):
+    async def test_stalled_screen_event_alerts_once(self):
+        old = (NOW - datetime.timedelta(minutes=10)).isoformat()
+        await DB.table("payment_events").insert({"event_type": "screen", "processed": False,
+                                                 "screen_text": "x", "received_at": old}).execute()
+        self.assertEqual(await ps.alert_stalled_events(), 1)
+        self.assertEqual(await ps.alert_stalled_events(), 0)
+        self.assertIn("لم تكتمل معالجة", self.sent()[-1][0])
+
+    async def test_fresh_or_processed_screen_events_are_not_stalled(self):
+        await DB.table("payment_events").insert({"event_type": "screen", "processed": False, "received_at": NOW.isoformat()}).execute()
+        await DB.table("payment_events").insert({"event_type": "screen", "processed": True,
+                                                 "received_at": (NOW - datetime.timedelta(hours=1)).isoformat()}).execute()
+        self.assertEqual(await ps.alert_stalled_events(), 0)
+
+    async def test_awaiting_verification_expires_after_48h_only(self):
+        DB.tables["payment_orders"] += [
+            {"id": 1, "user_id": 1, "status": "awaiting_verification", "code": "111111",
+             "claimed_at": (NOW - datetime.timedelta(hours=49)).isoformat(), "expires_at": NOW.isoformat()},
+            {"id": 2, "user_id": 2, "status": "awaiting_verification", "code": "222222",
+             "claimed_at": (NOW - datetime.timedelta(hours=5)).isoformat(), "expires_at": NOW.isoformat()},
+        ]
+        expired = await ps.expire_stale_orders()
+        self.assertEqual([o["id"] for o in expired], [1])
+        self.assertEqual({o["id"]: o["status"] for o in DB.tables["payment_orders"]}, {1: "expired", 2: "awaiting_verification"})
 
 
 class OrderTests(Base):
@@ -640,3 +776,56 @@ class AdminHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoOffAndAlreadyPaidHandlerTests(unittest.IsolatedAsyncioTestCase):
+    def load(self, **overrides):
+        ps_stub = types.SimpleNamespace(is_payment_admin=lambda uid: uid == 111, get_order=AsyncMock(return_value=None),
+                                        claim_order=AsyncMock(return_value=None), cancel_order=AsyncMock(return_value=False))
+        ps_stub.__dict__.update(overrides)
+        set_flag = AsyncMock(return_value=True)
+        env = load_functions(
+            "handlers/payments.py", ["admin_auto_off", "_finish_group_message", "_already_paid_for_user",
+                                      "user_claims_paid", "user_cancels"],
+            ps=ps_stub, html=__import__("html"), set_feature_flag=set_flag, logger=MagicMock(), spawn=lambda c: c.close(),
+            TelegramBadRequest=Exception, types=types.SimpleNamespace(CallbackQuery=object))
+        return env, ps_stub, set_flag
+
+    def call(self, data, uid=111):
+        msg = types.SimpleNamespace(html_text="نص", edit_text=AsyncMock(), edit_reply_markup=AsyncMock(), answer=AsyncMock())
+        return types.SimpleNamespace(data=data, from_user=types.SimpleNamespace(id=uid, full_name="Admin"),
+                                     message=msg, answer=AsyncMock())
+
+    async def test_kill_switch_requires_admin(self):
+        env, _, set_flag = self.load()
+        call = self.call("pay:autooff", uid=999)
+        await env["admin_auto_off"](call)
+        set_flag.assert_not_awaited()
+
+    async def test_kill_switch_turns_flag_off_and_removes_buttons(self):
+        env, _, set_flag = self.load()
+        call = self.call("pay:autooff")
+        await env["admin_auto_off"](call)
+        set_flag.assert_awaited_once_with("payments_auto_confirm", False)
+        call.message.edit_text.assert_awaited_once()
+
+    async def test_kill_switch_reports_save_failure(self):
+        env, _, set_flag = self.load()
+        set_flag.return_value = False
+        call = self.call("pay:autooff")
+        await env["admin_auto_off"](call)
+        self.assertTrue(call.answer.await_args.kwargs.get("show_alert"))
+        call.message.edit_text.assert_not_awaited()
+
+    async def test_student_pressing_paid_after_auto_credit_is_told_the_truth(self):
+        env, ps_stub, _ = self.load(get_order=AsyncMock(return_value={"id": 3, "user_id": 5, "status": "paid"}))
+        call = self.call("pay:paid:3", uid=5)
+        await env["user_claims_paid"](call)
+        self.assertIn("تم شحن رصيدك", call.answer.await_args_list[0].args[0])
+        call.message.edit_reply_markup.assert_awaited_once()
+
+    async def test_other_users_paid_order_is_not_disclosed(self):
+        env, ps_stub, _ = self.load(get_order=AsyncMock(return_value={"id": 3, "user_id": 5, "status": "paid"}))
+        call = self.call("pay:cancel:3", uid=6)
+        await env["user_cancels"](call)
+        self.assertNotIn("تم شحن رصيدك", call.answer.await_args_list[0].args[0])

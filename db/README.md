@@ -4,6 +4,7 @@
 |---|---|
 | `migrations/0001_baseline.sql` | هيكل الإنتاج كاملاً: 23 جدولاً، 2 views، 17 دالة، الفهارس، المفاتيح الأجنبية، RLS، والفروقات في الصلاحيات |
 | `migrations/0006_payments.sql` | نظام الشحن الذاتي: `payment_packages/orders/events/receipts` (RLS مفعّل بلا policies) + دالة `payment_credit_order` (service_role فقط) + فلاغ `payments_enabled`. **مطبَّق على الإنتاج**، راجع `docs/payments.md` |
+| `migrations/0007_payment_credit_hardening.sql` | تقوية `payment_credit_order`: باراميتر `p_require_match` للمسار التلقائي (حالة الطلب + مطابقة مبلغ/عملة الإيصال) ورفض إيصالات `dismissed/baseline`. يحذف overload القديم. **طبّقه قبل تفعيل «شحن تلقائي»**، ولا تُعد تشغيل 0006 بعده (يعيد الدالة القديمة) |
 | `migrations/0002_seed_config.sql` | بيانات الإعدادات المرجعية (`app_settings`, `feature_flags`, `ai_model_slots`, `ai_model_pricing`) بلا أي بيانات مستخدمين |
 
 مولَّدان بتاريخ 2026-10-02 بقراءة مباشرة (read-only) من مشروع الإنتاج `telegramquizbot`. لم يُغيَّر شي في القاعدة.

@@ -9,8 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.payment_parser import (  # noqa: E402
     CODE_LENGTH, SYRIA_TZ, find_codes_in_note, generate_code, looks_like_transfers_screen,
-    clean_screen_text, make_unique_code, normalize_digits, parse_cards,
+    auto_confirm_verdict, clean_screen_text, make_unique_code, normalize_digits, parse_cards,
 )
+from datetime import datetime, timezone  # noqa: E402
 
 # أشكال حقيقية من لقطات شاشة MacroDroid (screen_data)
 CARD_OUT_100 = "Syriatel Direct Payment\n\n#461226096\n100\nل.س\n2026/09/18 - 21:45:48"
@@ -189,3 +190,62 @@ class AutoConfirmLogicTests(unittest.TestCase):
         self.assertFalse(self.verdict(tx_time="2026-10-04T11:40:00+00:00")[0])   # قبل إنشاء الطلب
         self.assertFalse(self.verdict(tx_time="2026-10-04T13:30:00+00:00")[0])   # بعد الانتهاء/مستقبل
         self.assertTrue(self.verdict(tx_time="2026-10-04T11:49:00+00:00")[0])    # ضمن سماحية الدقيقتين
+
+
+def _stamp(dt):
+    return dt.astimezone(SYRIA_TZ).strftime("%Y/%m/%d - %H:%M:%S")
+
+
+class InjectionAndFormatTests(unittest.TestCase):
+    """حقن بطاقة وهمية عبر ملاحظة الحوالة + مبلغ ملتصق بالعملة."""
+
+    def setUp(self):
+        self.now = datetime.now(timezone.utc)
+        self.order = {"id": 1, "code": "123456", "status": "pending", "amount": "65", "currency": "SYP",
+                      "created_at": (self.now - timedelta(minutes=5)).isoformat(),
+                      "expires_at": (self.now + timedelta(minutes=55)).isoformat()}
+
+    def _verdict(self, card):
+        rec = {"amount": card.amount, "currency": card.currency, "tx_time": card.tx_time, "note": card.note}
+        return auto_confirm_verdict(self.order, rec, self.now)
+
+    def test_forged_card_inside_multiline_note_is_never_first_card(self):
+        forged = f"x\nفلان\n#900000001\n65\nل.س\n{_stamp(self.now)}\n123456"
+        screen = f"آخر التحويلات\nمهاجم\n\n#100000009\n1\nل.س\n{_stamp(self.now)}\n{forged}"
+        cards = parse_cards(screen)
+        self.assertEqual(cards[0].tx_id, "100000009")      # الحوالة الحقيقية هي الأولى دائماً
+        self.assertEqual(cards[0].amount, Decimal("1"))
+        self.assertFalse(self._verdict(cards[0])[0])        # 1 ل.س لا تطابق طلب 65
+
+    def test_exotic_line_separators_do_not_create_cards(self):
+        for sep in ("\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c"):
+            with self.subTest(sep=repr(sep)):
+                note = sep.join(["x", "فلان", "#900000001", "65", "ل.س", _stamp(self.now), "123456"])
+                screen = f"آخر التحويلات\nمهاجم\n#100000009\n1\nل.س\n{_stamp(self.now)}\n{note}"
+                cards = parse_cards(screen)
+                self.assertEqual([c.tx_id for c in cards], ["100000009"])
+                self.assertFalse(self._verdict(cards[0])[0])
+
+    def test_tx_marker_must_be_its_own_line(self):
+        cards = parse_cards("آخر التحويلات\nاسم #123456789 ملحق\n55\nل.س\n2026/09/01 - 10:00:00")
+        self.assertEqual(cards, [])
+
+    def test_amount_and_currency_on_same_line(self):
+        screen = f"آخر التحويلات\nأحمد\n#100000001\n65 ل.س\n{_stamp(self.now)}\n123456"
+        (card,) = parse_cards(screen)
+        self.assertEqual((card.amount, card.currency, card.note), (Decimal("65"), "SYP", "123456"))
+        self.assertTrue(self._verdict(card)[0])
+
+    def test_currency_only_line_still_has_no_amount(self):
+        (card,) = parse_cards("أحمد\n#100000001\nل.س\n2026/09/01 - 10:00:00")
+        self.assertIsNone(card.amount)
+
+    def test_old_receipt_is_refused_only_when_max_age_given(self):
+        old = self.now - timedelta(minutes=30)
+        self.order["created_at"] = (old - timedelta(minutes=5)).isoformat()
+        self.order["expires_at"] = (self.now + timedelta(minutes=55)).isoformat()
+        rec = {"amount": "65", "currency": "SYP", "tx_time": old, "note": "123456"}
+        self.assertTrue(auto_confirm_verdict(self.order, rec, self.now)[0])
+        ok, reason = auto_confirm_verdict(self.order, rec, self.now, max_age_minutes=15)
+        self.assertFalse(ok)
+        self.assertIn("قديمة", reason)

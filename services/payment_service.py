@@ -28,8 +28,10 @@ from aiogram import types
 
 from config import ADMIN_ID, bot, redis_client
 from constants import (
-    PAYMENT_ADMIN_GROUP_ID, PAYMENT_ADMIN_IDS_EXTRA, PAYMENT_AUTO_TX_GRACE_AFTER_MINUTES, PAYMENT_AUTO_TX_GRACE_BEFORE_MINUTES, PAYMENT_EVENT_RETENTION_DAYS,
-    PAYMENT_HEARTBEAT_TTL_SECONDS, PAYMENT_NOTIFICATION_ORPHAN_MINUTES, PAYMENT_ORDER_TTL_MINUTES,
+    PAYMENT_ADMIN_GROUP_ID, PAYMENT_ADMIN_IDS_EXTRA, PAYMENT_AUTO_DAILY_MAX_POINTS, PAYMENT_AUTO_MAX_POINTS_PER_ORDER,
+    PAYMENT_AUTO_MAX_RECEIPT_AGE_MINUTES, PAYMENT_AUTO_TX_GRACE_AFTER_MINUTES, PAYMENT_AUTO_TX_GRACE_BEFORE_MINUTES,
+    PAYMENT_AWAITING_EXPIRY_HOURS, PAYMENT_EVENT_RETENTION_DAYS, PAYMENT_HEARTBEAT_TTL_SECONDS,
+    PAYMENT_NOTIFICATION_ORPHAN_MINUTES, PAYMENT_ORDER_TTL_MINUTES, PAYMENT_STALLED_EVENT_MINUTES,
 )
 from helpers.supabase_helper import is_feature_enabled, log_usage_event, supabase
 from logger import get_logger
@@ -213,11 +215,14 @@ async def reject_order(order_id: int, actor: str, note: str = "") -> Optional[Di
     return res.data[0] if res.data else None
 
 
-async def credit_order(order_id: int, receipt_id: Optional[int], actor: str) -> Dict[str, Any]:
-    """الشحن الذري. يرجع صف النتيجة: result ∈ ok/already_paid/not_creditable/receipt_used/..."""
-    res = await supabase.rpc("payment_credit_order", {
-        "p_order_id": order_id, "p_receipt_id": receipt_id, "p_actor": actor,
-    }).execute()
+async def credit_order(order_id: int, receipt_id: Optional[int], actor: str, require_match: bool = False) -> Dict[str, Any]:
+    """الشحن الذري. يرجع صف النتيجة: result ∈ ok/already_paid/not_creditable/receipt_used/amount_mismatch/...
+    require_match=True (المسار التلقائي): الدالة نفسها تتحقق من حالة الطلب ومطابقة مبلغ/عملة الإيصال (خط دفاع ثانٍ
+    بقاعدة البيانات، يتطلب migration 0007). لا يُرسَل الباراميتر إلا عند الحاجة فيبقى الشحن اليدوي متوافقاً مع الدالة القديمة."""
+    params: Dict[str, Any] = {"p_order_id": order_id, "p_receipt_id": receipt_id, "p_actor": actor}
+    if require_match:
+        params["p_require_match"] = True
+    res = await supabase.rpc("payment_credit_order", params).execute()
     data = res.data
     if isinstance(data, list):
         data = data[0] if data else {}
@@ -234,12 +239,21 @@ async def set_order_group_message(order_id: int, chat_id: int, message_id: int) 
 
 
 async def expire_stale_orders() -> List[Dict[str, Any]]:
+    """pending بعد expires_at؛ وawaiting_verification بعد PAYMENT_AWAITING_EXPIRY_HOURS من ضغط «دفعت» حتى لا يبقى
+    الطالب ممنوعاً من طلب جديد للأبد (الطلب المنتهي يبقى قابلاً للشحن اليدوي كدفعة متأخرة)."""
     res = await (
         supabase.table("payment_orders")
         .update({"status": "expired", "updated_at": _iso(_now())})
         .eq("status", "pending").lt("expires_at", _iso(_now())).execute()
     )
-    return res.data or []
+    expired = list(res.data or [])
+    cutoff = _iso(_now() - datetime.timedelta(hours=PAYMENT_AWAITING_EXPIRY_HOURS))
+    res = await (
+        supabase.table("payment_orders")
+        .update({"status": "expired", "updated_at": _iso(_now())})
+        .eq("status", "awaiting_verification").lt("claimed_at", cutoff).execute()
+    )
+    return expired + list(res.data or [])
 
 
 async def dismiss_receipt(receipt_id: int) -> None:
@@ -328,8 +342,9 @@ async def record_event(event_type: str, device_id: Optional[str], notification_t
         "device_id": (device_id or "")[:80] or None,
         "notification_text": (notification_text or "")[:NOTIFICATION_MAX_CHARS] or None,
         "screen_text": (screen_text or "")[:SCREEN_MAX_CHARS] or None,
-        # التنبيهات (notification) تبقى غير معالجة لحد ما يصل حدث السجل المرافق لها
-        "processed": event_type not in ("notification",),
+        # notification: غير معالج لحد ما يصل حدث السجل المرافق. screen/manual_request: يُعلَّم معالجاً بنهاية
+        # process_event فقط، فلو أُعيد تشغيل Heroku أثناء المعالجة يلتقطه الـ watchdog بدل أن يضيع بصمت.
+        "processed": event_type not in ("notification", "screen", "manual_request"),
     }).execute()
     return res.data[0]["id"]
 
@@ -377,11 +392,22 @@ async def process_event(event_id: int, event_type: str, device_id: Optional[str]
             await _alert_unrecognized_screen(notification_text, screen_text)
             return
 
-        cards = [c for c in parse_cards(screen_text) if c.amount is not None]
+        all_cards = parse_cards(screen_text)
+        cards = [c for c in all_cards if c.amount is not None]
+        # بطاقة تعذّرت قراءة مبلغها لا تُسقَط بصمت: تنبيه صريح للمجموعة.
+        unreadable = [c for c in all_cards if c.amount is None]
+        if unreadable:
+            await send_admin_message(
+                "⚠️ <b>بطاقة بسجل شام كاش تعذّرت قراءة مبلغها</b>\n"
+                + "\n".join(f"• <code>#{c.tx_id}</code> — <code>{html.escape(c.raw[:200])}</code>" for c in unreadable[:5])
+                + "\nراجع الحدث الخام بجدول payment_events وتحقق منها يدوياً."
+            )
         if not cards:
             await _alert_unrecognized_screen(notification_text, screen_text)
             return
-        await _ingest_cards(cards, event_id, notification_text)
+        # الأحدث بالسجل = أول بطاقة. المصادقة التلقائية لها وحدها (بطاقة مزيفة محقونة بملاحظة لا تكون الأولى أبداً).
+        top_tx_id = all_cards[0].tx_id if all_cards else None
+        await _ingest_cards(cards, event_id, notification_text, top_tx_id=top_tx_id)
     except Exception as exc:
         logger.error(f"payment process_event failed (event {event_id}): {exc}", exc_info=True)
         # الفشل غير المتوقع يصل للمجموعة أيضاً: لا يضيع شيء بصمت.
@@ -389,6 +415,12 @@ async def process_event(event_id: int, event_type: str, device_id: Optional[str]
             f"⚠️ <b>خطأ داخلي بمعالجة حدث دفع #{event_id}</b>\nراجع الحدث الخام بجدول payment_events.\n"
             f"<code>{html.escape(str(exc))[:300]}</code>"
         )
+    finally:
+        # علامة الاكتمال: إن قُتلت العملية قبل هذا السطر (إعادة تشغيل Heroku) يبقى الحدث غير معالج فيلتقطه الـ watchdog.
+        try:
+            await _mark_events_processed([event_id])
+        except Exception as exc:
+            logger.warning(f"could not mark payment event {event_id} processed: {exc}")
 
 
 async def _insert_receipt(card: ParsedCard, event_id: int, status: str) -> Optional[Dict[str, Any]]:
@@ -412,7 +444,8 @@ async def _insert_receipt(card: ParsedCard, event_id: int, status: str) -> Optio
         raise
 
 
-async def _ingest_cards(cards: List[ParsedCard], event_id: int, notification_text: str) -> None:
+async def _ingest_cards(cards: List[ParsedCard], event_id: int, notification_text: str,
+                        top_tx_id: Optional[str] = None) -> None:
     first_run = not (await supabase.table("payment_receipts").select("id").limit(1).execute()).data
     fresh_cutoff = _now() - datetime.timedelta(minutes=BASELINE_FRESH_WINDOW_MINUTES)
     baseline_count = 0
@@ -434,11 +467,15 @@ async def _ingest_cards(cards: List[ParsedCard], event_id: int, notification_tex
     auto_on = False if first_run else await _auto_confirm_enabled()
     for receipt in new_receipts:
         auto_note = None
+        not_top = bool(top_tx_id and receipt["tx_id"] != top_tx_id)
         if auto_on:
-            done, auto_note = await _try_auto_confirm(receipt)
-            if done:
-                continue
-        await _notify_receipt(receipt, notification_text, auto_note=auto_note)
+            if not top_tx_id or not_top:
+                auto_note = "الحوالة ليست أحدث بطاقة بالسجل (لا تُصادَق تلقائياً إلا الأحدث)"
+            else:
+                done, auto_note = await _try_auto_confirm(receipt)
+                if done:
+                    continue
+        await _notify_receipt(receipt, notification_text, auto_note=auto_note, not_top=not_top)
 
 
 async def match_orders(receipt: Dict[str, Any]) -> Dict[str, Any]:
@@ -472,6 +509,20 @@ async def _auto_confirm_enabled() -> bool:
         return False
 
 
+async def auto_confirm_active() -> bool:
+    """للعرض بشاشة الطالب (نص مدة الشحن)."""
+    return await _auto_confirm_enabled()
+
+
+async def _auto_credited_points_last_24h() -> int:
+    res = await (
+        supabase.table("payment_orders").select("points").eq("status", "paid")
+        .eq("decided_by", AUTO_CONFIRM_ACTOR)
+        .gte("paid_at", _iso(_now() - datetime.timedelta(hours=24))).execute()
+    )
+    return sum(int(r.get("points") or 0) for r in (res.data or []))
+
+
 async def _try_auto_confirm(receipt: Dict[str, Any]) -> "tuple[bool, Optional[str]]":
     """يحاول مصادقة الإيصال تلقائياً. يرجع (True, None) لو شُحن، وإلا (False, السبب) فيكمل المسار اليدوي.
     الشحن نفسه دائماً عبر credit_order الذرية (قفل الطلب والإيصال)، فالاستدعاء المتكرر لا يشحن مرتين."""
@@ -481,10 +532,18 @@ async def _try_auto_confirm(receipt: Dict[str, Any]) -> "tuple[bool, Optional[st
             order, receipt, _now(),
             grace_before_minutes=PAYMENT_AUTO_TX_GRACE_BEFORE_MINUTES,
             grace_after_minutes=PAYMENT_AUTO_TX_GRACE_AFTER_MINUTES,
+            max_age_minutes=PAYMENT_AUTO_MAX_RECEIPT_AGE_MINUTES,
         )
         if not ok:
             return False, reason
-        result = await credit_order(order["id"], receipt["id"], AUTO_CONFIRM_ACTOR)
+        # سقوف تحدّ الضرر (لو تسرّب سر الـ webhook أو تزوير): فوقها = يدوي دائماً.
+        points = int(order["points"])
+        if points > PAYMENT_AUTO_MAX_POINTS_PER_ORDER:
+            return False, f"نقاط الطلب ({points}) فوق سقف الشحن التلقائي للطلب الواحد ({PAYMENT_AUTO_MAX_POINTS_PER_ORDER})"
+        used = await _auto_credited_points_last_24h()
+        if used + points > PAYMENT_AUTO_DAILY_MAX_POINTS:
+            return False, f"بلغ سقف الشحن التلقائي اليومي ({used}/{PAYMENT_AUTO_DAILY_MAX_POINTS} نقطة بآخر 24 ساعة)"
+        result = await credit_order(order["id"], receipt["id"], AUTO_CONFIRM_ACTOR, require_match=True)
         if result.get("result") != "ok":
             return False, f"رفضت الدالة الذرية الشحن ({result.get('result')})"
     except Exception as exc:
@@ -503,7 +562,8 @@ async def _try_auto_confirm(receipt: Dict[str, Any]) -> "tuple[bool, Optional[st
             f"🤖 <b>شحن تلقائي — طلب #{order['id']}</b>\n"
             f"👤 {await _user_label(user_id)}\n"
             f"✅ أُضيف <b>{points}</b> نقطة (المبلغ {format_money(receipt.get('amount'), receipt.get('currency'))})\n"
-            f"🔢 رقم العملية: <code>#{receipt['tx_id']}</code> — 🔑 الكود: <code>{order['code']}</code>"
+            f"🔢 رقم العملية: <code>#{receipt['tx_id']}</code> — 🔑 الكود: <code>{order['code']}</code>",
+            [[types.InlineKeyboardButton(text="🛑 إيقاف الشحن التلقائي", callback_data="pay:autooff")]],
         )
     except Exception as exc:
         logger.error(f"auto-confirm credited order {order['id']} but a follow-up step failed: {exc}", exc_info=True)
@@ -536,7 +596,8 @@ async def _strip_group_buttons(order: Dict[str, Any]) -> None:
         pass
 
 
-async def _notify_receipt(receipt: Dict[str, Any], notification_text: str, auto_note: Optional[str] = None) -> None:
+async def _notify_receipt(receipt: Dict[str, Any], notification_text: str, auto_note: Optional[str] = None,
+                          not_top: bool = False) -> None:
     matches = await match_orders(receipt)
     tx_time = receipt.get("tx_time") or ""
     lines = [
@@ -549,6 +610,8 @@ async def _notify_receipt(receipt: Dict[str, Any], notification_text: str, auto_
         f"🕒 وقت الحوالة: {html.escape(format_payment_time(tx_time))}",
         f"📝 الملاحظة: <code>{html.escape(clean_screen_text(receipt.get('note')) or '-')}</code>",
     ]
+    if not_top:
+        lines.insert(2, "🔎 <i>ليست أحدث بطاقة بالسجل — تحقق منها بتطبيق شام كاش (الاسم والمبلغ ورقم العملية) قبل التأكيد.</i>")
     if notification_text:
         lines.append(f"\n🔔 نص الإشعار:\n<code>{html.escape(notification_text[:500])}</code>")
     if auto_note:
@@ -633,6 +696,27 @@ async def alert_orphan_notifications() -> int:
     return count
 
 
+async def alert_stalled_events() -> int:
+    """حدث screen/manual_request لم تكتمل معالجته (غالباً قُتلت العملية بإعادة تشغيل/نشر Heroku وسط المعالجة):
+    تنبيه المجموعة بدل أن تضيع الدفعة بصمت. المطالبة ذرية (processed False->True) فلا يتكرر التنبيه."""
+    cutoff = _iso(_now() - datetime.timedelta(minutes=PAYMENT_STALLED_EVENT_MINUTES))
+    res = await (
+        supabase.table("payment_events").select("*").in_("event_type", ["screen", "manual_request"])
+        .eq("processed", False).lt("received_at", cutoff).limit(20).execute()
+    )
+    count = 0
+    for event in res.data or []:
+        claim = await supabase.table("payment_events").update({"processed": True}).eq("id", event["id"]).eq("processed", False).execute()
+        if not claim.data:
+            continue
+        count += 1
+        await _alert_manual_request(
+            f"[لم تكتمل معالجة حدث {event.get('event_type')} #{event['id']} (غالباً إعادة تشغيل السيرفر) — "
+            "راجع payment_events وتحقق من الدفعة يدوياً]\n" + (event.get("notification_text") or "")
+        )
+    return count
+
+
 async def purge_old_events() -> None:
     cutoff = _iso(_now() - datetime.timedelta(days=PAYMENT_EVENT_RETENTION_DAYS))
     await supabase.table("payment_events").delete().lt("received_at", cutoff).execute()
@@ -654,6 +738,7 @@ async def payment_watchdog_loop() -> None:
                 except Exception:
                     pass
             await alert_orphan_notifications()
+            await alert_stalled_events()
             if tick % 360 == 0:  # كل ~6 ساعات
                 await purge_old_events()
         except Exception as exc:

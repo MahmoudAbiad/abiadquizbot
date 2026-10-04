@@ -714,6 +714,21 @@ PAYMENT_HEARTBEAT_TTL_SECONDS = 15 * 60
 # الاتجاه (وارد/صادر) لا يُفحص: وجود كود الطلب السري بالملاحظة كافٍ. أي شرط ناقص = تبقى الدفعة للتأكيد اليدوي.
 PAYMENT_AUTO_TX_GRACE_BEFORE_MINUTES = 2   # سماحية ساعة الجوال: حوالة قبل إنشاء الطلب بهالمدة مقبولة
 PAYMENT_AUTO_TX_GRACE_AFTER_MINUTES = 2    # سماحية بعد انتهاء صلاحية الطلب
+PAYMENT_AUTO_MAX_RECEIPT_AGE_MINUTES = 15  # الحوالة الأقدم من هذا لا تُشحن تلقائياً (المعالجة تتم فور وصولها)
+
+
+def _payment_env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+
+
+# سقوف تحدّ الضرر لو تسرّب سر الـ webhook (تُضبط من Heroku config vars بلا إعادة نشر كود):
+PAYMENT_AUTO_MAX_POINTS_PER_ORDER = _payment_env_int("PAYMENT_AUTO_MAX_POINTS_PER_ORDER", 1000)   # أكبر باقة حالياً
+PAYMENT_AUTO_DAILY_MAX_POINTS = _payment_env_int("PAYMENT_AUTO_DAILY_MAX_POINTS", 5000)           # مجموع آخر 24 ساعة
+PAYMENT_AWAITING_EXPIRY_HOURS = 48         # طلب «دفعت» بلا قرار أدمن ينتهي بعد هذه المدة (يحرّر الطالب لطلب جديد)
+PAYMENT_STALLED_EVENT_MINUTES = 3          # حدث screen/manual_request لم تكتمل معالجته (إعادة تشغيل Heroku) -> تنبيه
 
 # ==================== Channel & Support Configuration ====================
 
