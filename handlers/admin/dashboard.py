@@ -69,9 +69,13 @@ async def render_admin_dashboard(event, state: FSMContext = None):
         "👥 <b>الكويز الجماعي:</b> إحصائيات جلسات الغروبات والقنوات\n"
         "📋 <b>الملاحظات:</b> مراجعة ملاحظات الكويزات\n"
         "🤖 <b>الذكاء الاصطناعي:</b> الموديلات وسجل التوليد\n"
+        "🏰 <b>مهلة هجوم الأرض:</b> تغيير المهلة أو تصفيرها\n"
         "⚙️ <b>الإعدادات العامة:</b> نقاط النظام + مفاتيح التحكم"
     )
     reply_markup = get_admin_dashboard_keyboard()
+    reply_markup.inline_keyboard.append([
+        types.InlineKeyboardButton(text="🏰 مهلة هجوم الأرض", callback_data="admin_challenge_cooldown")
+    ])
     
     if isinstance(event, types.Message):
         await event.answer(text, reply_markup=reply_markup, parse_mode="HTML")
