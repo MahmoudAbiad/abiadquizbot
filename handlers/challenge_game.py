@@ -14,6 +14,8 @@ from helpers.supabase_helper import challenge_live as live_repo
 from helpers.supabase_helper.feature_flags import is_feature_enabled
 from services.challenge_game import load_rules, subject_icon, tower_progress
 from services.challenge_notifications import notification_text
+from services.challenge_presentation import PhotoText, source_image, image_option_label
+from helpers.challenge_delivery import deliver_screen
 
 router = Router(name="challenge_game")
 router.message.filter(F.chat.type == "private")
@@ -161,30 +163,31 @@ def attack_screen(state, page=0):
         return text, [[button("🏕️ أرضي", "cg:home:0")], [button("🗺️ أرض أخرى", "cg:l:-1:0")]]
     q, idx = state["question"], state["index"]
     options = q["options"]
+    image_url = source_image(q)
     page = min(max(page, 0), (len(options)-1)//2)
     deadline = dt.datetime.fromisoformat(state["deadline"].replace("Z", "+00:00"))
     now = dt.datetime.fromisoformat(state["server_now"].replace("Z", "+00:00"))
     remaining = max(0, int((deadline-now).total_seconds()))
-    text = f"⚔️ السؤال {idx+1}/{state['total']} — ⏱ نحو {remaining} ثانية\n\n{q['text']}\n\n"
+    text = f"⚔️ السؤال {idx+1}/{state['total']} — ⏱ نحو {remaining} ثانية\n\n"
+    text += "اختر الإجابة بالاعتماد على الصورة.\n" if image_url else q["text"] + "\n\n"
     rows = []
     for i in range(page*2, min(page*2+2, len(options))):
-        text += f"{i+1}) {options[i]}\n\n"
-        rows.append([button(f"الإجابة {i+1}", f"cg:a:{mid}:{idx}:{i}")])
+        if not image_url:
+            text += f"{i+1}) {options[i]}\n\n"
+        rows.append([button(image_option_label(i) if image_url else f"الإجابة {i+1}", f"cg:a:{mid}:{idx}:{i}")])
     nav = []
     if page: nav.append(button("خيارات سابقة", f"cg:p:{mid}:{idx}:{page-1}"))
     if (page+1)*2 < len(options): nav.append(button("خيارات أخرى", f"cg:p:{mid}:{idx}:{page+1}"))
     if nav: rows.append(nav)
-    image_url = q.get("image_url")
-    if image_url and image_url.startswith("https://"):
-        rows.append([types.InlineKeyboardButton(text="🖼 صورة السؤال", url=image_url)])
     rows.append([button("🔄 تحديث / استعادة", f"cg:r:{mid}"), button("🏳️ انسحاب", f"cg:x:{mid}")])
-    return text, rows
+    return (PhotoText(text, image_url) if image_url else text), rows
 
 
 async def show_attack(message, state, page=0):
     text, rows = attack_screen(state, page)
-    sent = await render(message, text, rows)
-    await repo.attach_message(state["id"], state["attacker_id"], sent.message_id)
+    message_id = await deliver_screen(message.bot, message.chat.id, message.message_id, text, keyboard(rows))
+    if message_id is not None:
+        await repo.attach_message(state["id"], state["attacker_id"], message_id)
 
 
 async def show_history(message, user_id, direction, page):
@@ -323,15 +326,9 @@ async def challenge_heartbeat_loop(bot):
                 try:
                     state=await repo.advance(item["id"],item["attacker_id"],"tick")
                     text,rows=attack_screen(state)
-                    if state["message_id"]:
-                        try:
-                            await bot.edit_message_text(text,chat_id=item["attacker_id"],message_id=state["message_id"],
-                                                        reply_markup=keyboard(rows),parse_mode=None)
-                        except TelegramBadRequest as exc:
-                            if "message is not modified" not in str(exc).lower(): raise
-                    else:
-                        sent=await bot.send_message(item["attacker_id"],text,reply_markup=keyboard(rows),parse_mode=None)
-                        await repo.attach_message(item["id"],item["attacker_id"],sent.message_id)
+                    shown = await deliver_screen(bot, item["attacker_id"], state["message_id"], text, keyboard(rows))
+                    if shown is not None and shown != state["message_id"]:
+                        await repo.attach_message(item["id"], item["attacker_id"], shown)
                 except (TelegramBadRequest,TelegramForbiddenError):
                     # Session remains recoverable through /land. Don't resend on every heartbeat.
                     logger.info("game_delivery_unavailable match=%s",item["id"])

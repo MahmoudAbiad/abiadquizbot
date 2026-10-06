@@ -26,7 +26,7 @@ class ParseJsonTests(unittest.TestCase):
     def test_valid_object_with_variable_question_count(self):
         p = parse_challenge_json(jb({"title": "T", "questions": [q(), q("س2", ("أ", "ب", "ج"), 2, explanation=" شرح ")]}))
         self.assertEqual(p.question_count, 2)  # لا افتراض 10
-        self.assertEqual(p.questions[1]["explanation"], "شرح")
+        self.assertEqual(p.questions[1]["explanation"], " شرح ")
         self.assertEqual(p.source_type, "json_upload")
 
     def test_bare_list_uses_default_title(self):
@@ -80,9 +80,11 @@ class ParseJsonTests(unittest.TestCase):
         self.assertEqual(len(shown), 5)
 
     def test_image_url_only_https_kept_in_metadata(self):
-        p = parse_challenge_json(jb({"title": "T", "questions": [q(image_url="https://x/y.png"), q("2", image_url="javascript:1")]}))
+        p = parse_challenge_json(jb({"title": "T", "questions": [q(image_url="https://x/y.png")]}))
         self.assertEqual(p.questions[0]["metadata"], {"image_url": "https://x/y.png"})
-        self.assertNotIn("metadata", p.questions[1])
+        for image in ("javascript:1", "https://", "http://x/y.png"):
+            with self.assertRaises(ChallengeContentError):
+                parse_challenge_json(jb({"title": "T", "questions": [q(image_url=image)]}))
 
 
 class HashTests(unittest.TestCase):

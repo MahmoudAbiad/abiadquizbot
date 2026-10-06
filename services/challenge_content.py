@@ -5,8 +5,10 @@
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from services.challenge_presentation import source_image
 
 MAX_FILE_BYTES = 512 * 1024
 MAX_QUESTIONS = 200
@@ -50,7 +52,7 @@ def _clean_text(v: Any) -> str:
     return v.strip() if isinstance(v, str) else ""
 
 
-def normalize_questions(items: Any) -> List[Dict[str, Any]]:
+def normalize_questions(items: Any, is_math_quiz: bool = False) -> List[Dict[str, Any]]:
     """يتحقق من قائمة أسئلة بصيغة أبيض ويرجع نسخة منظّفة. يجمع حتى 5 أخطاء بدل الفشل عند الأول."""
     if not isinstance(items, list) or not items:
         raise ChallengeContentError("قائمة الأسئلة (questions) مفقودة أو فارغة.")
@@ -94,13 +96,30 @@ def normalize_questions(items: Any) -> List[Dict[str, Any]]:
             err("الشرح (explanation) يجب أن يكون نصاً.")
         elif len(exp_clean) > MAX_EXPLANATION_CHARS:
             err(f"الشرح أطول من {MAX_EXPLANATION_CHARS} حرفاً.")
+        original_meta = q.get("metadata") if isinstance(q.get("metadata"), dict) else {}
+        image_url = source_image(q)
+        if (q.get("image_url") or original_meta.get("image_url")) and not image_url:
+            err("رابط صورة السؤال غير صالح؛ المطلوب رابط HTTPS كامل للصورة الأصلية.")
+        is_math = q.get("is_math", original_meta.get("is_math", is_math_quiz)) is True
+        if is_math and not image_url:
+            err("السؤال مصوّر لكن رابط صورته غير موجود في المصدر. أرسل نسخة تتضمن الصورة الأصلية؛ لن تُعاد توليدها.")
         if not any(e.startswith(f"السؤال {i}:") for e in errors):
-            item: Dict[str, Any] = {"question": text, "options": opts, "correct_option_id": cid}
+            # Validate using stripped text, but retain the source formatting and option order.
+            item: Dict[str, Any] = {"question": q["question"],
+                "options": [o if isinstance(o, str) else str(o) for o in opts_raw], "correct_option_id": cid}
             if exp_clean:
-                item["explanation"] = exp_clean
-            image_url = q.get("image_url")
-            if isinstance(image_url, str) and image_url.startswith("https://"):
-                item["metadata"] = {"image_url": image_url}
+                item["explanation"] = exp
+            metadata = {}
+            # Keep display fields in the existing metadata column. No schema/RLS change.
+            for key in ("is_math", "table", "matrices"):
+                if key in q or key in original_meta:
+                    metadata[key] = deepcopy(q.get(key, original_meta.get(key)))
+            if is_math:
+                metadata["is_math"] = True
+            if image_url:
+                metadata["image_url"] = image_url
+            if metadata:
+                item["metadata"] = metadata
             out.append(item)
     if errors:
         shown = errors[:MAX_REPORTED_ERRORS]
@@ -111,9 +130,12 @@ def normalize_questions(items: Any) -> List[Dict[str, Any]]:
 
 
 def content_hash(questions: List[Dict[str, Any]]) -> str:
-    """بصمة المحتوى التنافسي فقط (السؤال+الخيارات+الإجابة) - لا العنوان ولا الشرح."""
+    """Content plus source presentation; media repairs must not hit a stale text-only duplicate."""
     canon = [[q["question"], q["options"], q["correct_option_id"]] for q in questions]
-    blob = json.dumps(canon, ensure_ascii=False, separators=(",", ":"))
+    for entry, q in zip(canon, questions):
+        if q.get("metadata"):
+            entry.append(q["metadata"])
+    blob = json.dumps(canon, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -139,7 +161,10 @@ def parse_challenge_json(raw: bytes, default_title: str = "") -> ParsedTest:
         title, items = data.get("title") or default_title, data.get("questions")
     else:
         raise ChallengeContentError("بنية JSON غير مدعومة: المطلوب كائن فيه questions أو قائمة أسئلة.")
-    return ParsedTest(clean_title(title), normalize_questions(items), SOURCE_JSON)
+    meta = {k: deepcopy(data[k]) for k in ("is_math_quiz", "subject_type", "difficulty")
+            if isinstance(data, dict) and k in data}
+    return ParsedTest(clean_title(title), normalize_questions(items, meta.get("is_math_quiz") is True),
+                      SOURCE_JSON, metadata=meta)
 
 
 def from_existing_quiz(quiz_row: Dict[str, Any]) -> ParsedTest:
@@ -151,7 +176,7 @@ def from_existing_quiz(quiz_row: Dict[str, Any]) -> ParsedTest:
             data = json.loads(data)
         except json.JSONDecodeError:
             raise ChallengeContentError("بيانات الكويز المصدر تالفة.") from None
-    questions = normalize_questions(data)
+    questions = normalize_questions(data, quiz_row.get("is_math_quiz") is True)
     meta = {k: quiz_row[k] for k in ("is_math_quiz", "subject_type", "difficulty") if quiz_row.get(k) is not None}
     return ParsedTest(clean_title(quiz_row.get("source_title"), "كويز"), questions, SOURCE_EXISTING,
                       str(quiz_row.get("id")), meta)

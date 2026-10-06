@@ -9,6 +9,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from uuid import UUID
+from weakref import WeakValueDictionary
 
 from aiogram import F, Router, types
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -18,6 +19,8 @@ from helpers.supabase_helper import challenge_game as game_repo
 from helpers.supabase_helper import challenge_live as live
 from helpers.supabase_helper.feature_flags import is_feature_enabled
 from services import challenge_live_ui as ui
+from helpers.challenge_delivery import deliver_screen
+from services.challenge_diagnostics import log_failure
 
 router = Router(name="challenge_live")
 router.message.filter(F.chat.type == "private")
@@ -31,6 +34,8 @@ _status = {}                # match_id -> last status seen by the worker (for ma
 _seen = set()               # match ids that were active on the previous beat
 _labels = {}                # unit_id -> {"subject", "unit"}
 _MAX_CACHE = 5000
+_wake = asyncio.Event()
+_present_locks = WeakValueDictionary()
 
 
 def to_markup(rows):
@@ -40,25 +45,46 @@ def to_markup(rows):
 
 
 async def deliver(bot, chat_id, message_id, screen):
-    """Edit the existing message; fall back to a NEW message if Telegram refuses (too old / deleted /
-    inaccessible). 'message is not modified' is success. Returns the message id now showing the screen,
-    or None when the user cannot be reached (blocked bot). Rate limits (TelegramRetryAfter) propagate."""
     text, rows = screen
-    markup = to_markup(rows)
-    if message_id:
-        try:
-            await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=markup, parse_mode=None)
-            return message_id
-        except TelegramBadRequest as exc:
-            if "message is not modified" in str(exc).lower():
-                return message_id
-        except TelegramForbiddenError:
-            return None
+    return await deliver_screen(bot, chat_id, message_id, text, to_markup(rows))
+
+
+def wake_live():
+    _wake.set()
+
+
+async def wait_for_work(delay):
     try:
-        sent = await bot.send_message(chat_id, text, reply_markup=markup, parse_mode=None)
-    except (TelegramBadRequest, TelegramForbiddenError):
-        return None
-    return sent.message_id
+        await asyncio.wait_for(_wake.wait(), timeout=delay)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        _wake.clear()
+
+
+async def push_opponent(bot, state):
+    """Notify the other player immediately, even while the background worker is idle.
+    Its own authorized state is read again; never reuse the caller's answer payload.
+    """
+    match_id, opponent_id = state["id"], state["opponent"]["id"]
+    pointers = await live.player_messages([match_id]) or {}
+    info = _search.get(opponent_id)
+    message_id = pointers.get((match_id, opponent_id)) or (info or {}).get("message_id")
+    other = await live.match_state(match_id, opponent_id)
+    entry = _cache.get((match_id, opponent_id))
+    page = entry.get("page", 0) if entry and entry["key"] == ui.state_key(other) else 0
+    await present(bot, opponent_id, message_id, other, page)
+    _search.pop(opponent_id, None)
+
+
+async def notify_opponent(bot, state):
+    try:
+        await push_opponent(bot, state)
+    except Exception as exc:
+        log_failure(logger, "live_opponent_push_failed", exc, match=state["id"])
+    finally:
+        _seen.add(state["id"])
+        wake_live()
 
 
 def remember(match_id, user_id, key, sig, message_id):
@@ -69,9 +95,20 @@ def remember(match_id, user_id, key, sig, message_id):
 
 
 async def present(bot, user_id, message_id, state, page=0):
+    key = (state["id"], user_id)
+    lock = _present_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        return await present_locked(bot, user_id, message_id, state, page)
+
+
+async def present_locked(bot, user_id, message_id, state, page=0):
     """Render a backend match state for `user_id` into `message_id` (private chat id == user id), keep the
     per-player message pointer in PostgreSQL, and remember what is displayed. Returns the shown message id."""
     match_id = state["id"]
+    entry = _cache.get((match_id, user_id))
+    stamp = ui.parse_ts(state.get("server_now"))
+    if entry and stamp and entry.get("server_now") and stamp < entry["server_now"]:
+        return entry["message_id"]  # a slower callback must not replace a newer worker screen
     profile = None
     if state["status"] in ui.TERMINAL:
         try:
@@ -81,18 +118,20 @@ async def present(bot, user_id, message_id, state, page=0):
     screen = ui.match_screen(state, page, profile)
     sig = ui.signature(screen)
     entry = _cache.get((match_id, user_id))
-    if entry and entry["sig"] == sig and entry["message_id"] == message_id:
-        return message_id
-    shown = await deliver(bot, user_id, message_id, screen)
+    unchanged = entry and entry["sig"] == sig and entry["message_id"] == message_id
+    shown = message_id if unchanged else await deliver(bot, user_id, message_id, screen)
     if shown is None:
-        remember(match_id, user_id, ui.state_key(state), "unreachable", None)   # blocked bot: stop retrying this state
+        remember(match_id, user_id, ui.state_key(state), "unreachable", None)
         return None
-    if not entry or entry["message_id"] != shown:
+    attached = bool(entry and entry.get("attached") and entry["message_id"] == shown)
+    if not attached:
         try:
             await live.attach_message(match_id, user_id, shown)
-        except Exception:
-            logger.info("live_attach_failed match=%s", match_id)
+            attached = True
+        except Exception as exc:
+            log_failure(logger, "live_attach_failed", exc, match=match_id)
     remember(match_id, user_id, ui.state_key(state), sig, shown)
+    _cache[(match_id, user_id)].update(server_now=stamp, page=page, attached=attached)
     return shown
 
 
@@ -162,6 +201,7 @@ async def start_search(bot, c, unit_hex):
         if ui.error_code(exc) in ("already_queued", "in_live_match"):
             return await resume(bot, user, message_id)   # double tap: show the real state instead of an error
         raise
+    wake_live()
     return await route_queue(bot, user, message_id, state)
 
 
@@ -171,7 +211,10 @@ async def route_queue(bot, user, message_id, queue):
         _search.pop(user.id, None)
         state = await live.match_state(queue["match_id"], user.id)
         logger.info("match_found match=%s", queue["match_id"])
-        return await present(bot, user.id, message_id, state)
+        _seen.add(state["id"])
+        # Both deliveries run concurrently; an unavailable peer cannot prevent the caller's screen.
+        shown, _ = await asyncio.gather(present(bot, user.id, message_id, state), notify_opponent(bot, state))
+        return shown
     if status == "waiting":
         info = _search.get(user.id)
         if not info:                                   # recovered screen (restart): labels from the unit
@@ -212,7 +255,8 @@ async def refresh(bot, user, message_id, match_id, page=0):
 async def answer(bot, c, match_id, index, option):
     user, message_id = c.from_user, c.message.message_id
     state = await live.answer(match_id, user.id, index, option, f"lv:{c.id}")
-    return await present(bot, user.id, message_id, state)
+    shown, _ = await asyncio.gather(present(bot, user.id, message_id, state), notify_opponent(bot, state))
+    return shown
 
 
 async def options_page(bot, user, message_id, match_id, index, page):
@@ -229,7 +273,8 @@ async def ask_leave(bot, user, message_id, match_id):
 
 async def leave(bot, user, message_id, match_id):
     state = await live.leave(match_id, user.id)
-    return await present(bot, user.id, message_id, state)
+    shown, _ = await asyncio.gather(present(bot, user.id, message_id, state), notify_opponent(bot, state))
+    return shown
 
 
 @router.callback_query(F.data.startswith("lv:"))
@@ -262,8 +307,7 @@ async def live_callback(c: types.CallbackQuery):
         elif action == "z":
             await leave(bot, user, message_id, str(UUID(parts[2])))
     except Exception as exc:
-        logger.warning("live_callback_failed user=%s action=%s type=%s code=%s", user.id, action,
-                       type(exc).__name__, ui.error_code(exc))
+        log_failure(logger, "live_callback_failed", exc, user=user.id, action=action, code=ui.error_code(exc))
         await edit(bot, user.id, message_id, ui.error_screen(exc))
 
 
@@ -278,18 +322,16 @@ async def render_for(bot, row, user_id, db_message_id):
     match_id = row["id"]
     key = (row["status"], row["question_index"])
     entry = _cache.get((match_id, user_id))
-    if entry and row["status"] != "created" and entry["key"] == key:
-        return                                        # nothing new (e.g. the answering handler already rendered it)
-    message_id, from_search = db_message_id, False
+    if entry and entry["sig"] == "unreachable" and entry["key"] == key:
+        return
+    # Read live state even within one question: scores and answered flags can change.
+    # present() still deduplicates identical screens, so this does not spam Telegram.
+    message_id, from_search = (entry or {}).get("message_id") or db_message_id, False
     if not message_id and _search.get(user_id):
         message_id, from_search = _search[user_id]["message_id"], True    # waiting player: adopt the search message
-    if not message_id:
-        # No pointer yet. The joiner's handler attaches within milliseconds; wait a few beats before sending a new one.
-        _pending[(match_id, user_id)] = _pending.get((match_id, user_id), 0) + 1
-        if _pending[(match_id, user_id)] < 3:
-            return
     state = await live.match_state(match_id, user_id)
-    shown = await present(bot, user_id, message_id, state)
+    page = entry.get("page", 0) if entry and entry["key"] == key else 0
+    shown = await present(bot, user_id, message_id, state, page)
     if shown is not None:
         _pending.pop((match_id, user_id), None)
         if from_search:
@@ -310,8 +352,9 @@ def _log_transition(row):
 
 async def live_beat(bot):
     """One heartbeat: second-chance pairing, DB-driven sweep (countdown end, timeouts, next question, expiry),
-    then push changed screens. A fixed number of aggregated queries regardless of user count."""
+    then read both player views (bounded concurrency) and push only changed screens."""
     global _seen
+    seen_before = set(_seen)
     waiting = await live.waiting_users()
     if len(waiting) >= 2:                              # one waiter cannot be paired; range widens with time
         await live.pair_waiting(waiting[:50])
@@ -323,28 +366,38 @@ async def live_beat(bot):
             logger.info("live_expiry_notice_unavailable user=%s", user_id)
     rows = await live.active_matches()
     ids = {r["id"] for r in rows}
-    finished = await live.matches_by_ids(sorted(_seen - ids)) if _seen - ids else []
+    settled = {m["id"] for m in swept.get("matches", []) if m.get("status") in ui.TERMINAL}
+    finished_ids = (_seen | settled) - ids
+    finished = await live.matches_by_ids(sorted(finished_ids)) if finished_ids else []
     everything = rows + finished
     messages = await live.player_messages([r["id"] for r in everything]) if everything else {}
-    for row in everything:
-        _log_transition(row)
-        for user_id in (row["attacker_id"], row["defender_id"]):
+    retry_ids = set()
+    slots = asyncio.Semaphore(8)
+
+    async def render_player(row, user_id):
+        async with slots:
             try:
                 await render_for(bot, row, user_id, messages.get((row["id"], user_id)))
             except asyncio.CancelledError:
                 raise
-            except Exception:                           # Telegram/transport trouble never changes the match
-                logger.info("live_render_unavailable match=%s", row["id"])
-    _seen = ids
+            except Exception as exc:
+                retry_ids.add(row["id"])
+                log_failure(logger, "live_render_unavailable", exc, match=row["id"], user=user_id)
+
+    for row in everything:
+        _log_transition(row)
+    await asyncio.gather(*(render_player(row, user_id) for row in everything
+                           for user_id in (row["attacker_id"], row["defender_id"])))
+    _seen = ids | retry_ids | (_seen - seen_before)
     return 1 if any(r["status"] == "created" for r in rows) else 2
 
 
 async def challenge_live_loop(bot):
     """Spawned beside challenge_heartbeat_loop in BOTH polling (main.py) and webhook (webhook_server.py) mode.
-    Idle (no search/match anywhere) costs one tiny indexed query per 20 s; works before the 0010 migration exists
+    Idle (no search/match anywhere) costs one indexed query per 2 s; works before the 0010 migration exists
     (errors are swallowed and retried slowly), and keeps running for in-flight matches even if flags are turned off."""
     while True:
-        delay = 20
+        delay = 2
         try:
             # `_seen` non-empty = a match was active on the last beat: one more beat renders its final screen
             # even though its queue rows are already 'done' (otherwise has_live_work() would hide the result).
@@ -352,7 +405,7 @@ async def challenge_live_loop(bot):
                 delay = await live_beat(bot)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.debug("live_heartbeat_unavailable_or_migrations_not_applied")
-            delay = 30
-        await asyncio.sleep(delay)
+        except Exception as exc:
+            log_failure(logger, "live_heartbeat_failed", exc)
+            delay = 5
+        await wait_for_work(delay)

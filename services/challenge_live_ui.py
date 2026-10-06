@@ -14,9 +14,10 @@ import math
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
+from services.challenge_presentation import PhotoText, source_image, image_option_label
 
 TERMINAL = {"completed", "expired", "abandoned", "cancelled"}
-PAGE_OPTIONS = 4          # options per page (long option lists paginate; callback stays tiny)
+PAGE_OPTIONS = 2          # options per page (long option lists paginate; callback stays tiny)
 PAGE_ITEMS = 6            # subjects / units per menu page
 MAX_QUESTION_CHARS = 1200
 MAX_OPTION_CHARS = 300
@@ -96,7 +97,7 @@ def state_key(state):
 
 def signature(screen):
     text, rows = screen
-    raw = text + "|" + "|".join(f"{b.text}>{b.data or b.url}" for row in rows for b in row)
+    raw = text + "|" + str(getattr(text, "image_url", "")) + "|" + "|".join(f"{b.text}>{b.data or b.url}" for row in rows for b in row)
     return hashlib.sha1(raw.encode()).hexdigest()
 
 
@@ -125,7 +126,7 @@ def error_code(exc):
 def error_screen(exc):
     code = error_code(exc)
     rows = [[Btn("↩️ أرضي", "cg:home:0")]]
-    if code in ("already_queued", "in_live_match"):
+    if code is None or code in ("already_queued", "in_live_match"):
         rows.insert(0, [Btn("⚔️ متابعة المباراة", cb("q"))])
     elif code in ("no_content", "branch_mismatch"):
         rows.insert(0, [Btn("🔁 اختيار وحدة أخرى", cb("m", 0))])
@@ -219,7 +220,7 @@ def _previous_block(state):
     prev = state.get("previous")
     if not prev:
         return ""
-    opp = state["opponent"]["name"] or "الخصم"
+    opp = _clip(state["opponent"]["name"] or "الخصم", 64)
     text = ("📌 نتيجة السؤال السابق\n"
             f"{_round_line('أنت', prev.get('mine'))}\n{_round_line(opp, prev.get('opponent'))}\n")
     correct = prev.get("correct_option_id")
@@ -242,41 +243,40 @@ def _found(state):
 def question_screen(state, page=0):
     mid, idx, total = hexid(state["id"]), state["index"], state["total"]
     q, me, opp = state["question"], state["me"], state["opponent"]
+    image = source_image(q)
     options = list(q.get("options") or [])
-    pages = max(1, math.ceil(len(options) / PAGE_OPTIONS))
+    size = (len(options) or 1) if image else PAGE_OPTIONS
+    pages = max(1, math.ceil(len(options) / size))
     page = min(max(page, 0), pages - 1)
     left = seconds_until(state.get("deadline"), state.get("server_now"))
-    opp_name = opp["name"] or "الخصم"
+    opp_name = _clip(opp["name"] or "الخصم", 64)
     text = ("🔥 ابدأ!\n" if idx == 0 and not state.get("previous") else "")
     text += _previous_block(state)
     text += (f"⚔️ السؤال {idx + 1} / {total}\n"
              f"🟢 أنت: {me['score']} — 🔵 {opp_name}: {opp['score']}\n"
-             f"⏱ لديك نحو {left} ثانية\n\n{_clip(q.get('text'), MAX_QUESTION_CHARS)}\n\n")
+             f"⏱ لديك نحو {left} ثانية\n\n")
+    text += "اختر الإجابة بالاعتماد على الصورة.\n" if image else str(q.get("text") or "") + "\n\n"
+    shown = range(page * size, min(len(options), (page + 1) * size))
     rows = []
+    if not image:
+        for i in shown:
+            text += f"{i + 1}) {options[i]}\n\n"
     if me.get("answered"):
         text += "✅ تم تسجيل إجابتك — بانتظار الخصم…" if not opp.get("answered") else "✅ تم تسجيل إجابتك."
-        for i, option in enumerate(options):
-            text += f"\n{i + 1}) {_clip(option, MAX_OPTION_CHARS)}"
     else:
-        shown = range(page * PAGE_OPTIONS, min(len(options), (page + 1) * PAGE_OPTIONS))
-        for i in shown:
-            text += f"{i + 1}) {_clip(options[i], MAX_OPTION_CHARS)}\n\n"
-        buttons = [Btn(f"الإجابة {i + 1}", cb("a", mid, idx, i)) for i in shown]
+        buttons = [Btn(image_option_label(i) if image else f"الإجابة {i + 1}", cb("a", mid, idx, i)) for i in shown]
         rows += [buttons[k:k + 2] for k in range(0, len(buttons), 2)]
-        nav = []
-        if page:
-            nav.append(Btn("خيارات سابقة", cb("p", mid, idx, page - 1)))
-        if page + 1 < pages:
-            nav.append(Btn("خيارات أخرى", cb("p", mid, idx, page + 1)))
-        if nav:
-            rows.append(nav)
         if opp.get("answered"):
             text += f"⚡ {opp_name} أجاب بالفعل"
-    image = q.get("image_url")
-    if image and str(image).startswith("https://"):
-        rows.append([Btn("🖼 صورة السؤال", url=image)])
+    nav = []
+    if page:
+        nav.append(Btn("خيارات سابقة", cb("p", mid, idx, page - 1)))
+    if page + 1 < pages:
+        nav.append(Btn("خيارات أخرى", cb("p", mid, idx, page + 1)))
+    if nav:
+        rows.append(nav)
     rows.append([Btn("🔄 تحديث المباراة", cb("r", mid)), Btn("🏳️ انسحاب", cb("x", mid))])
-    return text.rstrip(), rows
+    return (PhotoText(text.rstrip(), image) if image else text.rstrip()), rows
 
 
 def _mine(result, user_id):

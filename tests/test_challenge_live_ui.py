@@ -13,6 +13,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID
+from weakref import WeakValueDictionary
+from services.challenge_diagnostics import log_failure
+from helpers.challenge_delivery import deliver_screen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,18 +27,23 @@ UNIT = "22222222-2222-2222-2222-222222222222"
 SUBJ = "33333333-3333-3333-3333-333333333333"
 NOW = "2026-10-05T10:00:10+00:00"
 HANDLER = "handlers/challenge_live.py"
-NAMES = ["to_markup", "deliver", "remember", "present", "unit_labels", "identity", "live_open", "edit", "menu",
+NAMES = ["to_markup", "deliver", "remember", "present", "present_locked", "push_opponent", "notify_opponent", "wake_live", "unit_labels", "identity", "live_open", "edit", "menu",
          "units_menu", "start_search", "route_queue", "cancel", "resume", "refresh", "answer", "options_page",
          "ask_leave", "leave", "live_callback", "notify_expired", "render_for", "_log_transition", "live_beat",
          "challenge_live_loop"]
 
 
-class BadRequest(Exception):
-    pass
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 
-class Forbidden(Exception):
-    pass
+class BadRequest(TelegramBadRequest):
+    def __init__(self, message):
+        super().__init__(method=None, message=message)
+
+
+class Forbidden(TelegramForbiddenError):
+    def __init__(self, message):
+        super().__init__(method=None, message=message)
 
 
 class Btn:
@@ -138,6 +146,10 @@ def make_env(live, bot=None, flags=None, game=None):
                          TelegramBadRequest=BadRequest, TelegramForbiddenError=Forbidden, logger=Logs(), asyncio=asyncio,
                          UUID=UUID, OrderedDict=OrderedDict, _search={}, _cache=OrderedDict(), _pending={}, _status={},
                          _seen=set(), _labels={}, _MAX_CACHE=5000)
+    async def wait_for_work(delay):
+        await env["asyncio"].sleep(delay)
+    env.update(deliver_screen=deliver_screen, log_failure=log_failure,
+               _wake=asyncio.Event(), _present_locks=WeakValueDictionary(), wait_for_work=wait_for_work)
     env["bot"] = bot or FakeBot()
     return env
 
@@ -271,17 +283,19 @@ class RenderTests(unittest.TestCase):
         self.assertEqual([d for d in all_data(rows) if d.startswith("lv:a:")], [])
         self.assertTrue(any(d.startswith("lv:r:") for d in all_data(rows)))
 
-    def test_long_content_is_clipped_and_options_paginate(self):
-        state = mstate(question={"text": "س" * 5000, "options": ["خ" * 900] * 7, "image_url": "https://x/y.png"})
-        text, rows = ui.question_screen(state, page=0)
-        self.assertLess(len(text), 4096)
-        self.assertEqual(len([d for d in all_data(rows) if d.startswith("lv:a:")]), 4)
-        self.assertTrue(any(d.startswith("lv:p:") for d in all_data(rows)))
-        self.assertTrue(any(b.url for r in rows for b in r))
-        _, rows2 = ui.question_screen(state, page=1)
-        self.assertEqual(len([d for d in all_data(rows2) if d.startswith("lv:a:")]), 3)
-        text3, rows3 = ui.question_screen(mstate(question={"text": "س", "options": ["أ", "ب"], "image_url": "http://insecure/x.png"}))
-        self.assertFalse(any(b.url for r in rows3 for b in r))     # https only
+    def test_source_text_is_complete_and_image_is_embedded(self):
+        state = mstate(question={"text": "س" * 2000, "options": ["خ" * 500] * 7})
+        for page in range(4):
+            text, rows = ui.question_screen(state, page=page)
+            self.assertLessEqual(len(text), 4096)
+            self.assertIn(state["question"]["text"], text)
+            self.assertIn("خ" * 500, text)
+        state["question"]["image_url"] = "https://x/y.png"
+        text, rows = ui.question_screen(state)
+        self.assertEqual(text.image_url, "https://x/y.png")
+        self.assertLessEqual(len(text), 1024)
+        self.assertEqual(len([d for d in all_data(rows) if d.startswith("lv:a:")]), 7)
+        self.assertFalse(any(b.url for r in rows for b in r))
 
     def test_completed_screen_win_draw_loss(self):
         win, rows = ui.final_screen(mstate("completed", index=10, result=result()), {"win_streak": 4, "trophies": 108})
@@ -504,7 +518,7 @@ class AnswerTests(unittest.TestCase):
         self.assertIn("الإجابة 1", [b.text for row in e["bot"].edits[-1].markup.inline_keyboard for b in row])
         e2 = make_env(live)
         run(e2["options_page"](e2["bot"], user(), 100, MID, 2, 1))
-        self.assertEqual([b.text for row in e2["bot"].edits[-1].markup.inline_keyboard for b in row][0], "الإجابة 5")
+        self.assertEqual([b.text for row in e2["bot"].edits[-1].markup.inline_keyboard for b in row][0], "الإجابة 3")
 
     def test_leave_requires_confirmation_then_uses_backend(self):
         live = FakeLive(match_state=mstate(), leave=mstate("abandoned", result=result(winner=8, forfeit=7, reason="abandoned")))
@@ -638,7 +652,7 @@ class WorkerTests(unittest.TestCase):
             for u in (r["attacker_id"], r["defender_id"]):
                 e["_cache"][(r["id"], u)] = {"key": ("in_progress", 1), "sig": "x", "message_id": 9}
         run(e["live_beat"](e["bot"]))
-        self.assertEqual(live.names(), ["waiting_users", "sweep", "active_matches", "player_messages"])
+        self.assertEqual(live.names().count("match_state"), 60)  # refresh same-question answer flags
         live2 = FakeLive(waiting_users=[1, 2], sweep={"expired_users": []}, active_matches=[], pair_waiting=[])
         e2 = make_env(live2)
         run(e2["live_beat"](e2["bot"]))
@@ -677,12 +691,9 @@ class WorkerTests(unittest.TestCase):
         self.assertIn(("attach_message", (MID, 8, 777), {}), live.calls)
         self.assertNotIn(8, e["_search"])
 
-    def test_player_without_any_message_pointer_gets_new_message_after_grace_beats(self):
+    def test_player_without_message_pointer_is_not_delayed_by_grace_beats(self):
         live = FakeLive(match_state=mstate("created"), attach_message=None)
         e = make_env(live)
-        run(e["render_for"](e["bot"], self.ROW, 8, None))
-        run(e["render_for"](e["bot"], self.ROW, 8, None))
-        self.assertEqual((e["bot"].sends, live.names()), ([], []))      # the joiner's handler may still be attaching
         run(e["render_for"](e["bot"], self.ROW, 8, None))
         self.assertEqual(len(e["bot"].sends), 1)
         self.assertIn(("attach_message", (MID, 8, 501), {}), live.calls)
@@ -700,7 +711,7 @@ class WorkerTests(unittest.TestCase):
             async def stop_sleep(delay):
                 loops.append(delay)
                 raise asyncio.CancelledError
-            e["asyncio"] = SimpleNamespace(sleep=stop_sleep, CancelledError=asyncio.CancelledError)
+            e["asyncio"] = SimpleNamespace(sleep=stop_sleep, CancelledError=asyncio.CancelledError, Lock=asyncio.Lock, gather=asyncio.gather, Semaphore=asyncio.Semaphore)
             e["challenge_live_loop"].__globals__["asyncio"] = e["asyncio"]
             await e["challenge_live_loop"](e["bot"])
         with self.assertRaises(asyncio.CancelledError):
@@ -718,7 +729,7 @@ class WorkerTests(unittest.TestCase):
             async def sleep(delay):
                 delays.append(delay)
                 raise asyncio.CancelledError
-            e["asyncio"] = SimpleNamespace(sleep=sleep, CancelledError=asyncio.CancelledError)
+            e["asyncio"] = SimpleNamespace(sleep=sleep, CancelledError=asyncio.CancelledError, Lock=asyncio.Lock, gather=asyncio.gather, Semaphore=asyncio.Semaphore)
             e["challenge_live_loop"].__globals__["asyncio"] = e["asyncio"]
             return e
         e = loop_env(FakeLive(has_live_work=False))
@@ -727,7 +738,7 @@ class WorkerTests(unittest.TestCase):
         e = loop_env(FakeLive(has_live_work=Exception('relation "challenge_live_queue" does not exist')))
         with self.assertRaises(asyncio.CancelledError):
             run(e["challenge_live_loop"](e["bot"]))
-        self.assertEqual(delays, [20, 30])
+        self.assertEqual(delays, [2, 5])
 
     def test_match_started_is_logged_once_on_the_transition(self):
         e = make_env(FakeLive())
@@ -951,6 +962,7 @@ class FlowSimulationTests(unittest.TestCase):
         self.assertIn("جارٍ البحث", self.screen(bot, A, 100))
         self.press(e, sim, unit, B, 200, "b-join")                      # B joins: instantly matched
         self.assertIn("تم العثور على خصم", self.screen(bot, B, 200))
+        self.assertIn("تم العثور على خصم", self.screen(bot, A, 100))  # no worker beat needed
         self.beat(e, sim)                                                # worker: A's SEARCH message becomes the match
         self.assertIn("تم العثور على خصم", self.screen(bot, A, 100))
         self.assertIn("بعد 4", self.screen(bot, A, 100))
@@ -962,10 +974,11 @@ class FlowSimulationTests(unittest.TestCase):
         # Q1: A correct (option 1), then B wrong (option 0) => resolved by B's answer
         self.press(e, sim, ui.cb("a", ui.hexid(MID), 0, 1), A, 100, "a-q1")
         self.assertIn("تم تسجيل إجابتك", self.screen(bot, A, 100))
+        self.assertIn("أجاب بالفعل", self.screen(bot, B, 200))
         self.press(e, sim, ui.cb("a", ui.hexid(MID), 0, 0), B, 200, "b-q1")
         self.assertIn("السؤال 2 / 3", self.screen(bot, B, 200))
         self.assertIn("أنت: ❌ خاطئة", self.screen(bot, B, 200))
-        self.assertNotIn("السؤال 2 / 3", self.screen(bot, A, 100))       # A not yet pushed...
+        self.assertIn("السؤال 2 / 3", self.screen(bot, A, 100))          # immediate opponent push
         self.beat(e, sim)                                                # ...the worker pushes it within one beat
         self.assertIn("السؤال 2 / 3", self.screen(bot, A, 100))
         self.assertIn("أنت: ✅ صحيحة (+100)", self.screen(bot, A, 100))

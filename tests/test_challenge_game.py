@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from reliability_support import load_functions
 from services.challenge_game import load_rules, question_score, stars_for, tower_progress
 from services.challenge_notifications import notification_text
+from services.challenge_presentation import PhotoText, source_image, image_option_label
 
 
 class RuleTests(unittest.TestCase):
@@ -42,7 +43,7 @@ class ScreenTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from aiogram import types
-        cls.f=load_functions("handlers/challenge_game.py",["button","attack_screen"],UUID=UUID,dt=dt,types=types)
+        cls.f=load_functions("handlers/challenge_game.py",["button","attack_screen"],UUID=UUID,dt=dt,types=types, PhotoText=PhotoText, source_image=source_image, image_option_label=image_option_label)
     def state(self):
         return {"id":str(uuid4()),"attacker_id":1,"status":"in_progress","index":0,"total":10,
                 "question":{"text":"س"*2000,"options":["خ"*500 for _ in range(10)]},

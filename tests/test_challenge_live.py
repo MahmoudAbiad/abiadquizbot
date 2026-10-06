@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
+from services.challenge_diagnostics import log_failure
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -80,7 +81,8 @@ class RepoTests(unittest.TestCase):
     def env(self, responses):
         self.logs = []
         sb = FakeSupabase(responses)
-        f = load_functions(SRC, NAMES, supabase=sb, load_rules=load_rules, log_info=self.logs.append,
+        f = load_functions(SRC, NAMES, supabase=sb, load_rules=load_rules, log_info=load_functions("logger.py", ["log_info"])["log_info"],
+                           logger=MagicMock(info=self.logs.append), log_failure=log_failure,
                            _TERMINAL={"completed", "expired", "abandoned", "cancelled"},
                            _LOG_EVENT={"completed": "match_completed", "abandoned": "match_abandoned",
                                        "expired": "match_timeout", "cancelled": "match_cancelled"})

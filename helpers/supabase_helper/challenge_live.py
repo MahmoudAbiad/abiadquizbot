@@ -4,7 +4,8 @@ nothing here keeps match state in memory, so a worker restart or a Redis reset l
 Telegram actor ids are passed by the trusted bot backend only; never expose these RPCs to public clients.
 Logs carry ids and event names only (no answers, option text, tokens or payment data).
 """
-from ._client import supabase, log_info
+from ._client import supabase, log_info, logger
+from services.challenge_diagnostics import log_failure
 from services.challenge_game import load_rules
 
 _TERMINAL = {"completed", "expired", "abandoned", "cancelled"}
@@ -19,7 +20,7 @@ async def rpc(name, **params):
 def _log_terminal(state):
     status = (state or {}).get("status")
     if status in _TERMINAL:
-        log_info(f"{_LOG_EVENT[status]} match={state.get('id')}")
+        log_info(logger, f"{_LOG_EVENT[status]} match={state.get('id')}")
 
 
 async def join_queue(user_id, unit_id, request_key):
@@ -40,7 +41,7 @@ async def try_match(user_id, attempts=3):
     for _ in range(max(1, attempts)):
         state = await rpc("challenge_live_try_match", p_user=user_id, p_rules=rules)
         if state and state.get("created"):
-            log_info(f"match_created match={state.get('match_id')}")
+            log_info(logger, f"match_created match={state.get('match_id')}")
         if not state or not state.get("retry"):
             break
     return state
@@ -65,7 +66,7 @@ async def answer(match_id, user_id, index, option, update_key=None):
     """Record the player's answer once. update_key = Telegram update/callback id (duplicate-safe)."""
     state = await rpc("challenge_live_answer", p_match=match_id, p_user=user_id, p_index=index,
                       p_option=option, p_update=update_key)
-    log_info(f"answer_received match={match_id} index={index}")
+    log_info(logger, f"answer_received match={match_id} index={index}")
     _log_terminal(state)
     return state
 
@@ -98,13 +99,22 @@ async def sweep(limit=50):
     expired = await expire_queue()
     ticked = []
     for match_id in await due_matches(limit):
-        ticked.append(await tick(match_id))
+        try:
+            ticked.append(await tick(match_id))
+        except Exception as exc:
+            log_failure(logger, "live_tick_failed", exc, match=match_id)
     return {"expired_users": expired, "matches": ticked}
 
 
 async def pair_waiting(user_ids):
     """Second chance for waiting players (range widens with time); call from the same heartbeat."""
-    return [await try_match(u, attempts=1) for u in user_ids]
+    results = []
+    for user_id in user_ids:
+        try:
+            results.append(await try_match(user_id, attempts=1))
+        except Exception as exc:
+            log_failure(logger, "live_pair_failed", exc, user=user_id)
+    return results
 
 
 async def waiting_users(limit=200):
