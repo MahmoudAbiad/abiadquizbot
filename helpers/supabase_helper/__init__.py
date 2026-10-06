@@ -90,6 +90,7 @@ from .feedback import (
     save_quiz_feedback,
 )
 
+from . import challenges  # noqa: F401  (بنك التحديات - يُستورد كوحدة: supabase_helper.challenges)
 from .feature_flags import (
     _FEATURE_FLAG_REDIS_PREFIX,
     FEATURE_FLAG_CACHE_TTL_SECONDS,

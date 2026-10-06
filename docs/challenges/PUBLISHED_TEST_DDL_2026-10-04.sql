@@ -1,0 +1,39 @@
+-- PUBLISHED_TEST_DDL_2026-10-04.sql  (مرجع فقط — لا يُطبَّق)
+-- الحالة: **جزئي**. النص الكامل لنسخة 2026-10-04 القديمة لـ challenge_content_0008 / challenge_game_0009 / challenge_live_0010
+-- ما زال محفوظًا حرفيًا في مشروع الاختبار (xhlksusmczccqyvbxylo) داخل supabase_migrations.schema_migrations
+-- (لم تُحذف تلك السجلات). لم يُنسخ هنا كاملًا لأن النسخ اليدوي لـ ~72 ألف حرف عبر الدردشة مكلف وعرضة للخطأ.
+-- لاستخراجه كاملًا:
+--   select name, array_to_string(statements, E';\n') from supabase_migrations.schema_migrations
+--   where name in ('challenge_content_0008','challenge_game_0009','challenge_live_0010') order by version;
+--
+-- بصمات النسخ القديمة المسجلة (للتحقق من أي استخراج لاحق):
+--   challenge_content_0008 : 7530 حرفًا  md5 a36d65b14ec59933b0039b3278dfd8e5
+--   challenge_game_0009    : 24070 حرفًا md5 6ab1251335bd320bc782ff742bd8af24
+--   challenge_live_0010    : 41185 حرفًا md5 af95c710f3c0f94eddb3a37020b44695
+-- بصمات نسخ الـrepo المطبقة بعد إعادة البناء (مطابقة لملفات db/migrations بالـmd5):
+--   challenge_content_0008_repo : 8776 حرفًا  md5 a6351f550e1e05db67dc8080da604f55
+--   challenge_game_0009_repo    : 25551 حرفًا md5 ace5cf50cbd04ac904790f9558db3fda
+--   challenge_live_0010_repo    : 42091 حرفًا md5 9026218158bad39f84796c71cec92e50
+--
+-- ===== مقتطف تصميمي من 0010 القديمة (مستخرج من السجل) =====
+-- CREATE TABLE IF NOT EXISTS public.challenge_active_slots (
+--  user_id bigint PRIMARY KEY REFERENCES public.challenge_profiles(user_id),
+--  match_id uuid NOT NULL REFERENCES public.challenge_matches(id),
+--  kind text NOT NULL
+-- );
+-- CREATE TABLE IF NOT EXISTS public.challenge_queue (
+--  user_id bigint PRIMARY KEY REFERENCES public.challenge_profiles(user_id),
+--  branch_id uuid NOT NULL REFERENCES public.challenge_branches(id),
+--  subject_id uuid NOT NULL REFERENCES public.challenge_subjects(id),
+--  unit_id uuid NOT NULL REFERENCES public.challenge_units(id),
+--  trophies integer NOT NULL,
+--  request_key text NOT NULL CHECK(length(request_key)<=160),
+--  status text NOT NULL DEFAULT 'waiting' CHECK(status IN('waiting','matched','cancelled','expired')),
+--  match_id uuid REFERENCES public.challenge_matches(id),
+--  joined_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+--  expires_at timestamptz NOT NULL
+-- );
+-- CREATE INDEX challenge_queue_match  ON challenge_queue(unit_id,trophies,user_id) WHERE status='waiting';
+-- CREATE INDEX challenge_queue_expiry ON challenge_queue(expires_at) WHERE status='waiting';
+-- + عمود challenge_match_players.telegram_message_id (بدل message_id)
+-- + دوال: challenge_live_state/queue_state/current/create/try_match/join/poll/cancel(p_user)/sweep/finish(p_match,p_status)/resolve/advance

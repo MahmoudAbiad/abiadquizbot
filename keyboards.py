@@ -53,6 +53,9 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
             ],
             [types.InlineKeyboardButton(text=f"🔗 شارك واربح {referral_bonus_points:.0f} نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
+        from helpers.supabase_helper.feature_flags import is_feature_enabled
+        if await is_feature_enabled("challenge_system_enabled", default=False):
+            kb.append([types.InlineKeyboardButton(text="🏕️ أرضي والتحديات", callback_data="cg:home:0")])
         # 🆕 زر رفع محاضرة صوتية كبيرة (حتى 250MB) عبر Mini App - يُخفى تلقائياً لو
         # WEBAPP_PUBLIC_BASE_URL فاضي (مثلاً بوضع polling محلي بدون WEBHOOK_URL)
         # حتى ما نعرض زر مكسور بيفتح رابط فاضي.
@@ -662,6 +665,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="👥 إحصائيات الكويز الجماعي", callback_data="admin_group_quiz_stats")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
+        [types.InlineKeyboardButton(text="🏆 إدارة التحديات", callback_data="admin_challenges")],
         [types.InlineKeyboardButton(text="⚙️ الإعدادات العامة", callback_data="admin_settings_general")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]

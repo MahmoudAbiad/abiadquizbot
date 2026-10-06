@@ -199,6 +199,10 @@ async def lifespan(app: FastAPI):
         # handlers/group_quiz.py::group_quiz_heartbeat_loop
         from handlers.group_quiz import group_quiz_heartbeat_loop
         spawn(group_quiz_heartbeat_loop())
+        from handlers.challenge_game import challenge_heartbeat_loop
+        spawn(challenge_heartbeat_loop(bot))
+        from handlers.challenge_live import challenge_live_loop
+        spawn(challenge_live_loop(bot))
         print("👥 تم جدولة نبضة الكويز الجماعي الدورية كل 12 ثانية.")
 
         # 🧹 تنظيف دوري منفصل لبيانات الكويز الجماعي القديمة (جلسات منتهية/ملغاة

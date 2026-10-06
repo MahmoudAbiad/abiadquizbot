@@ -17,6 +17,8 @@ from logger import get_logger
 from config import bot, dp
 # 🚀 تم تحديث الاستيراد لجلب quiz_runner_router بدلاً من execution_router القديم
 from handlers import (
+    challenge_game_router,
+    challenge_live_router,
     start_router, 
     admin_router, 
     files_router, 
@@ -73,6 +75,8 @@ def main():
     dp.include_routers(
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
         # (معالج poll_answer العام هناك بيوقف الانتشار) - راجع handlers/group_quiz.py
+        challenge_game_router,
+        challenge_live_router,  # ⚔️ المواجهات المباشرة (lv:*) - مستقل عن cg:*
         group_quiz_router,
         payments_router,  # 💳 أزرار الشحن الذاتي (pay:*) - راجع handlers/payments.py
         start_router,
@@ -120,6 +124,10 @@ def main():
                 # لأي نسخة تشتغل محلياً/بـ polling.
                 from handlers.group_quiz import group_quiz_heartbeat_loop
                 spawn(group_quiz_heartbeat_loop())
+                from handlers.challenge_game import challenge_heartbeat_loop
+                spawn(challenge_heartbeat_loop(bot))
+                from handlers.challenge_live import challenge_live_loop
+                spawn(challenge_live_loop(bot))
 
                 # 🧹 تنظيف دوري لبيانات الكويز الجماعي القديمة (جلسات منتهية/ملغاة
                 # أقدم من GROUP_SESSION_RETENTION_DAYS) - نفس سبب استقلاليتها عن

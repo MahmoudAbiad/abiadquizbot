@@ -26,3 +26,5 @@ downloads/
 .idea/
 .vscode/
 .DS_Store
+
+tests/sql/node_modules/
