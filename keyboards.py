@@ -655,17 +655,14 @@ def get_pagination_keyboard(current_page: int, total_pages: int, query: str) -> 
 # ==================== Admin Keyboards ====================
 
 def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
-    """لوحة الإدارة الرئيسية: 6 أقسام مجمّعة حسب نوع العملية بدل أزرار متفرقة.
-    كل قسم يفتح قائمة فرعية خاصة به (راجع get_admin_communication_keyboard،
-    get_admin_users_menu_keyboard، get_admin_settings_general_keyboard)."""
+    """لوحة الإدارة الرئيسية للأقسام التشغيلية. الإعدادات التقنية والإدارية
+    (الذكاء الاصطناعي والتحديات وهجوم الأرض) مجمعة تحت "الإعدادات العامة"."""
     kb = [
         [types.InlineKeyboardButton(text="💬 التواصل مع الطلاب", callback_data="admin_communication_menu")],
         [types.InlineKeyboardButton(text="👥 إدارة المستخدمين", callback_data="admin_users_menu")],
         [types.InlineKeyboardButton(text="📊 التحليلات والإحصائيات", callback_data="admin_stats")],
         [types.InlineKeyboardButton(text="👥 إحصائيات الكويز الجماعي", callback_data="admin_group_quiz_stats")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
-        [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
-        [types.InlineKeyboardButton(text="🏆 إدارة التحديات", callback_data="admin_challenges")],
         [types.InlineKeyboardButton(text="⚙️ الإعدادات العامة", callback_data="admin_settings_general")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]
@@ -785,11 +782,13 @@ def get_admin_users_menu_keyboard() -> types.InlineKeyboardMarkup:
 
 
 def get_admin_settings_general_keyboard() -> types.InlineKeyboardMarkup:
-    """قسم الإعدادات العامة: نقاط النظام + مفاتيح التحكم (منفصل تماماً عن قسم الذكاء
-    الاصطناعي، لأنه ما إله علاقة بموديلات التوليد)."""
+    """قسم الإعدادات العامة: كل إعدادات النظام والإدارة التقنية بمكان واحد."""
     kb = [
         [types.InlineKeyboardButton(text="🎯 إعدادات النقاط", callback_data="admin_settings_menu")],
         [types.InlineKeyboardButton(text="🧩 مفاتيح التحكم", callback_data="admin_flags_menu")],
+        [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
+        [types.InlineKeyboardButton(text="🏆 إدارة التحديات", callback_data="admin_challenges")],
+        [types.InlineKeyboardButton(text="🏰 إعدادات هجوم الأرض", callback_data="admin_challenge_cooldown")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -831,7 +830,7 @@ def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboa
             text=f"⏱ مهلة طلب الذكاء الاصطناعي: {format_setting_value(request_timeout)} ث",
             callback_data="admin_setting_edit_ai_request_timeout",
         )])
-    kb.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
+    kb.append([types.InlineKeyboardButton(text="🔙 الإعدادات العامة", callback_data="admin_settings_general")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
