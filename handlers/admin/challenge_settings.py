@@ -90,7 +90,7 @@ async def render_challenge_cooldown_panel(event, state: FSMContext | None = None
         [_button("🔔 تغيير مهلة إشعار الهجوم", "admin_challenge_notification_cooldown_edit")],
         [_button("🏕️ تغيير مهلة إشعار نتيجة الدفاع", "admin_challenge_completion_notification_cooldown_edit")],
         [_button("♻️ تصفير كل المهل الحالية", "admin_challenge_cooldown_reset")],
-        [_button("🔙 رجوع للوحة الإدارة", "admin_main_menu")],
+        [_button("🔙 الإعدادات العامة", "admin_settings_general")],
     ])
     if isinstance(event, types.CallbackQuery):
         await safe_edit_text(event.message, text, reply_markup=markup)
