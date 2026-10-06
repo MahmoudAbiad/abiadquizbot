@@ -103,7 +103,7 @@ async def show_home(event, page: int = 0) -> None:
     if nav:
         rows.append(nav)
     rows.append([_btn("➕ فرع جديد", f"{P}add:b:none")])
-    rows.append([_btn("🏠 الرئيسية", "admin_main_menu")])
+    rows.append([_btn("🔙 الإعدادات العامة", "admin_settings_general")])
     await _render(event, text, rows)
 
 
