@@ -40,15 +40,17 @@ router.callback_query.filter(F.message.chat.type == "private")
 
 @router.callback_query(F.data == "admin_settings_general")
 async def open_settings_general_menu(call: types.CallbackQuery, state: FSMContext):
-    """قسم الإعدادات العامة: نقاط النظام + مفاتيح التحكم (منفصل عن قسم الذكاء
-    الاصطناعي)."""
+    """قسم الإعدادات العامة: نقطة الدخول الموحدة لكل إعدادات النظام والإدارة التقنية."""
     if state:
         await state.clear()
     text = (
         "⚙️ <b>الإعدادات العامة</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "🎯 <b>إعدادات النقاط:</b> نقاط الترحيب/التجديد/الإحالة\n"
-        "🧩 <b>مفاتيح التحكم:</b> تشغيل/إيقاف ميزات محددة"
+        "🧩 <b>مفاتيح التحكم:</b> تشغيل/إيقاف ميزات محددة\n"
+        "🤖 <b>الذكاء الاصطناعي:</b> الموديلات وسجل التوليد\n"
+        "🏆 <b>إدارة التحديات:</b> المحتوى والفروع والاختبارات\n"
+        "🏰 <b>إعدادات هجوم الأرض:</b> المهل، الإشعارات والحد اليومي"
     )
     await safe_edit_text(call.message, text, reply_markup=get_admin_settings_general_keyboard())
     try:
