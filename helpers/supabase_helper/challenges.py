@@ -35,9 +35,11 @@ def _is_unique_violation(e: Exception) -> bool:
 
 # ==================== الهرم: فرع / مادة / وحدة ====================
 
-async def list_nodes(kind: str, parent_id: Optional[str] = None) -> List[Dict[str, Any]]:
+async def list_nodes(kind: str, parent_id: Optional[str] = None, status: Optional[str] = "active") -> List[Dict[str, Any]]:
     """العقد الفعّالة (غير المؤرشفة) مرتبة بـ sort_order ثم الاسم. kind: branch|subject|unit."""
-    q = supabase.table(_TABLES[kind]).select("*").eq("status", "active")
+    q = supabase.table(_TABLES[kind]).select("*")
+    if status is not None:
+        q = q.eq("status", status)
     if _PARENT_COL[kind]:
         q = q.eq(_PARENT_COL[kind], parent_id)
     res = await q.order("sort_order").order("name").execute()
@@ -243,3 +245,29 @@ async def pick_active_test(unit_id: str, exclude_test_ids: Sequence[str] = ()) -
     excluded = set(exclude_test_ids)
     fresh = [t for t in candidates if t["id"] not in excluded]
     return random.choice(fresh or candidates)
+
+
+async def restore_branch(branch_id: str, admin_id: int) -> bool:
+    try:
+        res = await supabase.table("challenge_branches").update(
+            {"status": "active", "archived_at": None, "updated_at": _now()}
+        ).eq("id", branch_id).eq("status", "archived").execute()
+    except Exception as exc:
+        if _is_unique_violation(exc):
+            raise ChallengeRepoError("يوجد فرع فعّال بنفس الاسم. غيّر اسم الفرع المؤرشف أولاً ثم أعد الاستعادة.") from None
+        raise
+    log_info(logger, f"challenge_branch_restored id={branch_id} admin={admin_id}")
+    return bool(res.data)
+
+
+async def delete_archived_branch(branch_id: str, admin_id: int) -> bool:
+    try:
+        res = await supabase.rpc("challenge_delete_archived_branch", {"p_branch": branch_id}).execute()
+    except Exception as exc:
+        if "23503" in str(exc) or "foreign key" in str(exc).lower():
+            raise ChallengeRepoError("لا يمكن الحذف النهائي: الفرع أو محتواه مرتبط بطلاب أو أراضٍ أو مباريات. لم يُحذف أي شيء؛ يمكنك إبقاؤه مؤرشفاً.") from None
+        if "branch_not_archived" in str(exc):
+            raise ChallengeRepoError("يجب أرشفة الفرع قبل حذفه نهائياً.") from None
+        raise
+    log_info(logger, f"challenge_branch_deleted id={branch_id} admin={admin_id}")
+    return bool(res.data)

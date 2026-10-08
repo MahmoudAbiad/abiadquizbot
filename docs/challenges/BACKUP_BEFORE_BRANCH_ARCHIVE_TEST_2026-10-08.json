@@ -1,0 +1,1594 @@
+{
+  "project_ref": "xhlksusmczccqyvbxylo",
+  "project_name": "Test_telegramquizbot",
+  "flags": [
+    {
+      "key": "challenge_system_enabled",
+      "enabled": true,
+      "updated_at": "2026-10-06T01:54:26.69552+00:00"
+    },
+    {
+      "key": "spectator_mode_enabled",
+      "enabled": true,
+      "updated_at": "2026-10-06T01:54:30.689181+00:00"
+    }
+  ],
+  "columns": [
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_branches",
+      "column_name": "id",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_branches",
+      "column_name": "name",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_branches",
+      "column_name": "sort_order",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_branches",
+      "column_name": "status",
+      "is_nullable": "NO",
+      "column_default": "'active'::text"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_branches",
+      "column_name": "created_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_branches",
+      "column_name": "updated_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_branches",
+      "column_name": "archived_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_events",
+      "column_name": "id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_events",
+      "column_name": "match_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_events",
+      "column_name": "event_type",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_events",
+      "column_name": "question_index",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_events",
+      "column_name": "created_at",
+      "is_nullable": "NO",
+      "column_default": "clock_timestamp()"
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_live_queue",
+      "column_name": "user_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_live_queue",
+      "column_name": "status",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_live_queue",
+      "column_name": "branch_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_live_queue",
+      "column_name": "subject_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_live_queue",
+      "column_name": "unit_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_live_queue",
+      "column_name": "trophies",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_live_queue",
+      "column_name": "request_key",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_live_queue",
+      "column_name": "match_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_live_queue",
+      "column_name": "joined_at",
+      "is_nullable": "NO",
+      "column_default": "clock_timestamp()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_live_queue",
+      "column_name": "expires_at",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_live_queue",
+      "column_name": "updated_at",
+      "is_nullable": "NO",
+      "column_default": "clock_timestamp()"
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_match_answers",
+      "column_name": "match_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_match_answers",
+      "column_name": "user_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_match_answers",
+      "column_name": "question_index",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_match_answers",
+      "column_name": "question_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_match_answers",
+      "column_name": "option_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "boolean",
+      "table_name": "challenge_match_answers",
+      "column_name": "is_correct",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_match_answers",
+      "column_name": "score",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_match_answers",
+      "column_name": "elapsed_ms",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "boolean",
+      "table_name": "challenge_match_answers",
+      "column_name": "timed_out",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_match_answers",
+      "column_name": "answered_at",
+      "is_nullable": "NO",
+      "column_default": "clock_timestamp()"
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_match_answers",
+      "column_name": "update_key",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_match_players",
+      "column_name": "match_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_match_players",
+      "column_name": "user_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_match_players",
+      "column_name": "role",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_match_players",
+      "column_name": "score",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_match_players",
+      "column_name": "xp_delta",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_match_players",
+      "column_name": "trophies_delta",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_match_players",
+      "column_name": "message_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_matches",
+      "column_name": "id",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_matches",
+      "column_name": "kind",
+      "is_nullable": "NO",
+      "column_default": "'async_attack'::text"
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_matches",
+      "column_name": "status",
+      "is_nullable": "NO",
+      "column_default": "'created'::text"
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_matches",
+      "column_name": "attacker_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_matches",
+      "column_name": "defender_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_matches",
+      "column_name": "unit_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_matches",
+      "column_name": "subject_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_matches",
+      "column_name": "test_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_matches",
+      "column_name": "content_hash",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_matches",
+      "column_name": "request_key",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "jsonb",
+      "table_name": "challenge_matches",
+      "column_name": "snapshot",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "jsonb",
+      "table_name": "challenge_matches",
+      "column_name": "rules",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "jsonb",
+      "table_name": "challenge_matches",
+      "column_name": "labels",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_matches",
+      "column_name": "question_index",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_matches",
+      "column_name": "question_opened_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_matches",
+      "column_name": "question_deadline",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_matches",
+      "column_name": "server_deadline",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_matches",
+      "column_name": "created_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_matches",
+      "column_name": "started_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_matches",
+      "column_name": "finished_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "boolean",
+      "table_name": "challenge_matches",
+      "column_name": "reward_eligible",
+      "is_nullable": "NO",
+      "column_default": "false"
+    },
+    {
+      "data_type": "jsonb",
+      "table_name": "challenge_matches",
+      "column_name": "result",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_matches",
+      "column_name": "telegram_message_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_matches",
+      "column_name": "countdown_until",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_notifications",
+      "column_name": "id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_notifications",
+      "column_name": "match_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_notifications",
+      "column_name": "user_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_notifications",
+      "column_name": "kind",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_notifications",
+      "column_name": "created_at",
+      "is_nullable": "NO",
+      "column_default": "clock_timestamp()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_notifications",
+      "column_name": "claimed_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_playable_units",
+      "column_name": "branch_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_playable_units",
+      "column_name": "branch_name",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_playable_units",
+      "column_name": "branch_order",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_playable_units",
+      "column_name": "subject_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_playable_units",
+      "column_name": "subject_name",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_playable_units",
+      "column_name": "subject_order",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_playable_units",
+      "column_name": "unit_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_playable_units",
+      "column_name": "unit_name",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_playable_units",
+      "column_name": "unit_order",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_playable_units",
+      "column_name": "active_test_count",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_profiles",
+      "column_name": "user_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_profiles",
+      "column_name": "display_name",
+      "is_nullable": "NO",
+      "column_default": "'طالب'::text"
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_profiles",
+      "column_name": "branch_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_profiles",
+      "column_name": "xp",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "trophies",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "challenges",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "wins",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "losses",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "correct",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "questions",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_profiles",
+      "column_name": "response_ms",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "responses",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "defense_wins",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "defense_losses",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_profiles",
+      "column_name": "win_streak",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "boolean",
+      "table_name": "challenge_profiles",
+      "column_name": "notifications_enabled",
+      "is_nullable": "NO",
+      "column_default": "true"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_profiles",
+      "column_name": "last_seen",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_profiles",
+      "column_name": "last_notification_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_profiles",
+      "column_name": "last_completion_notification_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_profiles",
+      "column_name": "created_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_questions",
+      "column_name": "id",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_questions",
+      "column_name": "test_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_questions",
+      "column_name": "question_order",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_questions",
+      "column_name": "question_text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "jsonb",
+      "table_name": "challenge_questions",
+      "column_name": "options",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_questions",
+      "column_name": "correct_option_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_questions",
+      "column_name": "explanation",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "jsonb",
+      "table_name": "challenge_questions",
+      "column_name": "metadata",
+      "is_nullable": "NO",
+      "column_default": "'{}'::jsonb"
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_subject_stats",
+      "column_name": "user_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_subject_stats",
+      "column_name": "subject_id",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_subject_stats",
+      "column_name": "subject_name",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_subject_stats",
+      "column_name": "challenges",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_subject_stats",
+      "column_name": "wins",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_subject_stats",
+      "column_name": "correct",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_subject_stats",
+      "column_name": "questions",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_subject_stats",
+      "column_name": "response_ms",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_subject_stats",
+      "column_name": "responses",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_subjects",
+      "column_name": "id",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_subjects",
+      "column_name": "branch_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_subjects",
+      "column_name": "name",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_subjects",
+      "column_name": "sort_order",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_subjects",
+      "column_name": "status",
+      "is_nullable": "NO",
+      "column_default": "'active'::text"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_subjects",
+      "column_name": "created_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_subjects",
+      "column_name": "updated_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_subjects",
+      "column_name": "archived_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_tests",
+      "column_name": "id",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_tests",
+      "column_name": "unit_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_tests",
+      "column_name": "title",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_tests",
+      "column_name": "status",
+      "is_nullable": "NO",
+      "column_default": "'active'::text"
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_tests",
+      "column_name": "source_type",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_tests",
+      "column_name": "source_reference",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_tests",
+      "column_name": "content_hash",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_tests",
+      "column_name": "question_count",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "jsonb",
+      "table_name": "challenge_tests",
+      "column_name": "metadata",
+      "is_nullable": "NO",
+      "column_default": "'{}'::jsonb"
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_tests",
+      "column_name": "created_by_admin",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_tests",
+      "column_name": "created_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_tests",
+      "column_name": "updated_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_tests",
+      "column_name": "disabled_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_tests",
+      "column_name": "archived_at",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_towers",
+      "column_name": "user_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_towers",
+      "column_name": "subject_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_towers",
+      "column_name": "xp",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_towers",
+      "column_name": "correct",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_towers",
+      "column_name": "questions",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_unit_stats",
+      "column_name": "user_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_unit_stats",
+      "column_name": "unit_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_unit_stats",
+      "column_name": "challenges",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_unit_stats",
+      "column_name": "wins",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_unit_stats",
+      "column_name": "correct",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_unit_stats",
+      "column_name": "questions",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "bigint",
+      "table_name": "challenge_unit_stats",
+      "column_name": "response_ms",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_unit_stats",
+      "column_name": "responses",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_units",
+      "column_name": "id",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "data_type": "uuid",
+      "table_name": "challenge_units",
+      "column_name": "subject_id",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_units",
+      "column_name": "name",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "data_type": "integer",
+      "table_name": "challenge_units",
+      "column_name": "sort_order",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "data_type": "text",
+      "table_name": "challenge_units",
+      "column_name": "status",
+      "is_nullable": "NO",
+      "column_default": "'active'::text"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_units",
+      "column_name": "created_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_units",
+      "column_name": "updated_at",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "data_type": "timestamp with time zone",
+      "table_name": "challenge_units",
+      "column_name": "archived_at",
+      "is_nullable": "YES",
+      "column_default": null
+    }
+  ],
+  "settings": [
+    {
+      "key": "challenge_cooldown_reset_epoch",
+      "label": "وقت آخر تصفير عالمي لمهل إعادة الهجوم (Unix epoch)",
+      "value": 1791278808,
+      "updated_at": "2026-10-06T09:26:48.596101+00:00"
+    },
+    {
+      "key": "challenge_target_cooldown_seconds",
+      "label": "مهلة إعادة مهاجمة نفس الأرض (ثانية)",
+      "value": 0,
+      "updated_at": "2026-10-06T09:29:07.968212+00:00"
+    },
+    {
+      "key": "challenge_daily_attack_limit",
+      "label": "عدد هجمات الأرض اليومية لكل طالب",
+      "value": 20,
+      "updated_at": "2026-10-06T09:34:22.839225+00:00"
+    },
+    {
+      "key": "challenge_attack_notification_cooldown_seconds",
+      "label": "مهلة تكرار إشعار تعرض الأرض للهجوم (ثانية)",
+      "value": 0,
+      "updated_at": "2026-10-08T01:12:46.380861+00:00"
+    },
+    {
+      "key": "challenge_completion_notification_cooldown_seconds",
+      "label": "مهلة تكرار إشعار نتيجة الدفاع (ثانية)",
+      "value": 0,
+      "updated_at": "2026-10-08T01:12:51.014922+00:00"
+    }
+  ],
+  "migrations": [
+    {
+      "name": "0001a_baseline_tables",
+      "version": "20261004215620"
+    },
+    {
+      "name": "0001b_baseline_functions_rls_grants",
+      "version": "20261004215659"
+    },
+    {
+      "name": "0003_0004_group_quiz_burst_top_n",
+      "version": "20261004215707"
+    },
+    {
+      "name": "0006_0007_payments",
+      "version": "20261004215727"
+    },
+    {
+      "name": "fix_payment_credit_order_comment",
+      "version": "20261004215820"
+    },
+    {
+      "name": "challenge_content_0008",
+      "version": "20261004220431"
+    },
+    {
+      "name": "challenge_game_0009",
+      "version": "20261004220527"
+    },
+    {
+      "name": "challenge_live_0010",
+      "version": "20261004221213"
+    },
+    {
+      "name": "reset_challenge_objects_for_repo_rebuild",
+      "version": "20261005220653"
+    },
+    {
+      "name": "challenge_content_0008_repo",
+      "version": "20261005220722"
+    },
+    {
+      "name": "challenge_game_0009_repo",
+      "version": "20261005220826"
+    },
+    {
+      "name": "challenge_live_0010_repo",
+      "version": "20261005221010"
+    },
+    {
+      "name": "challenge_cooldown_admin_v2",
+      "version": "20261006091800"
+    },
+    {
+      "name": "challenge_daily_attack_limit",
+      "version": "20261006093422"
+    },
+    {
+      "name": "challenge_attack_notification_cooldown",
+      "version": "20261006094136"
+    },
+    {
+      "name": "challenge_completion_notification_cooldown",
+      "version": "20261006094700"
+    },
+    {
+      "name": "challenge_spectator_0015",
+      "version": "20261007131503"
+    },
+    {
+      "name": "challenge_spectator_0015_atomic_rollback_reapply_check",
+      "version": "20261007131656"
+    }
+  ],
+  "constraints": [
+    {
+      "conname": "challenge_profiles_xp_check",
+      "relation": "challenge_profiles",
+      "definition": "CHECK ((xp >= 0))"
+    },
+    {
+      "conname": "challenge_profiles_trophies_check",
+      "relation": "challenge_profiles",
+      "definition": "CHECK ((trophies >= 0))"
+    },
+    {
+      "conname": "challenge_profiles_pkey",
+      "relation": "challenge_profiles",
+      "definition": "PRIMARY KEY (user_id)"
+    },
+    {
+      "conname": "challenge_profiles_branch_id_fkey",
+      "relation": "challenge_profiles",
+      "definition": "FOREIGN KEY (branch_id) REFERENCES challenge_branches(id)"
+    },
+    {
+      "conname": "challenge_towers_pkey",
+      "relation": "challenge_towers",
+      "definition": "PRIMARY KEY (user_id, subject_id)"
+    },
+    {
+      "conname": "challenge_towers_user_id_fkey",
+      "relation": "challenge_towers",
+      "definition": "FOREIGN KEY (user_id) REFERENCES challenge_profiles(user_id)"
+    },
+    {
+      "conname": "challenge_towers_subject_id_fkey",
+      "relation": "challenge_towers",
+      "definition": "FOREIGN KEY (subject_id) REFERENCES challenge_subjects(id)"
+    },
+    {
+      "conname": "challenge_unit_stats_pkey",
+      "relation": "challenge_unit_stats",
+      "definition": "PRIMARY KEY (user_id, unit_id)"
+    },
+    {
+      "conname": "challenge_unit_stats_user_id_fkey",
+      "relation": "challenge_unit_stats",
+      "definition": "FOREIGN KEY (user_id) REFERENCES challenge_profiles(user_id)"
+    },
+    {
+      "conname": "challenge_unit_stats_unit_id_fkey",
+      "relation": "challenge_unit_stats",
+      "definition": "FOREIGN KEY (unit_id) REFERENCES challenge_units(id)"
+    },
+    {
+      "conname": "challenge_matches_kind_check",
+      "relation": "challenge_matches",
+      "definition": "CHECK ((kind = ANY (ARRAY['async_attack'::text, 'live'::text, 'friend_link'::text])))"
+    },
+    {
+      "conname": "challenge_matches_check",
+      "relation": "challenge_matches",
+      "definition": "CHECK ((attacker_id <> defender_id))"
+    },
+    {
+      "conname": "challenge_matches_pkey",
+      "relation": "challenge_matches",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "conname": "challenge_matches_attacker_id_request_key_key",
+      "relation": "challenge_matches",
+      "definition": "UNIQUE (attacker_id, request_key)"
+    },
+    {
+      "conname": "challenge_matches_attacker_id_fkey",
+      "relation": "challenge_matches",
+      "definition": "FOREIGN KEY (attacker_id) REFERENCES challenge_profiles(user_id)"
+    },
+    {
+      "conname": "challenge_matches_defender_id_fkey",
+      "relation": "challenge_matches",
+      "definition": "FOREIGN KEY (defender_id) REFERENCES challenge_profiles(user_id)"
+    },
+    {
+      "conname": "challenge_matches_unit_id_fkey",
+      "relation": "challenge_matches",
+      "definition": "FOREIGN KEY (unit_id) REFERENCES challenge_units(id)"
+    },
+    {
+      "conname": "challenge_matches_subject_id_fkey",
+      "relation": "challenge_matches",
+      "definition": "FOREIGN KEY (subject_id) REFERENCES challenge_subjects(id)"
+    },
+    {
+      "conname": "challenge_matches_test_id_fkey",
+      "relation": "challenge_matches",
+      "definition": "FOREIGN KEY (test_id) REFERENCES challenge_tests(id)"
+    },
+    {
+      "conname": "challenge_match_players_role_check",
+      "relation": "challenge_match_players",
+      "definition": "CHECK ((role = ANY (ARRAY['attacker'::text, 'defender'::text, 'player'::text])))"
+    },
+    {
+      "conname": "challenge_match_players_pkey",
+      "relation": "challenge_match_players",
+      "definition": "PRIMARY KEY (match_id, user_id)"
+    },
+    {
+      "conname": "challenge_match_players_match_id_fkey",
+      "relation": "challenge_match_players",
+      "definition": "FOREIGN KEY (match_id) REFERENCES challenge_matches(id)"
+    },
+    {
+      "conname": "challenge_match_players_user_id_fkey",
+      "relation": "challenge_match_players",
+      "definition": "FOREIGN KEY (user_id) REFERENCES challenge_profiles(user_id)"
+    },
+    {
+      "conname": "challenge_match_answers_pkey",
+      "relation": "challenge_match_answers",
+      "definition": "PRIMARY KEY (match_id, user_id, question_index)"
+    },
+    {
+      "conname": "challenge_match_answers_user_id_update_key_key",
+      "relation": "challenge_match_answers",
+      "definition": "UNIQUE (user_id, update_key)"
+    },
+    {
+      "conname": "challenge_match_answers_match_id_fkey",
+      "relation": "challenge_match_answers",
+      "definition": "FOREIGN KEY (match_id) REFERENCES challenge_matches(id)"
+    },
+    {
+      "conname": "challenge_match_answers_user_id_fkey",
+      "relation": "challenge_match_answers",
+      "definition": "FOREIGN KEY (user_id) REFERENCES challenge_profiles(user_id)"
+    },
+    {
+      "conname": "challenge_match_answers_question_id_fkey",
+      "relation": "challenge_match_answers",
+      "definition": "FOREIGN KEY (question_id) REFERENCES challenge_questions(id)"
+    },
+    {
+      "conname": "challenge_events_pkey",
+      "relation": "challenge_events",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "conname": "challenge_events_match_id_fkey",
+      "relation": "challenge_events",
+      "definition": "FOREIGN KEY (match_id) REFERENCES challenge_matches(id)"
+    },
+    {
+      "conname": "challenge_notifications_kind_check",
+      "relation": "challenge_notifications",
+      "definition": "CHECK ((kind = ANY (ARRAY['attack_started'::text, 'attack_completed'::text])))"
+    },
+    {
+      "conname": "challenge_notifications_pkey",
+      "relation": "challenge_notifications",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "conname": "challenge_notifications_match_id_user_id_kind_key",
+      "relation": "challenge_notifications",
+      "definition": "UNIQUE (match_id, user_id, kind)"
+    },
+    {
+      "conname": "challenge_notifications_match_id_fkey",
+      "relation": "challenge_notifications",
+      "definition": "FOREIGN KEY (match_id) REFERENCES challenge_matches(id)"
+    },
+    {
+      "conname": "challenge_notifications_user_id_fkey",
+      "relation": "challenge_notifications",
+      "definition": "FOREIGN KEY (user_id) REFERENCES challenge_profiles(user_id)"
+    },
+    {
+      "conname": "challenge_matches_status_check",
+      "relation": "challenge_matches",
+      "definition": "CHECK ((status = ANY (ARRAY['created'::text, 'in_progress'::text, 'completed'::text, 'expired'::text, 'abandoned'::text, 'cancelled'::text])))"
+    },
+    {
+      "conname": "challenge_live_queue_status_check",
+      "relation": "challenge_live_queue",
+      "definition": "CHECK ((status = ANY (ARRAY['waiting'::text, 'matched'::text, 'cancelled'::text, 'expired'::text, 'done'::text])))"
+    },
+    {
+      "conname": "challenge_live_queue_check",
+      "relation": "challenge_live_queue",
+      "definition": "CHECK (((status = ANY (ARRAY['matched'::text, 'done'::text])) = (match_id IS NOT NULL)))"
+    },
+    {
+      "conname": "challenge_live_queue_pkey",
+      "relation": "challenge_live_queue",
+      "definition": "PRIMARY KEY (user_id)"
+    },
+    {
+      "conname": "challenge_live_queue_user_id_fkey",
+      "relation": "challenge_live_queue",
+      "definition": "FOREIGN KEY (user_id) REFERENCES challenge_profiles(user_id)"
+    },
+    {
+      "conname": "challenge_live_queue_branch_id_fkey",
+      "relation": "challenge_live_queue",
+      "definition": "FOREIGN KEY (branch_id) REFERENCES challenge_branches(id)"
+    },
+    {
+      "conname": "challenge_live_queue_subject_id_fkey",
+      "relation": "challenge_live_queue",
+      "definition": "FOREIGN KEY (subject_id) REFERENCES challenge_subjects(id)"
+    },
+    {
+      "conname": "challenge_live_queue_unit_id_fkey",
+      "relation": "challenge_live_queue",
+      "definition": "FOREIGN KEY (unit_id) REFERENCES challenge_units(id)"
+    },
+    {
+      "conname": "challenge_live_queue_match_id_fkey",
+      "relation": "challenge_live_queue",
+      "definition": "FOREIGN KEY (match_id) REFERENCES challenge_matches(id)"
+    },
+    {
+      "conname": "challenge_branches_name_check",
+      "relation": "challenge_branches",
+      "definition": "CHECK (((length(btrim(name)) >= 1) AND (length(btrim(name)) <= 80)))"
+    },
+    {
+      "conname": "challenge_branches_status_check",
+      "relation": "challenge_branches",
+      "definition": "CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text])))"
+    },
+    {
+      "conname": "challenge_branches_pkey",
+      "relation": "challenge_branches",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "conname": "challenge_subjects_name_check",
+      "relation": "challenge_subjects",
+      "definition": "CHECK (((length(btrim(name)) >= 1) AND (length(btrim(name)) <= 80)))"
+    },
+    {
+      "conname": "challenge_subjects_status_check",
+      "relation": "challenge_subjects",
+      "definition": "CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text])))"
+    },
+    {
+      "conname": "challenge_subjects_pkey",
+      "relation": "challenge_subjects",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "conname": "challenge_subjects_branch_id_fkey",
+      "relation": "challenge_subjects",
+      "definition": "FOREIGN KEY (branch_id) REFERENCES challenge_branches(id)"
+    },
+    {
+      "conname": "challenge_units_name_check",
+      "relation": "challenge_units",
+      "definition": "CHECK (((length(btrim(name)) >= 1) AND (length(btrim(name)) <= 80)))"
+    },
+    {
+      "conname": "challenge_units_status_check",
+      "relation": "challenge_units",
+      "definition": "CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text])))"
+    },
+    {
+      "conname": "challenge_units_pkey",
+      "relation": "challenge_units",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "conname": "challenge_units_subject_id_fkey",
+      "relation": "challenge_units",
+      "definition": "FOREIGN KEY (subject_id) REFERENCES challenge_subjects(id)"
+    },
+    {
+      "conname": "challenge_tests_title_check",
+      "relation": "challenge_tests",
+      "definition": "CHECK (((length(btrim(title)) >= 1) AND (length(btrim(title)) <= 120)))"
+    },
+    {
+      "conname": "challenge_tests_status_check",
+      "relation": "challenge_tests",
+      "definition": "CHECK ((status = ANY (ARRAY['draft'::text, 'active'::text, 'disabled'::text, 'archived'::text])))"
+    },
+    {
+      "conname": "challenge_tests_source_type_check",
+      "relation": "challenge_tests",
+      "definition": "CHECK ((source_type = ANY (ARRAY['json_upload'::text, 'existing_abiad_quiz'::text, 'manual_future'::text])))"
+    },
+    {
+      "conname": "challenge_tests_question_count_check",
+      "relation": "challenge_tests",
+      "definition": "CHECK ((question_count >= 0))"
+    },
+    {
+      "conname": "challenge_tests_pkey",
+      "relation": "challenge_tests",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "conname": "challenge_tests_unit_id_fkey",
+      "relation": "challenge_tests",
+      "definition": "FOREIGN KEY (unit_id) REFERENCES challenge_units(id)"
+    },
+    {
+      "conname": "challenge_questions_question_order_check",
+      "relation": "challenge_questions",
+      "definition": "CHECK ((question_order >= 0))"
+    },
+    {
+      "conname": "challenge_questions_options_check",
+      "relation": "challenge_questions",
+      "definition": "CHECK (((jsonb_typeof(options) = 'array'::text) AND ((jsonb_array_length(options) >= 2) AND (jsonb_array_length(options) <= 10))))"
+    },
+    {
+      "conname": "challenge_questions_correct_option_id_check",
+      "relation": "challenge_questions",
+      "definition": "CHECK ((correct_option_id >= 0))"
+    },
+    {
+      "conname": "challenge_questions_correct_in_range",
+      "relation": "challenge_questions",
+      "definition": "CHECK ((correct_option_id < jsonb_array_length(options)))"
+    },
+    {
+      "conname": "challenge_questions_pkey",
+      "relation": "challenge_questions",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "conname": "challenge_questions_order_uq",
+      "relation": "challenge_questions",
+      "definition": "UNIQUE (test_id, question_order)"
+    },
+    {
+      "conname": "challenge_questions_test_id_fkey",
+      "relation": "challenge_questions",
+      "definition": "FOREIGN KEY (test_id) REFERENCES challenge_tests(id)"
+    }
+  ],
+  "existing_rpc": null
+}

@@ -49,6 +49,7 @@ class ChallengeAdminState(StatesGroup):
     waiting_json = State()        # data: unit_id
     waiting_quiz_ref = State()    # data: unit_id
     waiting_test_title = State()  # data: unit_id, parsed
+    confirm_branch_delete = State()  # data: branch_delete_id
     confirm_import = State()      # data: unit_id, parsed
 
 
@@ -100,11 +101,12 @@ async def show_home(event, page: int = 0) -> None:
             ("" if branches else "\n\n<i>لا توجد فروع بعد.</i>"))
     rows = [[_btn(f"📂 {b['name']}", f"{P}b:{b['id']}:0"),
              _btn("✏️", f"{P}ren:b:{b['id']}"),
-             _btn("🗑", f"{P}x:b:{b['id']}")] for b in chunk]
+             _btn("🗄", f"{P}x:b:{b['id']}")] for b in chunk]
     nav = _nav_row(branches, page, pages, "home")
     if nav:
         rows.append(nav)
     rows.append([_btn("➕ فرع جديد", f"{P}add:b:none")])
+    rows.append([_btn("🗄 الفروع المؤرشفة", f"{P}archives:0")])
     rows.append([_btn("🔙 الإعدادات العامة", "admin_settings_general")])
     await _render(event, text, rows)
 
@@ -291,11 +293,11 @@ async def cb_archive_ask(call: types.CallbackQuery):
         if not node or node["status"] != "active":
             return await show_home(call)
         await _render(call,
-                      f"🗑 حذف الفرع <b>{_e(node['name'])}</b>؟\n"
+                      f"🗄 أرشفة الفرع <b>{_e(node['name'])}</b>؟\n"
                       "سيختفي الفرع ومواده ووحداته واختباراته من قوائم الاختيار.\n"
                       "الحذف بالأرشفة: تبقى البيانات والسجلات السابقة محفوظة.\n"
-                      "لا يمكن استعادة الفرع من البوت حالياً.",
-                      [[_btn("✅ تأكيد الحذف", f"{P}xy:b:{node_id}"),
+                      "يمكن استعادته من الفروع المؤرشفة.",
+                      [[_btn("✅ تأكيد الأرشفة", f"{P}xy:b:{node_id}"),
                         _btn("❌ إلغاء", f"{P}home:0")]])
         return
     extra = "" if kind == "t" else "\nسيختفي كل ما تحتها عن الطلاب، لكن تبقى البيانات محفوظة."
@@ -376,6 +378,12 @@ async def msg_name(msg: types.Message, state: FSMContext):
             await show_home(msg)
         else:  # ref = الأب: فرع للمادة، ومادة للوحدة
             await show_node(msg, "b" if kind == "s" else "s", ref)
+    elif kind == "b":
+        node = await repo.get_node("branch", ref)
+        if node and node["status"] == "archived":
+            await show_archive(msg, "b", ref)
+        else:
+            await show_home(msg)
     elif kind == "u":
         await show_unit(msg, ref)
     else:
@@ -550,3 +558,108 @@ async def cb_confirm_import(call: types.CallbackQuery, state: FSMContext):
     note = "✅ تم حفظ الاختبار." if out.get("created") else "ℹ️ هذا المحتوى موجود مسبقاً في الوحدة - لم يُنشأ تكرار."
     await _render(call, note, [[_btn("📝 فتح الاختبار", f"{P}t:{out['test_id']}")],
                                [_btn("🔙 للوحدة", f"{P}u:{d['unit_id']}:0")]])
+
+
+# ==================== أرشيف الفروع (استعراض دون تغيير المحتوى) ====================
+
+async def show_archives(event, page=0):
+    nodes = await repo.list_nodes("branch", status="archived")
+    chunk, page, pages = paginate(nodes, page, PAGE_SIZE)
+    rows = [[_btn(f"🗄 {b['name']}", f"{P}arc:b:{b['id']}:0")] for b in chunk]
+    nav = _nav_row(nodes, page, pages, "archives")
+    if nav:
+        rows.append(nav)
+    rows.append([_btn("🔙 الفروع", f"{P}home:0")])
+    await _render(event, "🗄 <b>الفروع المؤرشفة</b>\nاختر فرعاً لاستعراض بياناته واستعادته أو حذفه نهائياً."
+                  + ("" if nodes else "\nلا توجد فروع مؤرشفة."), rows)
+
+
+async def show_archive(event, kind, node_id, page=0):
+    node = await (repo.get_test(node_id) if kind == "t" else repo.get_node(KIND_LABEL[kind][0], node_id))
+    if not node:
+        return await show_archives(event)
+    title = node.get("name", node.get("title", ""))
+    text = f"🗄 <b>{_e(title)}</b>\nالحالة: {_e(node['status'])}\n"
+    rows = []
+    if kind == "t":
+        items = await repo.get_test_questions_admin(node_id)
+        chunk, page, pages = paginate(items, page, PREVIEW_PAGE_SIZE)
+        text += _preview_text(chunk, title, page, pages)
+        back = f"{P}arc:u:{node['unit_id']}:0"
+    else:
+        child = {"b":"s", "s":"u", "u":"t"}[kind]
+        items = (await repo.list_tests(node_id, include_archived=True) if kind == "u" else
+                 await repo.list_nodes(KIND_LABEL[child][0], node_id, status=None))
+        chunk, page, pages = paginate(items, page, PAGE_SIZE)
+        text += f"العناصر: {len(items)}"
+        rows = [[_btn(f"{STATUS_ICON.get(n['status'], '')} {n.get('name', n.get('title', ''))}",
+                      f"{P}arc:{child}:{n['id']}:0")] for n in chunk]
+        back = (f"{P}archives:0" if kind == "b" else
+                f"{P}arc:b:{node['branch_id']}:0" if kind == "s" else f"{P}arc:s:{node['subject_id']}:0")
+    nav = _nav_row(items, page, pages, f"arc:{kind}:{node_id}")
+    if nav:
+        rows.append(nav)
+    if kind == "b" and node["status"] == "archived":
+        rows.extend([[_btn("♻️ استعادة", f"{P}restore:{node_id}"), _btn("✏️ الاسم", f"{P}ren:b:{node_id}")],
+                     [_btn("🗑 حذف نهائي", f"{P}purge:{node_id}")]])
+        text += "\nالاستعادة تعيد الفرع؛ العناصر المؤرشفة بشكل مستقل تبقى مؤرشفة."
+    rows.append([_btn("🔙 رجوع", back)])
+    await _render(event, text, rows)
+
+
+@router.callback_query(F.data.regexp(r"^adm_ch:archives:\d+$"))
+async def cb_archives(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await show_archives(call, int(call.data.split(":")[2]))
+
+
+@router.callback_query(F.data.regexp(r"^adm_ch:arc:[bsut]:[0-9a-f-]{36}:\d+$"))
+async def cb_archive_view(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    _, _, kind, node_id, page = call.data.split(":")
+    await show_archive(call, kind, node_id, int(page))
+
+
+@router.callback_query(F.data.regexp(r"^adm_ch:restore:[0-9a-f-]{36}$"))
+async def cb_branch_restore(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    node_id = call.data.split(":")[2]
+    try:
+        await repo.restore_branch(node_id, call.from_user.id)
+    except ChallengeRepoError as exc:
+        return await _render(call, f"⚠️ {_e(exc)}", [[_btn("🔙 رجوع", f"{P}arc:b:{node_id}:0")]])
+    await show_home(call)
+
+
+@router.callback_query(F.data.regexp(r"^adm_ch:purge:[0-9a-f-]{36}$"))
+async def cb_branch_purge_ask(call: types.CallbackQuery, state: FSMContext):
+    node_id = call.data.split(":")[2]
+    node = await repo.get_node("branch", node_id)
+    if not node or node["status"] != "archived":
+        await state.clear()
+        return await show_archives(call)
+    await state.set_state(ChallengeAdminState.confirm_branch_delete)
+    await state.update_data(branch_delete_id=node_id)
+    await _render(call, f"⚠️ حذف نهائي للفرع <b>{_e(node['name'])}</b>؟\n"
+                  "سيُحذف الفرع وجميع مواده ووحداته واختباراته وأسئلته. لا يمكن التراجع.\n"
+                  "إذا كانت البيانات مرتبطة بطلاب أو أراضٍ أو مباريات فسيُرفض الحذف كاملاً.",
+                  [[_btn("🗑 نعم، حذف نهائي", f"{P}purgeyes:{node_id}")],
+                   [_btn("❌ إلغاء", f"{P}arc:b:{node_id}:0")]])
+
+
+@router.callback_query(F.data.regexp(r"^adm_ch:purgeyes:[0-9a-f-]{36}$"))
+async def cb_branch_purge_do(call: types.CallbackQuery, state: FSMContext):
+    node_id = call.data.split(":")[2]
+    data = await state.get_data()
+    if (await state.get_state() != ChallengeAdminState.confirm_branch_delete.state
+            or data.get("branch_delete_id") != node_id):
+        return await call.answer("انتهى التأكيد. افتح الفرع وأعد طلب الحذف.", show_alert=True)
+    await state.clear()
+    try:
+        await repo.delete_archived_branch(node_id, call.from_user.id)
+    except ChallengeRepoError as exc:
+        return await _render(call, f"⚠️ {_e(exc)}", [[_btn("🔙 رجوع", f"{P}arc:b:{node_id}:0")]])
+    except Exception:
+        return await _render(call, "تعذر الحذف. أعد فتح الفرع للمحاولة مجدداً.",
+                             [[_btn("🔙 الأرشيف", f"{P}archives:0")]])
+    await show_archives(call)
