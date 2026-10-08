@@ -30,10 +30,12 @@ def screen(state, count=None, page=0):
         outcome = '⌛ لم يجب' if previous['timed_out'] else '✅ صحيحة' if previous['is_correct'] else '❌ خاطئة'
         text += f"السؤال السابق {previous['index']+1}: {outcome} (+{previous['score']})\n"
     image = source_image(q)
-    # Paginate question + options as text, also for mixed image/text sources. Every character
-    # remains reachable; a source image is reused on every page, never regenerated.
-    body = q['text'] + '\n\n' + '\n\n'.join(
-        f"{image_option_label(i) if image else str(i+1)}) {option}" for i,option in enumerate(q['options']))
+    # Source images already contain the question/options. Keep their caption compact.
+    # Text-only questions retain their prompt; options live exclusively in the keyboard.
+    body = '' if image else q['text']
+    options = [Btn(image_option_label(i) if image else f"{i+1}) {option}", 'sp:readonly')
+               for i, option in enumerate(q['options'])]
+    rows.extend(options[i:i+2] for i in range(0, len(options), 2))
     size = max(80, (950 if image else 3900) - len(text) - 160)
     chunks = [body[i:i+size] for i in range(0,len(body),size)] or ['']
     page = min(max(0,page),len(chunks)-1)

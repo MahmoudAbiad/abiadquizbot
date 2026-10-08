@@ -168,6 +168,14 @@ async def challenge_spectator_loop(bot):
 
 @router.callback_query(F.data.startswith('sp:'))
 async def callback(c: types.CallbackQuery):
+    # Informational buttons never reach match RPCs or presence writes. Answer once,
+    # before the usual empty acknowledgement, so Telegram displays the notice.
+    if c.data == 'sp:readonly':
+        try:
+            await c.answer('لا تستطيع المشاركة في وضعية المشاهدة', show_alert=True)
+        except TelegramBadRequest:
+            pass
+        return
     try: await c.answer()
     except TelegramBadRequest: pass
     try:

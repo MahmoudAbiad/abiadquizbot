@@ -116,19 +116,27 @@ class ScreenTests(unittest.TestCase):
         s['snapshot']='SECRET';s['option_id']='SECRET'
         text,rows=screen(s,1)
         self.assertNotIn('SECRET',text)
-        self.assertLess(text.index('خيار ب'),text.index('خيار أ'))
+        self.assertIn('نص السؤال',text)
+        self.assertNotIn('خيار ب',text)
+        self.assertEqual([b.text for b in rows[0]],['1) خيار ب','2) خيار أ'])
         self.assertTrue(all(b.data.startswith('sp:') for r in rows for b in r))
         self.assertTrue(all(len(b.data.encode())<=64 for r in rows for b in r))
     def test_math_source_image_and_mixed_text(self):
         s=state();s['question'].update(image_url=IMAGE,is_math=True,table={'rows':[[1]]},matrices=[])
-        text,_=screen(s,1)
+        s['question']['options']=['أول','ثاني','ثالث','رابع']
+        text,rows=screen(s,1)
         self.assertIsInstance(text,PhotoText);self.assertEqual(text.image_url,IMAGE)
-        self.assertIn('نص السؤال',text);self.assertIn('خيار ب',text)
-    def test_long_media_is_paginated_under_caption_limit(self):
+        self.assertNotIn('نص السؤال',text)
+        self.assertEqual([len(row) for row in rows[:2]],[2,2])
+        self.assertEqual([b.text for row in rows[:2] for b in row],
+                         [image_option_label(i) for i in range(4)])
+        self.assertTrue(all(b.data=='sp:readonly' for row in rows[:2] for b in row))
+    def test_long_media_stays_compact_without_duplicate_pages(self):
         s=state();s['question'].update(text='ن'*3500,image_url=IMAGE,options=['أ'*1000,'ب'*1000])
         for page in range(20):
             text,rows=screen(s,1,page);self.assertLessEqual(len(text),1024)
             self.assertEqual(text.image_url,IMAGE)
+            self.assertFalse(any(b.data.startswith('sp:p:') for r in rows for b in r))
     def test_previous_is_distinguished_from_current(self):
         s=state();s.update(index=1,previous=dict(index=0,is_correct=True,timed_out=False,score=98))
         text,_=screen(s,1);self.assertIn('السؤال السابق 1',text);self.assertIn('السؤال 2 / 3',text)
@@ -170,6 +178,19 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         return NS(data=f'sp:{action}:{UUID(MID).hex}{extra}',from_user=NS(id=uid),bot=self.bot,
                   message=NS(message_id=10),answer=AsyncMock())
     async def open(self): await self.e['callback'](self.cb())
+    async def test_option_buttons_only_show_notice_for_any_actor(self):
+        before=copy.deepcopy(self.s)
+        for uid in [1,2,3]:
+            c=self.cb(uid=uid);c.data='sp:readonly'
+            await self.e['callback'](c)
+            c.answer.assert_awaited_once_with('لا تستطيع المشاركة في وضعية المشاهدة',show_alert=True)
+        self.repo.state.assert_not_awaited()
+        self.repo.incoming.assert_not_awaited()
+        self.e['update_attacker'].assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+        self.bot.edit_message_text.assert_not_awaited()
+        self.assertEqual(await self.redis.keys('*'),[])
+        self.assertEqual(self.s,before)
     async def test_authorized_open_and_refresh(self):
         await self.open();self.repo.state.assert_awaited_with(MID,2)
         self.assertEqual(await self.p.count(MID),1)
