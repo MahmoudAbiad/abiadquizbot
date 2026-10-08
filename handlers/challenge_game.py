@@ -3,6 +3,8 @@ import asyncio
 import datetime as dt
 import logging
 from uuid import UUID
+from collections import OrderedDict
+from weakref import WeakValueDictionary
 
 from aiogram import F, Router, types
 from aiogram.filters import Command
@@ -21,6 +23,8 @@ router = Router(name="challenge_game")
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
 logger = logging.getLogger(__name__)
+_attack_locks = WeakValueDictionary()
+_attack_views = OrderedDict()
 EMPTY = "📚 لا توجد اختبارات متاحة لهذه الوحدة حاليًا."
 ERRORS = {
     "self_attack": "لا يمكنك مهاجمة أرضك.",
@@ -90,6 +94,12 @@ async def home(message, user, page=0):
             rows.insert(0, [button("⚔️ متابعة المباراة", "lv:q")])
     except Exception:
         pass  # before migration 0010 exists the async home must keep working
+    try:
+        from handlers.challenge_spectator import repo as spectator_repo
+        if await spectator_repo.incoming(user.id):
+            rows.insert(0, [button("👁 الهجمات الجارية على أرضي", "sp:l:0")])
+    except Exception:
+        pass  # additive migration/DB failure must not break land recovery
     rows.append([button("🏠 القائمة الرئيسية", "cg:main")])
     return await render(message, text, rows)
 
@@ -169,6 +179,8 @@ def attack_screen(state, page=0):
     now = dt.datetime.fromisoformat(state["server_now"].replace("Z", "+00:00"))
     remaining = max(0, int((deadline-now).total_seconds()))
     text = f"⚔️ السؤال {idx+1}/{state['total']} — ⏱ نحو {remaining} ثانية\n\n"
+    if state.get("viewer_count") is not None:
+        text += f"👁 جلسات مشاهدة حديثة: {state['viewer_count']}\n"
     text += "اختر الإجابة بالاعتماد على الصورة.\n" if image_url else q["text"] + "\n\n"
     rows = []
     for i in range(page*2, min(page*2+2, len(options))):
@@ -183,11 +195,48 @@ def attack_screen(state, page=0):
     return (PhotoText(text, image_url) if image_url else text), rows
 
 
+async def present_attack(bot, state, message_id, page=0):
+    """Shared cosmetic lock for callback/timer/presence deliveries; game state stays in SQL."""
+    from handlers.challenge_spectator import presence
+    mid = state["id"]
+    lock = _attack_locks.setdefault(mid, asyncio.Lock())
+    async with lock:
+        old = _attack_views.get(mid)
+        if old and state["server_now"] < old["stamp"]:
+            return
+        if page is None:
+            page = old["page"] if old and old["index"] == state["index"] else 0
+        count = await presence.count(mid) if state["status"] == "in_progress" else None
+        text, rows = attack_screen(dict(state, viewer_count=count), page)
+        sig = (str(text), getattr(text, "image_url", None), str(rows))
+        shown = message_id
+        if not old or old["sig"] != sig or old["message_id"] != message_id:
+            shown = await deliver_screen(bot, state["attacker_id"], message_id, text, keyboard(rows))
+        if shown is not None:
+            await repo.attach_message(mid, state["attacker_id"], shown)
+        _attack_views[mid] = dict(stamp=state["server_now"], index=state["index"], page=page,
+                                  sig=sig, message_id=shown, count=count)
+        _attack_views.move_to_end(mid)
+        while len(_attack_views)>2000: _attack_views.popitem(last=False)
+
+
+async def refresh_presence(bot, mid):
+    from handlers.challenge_spectator import presence
+    old = _attack_views.get(mid)
+    count = await presence.count(mid)
+    if old and old["count"] == count:
+        return
+    state = await repo.attack_display(mid)
+    if state and state["status"] == "in_progress" and state.get("message_id"):
+        await present_attack(bot, state, state["message_id"], None)
+
+
 async def show_attack(message, state, page=0):
-    text, rows = attack_screen(state, page)
-    message_id = await deliver_screen(message.bot, message.chat.id, message.message_id, text, keyboard(rows))
-    if message_id is not None:
-        await repo.attach_message(state["id"], state["attacker_id"], message_id)
+    from handlers.challenge_spectator import wake_spectators
+    try:
+        await present_attack(message.bot, state, message.message_id, page)
+    finally:
+        wake_spectators(state["id"])
 
 
 async def show_history(message, user_id, direction, page):
@@ -325,10 +374,11 @@ async def challenge_heartbeat_loop(bot):
             for item in await repo.due_attacks(now):
                 try:
                     state=await repo.advance(item["id"],item["attacker_id"],"tick")
-                    text,rows=attack_screen(state)
-                    shown = await deliver_screen(bot, item["attacker_id"], state["message_id"], text, keyboard(rows))
-                    if shown is not None and shown != state["message_id"]:
-                        await repo.attach_message(item["id"], item["attacker_id"], shown)
+                    from handlers.challenge_spectator import wake_spectators
+                    try:
+                        await present_attack(bot, state, state["message_id"])
+                    finally:
+                        wake_spectators(state["id"])
                 except (TelegramBadRequest,TelegramForbiddenError):
                     # Session remains recoverable through /land. Don't resend on every heartbeat.
                     logger.info("game_delivery_unavailable match=%s",item["id"])
@@ -340,7 +390,9 @@ async def challenge_heartbeat_loop(bot):
                     if not p or not p["notifications_enabled"]: continue
                     m=await repo.notification_summary(notice["match_id"])
                     if notice["kind"]=="attack_started" and m["status"]!="in_progress": continue
-                    await bot.send_message(notice["user_id"],notification_text(notice["kind"],m),parse_mode="HTML")
+                    from handlers.challenge_spectator import notification_markup
+                    await bot.send_message(notice["user_id"],notification_text(notice["kind"],m),parse_mode="HTML",
+                                           reply_markup=await notification_markup(notice,m))
                 except Exception:
                     logger.info("game_notice_unavailable match=%s",notice["match_id"])
         except asyncio.CancelledError:
@@ -350,3 +402,8 @@ async def challenge_heartbeat_loop(bot):
             logger.debug("game_heartbeat_unavailable_or_migrations_not_applied")
             await asyncio.sleep(30)
         await asyncio.sleep(3)
+
+
+# Uses the already registered async router in both polling and webhook entrypoints.
+from handlers.challenge_spectator import router as spectator_router
+router.include_router(spectator_router)

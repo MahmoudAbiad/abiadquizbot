@@ -102,3 +102,12 @@ async def has_active_attacks():
 
 async def subject_stats(user_id):
     return (await supabase.table("challenge_subject_stats").select("*").eq("user_id", user_id).execute()).data or []
+
+
+async def attack_display(match_id):
+    """Internal cosmetic refresh only. Never advances a question or settles a match."""
+    rows = (await supabase.table("challenge_matches").select("attacker_id")
+            .eq("id",match_id).eq("kind","async_attack").limit(1).execute()).data or []
+    if not rows:
+        return None
+    return await rpc("challenge_attack_state",p_match=match_id,p_user=rows[0]["attacker_id"])

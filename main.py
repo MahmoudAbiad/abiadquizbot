@@ -128,6 +128,8 @@ def main():
                 spawn(challenge_heartbeat_loop(bot))
                 from handlers.challenge_live import challenge_live_loop
                 spawn(challenge_live_loop(bot))
+                from handlers.challenge_spectator import challenge_spectator_loop
+                spawn(challenge_spectator_loop(bot))
 
                 # 🧹 تنظيف دوري لبيانات الكويز الجماعي القديمة (جلسات منتهية/ملغاة
                 # أقدم من GROUP_SESSION_RETENTION_DAYS) - نفس سبب استقلاليتها عن
