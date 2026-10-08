@@ -98,7 +98,9 @@ async def show_home(event, page: int = 0) -> None:
     text = ("🏆 <b>إدارة التحديات</b>\n━━━━━━━━━━━━━━━━━━\n"
             f"{await _guard_enabled_notice()}\n\nاختر فرعاً أو أضف جديداً:" +
             ("" if branches else "\n\n<i>لا توجد فروع بعد.</i>"))
-    rows = [[_btn(f"📂 {b['name']}", f"{P}b:{b['id']}:0")] for b in chunk]
+    rows = [[_btn(f"📂 {b['name']}", f"{P}b:{b['id']}:0"),
+             _btn("✏️", f"{P}ren:b:{b['id']}"),
+             _btn("🗑", f"{P}x:b:{b['id']}")] for b in chunk]
     nav = _nav_row(branches, page, pages, "home")
     if nav:
         rows.append(nav)
@@ -284,6 +286,18 @@ async def cb_test_status(call: types.CallbackQuery):
 async def cb_archive_ask(call: types.CallbackQuery):
     _, _, kind, node_id = call.data.split(":")
     what = {"b": "الفرع", "s": "المادة", "u": "الوحدة", "t": "الاختبار"}[kind]
+    if kind == "b":
+        node = await repo.get_node("branch", node_id)
+        if not node or node["status"] != "active":
+            return await show_home(call)
+        await _render(call,
+                      f"🗑 حذف الفرع <b>{_e(node['name'])}</b>؟\n"
+                      "سيختفي الفرع ومواده ووحداته واختباراته من قوائم الاختيار.\n"
+                      "الحذف بالأرشفة: تبقى البيانات والسجلات السابقة محفوظة.\n"
+                      "لا يمكن استعادة الفرع من البوت حالياً.",
+                      [[_btn("✅ تأكيد الحذف", f"{P}xy:b:{node_id}"),
+                        _btn("❌ إلغاء", f"{P}home:0")]])
+        return
     extra = "" if kind == "t" else "\nسيختفي كل ما تحتها عن الطلاب، لكن تبقى البيانات محفوظة."
     await _render(call, f"🗄 أرشفة {what}؟{extra}\nلا يمكن التراجع من البوت.",
                   [[_btn("✅ نعم، أرشف", f"{P}xy:{kind}:{node_id}"), _btn("❌ إلغاء", f"{P}cancelx:{kind}:{node_id}")]])
