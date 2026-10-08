@@ -681,7 +681,8 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
     option_wrap_width = max_width_px * 0.96
     option_blocks: List[List[str]] = []
     for letter, opt in zip(letters, options):
-        combined = f"({letter} {opt}" if is_ar else f"{letter}) {opt}"
+        # Supply logical reading order; _shape_line handles Arabic bidi/mirroring.
+        combined = f"{letter}) {opt}"
         option_blocks.append(_wrap_and_shape(combined, is_ar, option_wrap_width, opt_font_prop))
 
     # نقيس ارتفاع كل سطر فعلياً (بدل الاعتماد على ثابت واحد لكل الأسطر) - ضروري

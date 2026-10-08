@@ -117,8 +117,8 @@ class ScreenTests(unittest.TestCase):
         text,rows=screen(s,1)
         self.assertNotIn('SECRET',text)
         self.assertIn('نص السؤال',text)
-        self.assertNotIn('خيار ب',text)
-        self.assertEqual([b.text for b in rows[0]],['1) خيار ب','2) خيار أ'])
+        self.assertIn('خيار ب',text)
+        self.assertEqual([b.text for b in rows[0]],['ب','أ'])
         self.assertTrue(all(b.data.startswith('sp:') for r in rows for b in r))
         self.assertTrue(all(len(b.data.encode())<=64 for r in rows for b in r))
     def test_math_source_image_and_mixed_text(self):
@@ -129,7 +129,7 @@ class ScreenTests(unittest.TestCase):
         self.assertNotIn('نص السؤال',text)
         self.assertEqual([len(row) for row in rows[:2]],[2,2])
         self.assertEqual([b.text for row in rows[:2] for b in row],
-                         [image_option_label(i) for i in range(4)])
+                         ['ب','أ','د','ج'])
         self.assertTrue(all(b.data=='sp:readonly' for row in rows[:2] for b in row))
     def test_long_media_stays_compact_without_duplicate_pages(self):
         s=state();s['question'].update(text='ن'*3500,image_url=IMAGE,options=['أ'*1000,'ب'*1000])
@@ -138,8 +138,11 @@ class ScreenTests(unittest.TestCase):
             self.assertEqual(text.image_url,IMAGE)
             self.assertFalse(any(b.data.startswith('sp:p:') for r in rows for b in r))
     def test_previous_is_distinguished_from_current(self):
-        s=state();s.update(index=1,previous=dict(index=0,is_correct=True,timed_out=False,score=98))
+        s=state();s.update(index=1,previous=dict(index=0,option_id=1,correct_option_id=2,is_correct=False,timed_out=False,score=0))
         text,_=screen(s,1);self.assertIn('السؤال السابق 1',text);self.assertIn('السؤال 2 / 3',text)
+        self.assertIn('اختار المهاجم: ب — الإجابة الصحيحة: ج',text)
+        s['previous'].update(timed_out=True,option_id=None)
+        self.assertIn('اختار المهاجم: لم يجب — الإجابة الصحيحة: ج',screen(s,1)[0])
     def test_terminal_statuses_rewards_and_defense(self):
         for status in ['completed','expired','abandoned']:
             s=state();s.update(status=status,result=dict(correct=2,score=190,stars=2,attacker_won=True,attacker_xp=20,attacker_trophies=10))
