@@ -27,7 +27,7 @@ from helpers.gemini_helper.media import (
     _safe_delete_gemini_file,
     split_images_into_three_sync,
     split_pdf_into_three_sync, split_pdf_without_orphans,
-    split_ready_exam_pdf_without_orphans,
+    split_pdf_with_context_without_orphans,
 )
 from helpers.gemini_helper.schemas import QuizResponse
 
@@ -161,15 +161,72 @@ def _ready_exam_chunk_prompt(prompt_template: str, question_limit: int, chunk: D
     return prompt_template.replace("{count}", str(question_limit)) + instruction
 
 
-def _merge_ready_exam_chunk_questions(
-    results: Sequence[Any], question_limit: int
+def _generated_pdf_chunk_prompt(
+    prompt_template: str, question_target: int, chunk: Dict[str, Any]
+) -> str:
+    """Only owned pages supply question topics; adjacent pages are context."""
+    first = chunk["owned_first"]
+    last = chunk["owned_last"]
+    total = chunk["page_count"]
+    instruction = (
+        "\n\n[تعليمات إلزامية لتوليد أسئلة من جزء PDF - حدود صفحات السياق]:\n"
+        f"الملف الجزئي المرفق يتكوّن من {total} صفحات، وترقيمها هو ترتيب الصفحات "
+        "داخل هذا الملف الجزئي وليس الترقيم المطبوع. "
+        f"ولّد الأسئلة المطلوبة اعتماداً على المحتوى الذي يبدأ في الصفحات من {first} إلى {last} فقط (شاملاً). "
+        "الصفحات السابقة واللاحقة خارج هذا المجال صفحات سياق للقراءة والفهم "
+        "واستكمال تعريف أو معادلة أو مثال يمتد عبر الحد الفاصل، وليست مصادر "
+        "مستقلة لأفكار أسئلة جديدة. "
+        "إذا بدأت فكرة أو مسألة في صفحة سياق ثم امتدت إلى صفحة مخصصة لك، "
+        "لا تولّد سؤالاً يستند إليها بصفتها فكرة مستقلة. "
+        "إذا بدأت فكرة في صفحة مخصصة لك وامتدت لصفحة سياق، "
+        "استخدم تكملتها لفهمها وصياغة سؤال دقيق. "
+        "لا تكرر أسئلة مقتبسة حصرياً من صفحات السياق، "
+        "ولا تختلق معلومات لتعويض نقص المحتوى. "
+        f"العدد المستهدف من الأسئلة لهذا الجزء هو {question_target} سؤالاً، "
+        "من الصفحات المخصصة لهذا الجزء وحده. التزم بنوع الأسئلة والصعوبة "
+        "وشروط المخرجات في البرومبت الأساسي."
+    )
+    return prompt_template.replace("{count}", str(question_target)) + instruction
+
+
+def _generated_pdf_chunk_targets(count: int, chunks: Sequence[Dict[str, Any]]) -> List[int]:
+    """Apportion requested questions to chunks by owned pages, not context pages.
+
+    Largest remainder keeps the exact total while avoiding giving an entire
+    large request to the first chunk. For an extracted ready-made exam we do
+    NOT use quotas: its question density may differ across pages.
+    """
+    owned = [chunk["owned_last"] - chunk["owned_first"] + 1 for chunk in chunks]
+    total_pages = sum(owned)
+    if total_pages <= 0 or count <= 0:
+        return [0] * len(chunks)
+    targets = [(count * pages) // total_pages for pages in owned]
+    spare = count - sum(targets)
+    indices = sorted(
+        range(len(chunks)),
+        key=lambda i: (-(count * owned[i] % total_pages), i),
+    )
+    for index in indices[:spare]:
+        targets[index] += 1
+    return targets
+
+
+def _merge_pdf_chunk_questions(
+    results: Sequence[Any],
+    question_limit: int,
+    chunk_targets: Optional[Sequence[int]] = None,
 ) -> List[Dict[str, Any]]:
-    """Merge in document order, suppress identical questions across adjacent chunks."""
+    """Merge in PDF order and suppress identical cross-boundary questions."""
     questions: List[Dict[str, Any]] = []
     prior_chunk_questions: set = set()
-    for result in results:
+    for index, result in enumerate(results):
         current_chunk_questions: set = set()
-        for question in result[0]:
+        source_questions = result[0]
+        # Generated quizzes have per-chunk quotas; existing-exam extraction
+        # deliberately does not, because source questions may be uneven.
+        if chunk_targets is not None:
+            source_questions = source_questions[:chunk_targets[index]]
+        for question in source_questions:
             question_text = " ".join(str(question.get("question", "")).split()).casefold()
             if question_text and question_text in prior_chunk_questions:
                 continue
@@ -182,44 +239,71 @@ def _merge_ready_exam_chunk_questions(
     return questions
 
 
-async def _generate_ready_exam_pdf(
-    file_path: str, count: int, prompt_template: str, part_count: int
+async def _generate_pdf_with_context(
+    file_path: str, count: int, prompt_template: str, part_count: int,
+    ready_exam: bool = False,
 ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
-    """Parallel extraction with one context page at each side of each boundary.
+    """Context-overlap PDF generation for all subject types.
 
-    Two requests serve Over-Limit ready-made exams, three serve Super-PDF exams.
-    The full requested count is a per-chunk *upper bound*, not an exact quota:
-    fixed half/third quotas could silently discard questions when page density
-    differs. Only the merged result is limited to count.
+    Extended PDFs use two parallel calls; Super-PDFs use three. Extraction of
+    a ready-made exam attributes original questions to their starting page.
+    Generated tests assign questions to owned source pages, with adjacent
+    context pages available only for completing a topic at the boundary.
     """
     if not API_KEYS or (part_count == 3 and len(API_KEYS) < 3):
-        log_error(logger, "Insufficient GEMINI_API_KEYS for context-aware PDF extraction")
+        log_error(logger, "Insufficient GEMINI_API_KEYS for context-aware PDF processing")
         return None
-    chunks = await split_ready_exam_pdf_without_orphans(file_path, part_count)
+    chunks = await split_pdf_with_context_without_orphans(file_path, part_count)
     try:
         await asyncio.to_thread(release_memory_to_os)
         if len(chunks) != part_count:
             return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
 
+        # Keep per-chunk count a generous UPPER bound for extracting existing
+        # questions; density varies. For generating questions, quotas are
+        # proportional to owned pages and always sum to the requested count.
+        chunk_targets = (
+            [count] * len(chunks) if ready_exam
+            else _generated_pdf_chunk_targets(count, chunks)
+        )
+        active = [
+            (chunk, target)
+            for chunk, target in zip(chunks, chunk_targets)
+            if target > 0
+        ]
+        if not active:
+            return None
         attempts = [
             _execute_cascade(
                 _build_super_chunk_attempt_fn(
-                    [chunk["path"]], _ready_exam_chunk_prompt(prompt_template, count, chunk)
+                    [chunk["path"]],
+                    (
+                        _ready_exam_chunk_prompt(prompt_template, target, chunk)
+                        if ready_exam else
+                        _generated_pdf_chunk_prompt(prompt_template, target, chunk)
+                    ),
                 ),
-                # Preserve existing Super-PDF provider policy. The two-part
-                # Over-Limit path can use Vertex via the regular cascade.
+                # Retain the current three-part Super-PDF provider policy.
                 exclude_vertex=(part_count == 3),
             )
-            for chunk in chunks
+            for chunk, target in active
         ]
         results = await asyncio.gather(*attempts, return_exceptions=True)
         if any(result is None or isinstance(result, BaseException) for result in results):
-            log_error(logger, "Ready-made PDF: context chunk failed model/key cascade")
+            log_error(logger, "PDF: context chunk exhausted its model/key cascade")
             return None
 
-        questions = _merge_ready_exam_chunk_questions(results, count)
+        questions = _merge_pdf_chunk_questions(
+            results, count,
+            None if ready_exam else [target for _, target in active],
+        )
         if not questions:
             return None
+        if not ready_exam and len(questions) < count:
+            logger.warning(
+                "PDF context generation returned %s of %s requested questions",
+                len(questions), count,
+            )
         winning_models = [result[5] for result in results]
         _last_model_used_var.set({
             "provider": "gemini",
