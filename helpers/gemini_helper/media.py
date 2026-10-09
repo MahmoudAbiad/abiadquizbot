@@ -135,7 +135,7 @@ def split_pdf_with_context_sync(file_path: str, part_count: int) -> List[dict]:
     from services.upload_validation import MAX_PDF_PARTS_BYTES, MIN_FREE_DISK_BYTES
 
     if part_count not in (2, 3):
-        raise ValueError("Ready-made exam splitting requires 2 or 3 parts")
+        raise ValueError("PDF context splitting requires 2 or 3 parts")
     get_pdf_page_count_sync(file_path)
     base = Path(file_path)
     if shutil.disk_usage(base.parent).free < MAX_PDF_PARTS_BYTES + MIN_FREE_DISK_BYTES:
