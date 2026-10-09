@@ -27,6 +27,7 @@ from helpers.gemini_helper.media import (
     _safe_delete_gemini_file,
     split_images_into_three_sync,
     split_pdf_into_three_sync, split_pdf_without_orphans,
+    split_ready_exam_pdf_without_orphans,
 )
 from helpers.gemini_helper.schemas import QuizResponse
 
@@ -136,6 +137,117 @@ def _build_super_chunk_attempt_fn(
             for uploaded_file in uploaded:
                 spawn(_safe_delete_gemini_file(client, uploaded_file.name))
     return _attempt
+
+
+def _ready_exam_chunk_prompt(prompt_template: str, question_limit: int, chunk: Dict[str, Any]) -> str:
+    """Treat overlap as context, never as independent extraction ownership."""
+    local_first = chunk["owned_first"]
+    local_last = chunk["owned_last"]
+    total_pages = chunk["page_count"]
+    instruction = (
+        "\n\n[تعليمات إلزامية لجزء من اختبار جاهز - حدود صفحات السياق]:\n"
+        f"ملف PDF المرفق في هذا الطلب يتألف من {total_pages} صفحات. "
+        "رقم الصفحة هنا هو ترتيب الصفحة داخل ملف PDF الجزئي، وليس الرقم المطبوع على الورقة. "
+        f"استخرج حصراً الأسئلة التي يبدأ نصّها في الصفحات من {local_first} إلى {local_last} (شاملاً). "
+        "حدد تبعية كل سؤال حسب الصفحة التي يبدأ فيها، لا حسب الصفحة التي ينتهي فيها. "
+        "الصفحات خارج هذا النطاق صفحات سياق فقط: استخدمها لاستكمال قراءة السؤال "
+        "أو الخيارات أو مفتاح الإجابة، لكن لا تُخرج سؤالاً يبدأ على صفحة سياقية، "
+        "حتى لو استمر ذلك السؤال داخل الصفحات المخصصة لك. "
+        "وبالمقابل، إذا بدأ السؤال ضمن الصفحات المخصصة لك وامتد إلى صفحة سياقية، "
+        "استخرجه كاملاً بكل خياراته. "
+        "لا تكرر أسئلة السياق، ولا تختلق أسئلة لتعويضها، ولا تعتبر صفحة السياق سؤالاً إضافياً. "
+        "استخرج جميع الأسئلة التي تبدأ في نطاقك حتى السقف المحدد في التعليمات الأساسية."
+    )
+    return prompt_template.replace("{count}", str(question_limit)) + instruction
+
+
+def _merge_ready_exam_chunk_questions(
+    results: Sequence[Any], question_limit: int
+) -> List[Dict[str, Any]]:
+    """Merge in document order, suppress identical questions across adjacent chunks."""
+    questions: List[Dict[str, Any]] = []
+    prior_chunk_questions: set = set()
+    for result in results:
+        current_chunk_questions: set = set()
+        for question in result[0]:
+            question_text = " ".join(str(question.get("question", "")).split()).casefold()
+            if question_text and question_text in prior_chunk_questions:
+                continue
+            questions.append(question)
+            if question_text:
+                current_chunk_questions.add(question_text)
+            if len(questions) >= question_limit:
+                return questions
+        prior_chunk_questions = current_chunk_questions
+    return questions
+
+
+async def _generate_ready_exam_pdf(
+    file_path: str, count: int, prompt_template: str, part_count: int
+) -> Optional[Tuple[List[Dict[str, Any]], int]]:
+    """Parallel extraction with one context page at each side of each boundary.
+
+    Two requests serve Over-Limit ready-made exams, three serve Super-PDF exams.
+    The full requested count is a per-chunk *upper bound*, not an exact quota:
+    fixed half/third quotas could silently discard questions when page density
+    differs. Only the merged result is limited to count.
+    """
+    if not API_KEYS or (part_count == 3 and len(API_KEYS) < 3):
+        log_error(logger, "Insufficient GEMINI_API_KEYS for context-aware PDF extraction")
+        return None
+    chunks = await split_ready_exam_pdf_without_orphans(file_path, part_count)
+    try:
+        await asyncio.to_thread(release_memory_to_os)
+        if len(chunks) != part_count:
+            return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
+
+        attempts = [
+            _execute_cascade(
+                _build_super_chunk_attempt_fn(
+                    [chunk["path"]], _ready_exam_chunk_prompt(prompt_template, count, chunk)
+                ),
+                # Preserve existing Super-PDF provider policy. The two-part
+                # Over-Limit path can use Vertex via the regular cascade.
+                exclude_vertex=(part_count == 3),
+            )
+            for chunk in chunks
+        ]
+        results = await asyncio.gather(*attempts, return_exceptions=True)
+        if any(result is None or isinstance(result, BaseException) for result in results):
+            log_error(logger, "Ready-made PDF: context chunk failed model/key cascade")
+            return None
+
+        questions = _merge_ready_exam_chunk_questions(results, count)
+        if not questions:
+            return None
+        winning_models = [result[5] for result in results]
+        _last_model_used_var.set({
+            "provider": "gemini",
+            "model": winning_models[0] if len(set(winning_models)) == 1 else "mixed",
+            "key_index": None,
+            "mode": "super_pdf" if part_count == 3 else "over_limit_pdf",
+            "chunk_details": [
+                {
+                    "model": result[5],
+                    "key_index": result[6],
+                    "cascade_rank": result[7],
+                    "cascade_total": result[8],
+                }
+                for result in results
+            ],
+            "cascade_rank": None,
+            "cascade_total": None,
+        })
+        _last_token_usage_var.set({
+            "input_tokens": sum(result[2] for result in results),
+            "output_tokens": sum(result[3] for result in results),
+            "thoughts_tokens": sum(result[4] for result in results),
+            "total_tokens": sum(result[1] for result in results),
+        })
+        return questions, sum(result[1] for result in results)
+    finally:
+        for chunk in chunks:
+            safe_file_cleanup(chunk["path"])
 
 
 async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) -> Optional[Tuple[List[Dict[str, Any]], int]]:
