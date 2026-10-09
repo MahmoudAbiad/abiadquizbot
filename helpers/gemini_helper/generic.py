@@ -40,17 +40,26 @@ async def generate_structured_with_cascade(
     final_contents: List[Any] = ([prompt_instruction] if prompt_instruction else []) + list(contents)
 
     async def _attempt(client: genai.Client, key_index: int, model: str, cascade_rank: int, cascade_total: int) -> Tuple[Any, int]:
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=model,
-                contents=final_contents,
+        from helpers.gemini_helper.schemas import QuizResponse
+        from helpers.gemini_helper.streaming import generate_quiz_response
+        if response_schema is QuizResponse:
+            response = await generate_quiz_response(
+                client, model=model, contents=final_contents,
                 config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
+                    response_mime_type="application/json", response_schema=response_schema),
+                timeout=await get_ai_request_timeout())
+        else:
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=model,
+                    contents=final_contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=response_schema,
+                    ),
                 ),
-            ),
-            timeout=await get_ai_request_timeout(),
-        )
+                timeout=await get_ai_request_timeout(),
+            )
         parsed = _parse_structured_gemini_response(response, response_schema, model)
         token_count = _record_token_usage(response)
         return parsed, int(token_count)

@@ -143,7 +143,8 @@ async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuer
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
         is_saved_in_session=False, is_switching_question=False,
         attempt_id=attempt_id, stopped_early=False,
-        share_id=None
+        share_id=None, stream_poll_session=None, generation_pending=False,
+        stream_id=None, stream_waiting=False, stream_paused=False,
     )
     await state.set_state(QuizState.answering_quiz)
     if isinstance(msg_or_call, types.CallbackQuery):
@@ -174,6 +175,11 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
 
         # 1. حالة انتهاء الاختبار
         if idx >= len(questions):
+            if data.get("generation_pending"):
+                if not data.get("stream_waiting"):
+                    await bot.send_message(chat_id, "⏳ عم نجهّز السؤال التالي… رح يوصلك تلقائياً أول ما يجهز.")
+                await state.update_data(stream_waiting=True, is_switching_question=False)
+                return
             await _handle_quiz_completion(chat_id, user_id, state, data)
             return
 
@@ -191,10 +197,15 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
             ],
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
+        if data.get("generation_pending"):
+            control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint"),
+                 types.InlineKeyboardButton(text="⏸ إيقاف الحل", callback_data="quiz_stop")],
+                [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]])
 
         from handlers.session_navigation import session_id
         identity = await session_id(state)
-        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb,
+        await send_quiz_poll(chat_id, user_id, q, idx, max(len(questions), data.get("total_count", 0)), control_kb,
                              quiz_id=data.get('quiz_id'), poll_meta={"session_id": identity})
         # 🆕 send_quiz_poll (لسؤال رياضي) قد يملأ q["image_url"] بعد الرسم/الرفع الفعلي -
         # q هو نفس الكائن المرجعي questions[idx] أعلاه، فنعيد كتابة questions لـ state هنا
@@ -332,6 +343,8 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
             if not await active_quiz(state):
                 return
             current_data = await state.get_data()
+            if current_data.get("generation_pending") and current_data.get("stream_paused"):
+                return
             identity = await session_id(state)
             if quiz_info.get("session_id") != identity:
                 return
@@ -728,7 +741,7 @@ async def save_answer_text_edit(msg: types.Message, state: FSMContext):
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
-        if data.get("is_switching_question"):
+        if data.get("is_switching_question") or (data.get("generation_pending") and data.get("current_index", 0) >= len(data.get("questions", []))):
             await call.answer()
             return
             
@@ -748,6 +761,8 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
+        if data.get("current_index", 0) >= len(data.get("questions", [])):
+            return await call.answer("⏳ انتظر وصول السؤال التالي.")
         q = data['questions'][data['current_index']]
         hint_text = q['hint']
         if q.get("is_math"):
@@ -844,7 +859,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         }))
         await state.update_data(
             current_index=0, score=0, answered_questions={}, navigation_session_id=None, quiz_completed=False, is_switching_question=False,
-            stopped_early=False, attempt_id=new_attempt_id
+            stopped_early=False, attempt_id=new_attempt_id, stream_poll_session=None
         )
         try:
             await call.message.delete()

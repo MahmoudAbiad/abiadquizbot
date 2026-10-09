@@ -1,4 +1,5 @@
 import asyncio
+from contextvars import ContextVar
 import os
 import tempfile
 import types
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 from reliability_support import FakeRedis, load_functions
 from services.redis_reliability import UserLock
+from services.streaming_quiz import StreamingSessionDetached
 from services.upload_validation import InvalidUploadError
 
 
@@ -27,6 +29,10 @@ class State:
 
 class DebitTests(unittest.IsolatedAsyncioTestCase):
     def make(self):
+        from unittest.mock import patch
+        switch = patch.dict(os.environ, {"QUIZ_STREAMING_ENABLED": "0"})
+        switch.start()
+        self.addCleanup(switch.stop)
         status=types.SimpleNamespace(edit_text=AsyncMock(),delete=AsyncMock())
         self.call=types.SimpleNamespace(answer=AsyncMock(),from_user=types.SimpleNamespace(id=1),message=types.SimpleNamespace(answer=AsyncMock(return_value=status),delete=AsyncMock()))
         states=types.SimpleNamespace(waiting_for_count='waiting_for_count',processing_file_quiz='processing',answering_quiz='answering')
@@ -34,7 +40,7 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
         async def loaded(call,state,*a,**kw):await state.update_data(quiz_data=['result'],attempt_id='saved')
         loaded.__wrapped__ = loaded
         self.env=load_functions('handlers/files.py', {'handle_count_start','_clear_quiz_charge_markers','_missing_upload_paths'},
-            asyncio=asyncio, redis_client=FakeRedis(), UserLock=UserLock, QuizState=states,
+            asyncio=asyncio, StreamingSessionDetached=StreamingSessionDetached, redis_client=FakeRedis(), UserLock=UserLock, QuizState=states,
             _QUIZ_CHARGE_STATE_KEYS=('debited_cost','debited_free','debited_paid','debit_id','debited_gift'),
             validate_question_count=lambda count:(True,''), SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
             calculate_quiz_points_cost=AsyncMock(return_value=2),determine_execution_mode=lambda *a,**kw:'Standard',
@@ -188,7 +194,7 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
             await ready.wait()
             return 'quiz-'+str(kwargs['creator_id'])
         env=load_functions('services/quiz_service.py',{'execute_quiz_generation_workflow','normalize_quiz_option_count'},
-            asyncio=asyncio,os=os,OPTION_COUNT=4,_HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(2),
+            asyncio=asyncio,os=os,OPTION_COUNT=4,question_sink=ContextVar('sink', default=None),_HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(2),
             get_file_quizzes=AsyncMock(return_value=[]), SUBJECT_OTHER='other',SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
             SUBJECT_MATH='math',SUBJECT_ENGLISH='english',SUBJECT_FRENCH='french',QUESTION_TYPE_GENERAL='general',DIFFICULTY_MEDIUM='medium',
             resolve_generation_question_type_text=lambda *a:None,resolve_quiz_extraction_instruction=lambda *a:None,
@@ -212,7 +218,7 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
                 env = load_functions(
                     'services/quiz_service.py',
                     {'execute_quiz_generation_workflow', 'normalize_quiz_option_count'},
-                    asyncio=asyncio, os=os, OPTION_COUNT=4,
+                    asyncio=asyncio, os=os, OPTION_COUNT=4, question_sink=ContextVar("sink", default=None),
                     _HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(1),
                     SUBJECT_OTHER='other', SUBJECT_QUIZ_SOLVED='solved',
                     SUBJECT_QUIZ_UNSOLVED='unsolved', SUBJECT_MATH='math',

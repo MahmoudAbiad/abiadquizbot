@@ -35,7 +35,7 @@ from handlers import (
     gifts_router,
 )
 from handlers.session_navigation import router as session_navigation_router
-from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
+from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, StreamingQuizMiddleware
 
 # تهيئة Sentry للتتبع
 SENTRY_DSN = os.getenv("SENTRY_DSN")
@@ -68,6 +68,8 @@ def main():
     # (أول شيء يشتغل وآخر شيء يلف حوله) ليغطي أي استثناء يحدث بأي مرحلة لاحقة، بما فيها
     # ThrottlingMiddleware نفسها.
     dp.update.outer_middleware(ErrorTrackingMiddleware())
+    dp.message.outer_middleware(StreamingQuizMiddleware())
+    dp.callback_query.outer_middleware(StreamingQuizMiddleware())
 
     # 1. تفعيل الحماية من التكرار (Rate Limiting)
     dp.message.middleware(ThrottlingMiddleware(limit=1.2))

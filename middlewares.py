@@ -16,6 +16,66 @@ from error_context import set_error_context, reset_error_context
 logger = get_logger(__name__)
 
 
+class StreamingQuizMiddleware(BaseMiddleware):
+    """Only playback actions may mutate a quiz while its producer is running."""
+    async def __call__(self, handler, event, data):
+        state = data.get("state")
+        if state is None or not isinstance(event, (Message, CallbackQuery)):
+            return await handler(event, data)
+        snapshot = await state.get_data()
+        if not snapshot.get("generation_pending"):
+            return await handler(event, data)
+        from config import redis_client
+        from services.streaming_quiz import producer_key, acquire_wait
+        from services.redis_reliability import UserLock
+        user_id = event.from_user.id
+        if not await redis_client.exists(producer_key(user_id)):
+            lock = UserLock(redis_client, user_id)
+            await acquire_wait(lock)
+            recovered = False
+            try:
+                current = await state.get_data()
+                if current.get("generation_pending") and not await redis_client.exists(producer_key(user_id)):
+                    from services.quiz_service import refund_user_on_failure
+                    await refund_user_on_failure(user_id, current)
+                    await state.clear()
+                    recovered = True
+            finally:
+                await lock.release()
+            if not recovered:
+                return await handler(event, data)
+            message = "⚠️ انقطعت عملية التوليد. أُعيدت نقاط الطلب؛ أرسل الملف للمحاولة مجدداً."
+        elif isinstance(event, CallbackQuery) and event.data in {"quiz_stop", "stream_resume"}:
+            lock = UserLock(redis_client, user_id)
+            await acquire_wait(lock)
+            try:
+                current = await state.get_data()
+                if not current.get("generation_pending"):
+                    return await event.answer("اكتمل التوليد. استخدم أزرار الاختبار.")
+                paused = event.data == "quiz_stop"
+                await state.update_data(stream_paused=paused)
+                if not paused and current.get("questions"):
+                    from handlers.quiz_runner import send_question_by_ids
+                    await send_question_by_ids(event.message.chat.id, user_id, state)
+                if paused:
+                    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    await event.message.answer(
+                        "⏸ توقف الحل. سنُكمل تجهيز الاختبار وحفظه، ثم نعرض نتيجتك الحالية. يمكنك استئناف الحل الآن.",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                            InlineKeyboardButton(text="▶️ استئناف الحل", callback_data="stream_resume")]]))
+                return await event.answer()
+            finally:
+                await lock.release()
+        elif (isinstance(event, CallbackQuery) and event.data in {"next_question", "get_hint"}
+              and not snapshot.get("stream_paused")):
+            return await handler(event, data)
+        else:
+            message = "⏳ ما زال تجهيز بقية الأسئلة جارياً. يمكنك الحل والتنقّل الآن؛ الحفظ والمشاركة والطلبات الجديدة متاحة عند اكتماله."
+        if isinstance(event, CallbackQuery):
+            return await event.answer(message, show_alert=True)
+        return await event.answer(message)
+
+
 class ErrorTrackingMiddleware(BaseMiddleware):
     """
     ميدل وير على مستوى الـ Update (يغطي كل الأنواع: رسائل، ضغطات أزرار، إجابات استفتاء

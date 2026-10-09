@@ -34,7 +34,7 @@ async def active_quiz(state):
 
 async def session_id(state):
     data = await state.get_data()
-    identity = data.get("attempt_id") or data.get("navigation_session_id")
+    identity = data.get("stream_poll_session") or data.get("attempt_id") or data.get("navigation_session_id")
     if not identity:
         identity = uuid.uuid4().hex
         await state.update_data(navigation_session_id=identity)

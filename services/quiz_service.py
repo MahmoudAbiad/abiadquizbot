@@ -14,6 +14,7 @@ from constants import (
     QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
 )
 from helpers.gemini_helper import generate_quiz_smart, get_last_generation_metadata
+from helpers.gemini_helper.streaming import question_sink
 from logger import get_logger, log_warning
 from services.file_service import extract_office_text_if_needed
 from services.image_quiz_renderer import render_question_image_async, looks_arabic
@@ -314,7 +315,8 @@ async def execute_quiz_generation_workflow(
     user_id: int,
     data: Dict[str, Any],
     count: int,
-    status_message: Any
+    status_message: Any,
+    on_question=None,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], str, Optional[Dict[str, Any]]]:
     """
     التدفق التنفيذي المركزي لتوليد الكويز:
@@ -422,22 +424,43 @@ async def execute_quiz_generation_workflow(
         quiz_extraction_instruction = resolve_quiz_extraction_instruction(subject_type, quiz_extraction_mode)
 
         # 3. استدعى محرك AI
-        quiz_data = await generate_quiz_smart(
-            file_paths=file_paths if is_media else None,
-            pure_text=pure_text if not is_media else None,
-            count=count,
-            skip_cache=True,
-            file_hash=file_hash,
-            status_message=status_message,
-            previous_questions=previous_questions if previous_questions else None,
-            is_math_mode=is_math_mode,
-            english_mode=english_mode,
-            content_language=content_language,
-            difficulty=difficulty,
-            question_type=question_type,
-            custom_question_type_text=custom_question_type_text,
-            quiz_extraction_instruction=quiz_extraction_instruction,
-        )
+        streamed_raw, streamed_prepared = [], []
+        async def publish_question(question):
+            import copy
+            prepared = copy.deepcopy(question)
+            if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+                prepared = normalize_quiz_option_count([prepared])[0]
+            elif len(prepared.get("options", [])) != OPTION_COUNT:
+                raise ValueError("Invalid streamed option count")
+            prepared = _shuffle_question_options(prepared)
+            if is_math_mode:
+                prepared["is_math"] = True
+            streamed_raw.append(copy.deepcopy(question))
+            streamed_prepared.append(prepared)
+            await on_question(copy.deepcopy(prepared))
+
+        sink_token = question_sink.set(publish_question if on_question else None)
+        try:
+            quiz_data = await generate_quiz_smart(
+                file_paths=file_paths if is_media else None,
+                pure_text=pure_text if not is_media else None,
+                count=count,
+                skip_cache=True,
+                file_hash=file_hash,
+                status_message=status_message,
+                previous_questions=previous_questions if previous_questions else None,
+                is_math_mode=is_math_mode,
+                english_mode=english_mode,
+                content_language=content_language,
+                difficulty=difficulty,
+                question_type=question_type,
+                custom_question_type_text=custom_question_type_text,
+                quiz_extraction_instruction=quiz_extraction_instruction,
+            )
+        finally:
+            question_sink.reset(sink_token)
+        if on_question and quiz_data and streamed_raw != quiz_data:
+            raise ValueError("Streamed and final quiz differ; refusing to replace visible questions")
 
         if not quiz_data:
             return None, None, "ai_failed", None
@@ -477,7 +500,7 @@ async def execute_quiz_generation_workflow(
 
         # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
         #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
-        quiz_data = shuffle_quiz_options(quiz_data)
+        quiz_data = streamed_prepared if on_question else shuffle_quiz_options(quiz_data)
 
         # 3.6 تعليم كل سؤال بنمط الكويز المصوّر LaTeX ليتحول التنفيذ لاحقاً
         #     (services/quiz_engine.py) لمسار الصورة + Poll الحروف بدل النص العادي

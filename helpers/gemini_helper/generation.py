@@ -30,6 +30,7 @@ from helpers.gemini_helper.media import (
     split_pdf_with_context_without_orphans,
 )
 from helpers.gemini_helper.schemas import QuizResponse
+from helpers.gemini_helper.streaming import generate_quiz_response, question_sink, OrderedChunks
 
 logger = get_logger(__name__)
 
@@ -49,15 +50,10 @@ async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[Tuple
         uploaded: List[Any] = []
         try:
             contents = await _build_contents_for_paths(client, paths, prompt, uploaded)
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=QuizResponse,
-                    ),
-                ),
+            response = await generate_quiz_response(
+                client, model=model, contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", response_schema=QuizResponse),
                 timeout=await get_ai_request_timeout(),
             )
             parsed = _parse_structured_gemini_response(response, QuizResponse, model)
@@ -109,15 +105,10 @@ def _build_super_chunk_attempt_fn(
         uploaded: List[Any] = []
         try:
             contents = await _build_contents_for_paths(client, paths, prompt, uploaded)
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=QuizResponse,
-                    ),
-                ),
+            response = await generate_quiz_response(
+                client, model=model, contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", response_schema=QuizResponse),
                 timeout=await get_ai_request_timeout(),
             )
             parsed = _parse_structured_gemini_response(response, QuizResponse, model)
@@ -313,6 +304,10 @@ async def _generate_pdf_with_context(
             )
             for index, (chunk, target) in enumerate(active)
         ]
+        if question_sink.get() is not None:
+            ordered = OrderedChunks(question_sink.get(), count,
+                                    None if ready_exam else [target for _, target in active])
+            attempts = [ordered.run(index, attempt) for index, attempt in enumerate(attempts)]
         results = await asyncio.gather(*attempts, return_exceptions=True)
         if any(result is None or isinstance(result, BaseException) for result in results):
             log_error(logger, "PDF: context chunk exhausted its model/key cascade")
@@ -474,8 +469,11 @@ async def _generate_super_images(
     ]
     if not tasks:
         return None
-    results = await asyncio.gather(*tasks)
-    if any(result is None for result in results):
+    if question_sink.get() is not None:
+        ordered = OrderedChunks(question_sink.get(), 10000, deduplicate=False)
+        tasks = [ordered.run(index, task) for index, task in enumerate(tasks)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    if any(result is None or isinstance(result, BaseException) for result in results):
         log_error(logger, "Super Images: chunk exhausted the entire model/key cascade")
         return None
     questions = [question for result in results for question in result[0]]
