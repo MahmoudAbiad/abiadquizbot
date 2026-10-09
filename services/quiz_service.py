@@ -442,13 +442,16 @@ async def execute_quiz_generation_workflow(
         if not quiz_data:
             return None, None, "ai_failed", None
 
-        # Normalize before shuffling, saving to DB, rendering/caching images, or
-        # sending Telegram polls. Never discard the actual marked answer.
-        try:
-            quiz_data = normalize_quiz_option_count(quiz_data)
-        except ValueError as exc:
-            log_warning(logger, f"[quiz_service] Refusing malformed options from AI: {exc}")
-            return None, None, "ai_failed", get_last_generation_metadata()
+        # Five-choice fallback applies ONLY when extracting an existing exam
+        # (quiz_solved / quiz_unsolved). Other generated quiz types retain their
+        # existing validation and are never modified by this extraction-specific
+        # safeguard. Run before shuffle, persistence, image rendering and polls.
+        if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+            try:
+                quiz_data = normalize_quiz_option_count(quiz_data)
+            except ValueError as exc:
+                log_warning(logger, f"[quiz_service] Refusing malformed ready-made exam options: {exc}")
+                return None, None, "ai_failed", get_last_generation_metadata()
 
         # 3.1 🆕 بيانات آخر توليد ناجح (موديل/مزوّد/توكنز) - تُقرأ فوراً بعد عودة
         # generate_quiz_smart وبنفس الـ Task (راجع ContextVar بـ gemini_helper.py). كانت
