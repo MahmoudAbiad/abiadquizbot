@@ -34,7 +34,7 @@ class QuizMatrix(BaseModel):
 
 class QuizQuestion(BaseModel):
     question: str = Field(description="Question text")
-    options: List[str] = Field(description="Four answer options")
+    options: List[str] = Field(description="Normally four answer options. For extracting an existing five-option exam, retain all original options here and mark the correct index in the full list; the server will safely reduce the list to four.")
     correct_option_id: int = Field(description="Correct option index")
     hint: str = Field(description="Hint")
     explanation: str = Field(default="", description="Explanation")
