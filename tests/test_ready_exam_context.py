@@ -317,6 +317,7 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
             asyncio=asyncio, time=time,
             MAX_LIMIT_PAGES=35, MAX_STANDARD_PAGES=15,
             MAX_STANDARD_QUESTIONS=30, SUPER_IMAGE_BATCH_THRESHOLD=10,
+            DIFFICULTY_PROGRESSIVE='progressive',
             OPTION_COUNT=4, SUBJECT_FRENCH='french',
             MSG_PREVIOUS_QUESTIONS_INSTRUCTION='',
             _resolve_difficulty_instruction=lambda _: '',
