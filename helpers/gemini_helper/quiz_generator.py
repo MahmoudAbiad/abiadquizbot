@@ -33,8 +33,7 @@ from helpers.gemini_helper.loading import _loading_animation
 from helpers.gemini_helper.generation import (
     _generate_regular,
     _generate_super_images,
-    _generate_super_pdf,
-    _generate_ready_exam_pdf,
+    _generate_pdf_with_context,
 )
 from helpers.gemini_helper.text_generation import (
     _generate_text_quiz,
@@ -219,21 +218,22 @@ async def generate_quiz_smart(
         )
         is_super_pdf = is_single_pdf and pdf_page_count > MAX_LIMIT_PAGES
         is_super_images = len(file_paths) > SUPER_IMAGE_BATCH_THRESHOLD
-        # Context overlap applies ONLY to ready-made exams (solved/unsolved).
-        # Other subjects retain their existing normal / super processing.
-        is_ready_exam_pdf = is_single_pdf and bool(quiz_extraction_instruction)
+        # All extended/super PDF generation now uses context overlap.
+        # For ready-made exams the prompt extracts only original questions
+        # starting on owned pages; all other subjects generate questions from
+        # the owned content, using boundary pages for context only.
+        is_ready_exam = bool(quiz_extraction_instruction)
         if is_super_pdf:
-            if is_ready_exam_pdf:
-                generated = await _generate_ready_exam_pdf(
-                    file_paths[0], count, base_prompt_template, part_count=3
-                )
-            else:
-                generated = await _generate_super_pdf(file_paths[0], count, base_prompt_template)
-        elif is_ready_exam_pdf and (
+            generated = await _generate_pdf_with_context(
+                file_paths[0], count, base_prompt_template,
+                part_count=3, ready_exam=is_ready_exam,
+            )
+        elif is_single_pdf and (
             pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
         ):
-            generated = await _generate_ready_exam_pdf(
-                file_paths[0], count, base_prompt_template, part_count=2
+            generated = await _generate_pdf_with_context(
+                file_paths[0], count, base_prompt_template,
+                part_count=2, ready_exam=is_ready_exam,
             )
         elif is_super_images:
             generated = await _generate_super_images(file_paths, count, base_prompt_template)
