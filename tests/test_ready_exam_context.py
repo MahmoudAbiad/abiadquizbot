@@ -22,9 +22,14 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
             {'split_ready_exam_pdf_with_context_sync',
              'split_ready_exam_pdf_without_orphans'},
             asyncio=asyncio, Path=Path, os=os, uuid=uuid, fitz=fitz,
-            get_pdf_page_count_sync=lambda path: len(fitz.open(path)),
+            get_pdf_page_count_sync=lambda path: self._count_pages(fitz, path),
         )
         return fitz, env
+
+    @staticmethod
+    def _count_pages(fitz, path):
+        with fitz.open(path) as doc:
+            return len(doc)
 
     def create_pdf(self, fitz, folder, pages):
         path = os.path.join(folder, 'exam.pdf')
@@ -100,6 +105,38 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     env['split_ready_exam_pdf_with_context_sync'](source, 2)
             self.assertEqual(os.listdir(folder), ['exam.pdf'])
+
+    async def test_cancelled_context_split_cleans_temporary_files(self):
+        import threading
+
+        started = threading.Event()
+        finish = threading.Event()
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, 'source.pdf')
+            Path(source).write_bytes(b'source')
+
+            def fake_split(path, part_count):
+                started.set()
+                finish.wait(timeout=5)
+                part_path = os.path.join(folder, 'part.pdf')
+                Path(part_path).write_bytes(b'chunk')
+                return [{'path': part_path}]
+
+            env = load_functions(
+                'helpers/gemini_helper/media.py',
+                {'split_ready_exam_pdf_without_orphans'},
+                asyncio=asyncio, os=os,
+                split_ready_exam_pdf_with_context_sync=fake_split,
+            )
+            task = asyncio.create_task(
+                env['split_ready_exam_pdf_without_orphans'](source, 2)
+            )
+            await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            finish.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(os.listdir(folder), ['source.pdf'])
 
     async def test_context_instruction_and_cross_chunk_duplicate_handling(self):
         env = load_functions(
