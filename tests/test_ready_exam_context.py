@@ -285,13 +285,22 @@ class PdfContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(excludes, [False, False])
         self.assertEqual(cleaned, ['temp-part-1.pdf', 'temp-part-2.pdf'])
 
+        recorded_prompts.clear()
+        cleaned.clear()
+        excludes.clear()
+        await env['_generate_pdf_with_context'](
+            'exam.pdf', 40, 'Generate {count} questions.', 2,
+            ready_exam=False, progressive=True,
+        )
+        self.assertIn('المرحلة الأولى', recorded_prompts[0])
+        self.assertIn('المرحلة الأخيرة', recorded_prompts[1])
 
 
 class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
     """Every PDF subject shares the context splitter; non-PDF paths stay intact."""
 
     async def run_case(self, pages, count, is_math=False, english_mode=None,
-                       extraction=None, paths=None):
+                       extraction=None, paths=None, difficulty=None):
         import time
         from unittest.mock import AsyncMock
         from types import SimpleNamespace
@@ -334,7 +343,7 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
         result = await env['generate_quiz_smart'](
             file_paths=paths if paths is not None else ['material.pdf'],
             count=count, is_math_mode=is_math, english_mode=english_mode,
-            quiz_extraction_instruction=extraction,
+            quiz_extraction_instruction=extraction, difficulty=difficulty,
         )
         self.assertEqual(len(result), 1)
         return split, regular, images
@@ -365,6 +374,12 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(split.call_args.kwargs['part_count'], 3)
                 self.assertEqual(split.call_args.kwargs['ready_exam'], bool(extraction))
                 regular.assert_not_awaited()
+
+    async def test_progressive_generation_flag_reaches_the_pdf_chunks(self):
+        split, _, _ = await self.run_case(
+            18, 40, is_math=True, difficulty='progressive'
+        )
+        self.assertTrue(split.call_args.kwargs['progressive'])
 
     async def test_small_pdf_still_uses_regular_generation(self):
         split, regular, _ = await self.run_case(8, 15, is_math=True)
