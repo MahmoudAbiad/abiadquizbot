@@ -1,4 +1,4 @@
-"""Context-overlap tests for ready-made (solved/unsolved) exam PDF extraction.
+"""Context-overlap tests for both exam extraction and standard quiz generation.
 
 Production functions are isolated with load_functions so these deterministic
 tests need neither the AI SDK nor a real API key.
@@ -14,13 +14,13 @@ from unittest.mock import Mock
 from reliability_support import load_functions
 
 
-class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
+class PdfContextTests(unittest.IsolatedAsyncioTestCase):
     def split_env(self):
         import fitz
         env = load_functions(
             'helpers/gemini_helper/media.py',
-            {'split_ready_exam_pdf_with_context_sync',
-             'split_ready_exam_pdf_without_orphans'},
+            {'split_pdf_with_context_sync',
+             'split_pdf_with_context_without_orphans'},
             asyncio=asyncio, Path=Path, os=os, uuid=uuid, fitz=fitz,
             get_pdf_page_count_sync=lambda path: self._count_pages(fitz, path),
         )
@@ -44,7 +44,7 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
         fitz, env = self.split_env()
         with tempfile.TemporaryDirectory() as folder:
             source = self.create_pdf(fitz, folder, 18)
-            chunks = env['split_ready_exam_pdf_with_context_sync'](source, 2)
+            chunks = env['split_pdf_with_context_sync'](source, 2)
             self.assertEqual(len(chunks), 2)
             self.assertEqual(
                 [(c['original_start'], c['original_end']) for c in chunks],
@@ -70,7 +70,7 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
         fitz, env = self.split_env()
         with tempfile.TemporaryDirectory() as folder:
             source = self.create_pdf(fitz, folder, 39)
-            chunks = env['split_ready_exam_pdf_with_context_sync'](source, 3)
+            chunks = env['split_pdf_with_context_sync'](source, 3)
             self.assertEqual(
                 [(c['original_start'], c['original_end']) for c in chunks],
                 [(1, 13), (14, 26), (27, 39)]
@@ -103,7 +103,7 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.object(fitz, 'open', side_effect=fail_on_second_chunk):
                 with self.assertRaises(ValueError):
-                    env['split_ready_exam_pdf_with_context_sync'](source, 2)
+                    env['split_pdf_with_context_sync'](source, 2)
             self.assertEqual(os.listdir(folder), ['exam.pdf'])
 
     async def test_cancelled_context_split_cleans_temporary_files(self):
@@ -124,12 +124,12 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
 
             env = load_functions(
                 'helpers/gemini_helper/media.py',
-                {'split_ready_exam_pdf_without_orphans'},
+                {'split_pdf_with_context_without_orphans'},
                 asyncio=asyncio, os=os,
-                split_ready_exam_pdf_with_context_sync=fake_split,
+                split_pdf_with_context_sync=fake_split,
             )
             task = asyncio.create_task(
-                env['split_ready_exam_pdf_without_orphans'](source, 2)
+                env['split_pdf_with_context_without_orphans'](source, 2)
             )
             await asyncio.to_thread(started.wait, 5)
             task.cancel()
@@ -141,7 +141,7 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_instruction_and_cross_chunk_duplicate_handling(self):
         env = load_functions(
             'helpers/gemini_helper/generation.py',
-            {'_ready_exam_chunk_prompt', '_merge_ready_exam_chunk_questions'},
+            {'_ready_exam_chunk_prompt', '_merge_pdf_chunk_questions'},
         )
         prompt = env['_ready_exam_chunk_prompt'](
             'Extract up to {count} questions.',
@@ -151,7 +151,36 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Extract up to 40 questions.', prompt)
         self.assertIn('من 2 إلى 10', prompt)
         self.assertIn('الصفحات خارج هذا النطاق صفحات سياق فقط', prompt)
-        merged = env['_merge_ready_exam_chunk_questions'](
+        generic = load_functions(
+            'helpers/gemini_helper/generation.py',
+            {'_generated_pdf_chunk_prompt', '_generated_pdf_chunk_targets'},
+        )
+        generated_prompt = generic['_generated_pdf_chunk_prompt'](
+            'Generate {count} questions.',
+            20,
+            {'owned_first': 2, 'owned_last': 10, 'page_count': 11},
+        )
+        self.assertIn('Generate 20 questions.', generated_prompt)
+        self.assertIn('من 2 إلى 10', generated_prompt)
+        self.assertIn('صفحات سياق', generated_prompt)
+        targets = generic['_generated_pdf_chunk_targets'](
+            40,
+            [
+                {'owned_first': 1, 'owned_last': 9},
+                {'owned_first': 2, 'owned_last': 10},
+            ],
+        )
+        self.assertEqual(targets, [20, 20])
+        uneven = generic['_generated_pdf_chunk_targets'](
+            40,
+            [
+                {'owned_first': 1, 'owned_last': 10},
+                {'owned_first': 2, 'owned_last': 11},
+                {'owned_first': 2, 'owned_last': 10},
+            ],
+        )
+        self.assertEqual(uneven, [14, 14, 12])
+        merged = env['_merge_pdf_chunk_questions'](
             [
                 ([{'question': 'Q1'}, {'question': 'Boundary Q'}],),
                 ([{'question': '  boundary   q '}, {'question': 'Q3'}],),
@@ -191,10 +220,11 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
             )
         env = load_functions(
             'helpers/gemini_helper/generation.py',
-            {'_generate_ready_exam_pdf', '_ready_exam_chunk_prompt',
-             '_merge_ready_exam_chunk_questions'},
+            {'_generate_pdf_with_context', '_ready_exam_chunk_prompt',
+             '_generated_pdf_chunk_prompt', '_generated_pdf_chunk_targets',
+             '_merge_pdf_chunk_questions'},
             asyncio=asyncio, API_KEYS=['key1', 'key2', 'key3'],
-            split_ready_exam_pdf_without_orphans=split,
+            split_pdf_with_context_without_orphans=split,
             release_memory_to_os=lambda: None,
             _generate_regular=Mock(), _execute_cascade=cascade,
             _build_super_chunk_attempt_fn=build,
@@ -202,8 +232,8 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
             log_error=Mock(), logger=Mock(),
             safe_file_cleanup=lambda path: cleaned.append(path),
         )
-        two = await env['_generate_ready_exam_pdf'](
-            'exam.pdf', 40, 'Extract {count}.', 2
+        two = await env['_generate_pdf_with_context'](
+            'exam.pdf', 40, 'Extract {count}.', 2, ready_exam=True
         )
         self.assertEqual(len(two[0]), 2)
         self.assertEqual(excludes, [False, False])
@@ -213,8 +243,8 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
         cleaned.clear()
         excludes.clear()
 
-        three = await env['_generate_ready_exam_pdf'](
-            'exam.pdf', 40, 'Extract {count}.', 3
+        three = await env['_generate_pdf_with_context'](
+            'exam.pdf', 40, 'Extract {count}.', 3, ready_exam=True
         )
         self.assertEqual(len(three[0]), 3)
         self.assertEqual(excludes, [True, True, True])
@@ -222,3 +252,20 @@ class ReadyExamPdfContextTests(unittest.IsolatedAsyncioTestCase):
             'temp-part-1.pdf', 'temp-part-2.pdf', 'temp-part-3.pdf'
         ])
         self.assertEqual(len(recorded_prompts), 3)
+
+        # Other subjects use the same split, but get proportionate question
+        # targets and may read context only to complete the owned material.
+        recorded_prompts.clear()
+        cleaned.clear()
+        excludes.clear()
+        generated = await env['_generate_pdf_with_context'](
+            'exam.pdf', 40, 'Generate {count} questions.', 2, ready_exam=False
+        )
+        self.assertEqual(len(generated[0]), 2)
+        self.assertEqual(len(recorded_prompts), 2)
+        self.assertIn('Generate 20 questions.', recorded_prompts[0])
+        self.assertIn('Generate 20 questions.', recorded_prompts[1])
+        self.assertIn('لتوليد أسئلة', recorded_prompts[0])
+        self.assertEqual(excludes, [False, False])
+        self.assertEqual(cleaned, ['temp-part-1.pdf', 'temp-part-2.pdf'])
+
