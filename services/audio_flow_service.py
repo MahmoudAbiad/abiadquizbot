@@ -95,7 +95,7 @@ async def evaluate_audio_cost(file_path: str, reported_duration_seconds: int = 0
 
 def compute_balance_and_deficit(user_info: Dict[str, Any], required: float) -> Tuple[float, float]:
     """يحسب الرصيد الإجمالي الحالي (مجاني + مدفوع) والعجز المطلوب شحنه لتغطية التكلفة."""
-    balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0)
+    balance = float(user_info.get("free_points") or 0) + float(user_info.get("paid_points") or 0) + float(user_info.get("gift_points") or 0)
     deficit = max(0.0, required - balance)
     return balance, deficit
 
@@ -107,7 +107,8 @@ def build_insufficient_balance_text(user_info: Dict[str, Any], required: float) 
     balance, deficit = compute_balance_and_deficit(user_info, required)
     return (
         "❌ <b>رصيدك الحالي لا يكفي لتفريغ وتحليل هذه المحاضرة الصوتية.</b>\n\n"
-        f"🎁 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
+        f"🔄 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
+        f"🎁 الهدايا: <code>{float(user_info.get('gift_points') or 0):.2f}</code>\n"
         f"💳 المدفوع: <code>{float(user_info.get('paid_points') or 0):.2f}</code>\n"
         f"💰 الإجمالي الحالي: <code>{balance:.2f}</code> / المطلوب: <code>{required:.2f}</code>\n"
         f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>"
@@ -163,3 +164,4 @@ def write_temp_text_export(prefix: str, user_id: int, content: str) -> str:
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return path
+

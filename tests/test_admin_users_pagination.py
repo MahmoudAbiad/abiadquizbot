@@ -62,7 +62,7 @@ class Database:
 
 class AdminUsersTests(unittest.IsolatedAsyncioTestCase):
     def helpers(self, database):
-        return load_functions('helpers/supabase_helper/admin_ops.py', {'_admin_users_query', 'admin_get_users_page'}, supabase=database)
+        return load_functions('helpers/supabase_helper/admin_ops.py', {'_admin_users_query', 'admin_get_users_page'}, supabase=database, enrich_balances=AsyncMock(side_effect=lambda rows: rows))
 
     async def test_registry_can_reach_users_beyond_1000(self):
         db = Database()
@@ -100,7 +100,7 @@ class AdminUsersTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_export_contains_every_user_after_api_cap(self):
         db = Database()
-        env = load_functions('handlers/admin/users.py', {'fetch_users_async'}, supabase=db)
+        env = load_functions('handlers/admin/users.py', {'fetch_users_async'}, supabase=db, enrich_balances=AsyncMock(side_effect=lambda rows: rows))
         rows = await env['fetch_users_async']()
         self.assertEqual([r['user_id'] for r in rows], list(range(1, 1208)))
         self.assertTrue(all(size == 500 for _, size in db.calls))
@@ -143,3 +143,4 @@ class AdminUsersTests(unittest.IsolatedAsyncioTestCase):
         state = types.SimpleNamespace(get_data=AsyncMock(return_value={'admin_user_search_token':'current', 'admin_user_search':'mahmoud'}))
         await env['callback_user_search_page'](call, state)
         env['render_user_search_page'].assert_awaited_once_with(call, 'mahmoud', 'current', 3)
+

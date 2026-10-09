@@ -1,3 +1,4 @@
+from helpers.supabase_helper.gifts import refund as refund_wallet
 # handlers/audio.py
 """
 معالج المحاضرات الصوتية: يستقبل رسائل صوتية (voice/audio)، يفرّغها نصياً عبر
@@ -283,6 +284,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         return
 
     charged = False
+    debit_id = None
     debited_free = 0.0
     debited_paid = 0.0
     try:
@@ -317,6 +319,8 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         # 🆕 [طبقة 2] نحفظ التقسيم الفعلي (كم اتخصم من free_points وكم من paid_points)
         # عشان أي ريفوند لاحق بهالدالة (كامل أو جزئي أو عند استثناء) يرجع كل جزء
         # لمصدره الصحيح بدل ما يرجعه كله لـpaid_points.
+        debit_id = deduction["debit_id"]
+        debited_gift = deduction["debited_gift"]
         debited_free = deduction["debited_free"]
         debited_paid = deduction["debited_paid"]
 
@@ -345,7 +349,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         pure_text, truncated = transcription_result if transcription_result else (None, False)
 
         if not pure_text or not pure_text.strip():
-            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
+            await refund_wallet(call.from_user.id, debit_id)
             charged = False
             await state.set_state(None)
             await call.message.edit_text(
@@ -365,8 +369,9 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             # cost الإجمالي ويرجع كله لـpaid_points - هيك التوزيع النسبي بين الرصيدين
             # يضل صحيح بعد الريفوند الجزئي.
             free_refund, paid_refund, partial_refund_amount = compute_partial_refund(debited_free, debited_paid)
+            partial_refund_amount += round(debited_gift * 0.5, 2)
             if partial_refund_amount > 0:
-                await refund_user_points_split(call.from_user.id, free_refund, paid_refund)
+                await refund_wallet(call.from_user.id, debit_id, 0.5)
                 debited_free -= free_refund
                 debited_paid -= paid_refund
             spawn(log_usage_event(call.from_user.id, "audio_transcription_truncated", {
@@ -412,7 +417,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
     except Exception as exc:
         log_error(logger, f"Audio confirm/transcription failed: {exc}", exception=exc)
         if charged:
-            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
+            await refund_wallet(call.from_user.id, debit_id)
         await state.set_state(None)
         error_text = "❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية." + (" تم إرجاع نقاطك." if charged else "")
         try:
@@ -421,7 +426,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             await call.message.answer(error_text)
     except asyncio.CancelledError:
         if charged:
-            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
+            await refund_wallet(call.from_user.id, debit_id)
         await state.set_state(None)
         raise
     finally:
@@ -839,3 +844,4 @@ async def process_web_uploaded_audio(
 
 
 audio_router = router
+

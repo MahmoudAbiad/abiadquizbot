@@ -138,6 +138,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         points = user_info["points"]
         free_points = user_info.get("free_points", 0)
         paid_points = user_info.get("paid_points", 0)
+        gift_points = user_info.get("gift_points", 0)
         status = user_info["status"]
 
         # 🆕 تسجيل حدث بدء تشغيل البوت لتتبع نمط عودة/تجدد الطلاب
@@ -161,10 +162,11 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         if status == "new":
             intro_text = (
                 "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
-                f"🎁 أضفنا لحسابك <b>{points} نقطة مجانية</b> — استخدمها الآن لتوليد أول اختبار لك 🚀"
+                f"🎁 أضفنا لحسابك <b>{gift_points:g} نقطة هدية</b> — استخدمها الآن لتوليد أول اختبار لك 🚀"
             )
             start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="🚀 أرسل أول ملف الآن", callback_data="new_user_send_now")]
+                [types.InlineKeyboardButton(text="🚀 أرسل أول ملف الآن", callback_data="new_user_send_now")],
+                [types.InlineKeyboardButton(text="🎁 صلاحية هديتي", callback_data="gift:list:0")]
             ])
 
             await msg.answer(intro_text, parse_mode="HTML", reply_markup=start_kb)
@@ -185,7 +187,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         welcome_text += (
             f"\n📥 <b>ابدأ الآن:</b> أرسل ملف (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشراً — وحدد عدد الأسئلة. ذلك كل شيء! 🔥\n\n"
             f"💰 <code>1</code> نقطة تقريباً لكل صفحة/سؤال، وخصم <code>90%</code> عند إعادة استخدام كويز جاهز.\n"
-            f"📊 رصيدك: <code>{points:.2f}</code> نقطة (🎁 {free_points:.2f} · 💳 {paid_points:.2f})\n\n"
+            f"📊 رصيدك: <code>{points:.2f}</code> نقطة \n🔄 مجانية: {free_points:.2f} · 🎁 هدايا: {gift_points:.2f} · 💳 مدفوعة: {paid_points:.2f}\n\n"
             f"🎯 شارك رابط دعوتك مع زملائك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁\n"
            #f"❓ محتاج شرح أوضح بالخطوات؟ اضغط 🎬 «كيف يعمل البوت؟» بالأسفل، أو أرسل /help بأي وقت."
         )
@@ -341,6 +343,7 @@ async def set_bot_commands(bot):
     # ملاحظة: هذه نسخة مستقلة تُستخدم فقط في وضع Polling المحلي (main.py)؛
     # النسخة الفعلية المستخدمة على Railway/الويبهوك هي config.py::set_bot_commands
     commands = [
+        types.BotCommand(command="wallet", description="رصيدي وهداياي وصلاحيتها"),
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
         types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
     ]
@@ -383,3 +386,4 @@ async def cmd_channel(message: types.Message):
     
     # تسجيل حدث فتح القناة
     spawn(log_usage_event(message.from_user.id, "channel_opened"))
+

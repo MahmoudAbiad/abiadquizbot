@@ -45,13 +45,15 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
         referral_bonus_points = await get_setting("referral_bonus_points")
         kb = [
+            [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
+            [types.InlineKeyboardButton(text="🎟 شحن كود هدية", callback_data="gift:redeem")],
             [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
             [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
-            [types.InlineKeyboardButton(text=f"🔗 شارك واربح {referral_bonus_points:.0f} نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
+            [types.InlineKeyboardButton(text=f"🔗 شارك واربح {referral_bonus_points:.0f} نقاط هدية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
         ]
         from helpers.supabase_helper.feature_flags import is_feature_enabled
         if await is_feature_enabled("challenge_system_enabled", default=False):
@@ -787,6 +789,7 @@ def get_admin_settings_general_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="🎯 إعدادات النقاط", callback_data="admin_settings_menu")],
         [types.InlineKeyboardButton(text="🧩 مفاتيح التحكم", callback_data="admin_flags_menu")],
         [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
+        [types.InlineKeyboardButton(text="🎟 أكواد الهدايا", callback_data="ag:home:0")],
         [types.InlineKeyboardButton(text="🏆 إدارة التحديات", callback_data="admin_challenges")],
         [types.InlineKeyboardButton(text="🏰 إعدادات هجوم الأرض", callback_data="admin_challenge_cooldown")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
@@ -801,6 +804,7 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
     بميزة معيّنة - راجع settings_helper.SETTING_TO_FEATURE_FLAG)."""
     from helpers.settings_helper import format_setting_value
     kb = []
+    kb.append([types.InlineKeyboardButton(text="🎟 أكواد الهدايا", callback_data="ag:home:0")])
     for key, label in labels.items():
         value_text = format_setting_value(settings.get(key))
         kb.append([types.InlineKeyboardButton(
@@ -890,6 +894,7 @@ def build_contact_button(user_id: int, username: Optional[str] = None, text: str
 
 def get_admin_user_actions_keyboard(user_id: int, username: Optional[str] = None) -> types.InlineKeyboardMarkup:
     kb = [
+        [types.InlineKeyboardButton(text="🎁 هدايا الطالب وصلاحيتها", callback_data=f"ag:gifts:{user_id}:0")],
         [types.InlineKeyboardButton(text="💰 شحن رصيد الطالب", callback_data=f"admin_charge_menu_{user_id}")],
         [
             types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}"),
@@ -1163,3 +1168,4 @@ def get_group_channel_picker_keyboard(
         rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
     rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
+

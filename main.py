@@ -32,6 +32,7 @@ from handlers import (
     quiz_delete_router,
     group_quiz_router,
     payments_router,
+    gifts_router,
 )
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
 
@@ -79,6 +80,7 @@ def main():
         challenge_live_router,  # ⚔️ المواجهات المباشرة (lv:*) - مستقل عن cg:*
         group_quiz_router,
         payments_router,  # 💳 أزرار الشحن الذاتي (pay:*) - راجع handlers/payments.py
+        gifts_router,
         start_router,
         admin_router,
         sharing_router,

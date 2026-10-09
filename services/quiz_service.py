@@ -172,18 +172,12 @@ def shuffle_quiz_options(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 async def refund_user_on_failure(user_id: int, data: Dict[str, Any]) -> None:
-    """إعادة النقاط تلقائياً في حال فشل التوليد.
-
-    🆕 [طبقة 3] بترجع كل جزء لمصدره الصحيح (debited_free → free_points،
-    debited_paid → paid_points) بدل ما ترجع كل شي لـpaid_points - هاد كان عم
-    "يُرقّي" نقاط مجانية مؤقتة (بتنصفر يومياً) لنقاط مدفوعة دائمة بكل عملية
-    فشل/ريفوند. debited_free/debited_paid متوفرين بالـstate من update_user_stats
-    وقت الخصم (راجع handlers/files.py).
-
-    fallback: لو الحالة (state) قديمة وما فيها التقسيم لأي سبب (مثلاً لسا معلّقة
-    من قبل هالإصلاح)، نرجع لسلوك الطبقة القديمة (كل شي لـpaid_points) بدل ما
-    نخسر الريفوند كلياً.
-    """
+    """Refund a new receipt idempotently, or a pre-migration split for old FSMs."""
+    if data.get("debit_id"):
+        from helpers.supabase_helper.gifts import refund
+        if not await refund(user_id, data["debit_id"]):
+            raise RuntimeError("Wallet refund failed")
+        return
     debited_free = data.get("debited_free")
     debited_paid = data.get("debited_paid")
     if debited_free is not None or debited_paid is not None:

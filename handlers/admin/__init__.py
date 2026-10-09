@@ -1,5 +1,6 @@
 # handlers/admin/__init__.py
 from aiogram import Router
+from .gifts import router as gifts_router
 from .dashboard import router as dashboard_router
 from .users import router as users_router
 from .analytics import router as analytics_router
@@ -15,6 +16,7 @@ from .challenge_settings import router as challenge_settings_router
 router = Router()
 router.include_routers(
     dashboard_router,
+    gifts_router,
     users_router,
     analytics_router,
     feedbacks_router,

@@ -34,10 +34,10 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
         async def loaded(call,state,*a,**kw):await state.update_data(quiz_data=['result'],attempt_id='saved')
         self.env=load_functions('handlers/files.py', {'handle_count_start','_clear_quiz_charge_markers','_missing_upload_paths'},
             asyncio=asyncio, redis_client=FakeRedis(), UserLock=UserLock, QuizState=states,
-            _QUIZ_CHARGE_STATE_KEYS=('debited_cost','debited_free','debited_paid'),
+            _QUIZ_CHARGE_STATE_KEYS=('debited_cost','debited_free','debited_paid','debit_id','debited_gift'),
             validate_question_count=lambda count:(True,''), SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
             calculate_quiz_points_cost=AsyncMock(return_value=2),determine_execution_mode=lambda *a,**kw:'Standard',
-            _current_user=AsyncMock(return_value={'points':100}),update_user_stats=AsyncMock(return_value={'debited_free':1.5,'debited_paid':0.5}),
+            _current_user=AsyncMock(return_value={'points':100}),update_user_stats=AsyncMock(return_value={'debited_free':1.5,'debited_paid':0.5,'debited_gift':0,'debit_id':'receipt-1'}),
             log_usage_event=AsyncMock(),spawn=spawn,logger=Mock(),log_error=Mock(),log_warning=Mock(),
             refund_user_on_failure=AsyncMock(), _insufficient_balance=AsyncMock(),MSG_PROCESSING='processing',
             os=os,Dict=dict,List=list,Any=object,InvalidUploadError=InvalidUploadError,safe_title=lambda t:t,
@@ -64,7 +64,7 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state.data['quiz_data'],['result'])
         self.assertEqual(self.state.data['attempt_id'],'saved')
         self.assertEqual(self.state.data['source_title'],'keep')
-        self.assertTrue(all(key not in self.state.data for key in ('debited_cost','debited_free','debited_paid')))
+        self.assertTrue(all(key not in self.state.data for key in ('debited_cost','debited_free','debited_paid','debit_id','debited_gift')))
         self.env['refund_user_on_failure'].assert_not_awaited()
 
     async def test_failed_ai_refunds_once_even_if_error_message_fails(self):
@@ -241,9 +241,10 @@ class AudioRefundTests(unittest.IsolatedAsyncioTestCase):
             call=types.SimpleNamespace(from_user=types.SimpleNamespace(id=1),answer=AsyncMock(),message=types.SimpleNamespace(edit_text=edits,answer=AsyncMock()))
             env=load_functions('handlers/audio.py',{'handle_audio_confirm_start'},asyncio=asyncio,os=os,time=time,
                 get_or_create_audio_user=AsyncMock(return_value={'points':10}),compute_balance_and_deficit=lambda *a:(10,0),
-                update_user_stats=AsyncMock(return_value={'debited_free':1,'debited_paid':1}),
+                update_user_stats=AsyncMock(return_value={'debited_free':1,'debited_paid':1,'debited_gift':0,'debit_id':'audio-1'}),
                 spawn=lambda coro:coro.close(),log_usage_event=AsyncMock(),transcribe_audio_lecture=AsyncMock(return_value=None),
-                refund_user_points_split=AsyncMock(),safe_file_cleanup=lambda p:os.remove(p) if os.path.exists(p) else None,
+                refund_wallet=AsyncMock(return_value=True),refund_user_points_split=AsyncMock(),safe_file_cleanup=lambda p:os.remove(p) if os.path.exists(p) else None,
                 logger=Mock(),log_info=Mock(),log_error=Mock())
             await env['handle_audio_confirm_start'](call,state)
-            env['refund_user_points_split'].assert_awaited_once_with(1,1,1)
+            env['refund_wallet'].assert_awaited_once_with(1,'audio-1')
+

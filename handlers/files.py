@@ -71,7 +71,7 @@ router = Router()
 DOWNLOADS_DIR = "downloads"
 
 
-_QUIZ_CHARGE_STATE_KEYS = ("debited_cost", "debited_free", "debited_paid")
+_QUIZ_CHARGE_STATE_KEYS = ("debited_cost", "debited_free", "debited_paid", "debited_gift", "debit_id")
 
 async def _clear_quiz_charge_markers(state: FSMContext) -> None:
     """يمسح فقط بيانات عملية الخصم الحالية من FSM بدون حذف بيانات الكويز/النتيجة الأخرى."""
@@ -192,7 +192,8 @@ async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]])
     await message.answer(
         "❌ <b>رصيدك الحالي لا يكفي لإتمام هذه العملية.</b>\n\n"
-        f"🎁 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
+        f"🔄 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
+        f"🎁 الهدايا: <code>{float(user_info.get('gift_points') or 0):.2f}</code>\n"
         f"💳 المدفوع: <code>{float(user_info.get('paid_points') or 0):.2f}</code>\n"
         f"💰 الإجمالي الحالي: <code>{balance:.2f}</code> / المطلوب: <code>{required:.2f}</code>\n"
         f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>\n\n"
@@ -1180,11 +1181,14 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # نحدّث النسخة المحلية أولاً قبل أي await على Redis. لو انقطع Redis مباشرةً
         # بعد نجاح الخصم، يبقى لدينا سجل الخصم الحالي محلياً ونستطيع عمل refund صحيح.
         data["debited_cost"] = cost
+        data["debit_id"] = deduction["debit_id"]
+        data["debited_gift"] = deduction["debited_gift"]
         data["debited_free"] = deduction["debited_free"]
         data["debited_paid"] = deduction["debited_paid"]
         await state.update_data(
             debited_cost=cost, calculated_cost=cost, requested_count=count, execution_mode=mode,
             debited_free=deduction["debited_free"], debited_paid=deduction["debited_paid"],
+            debit_id=deduction["debit_id"], debited_gift=deduction["debited_gift"],
         )
         try:
             await call.message.delete()
@@ -1658,3 +1662,4 @@ async def process_web_uploaded_images(
 
 
 files_router = router
+
