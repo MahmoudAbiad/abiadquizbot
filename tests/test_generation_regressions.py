@@ -194,12 +194,43 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
             resolve_generation_question_type_text=lambda *a:None,resolve_quiz_extraction_instruction=lambda *a:None,
             generate_quiz_smart=AsyncMock(return_value=[{'question':'ok','options':['a','b','c','d','e'],'correct_option_id':4}]),get_last_generation_metadata=lambda:None,
             log_ai_generation=AsyncMock(),spawn=spawn,shuffle_quiz_options=lambda x:x,save_file_quiz_multiple=save,build_question_type_label=lambda *a,**k:'label')
-        results=await asyncio.gather(*(env['execute_quiz_generation_workflow'](user,{'input_type':'text','file_hash':'same','pure_text':'text'},5,None) for user in [1,2]))
+        results=await asyncio.gather(*(env['execute_quiz_generation_workflow'](user,{'input_type':'text','file_hash':'same','pure_text':'text','subject_type':'solved'},5,None) for user in [1,2]))
         self.assertEqual([r[1] for r in results],['quiz-1','quiz-2'])
         self.assertEqual(results[0][0][0]['options'], ['a','b','c','e'])
         self.assertEqual(results[0][0][0]['correct_option_id'], 3)
         self.assertEqual(env['get_file_quizzes'].await_count,2)  # No post-insert ID guessing.
 
+
+
+    async def test_ready_made_fallback_applies_to_unsolved_but_not_other_quizzes(self):
+        def spawn(coro): coro.close()
+        for subject_type, expected_options in (('unsolved', ['a', 'b', 'c', 'e']),
+                                               ('other', ['a', 'b', 'c', 'd', 'e'])):
+            with self.subTest(subject_type=subject_type):
+                generated = [{'question': 'Q', 'options': ['a', 'b', 'c', 'd', 'e'],
+                              'correct_option_id': 4}]
+                env = load_functions(
+                    'services/quiz_service.py',
+                    {'execute_quiz_generation_workflow', 'normalize_quiz_option_count'},
+                    asyncio=asyncio, os=os, OPTION_COUNT=4,
+                    _HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(1),
+                    SUBJECT_OTHER='other', SUBJECT_QUIZ_SOLVED='solved',
+                    SUBJECT_QUIZ_UNSOLVED='unsolved', SUBJECT_MATH='math',
+                    SUBJECT_ENGLISH='english', SUBJECT_FRENCH='french',
+                    QUESTION_TYPE_GENERAL='general', DIFFICULTY_MEDIUM='medium',
+                    resolve_generation_question_type_text=lambda *args: None,
+                    resolve_quiz_extraction_instruction=lambda *args: None,
+                    generate_quiz_smart=AsyncMock(return_value=generated),
+                    get_last_generation_metadata=lambda: None, spawn=spawn,
+                    log_ai_generation=AsyncMock(), shuffle_quiz_options=lambda data: data,
+                )
+                quiz, _, error, _ = await env['execute_quiz_generation_workflow'](
+                    1, {'input_type': 'text', 'pure_text': 'source',
+                        'subject_type': subject_type}, 1, None
+                )
+                self.assertEqual(error, '')
+                self.assertEqual(quiz[0]['options'], expected_options)
+                self.assertEqual(quiz[0]['options'][quiz[0]['correct_option_id']], 'e')
 
 
 class QuizOptionNormalizationTests(unittest.TestCase):
