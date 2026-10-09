@@ -224,6 +224,17 @@ class QuizOptionNormalizationTests(unittest.TestCase):
         self.assertEqual(result['options'], ['A', 'B', 'C', 'E'])
         self.assertEqual(result['correct_option_id'], 3)
 
+    def test_correct_answer_survives_subsequent_shuffle(self):
+        shuffle = load_functions(
+            'services/quiz_service.py', {'_shuffle_question_options'},
+            random=types.SimpleNamespace(shuffle=lambda indices: indices.reverse())
+        )['_shuffle_question_options']
+        question = {'options': ['A', 'B', 'C', 'D', 'E'], 'correct_option_id': 4}
+        self.normalize([question])
+        shuffle(question)
+        self.assertEqual(len(question['options']), 4)
+        self.assertEqual(question['options'][question['correct_option_id']], 'E')
+
     def test_more_than_five_options_still_keep_correct_answer(self):
         result = self.normalize([{'options': ['A', 'B', 'C', 'D', 'E', 'F'],
                                   'correct_option_id': 5}])[0]
