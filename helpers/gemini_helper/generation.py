@@ -162,7 +162,8 @@ def _ready_exam_chunk_prompt(prompt_template: str, question_limit: int, chunk: D
 
 
 def _generated_pdf_chunk_prompt(
-    prompt_template: str, question_target: int, chunk: Dict[str, Any]
+    prompt_template: str, question_target: int, chunk: Dict[str, Any],
+    difficulty_segment: Optional[str] = None,
 ) -> str:
     """Only owned pages supply question topics; adjacent pages are context."""
     first = chunk["owned_first"]
@@ -186,7 +187,14 @@ def _generated_pdf_chunk_prompt(
         "من الصفحات المخصصة لهذا الجزء وحده. التزم بنوع الأسئلة والصعوبة "
         "وشروط المخرجات في البرومبت الأساسي."
     )
-    return prompt_template.replace("{count}", str(question_target)) + instruction
+    return (
+        prompt_template.replace("{count}", str(question_target))
+        + instruction
+        + (
+            "\n\n[تدرّج الصعوبة على مستوى الاختبار الكامل]: " + difficulty_segment
+            if difficulty_segment else ""
+        )
+    )
 
 
 def _generated_pdf_chunk_targets(count: int, chunks: Sequence[Dict[str, Any]]) -> List[int]:
@@ -241,7 +249,7 @@ def _merge_pdf_chunk_questions(
 
 async def _generate_pdf_with_context(
     file_path: str, count: int, prompt_template: str, part_count: int,
-    ready_exam: bool = False,
+    ready_exam: bool = False, progressive: bool = False,
 ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     """Context-overlap PDF generation for all subject types.
 
@@ -273,6 +281,20 @@ async def _generate_pdf_with_context(
         ]
         if not active:
             return None
+        # Progressive difficulty is global across the merged quiz, not
+        # re-started from easy at each independently prompted PDF chunk.
+        progressive_segments = (
+            (
+                "هذه المرحلة الأولى من الاختبار: ابدأ بالسهل وتدرّج نحو المتوسط، "
+                "ولا تصل إلى مستوى الأسئلة الأصعب في هذا الجزء.",
+                "هذه المرحلة الأخيرة من الاختبار: ابدأ من المتوسط، ثم تدرّج "
+                "حتى الأسئلة المتقدمة والأصعب في النهاية.",
+            ) if part_count == 2 else (
+                "المرحلة الأولى: ركّز على الأسئلة السهلة مع تصاعد طفيف فقط.",
+                "المرحلة الوسطى: ركّز على الأسئلة المتوسطة مع زيادة تدريجية.",
+                "المرحلة الأخيرة: ركّز على الأسئلة المتقدمة والأصعب تدريجياً.",
+            )
+        ) if progressive and not ready_exam else None
         attempts = [
             _execute_cascade(
                 _build_super_chunk_attempt_fn(
@@ -280,13 +302,16 @@ async def _generate_pdf_with_context(
                     (
                         _ready_exam_chunk_prompt(prompt_template, target, chunk)
                         if ready_exam else
-                        _generated_pdf_chunk_prompt(prompt_template, target, chunk)
+                        _generated_pdf_chunk_prompt(
+                            prompt_template, target, chunk,
+                            progressive_segments[index] if progressive_segments else None,
+                        )
                     ),
                 ),
                 # Retain the current three-part Super-PDF provider policy.
                 exclude_vertex=(part_count == 3),
             )
-            for chunk, target in active
+            for index, (chunk, target) in enumerate(active)
         ]
         results = await asyncio.gather(*attempts, return_exceptions=True)
         if any(result is None or isinstance(result, BaseException) for result in results):
