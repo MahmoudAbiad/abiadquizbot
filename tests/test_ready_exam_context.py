@@ -189,6 +189,22 @@ class PdfContextTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([q['question'] for q in merged], ['Q1', 'Boundary Q', 'Q3'])
 
+    async def test_generated_merge_cannot_be_filled_by_first_chunk_alone(self):
+        env = load_functions(
+            'helpers/gemini_helper/generation.py',
+            {'_merge_pdf_chunk_questions'},
+        )
+        first = ([{'question': f'FIRST-{i}'} for i in range(35)],)
+        second = ([{'question': f'SECOND-{i}'} for i in range(35)],)
+        merged = env['_merge_pdf_chunk_questions'](
+            [first, second], 40, chunk_targets=[20, 20],
+        )
+        self.assertEqual(len(merged), 40)
+        self.assertEqual([q['question'] for q in merged[:2]], ['FIRST-0', 'FIRST-1'])
+        self.assertEqual(merged[19]['question'], 'FIRST-19')
+        self.assertEqual(merged[20]['question'], 'SECOND-0')
+        self.assertEqual(merged[-1]['question'], 'SECOND-19')
+
     async def test_chunk_generator_uses_two_or_three_requests_and_cleans_up(self):
         recorded_prompts = []
         cleaned = []
