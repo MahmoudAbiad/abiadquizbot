@@ -142,6 +142,37 @@ def build_transparency_text(
     lines.append(f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>")
     return "\n".join(lines)
 
+def normalize_quiz_option_count(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Enforce exactly four options while preserving the model's marked correct answer.
+
+    A ready-made exam can contain five choices. Keep the correct choice and the
+    first OPTION_COUNT - 1 incorrect choices (i.e. discard the last incorrect
+    choice), preserving their original order. The normal shuffle happens later
+    and updates correct_option_id again.
+
+    Fail closed if there are too few choices or the answer index is invalid:
+    guessing a correct answer or inventing a distractor would be misleading.
+    """
+    for question_number, question in enumerate(quiz_data, start=1):
+        options = question.get("options")
+        correct_index = question.get("correct_option_id")
+        if not isinstance(options, list) or len(options) < OPTION_COUNT:
+            raise ValueError(f"Question {question_number}: expected at least {OPTION_COUNT} options")
+        if type(correct_index) is not int or not 0 <= correct_index < len(options):
+            raise ValueError(f"Question {question_number}: invalid correct option index")
+        if any(not isinstance(option, str) or not option.strip() for option in options):
+            raise ValueError(f"Question {question_number}: empty or invalid option")
+
+        if len(options) > OPTION_COUNT:
+            kept = [i for i in range(len(options)) if i != correct_index][:OPTION_COUNT - 1]
+            kept.append(correct_index)
+            kept.sort()
+            question["options"] = [options[i] for i in kept]
+            question["correct_option_id"] = kept.index(correct_index)
+
+    return quiz_data
+
+
 def _shuffle_question_options(question: Dict[str, Any]) -> Dict[str, Any]:
     """
     يخلط ترتيب الخيارات عشوائياً ويحدّث correct_option_id ليطابق الموضع الجديد.
@@ -410,6 +441,14 @@ async def execute_quiz_generation_workflow(
 
         if not quiz_data:
             return None, None, "ai_failed", None
+
+        # Normalize before shuffling, saving to DB, rendering/caching images, or
+        # sending Telegram polls. Never discard the actual marked answer.
+        try:
+            quiz_data = normalize_quiz_option_count(quiz_data)
+        except ValueError as exc:
+            log_warning(logger, f"[quiz_service] Refusing malformed options from AI: {exc}")
+            return None, None, "ai_failed", get_last_generation_metadata()
 
         # 3.1 🆕 بيانات آخر توليد ناجح (موديل/مزوّد/توكنز) - تُقرأ فوراً بعد عودة
         # generate_quiz_smart وبنفس الـ Task (راجع ContextVar بـ gemini_helper.py). كانت
