@@ -80,17 +80,62 @@ def _layout(q, is_ar):
         except ValueError:
             pass
     if blocks is None:
-        blocks = [_lines(s, is_ar, width) for s in raw]
+        blocks = [_lines(s, is_ar, width - 45) for s in raw]
+    rows = []
     for start in range(0, len(blocks), columns):
         row = blocks[start:start + columns]
-        if columns == 1:
-            for line, h, bold in row[0]:
-                items.append(('text', h + 8, [(PAD, line, bold)]))
-        else:
-            h = max(b[0][1] for b in row) + 12
-            items.append(('text', h, [(PAD + col * width / columns, b[0][0], False)
-                                      for col, b in enumerate(row)]))
+        row_h = max(sum(line[1] for line in cell) for cell in row) + 32
+        rows.append((row_h, row))
+    # Keep a normal 2x2 grid together. Very long options continue in bounded rows.
+    group, group_h = [], 0
+    for row_h, row in rows:
+        if row_h > MAX_HEIGHT - 150 and columns == 1:
+            pieces, piece_h = [], 0
+            for line in row[0]:
+                if pieces and piece_h + line[1] > MAX_HEIGHT - 182:
+                    if group:
+                        items.append(('options', group_h + 20, (columns, group)))
+                        group, group_h = [], 0
+                    items.append(('options', piece_h + 52, (1, [(piece_h + 32, [pieces])])))
+                    pieces, piece_h = [], 0
+                pieces.append(line)
+                piece_h += line[1]
+            row_h, row = piece_h + 32, [pieces]
+        if group and group_h + row_h > MAX_HEIGHT - 150:
+            items.append(('options', group_h + 20, (columns, group)))
+            group, group_h = [], 0
+        group.append((row_h, row))
+        group_h += row_h
+    if group:
+        items.append(('options', group_h + 20, (columns, group)))
+
     return items
+
+
+def _draw_options(ax, data, y_top, is_ar):
+    columns, rows = data
+    width = WIDTH - 2 * PAD
+    cell_w = width / columns
+    height = sum(row_h for row_h, _ in rows)
+    top = y_top - 10
+    ax.add_patch(r.Rectangle((PAD, top - height), width, height,
+                            fill=False, edgecolor='black', linewidth=0.65))
+    for col in range(1, columns):
+        x = PAD + col * cell_w
+        ax.plot([x, x], [top, top - height], color='black', linewidth=0.65)
+    y = top
+    for ri, (row_h, cells) in enumerate(rows):
+        if ri:
+            ax.plot([PAD, WIDTH - PAD], [y, y], color='black', linewidth=0.65)
+        for col, lines in enumerate(cells):
+            visual_col = columns - 1 - col if is_ar else col
+            x = PAD + (visual_col + 0.5) * cell_w
+            line_y = y - (row_h - sum(h for _, h, _ in lines)) / 2
+            for line, line_h, bold in lines:
+                ax.text(x, line_y - line_h / 2, line, ha='center', va='center',
+                        fontsize=SIZE, fontproperties=r._font_prop(is_ar, bold), color='black')
+                line_y -= line_h
+        y -= row_h
 
 
 def iter_print_blocks(q, is_ar, heading):
@@ -131,6 +176,8 @@ def iter_print_blocks(q, is_ar, heading):
                         ax.text(WIDTH - offset if is_ar else offset, y, line,
                                 ha=align, va='top', fontsize=SIZE,
                                 fontproperties=r._font_prop(is_ar, bold), color='black')
+                elif kind == 'options':
+                    _draw_options(ax, data, y, is_ar)
                 elif kind == 'table':
                     r._draw_table(ax, data, PAD, y, WIDTH - 2 * PAD, is_ar)
                 else:
