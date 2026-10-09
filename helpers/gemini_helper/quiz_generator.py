@@ -11,6 +11,7 @@ from constants import (
     MAX_LIMIT_PAGES,
     MAX_STANDARD_PAGES,
     MAX_STANDARD_QUESTIONS,
+    DIFFICULTY_PROGRESSIVE,
     SUPER_IMAGE_BATCH_THRESHOLD,
     OPTION_COUNT,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
@@ -227,6 +228,7 @@ async def generate_quiz_smart(
             generated = await _generate_pdf_with_context(
                 file_paths[0], count, base_prompt_template,
                 part_count=3, ready_exam=is_ready_exam,
+                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
             )
         elif is_single_pdf and (
             pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
@@ -234,6 +236,7 @@ async def generate_quiz_smart(
             generated = await _generate_pdf_with_context(
                 file_paths[0], count, base_prompt_template,
                 part_count=2, ready_exam=is_ready_exam,
+                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
             )
         elif is_super_images:
             generated = await _generate_super_images(file_paths, count, base_prompt_template)
