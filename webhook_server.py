@@ -193,6 +193,8 @@ async def lifespan(app: FastAPI):
 
         # 🧹 إطلاق مهمة التنظيف التلقائي الدوري للبيانات
         spawn(scheduled_cleanup_loop())
+        from handlers.session_navigation import pending_cleanup_loop
+        spawn(pending_cleanup_loop())
         print("🔄 تم جدولة تنظيف البيانات التلقائي كل 12 ساعة.")
 
         # 👥 إطلاق نبضة الكويز الجماعي الدورية (وضع fixed_interval) - راجع
@@ -429,6 +431,22 @@ class AudioUploadCompleteRequest(BaseModel):
     file_name: str = ""
 
 
+async def _ensure_upload_session_available(user_id, upload_type):
+    from services.flow_state import build_state_for_chat
+    from handlers.session_navigation import active_quiz, offer_transition
+    from services.redis_reliability import UserLock
+    state = build_state_for_chat(user_id, user_id)
+    lock = UserLock(redis_client, user_id)
+    if not await lock.acquire():
+        raise HTTPException(status_code=409, detail="طلبك قيد المعالجة. حاول بعد قليل.")
+    try:
+        if await active_quiz(state):
+            await offer_transition(state, user_id, user_id, {"kind": "upload", "type": upload_type})
+            raise HTTPException(status_code=409, detail="لديك اختبار جارٍ. ارجع إلى محادثة البوت واختر متابعة الاختبار أو إنهاءه ثم الرفع. لم يبدأ إرسال الملف.")
+    finally:
+        await lock.release()
+
+
 @app.post("/api/audio-upload/init")
 async def audio_upload_init(payload: AudioUploadInitRequest):
     """
@@ -446,6 +464,7 @@ async def audio_upload_init(payload: AudioUploadInitRequest):
 
     user_id = user.get("id")
     await _enforce_audio_upload_rate_limit(user_id, "audio_init")
+    await _ensure_upload_session_available(user_id, "audio")
 
     # 🆕 دفاع ثانٍ من طرف السيرفر - لا نثق بفحص الحجم من طرف المتصفح وحده
     if payload.file_size <= 0 or payload.file_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
@@ -537,6 +556,7 @@ async def file_upload_init(payload: FileUploadInitRequest):
 
     user_id = user.get("id")
     await _enforce_upload_rate_limit(user_id, "file_init", FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
+    await _ensure_upload_session_available(user_id, "document")
 
     if payload.file_size <= 0 or payload.file_size > MAX_FILE_WEB_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="حجم الملف يتجاوز الحد المسموح (100 ميغابايت).")
@@ -615,6 +635,7 @@ async def image_upload_init(payload: ImageUploadInitRequest):
 
     user_id = user.get("id")
     await _enforce_upload_rate_limit(user_id, "images_init", FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
+    await _ensure_upload_session_available(user_id, "images")
 
     count = len(payload.file_sizes)
     if count <= 0 or count > MAX_IMAGE_WEB_UPLOAD_COUNT:

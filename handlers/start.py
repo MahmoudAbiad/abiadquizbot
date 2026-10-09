@@ -97,25 +97,6 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         
         # حماية التدفق: التحقق من وجود كويز معلق قادم من رابط عميق
         if command.args and (command.args.startswith("share_") or command.args.startswith("quiz_")):
-            current_state = await state.get_state()
-            
-            # إذا كان المستخدم يحل اختباراً حالياً، نمنع دهس البيانات ونطلب تأكيده بوضوح
-            if current_state == QuizState.answering_quiz:
-                await state.update_data(interrupted_deep_link=command.args)
-                overwrite_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                    [types.InlineKeyboardButton(text="⚠️ نعم، ألغِ الحالي وافتح الجديد", callback_data="deep_link_overwrite_confirm")],
-                    [types.InlineKeyboardButton(text="🔄 لا، أريد إكمال اختباري الحالي", callback_data="deep_link_overwrite_cancel")]
-                ])
-                await msg.answer(
-                    "⚠️ <b>تنبيه حرج!</b>\n\n"
-                    "أنت تقوم بحل اختبار نشط حالياً. الضغط على الرابط سيؤدي إلى خسارة تقدمك الحالي وإلغاء الكويز.\n"
-                    "هل أنت متأكد من رغبتك في إنهاء الاختبار الحالي وفتح الرابط الجديد؟",
-                    reply_markup=overwrite_kb,
-                    parse_mode="HTML"
-                )
-                return
-            
-            # إذا كانت حالته نظيفة، يتم تشغيل الكويز مباشرة
             await launch_deep_linked_quiz(msg, state, command.args)
             return
 
@@ -211,24 +192,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
 
 @router.callback_query(F.data == "deep_link_overwrite_confirm")
 async def handle_deep_link_overwrite_confirm(call: types.CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-        payload = data.get("interrupted_deep_link")
-        
-        # إصلاح التتبع: إغلاق محاولة الكويز القائم قبل مسح الحالة كي لا تبقى معلقة بالداتابيز
-        if data.get("attempt_id"):
-            spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
-
-        await state.clear()
-        if payload:
-            await call.message.delete()
-            await launch_deep_linked_quiz(call.message, state, payload)
-        else:
-            await call.answer("❌ عذراً، انتهت صلاحية هذا الطلب.", show_alert=True)
-    except Exception as e:
-        logger.error(f"Error in deep_link_overwrite_confirm: {e}")
-    finally:
-        await call.answer()
+    await call.answer("هذا زر قديم. افتح رابط الاختبار مجددًا لاختيار الانتقال بأمان.", show_alert=True)
 
 @router.callback_query(F.data == "deep_link_overwrite_cancel")
 async def handle_deep_link_overwrite_cancel(call: types.CallbackQuery, state: FSMContext):
@@ -386,4 +350,5 @@ async def cmd_channel(message: types.Message):
     
     # تسجيل حدث فتح القناة
     spawn(log_usage_event(message.from_user.id, "channel_opened"))
+
 

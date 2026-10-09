@@ -27,6 +27,7 @@ from keyboards import (
 from logger import get_logger, log_error, log_warning
 from services.latex_text import latex_to_plain
 from services.quiz_permissions import can_edit_quiz
+from services.redis_reliability import user_locked
 from services.flow_state import build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لاستئناف الكويز من خلفية (محرر أسئلة الرياضيات عبر الويب)
 from helpers.supabase_helper import (
     list_favorite_quizzes,
@@ -123,15 +124,21 @@ async def show_menu_after_first_quiz(call: types.CallbackQuery) -> None:
     finally:
         await call.answer()
 
+@user_locked()
 async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: Optional[str] = "") -> None:
     user_id = msg_or_call.from_user.id
+    from handlers.session_navigation import offer_transition
+    chat_id = msg_or_call.message.chat.id if isinstance(msg_or_call, types.CallbackQuery) else msg_or_call.chat.id
+    if await offer_transition(state, user_id, chat_id, {"kind": "loaded", "kwargs": {
+            "quiz_data": quiz_data, "source_title": source_title, "origin": origin, "quiz_id": quiz_id}}):
+        return
     attempt_id = start_quiz_attempt(user_id, quiz_id or None, origin, len(quiz_data))
     spawn(log_usage_event(user_id, "quiz_started", {
         "origin": origin, "quiz_id": quiz_id, "questions": len(quiz_data),
     }))
 
     await state.update_data(
-        questions=quiz_data, current_index=0, score=0,
+        questions=quiz_data, current_index=0, score=0, answered_questions={}, navigation_session_id=None,
         total_count=len(quiz_data), source_title=source_title,
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
         is_saved_in_session=False, is_switching_question=False,
@@ -185,7 +192,10 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
 
-        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb, quiz_id=data.get('quiz_id'))
+        from handlers.session_navigation import session_id
+        identity = await session_id(state)
+        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb,
+                             quiz_id=data.get('quiz_id'), poll_meta={"session_id": identity})
         # 🆕 send_quiz_poll (لسؤال رياضي) قد يملأ q["image_url"] بعد الرسم/الرفع الفعلي -
         # q هو نفس الكائن المرجعي questions[idx] أعلاه، فنعيد كتابة questions لـ state هنا
         # لضمان تخزين الرابط الجديد فعلياً (وليس فقط بالذاكرة المحلية لهذه الدالة)، حتى
@@ -313,12 +323,33 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         if poll_answer.user.id != quiz_info["user_id"]:
             return
         
-        selected_opt = int(poll_answer.option_ids[0])
-        if selected_opt == correct_opt:
+        from handlers.session_navigation import active_quiz, session_id
+        from services.redis_reliability import UserLock
+        lock = UserLock(redis_client, poll_answer.user.id)
+        if not await lock.acquire():
+            raise RuntimeError("Quiz session busy; retry poll answer")
+        try:
+            if not await active_quiz(state):
+                return
             current_data = await state.get_data()
-            await state.update_data(score=current_data.get('score', 0) + 1)
+            identity = await session_id(state)
+            if quiz_info.get("session_id") != identity:
+                return
+            index = quiz_info.get("question_index")
+            if index != current_data.get("current_index"):
+                return
+            answered = dict(current_data.get("answered_questions") or {})
+            if str(index) in answered:
+                return
+            selected_opt = int(poll_answer.option_ids[0])
+            answered[str(index)] = selected_opt
+            await state.update_data(answered_questions=answered,
+                score=current_data.get('score', 0) + int(selected_opt == correct_opt))
+        finally:
+            await lock.release()
     except Exception as e:
         log_error(logger, f"Error in handle_poll_answer: {e}", exception=e)
+        raise
 
 
 @router.message(QuizState.answering_quiz, F.text == ".")
@@ -693,6 +724,7 @@ async def save_answer_text_edit(msg: types.Message, state: FSMContext):
     await _save_edited_question(msg, state, question_index, question, "answer_text", option_index)
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "next_question")
+@user_locked()
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
@@ -756,6 +788,7 @@ async def request_stop_confirmation(call: types.CallbackQuery, state: FSMContext
         await call.answer()
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "quiz_stop_confirmed")
+@user_locked()
 async def stop_quiz_confirmed(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
@@ -786,6 +819,7 @@ async def resume_quiz_flow(call: types.CallbackQuery):
         await call.answer()
 
 @router.callback_query(F.data == "quiz_replay")
+@user_locked()
 async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
@@ -794,6 +828,11 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
             await call.answer("❌ لا يوجد كويز محفوظ لإعادة تشغيله", show_alert=True)
             return
         
+        from handlers.session_navigation import offer_transition
+        if await offer_transition(state, call.from_user.id, call.message.chat.id, {"kind": "loaded", "kwargs": {
+                "quiz_data": questions, "source_title": data.get("source_title", "كويز"),
+                "origin": data.get("quiz_origin", "shared"), "quiz_id": data.get("quiz_id") or ""}}):
+            return
         await state.set_state(QuizState.answering_quiz)
         # 🩹 إعادة التشغيل يجب أن تُسجَّل كمحاولة جديدة تماماً في قاعدة البيانات، وإلا
         # فإن complete_quiz_attempt اللاحقة ستستخدم نفس attempt_id القديم وتكتب فوق
@@ -804,7 +843,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
             "origin": data.get("quiz_origin", "shared"), "quiz_id": data.get("quiz_id"), "questions": len(questions),
         }))
         await state.update_data(
-            current_index=0, score=0, quiz_completed=False, is_switching_question=False,
+            current_index=0, score=0, answered_questions={}, navigation_session_id=None, quiz_completed=False, is_switching_question=False,
             stopped_early=False, attempt_id=new_attempt_id
         )
         try:
@@ -1064,21 +1103,11 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
         await state.set_state(QuizState.answering_quiz)
 
 @router.callback_query(F.data == "force_stop_previous_quiz")
+@user_locked()
 async def force_stop_previous_quiz_handler(call: types.CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-        if data.get("attempt_id"):
-            spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
-        await state.clear()
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
-        await call.message.answer("✅ <b>تم إيقاف الاختبار السابق بنجاح!</b>\n\nيمكنك الآن إرسال محتوى جديد فوراً. 🚀", parse_mode="HTML")
-    except Exception as e:
-        log_error(logger, f"Error in force_stop_previous_quiz: {e}")
-    finally:
-        await call.answer()
+    from handlers.session_navigation import offer_transition
+    await call.answer()
+    await offer_transition(state, call.from_user.id, call.message.chat.id, {"kind": "stop"})
 
 @router.callback_query(F.data == "delete_warning_msg")
 async def delete_warning_msg_handler(call: types.CallbackQuery):

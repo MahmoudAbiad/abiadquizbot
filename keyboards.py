@@ -68,7 +68,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
             kb.append([
                 types.InlineKeyboardButton(
                     text="📤 رفع صوت / ملف / صور كبيرة",
-                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/upload_hub.html"),
+                    callback_data="upload_open:all",
                 )
             ])
         return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -81,16 +81,15 @@ def get_web_upload_redirect_keyboard(upload_type: str = "document") -> types.Inl
     """
     🆕 لوحة برفقة رسالة MSG_REDIRECT_TO_WEB_UPLOAD - تُعرض لما يفشل استقبال ملف/صوت
     مباشرة عبر تيليجرام بسبب تجاوز حد Bot API (20MB)، كبديل فوري بدل رفض جاف بلا حل.
-    upload_type: "audio"/"document"/"images" - رابط مباشر (Deep Link) لصفحة الرفع
+    upload_type: "audio"/"document"/"images" - فحص الجلسة أولاً ثم زر صفحة الرفع
     الموحّدة webapp/upload_hub.html؟type=... يتخطى شاشة الاختيار مباشرة (النوع معروف
     مسبقاً بهالحالة، فلا داعي يختار الطالب من جديد). تُرجع لوحة فاضية لو
     WEBAPP_PUBLIC_BASE_URL غير مُهيّأ (بدل زر مكسور برابط فاضي).
     """
     if not WEBAPP_PUBLIC_BASE_URL:
         return types.InlineKeyboardMarkup(inline_keyboard=[])
-    url = f"{WEBAPP_PUBLIC_BASE_URL}/webapp/upload_hub.html?type={upload_type}"
     return types.InlineKeyboardMarkup(inline_keyboard=[[
-        types.InlineKeyboardButton(text=BTN_OPEN_UPLOAD_PAGE, web_app=types.WebAppInfo(url=url)),
+        types.InlineKeyboardButton(text=BTN_OPEN_UPLOAD_PAGE, callback_data=f"upload_open:{upload_type}"),
     ]])
 
 def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMarkup:
@@ -1168,4 +1167,5 @@ def get_group_channel_picker_keyboard(
         rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
     rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
 

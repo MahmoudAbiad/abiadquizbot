@@ -1,4 +1,5 @@
 from helpers.supabase_helper.gifts import refund as refund_wallet
+from handlers.session_navigation import offer_transition, message_action
 # handlers/audio.py
 """
 معالج المحاضرات الصوتية: يستقبل رسائل صوتية (voice/audio)، يفرّغها نصياً عبر
@@ -134,8 +135,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     voice التي يقيس تيليجرام مدتها بنفسه وقت التسجيل). التسعير يُحتسب دائماً من القيمة
     الأكبر بين المُعلنة والفعلية تفادياً لأي دفع أقل من التكلفة الحقيقية."""
     current_state = await state.get_state()
-    if current_state == QuizState.answering_quiz:
-        await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه عبر الضغط على (⏹️ إيقاف) أولاً قبل رفع محاضرة صوتية جديدة.")
+    if await offer_transition(state, message.from_user.id, message.chat.id, message_action(message, "audio")):
         return
     if current_state == QuizState.processing_audio:
         await message.answer("⏳ لديك محاضرة صوتية أخرى قيد التحميل/التفريغ حالياً؛ يرجى انتظار انتهائها قبل إرسال مقطع جديد.")
@@ -685,9 +685,8 @@ async def process_web_uploaded_audio(
         await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
         await delete_audio_temp(object_path)
         return
-    if current_state == QuizState.answering_quiz:
-        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع محاضرة صوتية جديدة.")
-        await delete_audio_temp(object_path)
+    if await offer_transition(state, user_id, chat_id, {"kind": "web_audio",
+            "user_id": user_id, "chat_id": chat_id, "object_path": object_path, "declared_file_name": declared_file_name}):
         return
     if current_state == QuizState.processing_audio:
         await bot.send_message(chat_id, "⏳ لديك محاضرة صوتية أخرى قيد المعالجة حالياً؛ يرجى انتظار انتهائها.")
@@ -844,4 +843,5 @@ async def process_web_uploaded_audio(
 
 
 audio_router = router
+
 

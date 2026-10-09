@@ -29,7 +29,7 @@ class ResourcesTests(unittest.IsolatedAsyncioTestCase):
                 downloaded.append(max_size_bytes)
                 if max_size_bytes < 15:return False
                 Path(dest).write_bytes(b'x'*15);return True
-            env=load_functions('handlers/files.py',{'process_web_uploaded_images'},
+            env=load_functions('handlers/files.py',{'process_web_uploaded_images'}, offer_transition=AsyncMock(return_value=False),
                 asyncio=asyncio,os=os,uuid=uuid,build_state_for_chat=lambda *a:state,
                 QuizState=types.SimpleNamespace(answering_quiz='answering',processing_web_file='web',processing_file_quiz='quiz'),
                 PENDING_REQUEST_STATES=[],bot=types.SimpleNamespace(send_message=AsyncMock(return_value=types.SimpleNamespace(delete=AsyncMock()))),

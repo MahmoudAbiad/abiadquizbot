@@ -1,4 +1,5 @@
 # Handlers/files.py
+from handlers.session_navigation import offer_transition, message_action
 import asyncio
 from task_utils import spawn
 import json
@@ -712,15 +713,9 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
     transferred = False
     try:
         current_state = await state.get_state()
-        if current_state == QuizState.answering_quiz:
-            data = await state.get_data()
-            if data.get("attempt_id"):
-                spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
-            await _discard_pending_upload(state)
-            await state.clear()
-            await message.answer("ℹ️ <b>تم إيقاف اختبارك السابق تلقائياً وجاري معالجة المحتوى الجديد...</b>", parse_mode="HTML")
-
-        elif current_state == QuizState.processing_file_quiz:
+        if await offer_transition(state, message.from_user.id, message.chat.id, message_action(message, "media")):
+            return
+        if current_state == QuizState.processing_file_quiz:
             # 🩹 طلب توليد فعلي قيد التنفيذ عند Gemini حالياً (بعد ضغط "ابدأ التوليد") - لازم
             # نرفض أي ملف جديد بدل حذف/استبدال الطلب الحالي، وإلا بنحذف الملف يلي عم يُرفع
             # فعلياً لـ Gemini بهالّحظة ونفشّل التوليد بالكامل (راجع handle_count_start).
@@ -797,17 +792,9 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 @user_locked()
 async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     text = message.text.strip()
-    if await state.get_state() == QuizState.answering_quiz:
-        if len(text) >= 30:
-            data = await state.get_data()
-            if data.get("attempt_id"):
-                spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
-            await _discard_pending_upload(state)
-            await state.clear()
-            await message.answer("ℹ️ <b>تم إيقاف الاختبار السابق تلقائياً لبدء الكويز النصي الجديد...</b>", parse_mode="HTML")
-        else:
-            await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه عبر الضغط على (⏹️ إيقاف) أولاً.")
-            return
+    action = message_action(message, "text") if len(text) >= 30 else {"kind": "stop"}
+    if await offer_transition(state, message.from_user.id, message.chat.id, action):
+        return
 
     if len(text) < 30:
         await message.answer("⚠️ النص قصير جداً؛ أرسل 30 حرفاً على الأقل لضمان دقة الأسئلة.")
@@ -1296,7 +1283,8 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         charged_this_attempt = False
         await _clear_quiz_charge_markers(state)
 
-        await start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
+        # Generation already owns UserLock; do not try to acquire it twice.
+        await start_loaded_quiz.__wrapped__(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
 
     except (FileNotFoundError, InvalidUploadError) as exc:
@@ -1492,9 +1480,8 @@ async def process_web_uploaded_file(
     state = build_state_for_chat(chat_id, user_id)
 
     current_state = await state.get_state()
-    if current_state == QuizState.answering_quiz:
-        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع ملف جديد.")
-        await delete_file_temp(object_path)
+    if await offer_transition(state, user_id, chat_id, {"kind": "web_file",
+            "user_id": user_id, "chat_id": chat_id, "object_path": object_path, "declared_file_name": declared_file_name}):
         return
     if current_state == QuizState.processing_web_file:
         await bot.send_message(chat_id, "⏳ لديك ملف آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
@@ -1583,9 +1570,8 @@ async def process_web_uploaded_images(
     state = build_state_for_chat(chat_id, user_id)
 
     current_state = await state.get_state()
-    if current_state == QuizState.answering_quiz:
-        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع ألبوم صور جديد.")
-        await delete_file_temp_batch(object_paths)
+    if await offer_transition(state, user_id, chat_id, {"kind": "web_images",
+            "user_id": user_id, "chat_id": chat_id, "object_paths": object_paths}):
         return
     if current_state == QuizState.processing_web_file:
         await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
@@ -1662,4 +1648,5 @@ async def process_web_uploaded_images(
 
 
 files_router = router
+
 

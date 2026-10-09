@@ -34,6 +34,7 @@ from handlers import (
     payments_router,
     gifts_router,
 )
+from handlers.session_navigation import router as session_navigation_router
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
 
 # تهيئة Sentry للتتبع
@@ -74,6 +75,7 @@ def main():
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
     dp.include_routers(
+        session_navigation_router,
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
         # (معالج poll_answer العام هناك بيوقف الانتشار) - راجع handlers/group_quiz.py
         challenge_game_router,
@@ -140,6 +142,8 @@ def main():
                 from services.group_quiz_store import group_quiz_cleanup_loop
                 spawn(group_quiz_cleanup_loop())
 
+                from handlers.session_navigation import pending_cleanup_loop
+                spawn(pending_cleanup_loop())
                 await dp.start_polling(bot)
                 
             except Exception as e:
@@ -153,3 +157,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

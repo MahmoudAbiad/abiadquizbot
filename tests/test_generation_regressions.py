@@ -32,6 +32,7 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
         states=types.SimpleNamespace(waiting_for_count='waiting_for_count',processing_file_quiz='processing',answering_quiz='answering')
         def spawn(coro):coro.close()
         async def loaded(call,state,*a,**kw):await state.update_data(quiz_data=['result'],attempt_id='saved')
+        loaded.__wrapped__ = loaded
         self.env=load_functions('handlers/files.py', {'handle_count_start','_clear_quiz_charge_markers','_missing_upload_paths'},
             asyncio=asyncio, redis_client=FakeRedis(), UserLock=UserLock, QuizState=states,
             _QUIZ_CHARGE_STATE_KEYS=('debited_cost','debited_free','debited_paid','debit_id','debited_gift'),
@@ -164,6 +165,7 @@ class UploadRetentionTests(DebitTests):
     async def test_error_after_successful_generation_not_reported_as_refund(self):
         fn=self.make()
         async def broken(*a,**k):raise RuntimeError('telegram send failed')
+        broken.__wrapped__ = broken
         self.env['start_loaded_quiz']=broken
         await fn(self.call,self.state)
         self.env['refund_user_on_failure'].assert_not_awaited()
@@ -206,7 +208,7 @@ class WebAudioTests(unittest.IsolatedAsyncioTestCase):
             async def download(obj,dest,**kw):
                 with open(dest,'wb') as target:target.write(b'test audio')
                 return True
-            env=load_functions('handlers/audio.py',{'process_web_uploaded_audio'},
+            env=load_functions('handlers/audio.py',{'process_web_uploaded_audio'}, offer_transition=AsyncMock(return_value=False),
                 asyncio=asyncio,os=os,uuid=uuid,build_state_for_chat=lambda *a:state,
                 QuizState=types.SimpleNamespace(answering_quiz='answering',processing_audio='audio',processing_file_quiz='quiz',processing_web_file='file',waiting_for_audio_confirm='confirm'),
                 bot=bot,ensure_directory_exists=lambda *a:None,DOWNLOADS_DIR=directory,MAX_AUDIO_WEB_UPLOAD_SIZE=250,

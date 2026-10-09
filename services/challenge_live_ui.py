@@ -128,6 +128,9 @@ def error_screen(exc):
     rows = [[Btn("↩️ أرضي", "cg:home:0")]]
     if code is None or code in ("already_queued", "in_live_match"):
         rows.insert(0, [Btn("⚔️ متابعة المباراة", cb("q"))])
+    elif code == "active_attack":
+        rows.insert(0, [Btn("▶️ متابعة الهجوم الجاري", "cg:resume_active")])
+        rows.insert(1, [Btn("🏳️ إنهاء الهجوم", "cg:stop_active")])
     elif code in ("no_content", "branch_mismatch"):
         rows.insert(0, [Btn("🔁 اختيار وحدة أخرى", cb("m", 0))])
     return ERRORS.get(code, GENERIC_ERROR), rows
@@ -342,3 +345,4 @@ def match_screen(state, page=0, profile=None):
     if status in ("in_progress",):          # transient: last question resolved, settlement not yet visible
         return "⏳ جارٍ احتساب النتيجة…", [[Btn("🔄 تحديث المباراة", cb("r", hexid(state["id"])))]]
     return final_screen(state, profile)
+

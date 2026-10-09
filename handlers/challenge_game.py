@@ -308,6 +308,15 @@ async def game_callback(c: types.CallbackQuery):
             from keyboards import get_main_menu_keyboard
             me = await c.bot.get_me()
             return await c.message.edit_text("🏠 القائمة الرئيسية", reply_markup=await get_main_menu_keyboard(me.username, user.id), parse_mode=None)
+        if action in {"resume_active", "stop_active"}:
+            mid = await repo.active_attack(user.id)
+            if not mid:
+                return await home(c.message, user)
+            current = await repo.advance(mid, user.id)
+            if action == "resume_active":
+                return await show_attack(c.message, current)
+            return await render(c.message, "تأكيد الانسحاب؟ سيُسجّل الهجوم دون مكافآت.",
+                [[button("🏳️ تأكيد", f"cg:z:{UUID(mid).hex}"), button("↩️ متابعة", f"cg:r:{UUID(mid).hex}")]])
         if action not in {"a", "r", "p", "x", "z"}:
             if not await is_feature_enabled("challenge_system_enabled", default=False):
                 return await render(c.message, ERRORS["game_disabled"], [[button("🏠 القائمة الرئيسية", "cg:main")]])
@@ -407,3 +416,4 @@ async def challenge_heartbeat_loop(bot):
 # Uses the already registered async router in both polling and webhook entrypoints.
 from handlers.challenge_spectator import router as spectator_router
 router.include_router(spectator_router)
+

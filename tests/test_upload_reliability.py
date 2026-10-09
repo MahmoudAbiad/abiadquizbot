@@ -69,7 +69,7 @@ class UploadEndpointTests(unittest.IsolatedAsyncioTestCase):
         async def once(kind, identity, start):
             return await complete_once(self.redis, kind, identity, start)
         return load_functions('webhook_server.py', {'_upload_extension', '_object_extension', 'image_upload_init', 'image_upload_complete', 'file_upload_init', 'file_upload_complete', 'audio_upload_complete'},
-            HTTPException=HTTPError, os=os, re=re, supported_extension=supported_extension,
+            _ensure_upload_session_available=AsyncMock(), HTTPException=HTTPError, os=os, re=re, supported_extension=supported_extension,
             IMAGE_EXTENSIONS=IMAGE_EXTENSIONS, DOCUMENT_EXTENSIONS=DOCUMENT_EXTENSIONS, AUDIO_EXTENSIONS=AUDIO_EXTENSIONS,
             bot=types.SimpleNamespace(token='fake'), verify_telegram_init_data=lambda *a, **k: (True, {'id':1}),
             FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS=10, AUDIO_UPLOAD_INIT_DATA_MAX_AGE_SECONDS=10,
