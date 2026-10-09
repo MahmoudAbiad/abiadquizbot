@@ -187,16 +187,65 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
             if arrived==2:ready.set()
             await ready.wait()
             return 'quiz-'+str(kwargs['creator_id'])
-        env=load_functions('services/quiz_service.py',{'execute_quiz_generation_workflow'},
-            asyncio=asyncio,os=os,_HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(2),
+        env=load_functions('services/quiz_service.py',{'execute_quiz_generation_workflow','normalize_quiz_option_count'},
+            asyncio=asyncio,os=os,OPTION_COUNT=4,_HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(2),
             get_file_quizzes=AsyncMock(return_value=[]), SUBJECT_OTHER='other',SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
             SUBJECT_MATH='math',SUBJECT_ENGLISH='english',SUBJECT_FRENCH='french',QUESTION_TYPE_GENERAL='general',DIFFICULTY_MEDIUM='medium',
             resolve_generation_question_type_text=lambda *a:None,resolve_quiz_extraction_instruction=lambda *a:None,
-            generate_quiz_smart=AsyncMock(return_value=[{'question':'ok','options':['a','b']}]),get_last_generation_metadata=lambda:None,
+            generate_quiz_smart=AsyncMock(return_value=[{'question':'ok','options':['a','b','c','d','e'],'correct_option_id':4}]),get_last_generation_metadata=lambda:None,
             log_ai_generation=AsyncMock(),spawn=spawn,shuffle_quiz_options=lambda x:x,save_file_quiz_multiple=save,build_question_type_label=lambda *a,**k:'label')
         results=await asyncio.gather(*(env['execute_quiz_generation_workflow'](user,{'input_type':'text','file_hash':'same','pure_text':'text'},5,None) for user in [1,2]))
         self.assertEqual([r[1] for r in results],['quiz-1','quiz-2'])
+        self.assertEqual(results[0][0][0]['options'], ['a','b','c','e'])
+        self.assertEqual(results[0][0][0]['correct_option_id'], 3)
         self.assertEqual(env['get_file_quizzes'].await_count,2)  # No post-insert ID guessing.
+
+
+
+class QuizOptionNormalizationTests(unittest.TestCase):
+    """Ready-made five-choice exams must keep the correct answer and only four options."""
+
+    def setUp(self):
+        self.normalize = load_functions(
+            'services/quiz_service.py', {'normalize_quiz_option_count'}, OPTION_COUNT=4
+        )['normalize_quiz_option_count']
+
+    def test_fifth_wrong_option_is_removed(self):
+        question = {'question': 'Q', 'options': ['A', 'B', 'C', 'D', 'E'],
+                    'correct_option_id': 1, 'hint': 'original hint'}
+        result = self.normalize([question])
+        self.assertEqual(result[0]['options'], ['A', 'B', 'C', 'D'])
+        self.assertEqual(result[0]['correct_option_id'], 1)
+        self.assertEqual(result[0]['hint'], 'original hint')
+
+    def test_fifth_option_is_correct_so_fourth_wrong_is_removed(self):
+        result = self.normalize([{'options': ['A', 'B', 'C', 'D', 'E'],
+                                  'correct_option_id': 4}])[0]
+        self.assertEqual(result['options'], ['A', 'B', 'C', 'E'])
+        self.assertEqual(result['correct_option_id'], 3)
+
+    def test_more_than_five_options_still_keep_correct_answer(self):
+        result = self.normalize([{'options': ['A', 'B', 'C', 'D', 'E', 'F'],
+                                  'correct_option_id': 5}])[0]
+        self.assertEqual(result['options'], ['A', 'B', 'C', 'F'])
+        self.assertEqual(result['correct_option_id'], 3)
+
+    def test_four_options_remain_unchanged_and_are_idempotent(self):
+        question = {'options': ['A', 'B', 'C', 'D'], 'correct_option_id': 3}
+        self.assertIs(self.normalize([question])[0], question)
+        self.assertEqual(self.normalize([question])[0], question)
+
+    def test_reject_too_few_choices_or_unreliable_answer_index(self):
+        invalid_questions = [
+            {'options': ['A', 'B', 'C'], 'correct_option_id': 1},
+            {'options': ['A', 'B', 'C', 'D', 'E'], 'correct_option_id': 5},
+            {'options': ['A', '', 'C', 'D'], 'correct_option_id': 1},
+            {'options': ['A', 'B', 'C', 'D'], 'correct_option_id': None},
+        ]
+        for question in invalid_questions:
+            with self.subTest(question=question):
+                with self.assertRaises(ValueError):
+                    self.normalize([question])
 
 
 class WebAudioTests(unittest.IsolatedAsyncioTestCase):
