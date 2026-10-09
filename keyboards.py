@@ -105,18 +105,16 @@ def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMark
 def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
     """لوحة اختيار صيغة تحميل الكويز (Word أو PDF)، مع الحفاظ على الستايل المختار،
     تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
-    if favorite_id:
-        docx_cb = f"fav_export_docx_{style_code}_{favorite_id}"
-        pdf_cb = f"fav_export_pdf_{style_code}_{favorite_id}"
-    else:
-        docx_cb, pdf_cb = f"export_docx_{style_code}", f"export_pdf_{style_code}"
-    kb = [
-        [
-            types.InlineKeyboardButton(text="📄 Word (docx)", callback_data=docx_cb),
-            types.InlineKeyboardButton(text="📕 PDF", callback_data=pdf_cb)
-        ]
-    ]
+    prefix = "fav_export_" if favorite_id else "export_"
+    suffix = f"_{favorite_id}" if favorite_id else ""
+    kb = []
+    for variant, label in (("s", "نسخة الطالب"), ("t", "نسخة الأستاذ")):
+        kb.append([
+            types.InlineKeyboardButton(text=f"📕 PDF — {label}", callback_data=f"{prefix}pdf{variant}_{style_code}{suffix}"),
+            types.InlineKeyboardButton(text=f"📄 Word — {label}", callback_data=f"{prefix}docx{variant}_{style_code}{suffix}"),
+        ])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
     # 🆕 إعادة تنظيم بصري: تجميع الإجراءات المترابطة بصف واحد (2 بجنب بعض)
@@ -1167,5 +1165,6 @@ def get_group_channel_picker_keyboard(
         rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
     rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 

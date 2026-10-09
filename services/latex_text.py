@@ -117,7 +117,7 @@ def _replace_frac(text: str) -> str:
             if close2 != -1:
                 num = text[open1 + 1:close1]
                 den = text[rest_start + 1:close2]
-                out.append(f"({num}/{den})")
+                out.append(f"(({num})/({den}))")
                 i = close2 + 1
                 continue
         # صياغة غير مكتملة - نتجاهل \frac ونكمل بعد القوس الأول فقط
@@ -218,3 +218,4 @@ def latex_to_plain(text: str) -> str:
     result = re.sub(r"[ \t]+", " ", result).strip()
 
     return result
+

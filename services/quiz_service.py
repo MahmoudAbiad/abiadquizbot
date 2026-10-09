@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 # تحويل صفحة PDF لصورة (PyMuPDF)، واستدعاءات Gemini الثقيلة. بدون سقف تزامن، عدة طلبات
 # ملفات كبيرة بنفس اللحظة ممكن تستهلك الذاكرة/CPU بشكل تراكمي وتُبطئ كل الطلبات المتزامنة.
 # Semaphore(2) يحصر معالجة الملفات الثقيلة بحد أقصى عمليتين متزامنتين فقط.
-_HEAVY_PROCESSING_SEMAPHORE = asyncio.Semaphore(2)
+from services.processing_limits import HEAVY_PROCESSING_SEMAPHORE as _HEAVY_PROCESSING_SEMAPHORE
 
 # 🆕 (تحسين تجربة الكويز الرياضي): بدل رسم/رفع صورة كل سؤال رياضي بشكل "كسول" لحظة
 # وصول دوره فعلياً (services/quiz_engine._send_math_image_question - الطالب ينتظر
@@ -476,3 +476,4 @@ async def execute_quiz_generation_workflow(
             spawn(_prefetch_math_quiz_images(new_quiz_id, quiz_data))
 
         return quiz_data, new_quiz_id, "", get_last_generation_metadata()
+
