@@ -269,3 +269,95 @@ class PdfContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(excludes, [False, False])
         self.assertEqual(cleaned, ['temp-part-1.pdf', 'temp-part-2.pdf'])
 
+
+
+class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
+    """Every PDF subject shares the context splitter; non-PDF paths stay intact."""
+
+    async def run_case(self, pages, count, is_math=False, english_mode=None,
+                       extraction=None, paths=None):
+        import time
+        from unittest.mock import AsyncMock
+        from types import SimpleNamespace
+
+        contexts = [
+            ('SYSTEM_PROMPT_GENERATE_QUESTIONS', 'general'),
+            ('SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS', 'math'),
+            ('SYSTEM_PROMPT_GENERATE_ENGLISH_PLAIN_QUESTIONS', 'english'),
+            ('SYSTEM_PROMPT_GENERATE_ENGLISH_TRANSLATED_QUESTIONS', 'translated'),
+            ('SYSTEM_PROMPT_GENERATE_FRENCH_PLAIN_QUESTIONS', 'french'),
+            ('SYSTEM_PROMPT_GENERATE_FRENCH_TRANSLATED_QUESTIONS', 'french-translated'),
+        ]
+        prompts = {
+            key: label + ' {count} {option_count} {difficulty_instruction} {question_type_instruction}'
+            for key, label in contexts
+        }
+        split = AsyncMock(return_value=([{'question': 'Q'}], 1))
+        regular = AsyncMock(return_value=([{'question': 'Q'}], 1))
+        images = AsyncMock(return_value=([{'question': 'Q'}], 1))
+        state = SimpleNamespace(set=lambda *args: None, get=lambda: None)
+        env = load_functions(
+            'helpers/gemini_helper/quiz_generator.py', {'generate_quiz_smart'},
+            asyncio=asyncio, time=time,
+            MAX_LIMIT_PAGES=35, MAX_STANDARD_PAGES=15,
+            MAX_STANDARD_QUESTIONS=30, SUPER_IMAGE_BATCH_THRESHOLD=10,
+            OPTION_COUNT=4, SUBJECT_FRENCH='french',
+            MSG_PREVIOUS_QUESTIONS_INSTRUCTION='',
+            _resolve_difficulty_instruction=lambda _: '',
+            _resolve_question_type_instruction=lambda *_: '',
+            _last_model_used_var=state, _last_token_usage_var=state,
+            _last_generation_metadata_var=state, _groq_skip_reason_var=state,
+            get_pdf_page_count_sync=lambda _: pages,
+            _generate_pdf_with_context=split, _generate_regular=regular,
+            _generate_super_images=images,
+            _generate_text_quiz=AsyncMock(),
+            _generate_text_quiz_with_gemini=AsyncMock(),
+            **prompts,
+        )
+        result = await env['generate_quiz_smart'](
+            file_paths=paths if paths is not None else ['material.pdf'],
+            count=count, is_math_mode=is_math, english_mode=english_mode,
+            quiz_extraction_instruction=extraction,
+        )
+        self.assertEqual(len(result), 1)
+        return split, regular, images
+
+    async def test_extended_math_english_general_and_ready_exam_all_split(self):
+        for label, opts in (
+            ('math', {'is_math': True}),
+            ('english', {'english_mode': 'plain'}),
+            ('general', {}),
+            ('ready-exam', {'extraction': 'Extract existing exam questions.'}),
+        ):
+            with self.subTest(label=label):
+                split, regular, _ = await self.run_case(18, 40, **opts)
+                split.assert_awaited_once()
+                args = split.call_args
+                self.assertEqual(args.kwargs['part_count'], 2)
+                self.assertEqual(
+                    args.kwargs['ready_exam'], label == 'ready-exam'
+                )
+                regular.assert_not_awaited()
+
+    async def test_super_pdf_all_types_use_three_context_chunks(self):
+        for extraction in (None, 'Extract exam'):
+            with self.subTest(extraction=extraction):
+                split, regular, _ = await self.run_case(
+                    39, 45, extraction=extraction
+                )
+                self.assertEqual(split.call_args.kwargs['part_count'], 3)
+                self.assertEqual(split.call_args.kwargs['ready_exam'], bool(extraction))
+                regular.assert_not_awaited()
+
+    async def test_small_pdf_still_uses_regular_generation(self):
+        split, regular, _ = await self.run_case(8, 15, is_math=True)
+        split.assert_not_awaited()
+        regular.assert_awaited_once()
+
+    async def test_image_batches_still_use_existing_super_image_path(self):
+        split, regular, images = await self.run_case(
+            0, 40, paths=[f'{i}.png' for i in range(11)]
+        )
+        split.assert_not_awaited()
+        regular.assert_not_awaited()
+        images.assert_awaited_once()
