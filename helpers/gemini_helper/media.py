@@ -124,12 +124,12 @@ async def split_pdf_without_orphans(file_path):
 
 
 
-def split_ready_exam_pdf_with_context_sync(file_path: str, part_count: int) -> List[dict]:
-    """Split an existing exam into owned page ranges with one adjacent context page.
+def split_pdf_with_context_sync(file_path: str, part_count: int) -> List[dict]:
+    """Split a PDF into owned page ranges with one adjacent context page.
 
-    Context pages may help complete a question, but a question belongs only to
-    the chunk where its first page is owned. The returned local (1-based) page
-    indices are used in a mandatory per-chunk extraction instruction.
+    The returned local (1-based) page indices distinguish original pages
+    owned by the chunk from pages included for context only, for both
+    extraction and new-question generation.
     """
     import shutil
     from services.upload_validation import MAX_PDF_PARTS_BYTES, MIN_FREE_DISK_BYTES
@@ -197,10 +197,10 @@ def split_ready_exam_pdf_with_context_sync(file_path: str, part_count: int) -> L
             raise
 
 
-async def split_ready_exam_pdf_without_orphans(file_path: str, part_count: int) -> List[dict]:
+async def split_pdf_with_context_without_orphans(file_path: str, part_count: int) -> List[dict]:
     """Wait for the thread on cancellation and delete every temporary chunk."""
     task = asyncio.create_task(
-        asyncio.to_thread(split_ready_exam_pdf_with_context_sync, file_path, part_count)
+        asyncio.to_thread(split_pdf_with_context_sync, file_path, part_count)
     )
     try:
         return await asyncio.shield(task)
