@@ -276,9 +276,63 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         await self.session.close()
         self.assertEqual(self.state.data['questions'],[q('new')])
 
-    def test_disable_switch(self):
-        with patch.dict(os.environ,{'QUIZ_STREAMING_ENABLED':'0'}):self.assertFalse(streaming_enabled())
-        with patch.dict(os.environ,{'QUIZ_STREAMING_ENABLED':'1'}):self.assertTrue(streaming_enabled())
+    async def test_disable_switch(self):
+        saved = AsyncMock(return_value=True)
+        with patch.dict('sys.modules', {'helpers.supabase_helper': types.SimpleNamespace(is_feature_enabled=saved)}):
+            with patch.dict(os.environ, {'QUIZ_STREAMING_ENABLED': '0'}):
+                self.assertFalse(await streaming_enabled())
+                saved.assert_not_awaited()
+            with patch.dict(os.environ, {'QUIZ_STREAMING_ENABLED': '1'}):
+                self.assertTrue(await streaming_enabled())
+                saved.assert_awaited_once_with('quiz_streaming_enabled', default=True)
+                saved.return_value = False
+                self.assertFalse(await streaming_enabled())
+
+class AdminSwitchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_toggle_updates_generation_and_survives_cache_loss(self):
+        import datetime
+        from constants import FEATURE_FLAGS_REGISTRY
+        key = 'quiz_streaming_enabled'
+        self.assertIn(key, FEATURE_FLAGS_REGISTRY)
+        rows = {}
+        table = Mock()
+        table.select.return_value = table
+        table.eq.return_value = table
+        table.limit.return_value = table
+        async def read():
+            return types.SimpleNamespace(data=[{'enabled': rows[key]}] if key in rows else [])
+        table.execute = AsyncMock(side_effect=read)
+        def upsert(row):
+            async def save():
+                rows[row['key']] = row['enabled']
+                return types.SimpleNamespace(data=[row])
+            return types.SimpleNamespace(execute=save)
+        table.upsert.side_effect = upsert
+        redis = FakeRedis()
+        db = load_functions('helpers/supabase_helper/feature_flags.py',
+            {'is_feature_enabled', 'set_feature_flag', '_flag_redis_key', '_decode_flag_value'},
+            redis_client=redis, supabase=types.SimpleNamespace(table=Mock(return_value=table)),
+            datetime=datetime, _GAME_FLAGS=set(), _FEATURE_FLAG_REDIS_PREFIX='feature_flag:',
+            FEATURE_FLAG_CACHE_TTL_SECONDS=30, logger=Mock(), log_error=Mock())
+        async def all_flags(registry):
+            return {key: await db['is_feature_enabled'](key)}
+        render = AsyncMock()
+        admin = load_functions('handlers/admin/feature_flags.py', {'toggle_flag'},
+            FEATURE_FLAGS_REGISTRY=FEATURE_FLAGS_REGISTRY, FEATURE_SUBFLAGS_REGISTRY={},
+            get_all_feature_flags=all_flags, set_feature_flag=db['set_feature_flag'],
+            render_feature_detail=render, logger=Mock())
+        call = types.SimpleNamespace(data='admin_flag_toggle_' + key, answer=AsyncMock())
+        with patch.dict(os.environ, {'QUIZ_STREAMING_ENABLED': '1'}), patch.dict('sys.modules',
+                {'helpers.supabase_helper': types.SimpleNamespace(is_feature_enabled=db['is_feature_enabled'])}):
+            self.assertTrue(await streaming_enabled())
+            await admin['toggle_flag'](call)
+            self.assertFalse(await streaming_enabled())
+            redis.values.clear()
+            self.assertFalse(await streaming_enabled())
+            await admin['toggle_flag'](call)
+            self.assertTrue(await streaming_enabled())
+            render.assert_awaited_with(call, key)
+        table.upsert.assert_called()
 
 class CascadeTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_provider_fallback_after_visible_prefix(self):
@@ -374,7 +428,8 @@ class HandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         config=types.SimpleNamespace(QuizState=harness.env['QuizState'])
         send=AsyncMock()
         runner=types.SimpleNamespace(send_question_by_ids=send)
-        db=types.SimpleNamespace(start_quiz_attempt=Mock(return_value='stream-attempt'))
+        db=types.SimpleNamespace(start_quiz_attempt=Mock(return_value='stream-attempt'),
+                                 is_feature_enabled=AsyncMock(return_value=True))
         async def generate(user,data,count,status,on_question):
             await on_question(q())
             await harness.state.update_data(score=1,current_index=1,answered_questions={'0':1},stream_waiting=True)

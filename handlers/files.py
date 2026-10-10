@@ -1198,7 +1198,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         heartbeat_task = asyncio.create_task(_run_processing_heartbeat(status_msg))
         try:
             from services.streaming_quiz import StreamingQuiz, streaming_enabled
-            if streaming_enabled():
+            if await streaming_enabled():
                 stream_session = StreamingQuiz(state, user_id, call.message.chat.id, data, count, lock, redis_client)
                 await stream_session.begin()
                 quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(

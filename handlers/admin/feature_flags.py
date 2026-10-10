@@ -100,6 +100,15 @@ async def render_feature_detail(event, flag_key: str) -> None:
         f"الحالة: {status_line}\n\n"
         "اضغط لتشغيل/إيقاف الميزة، أو لتعديل أي إعداد خاص بها أدناه."
     )
+    if flag_key == "quiz_streaming_enabled":
+        from services.streaming_quiz import streaming_allowed_by_environment
+        text += (
+            "\n\nعند التشغيل: يبدأ عرض الأسئلة فور جاهزيتها أثناء استمرار التوليد."
+            "\nعند الإيقاف: ينتظر البوت اكتمال التوليد قبل بدء الاختبار."
+            "\nالتغيير يسري على التوليدات الجديدة فقط؛ الاختبارات الجارية تكمل بشكل طبيعي."
+        )
+        if not streaming_allowed_by_environment():
+            text += "\n\n⚠️ الميزة موقوفة من إعدادات الاستضافة؛ تفعيل الزر وحده لن يشغّلها."
     if any(on for _, _, on in sub_flags):
         text += (
             "\n\n🤖 <b>الشحن التلقائي مفعّل:</b> تُصادَق تلقائياً فقط الدفعات المكتملة الصحة "

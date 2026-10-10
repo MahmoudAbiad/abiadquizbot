@@ -17,6 +17,8 @@ Base: `9b133cba81e4af89a56b596c8193b260f85b32c4`.
 
 `QUIZ_STREAMING_ENABLED=1` enables the experiment (default on this test-branch change).
 `QUIZ_STREAMING_ENABLED=0` restores non-streaming for newly started generations.
+Admin control: الإعدادات العامة → مفاتيح التحكم → عرض الأسئلة أثناء التوليد (Streaming).
+The saved `quiz_streaming_enabled` feature flag defaults on and controls new generations without a restart. Running generations keep their current mode. The environment variable remains an emergency override; the admin panel warns when it disables streaming.
 No database migrations or security changes are required. Allow active generations to finish before restarting/reverting. Revert this change's commit with `git revert <streaming-commit>`; do not reset the branch to an old commit and discard unrelated work.
 
 ## Validation

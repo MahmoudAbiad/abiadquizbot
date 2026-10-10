@@ -10,8 +10,16 @@ class StreamingSessionDetached(Exception):
     """The old producer must never clear or start a newer user's session."""
 
 
-def streaming_enabled():
+def streaming_allowed_by_environment():
     return os.getenv("QUIZ_STREAMING_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def streaming_enabled():
+    """Read the saved admin switch once per generation; env remains a kill switch."""
+    if not streaming_allowed_by_environment():
+        return False
+    from helpers.supabase_helper import is_feature_enabled
+    return await is_feature_enabled("quiz_streaming_enabled", default=True)
 
 
 def producer_key(user_id):
