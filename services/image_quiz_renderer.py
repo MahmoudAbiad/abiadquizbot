@@ -905,8 +905,11 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
 # من أي مكان بالمشروع (services/quiz_engine.py و services/export_service.py عبر
 # handlers/export.py).
 async def render_question_image_async(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
+    from services.quiz_timing import measured
     async with RENDER_SEMAPHORE:
-        result = await asyncio.to_thread(render_question_image, question, idx, total, is_ar)
+        result = await measured("render_worker", asyncio.to_thread(
+            render_question_image, question, idx, total, is_ar))
     from mem_utils import release_memory_to_os
     release_memory_to_os()
     return result
+

@@ -13,6 +13,8 @@
 
 import ctypes
 import gc
+import time
+import threading
 
 from logger import get_logger, log_warning
 
@@ -47,10 +49,17 @@ def release_memory_to_os() -> None:
     malloc_trim(0) يفحص كومة glibc نفسها ويعيد الصفحات الكبيرة الفارغة فعليًا -
     لا يؤثر إطلاقًا على أي كائن حي أو بيانات قيد الاستخدام.
     """
+    started = time.perf_counter()
     gc.collect()
+    logger.info("quiz_memory phase=gc_collect ms=%.1f thread=%s",
+                (time.perf_counter() - started) * 1000, threading.current_thread().name)
     libc = _get_libc()
     if libc is not None:
+        started = time.perf_counter()
         try:
             libc.malloc_trim(0)
         except Exception as exc:
             log_warning(logger, f"mem_utils: malloc_trim call failed: {exc}")
+        finally:
+            logger.info("quiz_memory phase=malloc_trim ms=%.1f thread=%s",
+                        (time.perf_counter() - started) * 1000, threading.current_thread().name)
