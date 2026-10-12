@@ -27,7 +27,7 @@ repair = load_functions('helpers/gemini_helper/parsing.py', {'_repair_json_backs
     _JSON_LEGAL_ALWAYS_ESCAPES=('"', '\\', '/', 'u'),
     _JSON_AMBIGUOUS_ESCAPE_LETTERS=('b', 'f', 'r', 't'))['_repair_json_backslashes']
 S = load_functions('helpers/gemini_helper/streaming.py',
-    {'StreamingInterrupted', 'QuestionDecoder', 'generate_quiz_response', 'OrderedChunks', 'generate_groq_response'},
+    {'StreamingInterrupted', 'QuestionDecoder', '_publish_outside_provider_timeout', 'generate_quiz_response', 'OrderedChunks', 'generate_groq_response'},
     asyncio=asyncio, contextlib=contextlib, json=json, re=re, SimpleNamespace=types.SimpleNamespace,
     QuizQuestion=schemas.QuizQuestion, QuizResponse=schemas.QuizResponse,
     _repair_json_backslashes=repair, question_sink=ContextVar('test_sink', default=None))
@@ -137,6 +137,41 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(asyncio.CancelledError if cancel else Interrupted): await task
                 self.assertTrue(closed.is_set())
             finally: sink.reset(token)
+
+    async def test_slow_delivery_does_not_consume_provider_budget(self):
+        async def chunks():
+            yield types.SimpleNamespace(text=json.dumps({'questions': [q(), q('2')]}))
+        async def emit(question):
+            await asyncio.sleep(.08)
+        token = sink.set(emit)
+        try:
+            response = await S['generate_quiz_response'](client_for(chunks()),
+                model='m', contents=[], config=None, timeout=.05)
+            self.assertEqual(len(json.loads(response.text)['questions']), 2)
+        finally:
+            sink.reset(token)
+
+    async def test_cancellation_during_delivery_closes_provider(self):
+        started, closed = asyncio.Event(), asyncio.Event()
+        async def chunks():
+            try:
+                yield types.SimpleNamespace(text=json.dumps({'questions': [q()]}))
+            finally:
+                closed.set()
+        async def emit(question):
+            started.set()
+            await asyncio.Event().wait()
+        token = sink.set(emit)
+        try:
+            task = asyncio.create_task(S['generate_quiz_response'](client_for(chunks()),
+                model='m', contents=[], config=None, timeout=1))
+            await asyncio.wait_for(started.wait(), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(closed.is_set())
+        finally:
+            sink.reset(token)
 
     async def test_disabled_uses_original_nonstream_api(self):
         client=client_for(None)
@@ -268,6 +303,9 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         await self.session.publish(q());await self.session.reacquire();await self.session.close()
         self.assertFalse(self.state.data['generation_pending']);self.assertEqual(self.state.data['questions'],[])
         self.assertTrue(self.state.data['quiz_completed'])
+        self.assertTrue(self.state.data['generation_failed'])
+        for key in ('stream_poll_session', 'navigation_session_id', 'attempt_id', 'quiz_id'):
+            self.assertIsNone(self.state.data[key])
 
     async def test_old_stream_does_not_overwrite_new_session(self):
         await self.state.update_data(stream_id='new',questions=[q('new')])
@@ -387,6 +425,42 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_next_after_abort_or_completion_has_no_side_effects(self):
+        for changes in ({'generation_failed': True}, {'quiz_completed': True}, {'questions': []}):
+            state = State()
+            await state.update_data(questions=[q()], current_index=2, **{
+                key: value for key, value in changes.items() if key != 'questions'})
+            if 'questions' in changes:
+                await state.update_data(questions=[])
+            event = types.SimpleNamespace(answer=AsyncMock(), message=types.SimpleNamespace(delete=AsyncMock()))
+            send, error = AsyncMock(), Mock()
+            env = load_functions('handlers/quiz_runner.py', {'handle_next'},
+                send_question=send, log_error=error, logger=Mock())
+            await env['handle_next'](event, state)
+            self.assertEqual(state.data['current_index'], 2)
+            send.assert_not_called()
+            error.assert_not_called()
+            event.message.delete.assert_not_called()
+            event.answer.assert_awaited_once()
+
+    async def test_failed_empty_or_completed_session_cannot_send_success(self):
+        for changes in ({'generation_failed': True}, {'quiz_completed': True}, {'questions': []}):
+            state = State()
+            await state.update_data(questions=[q()], current_index=1)
+            await state.update_data(**changes)
+            complete, error = AsyncMock(), Mock()
+            env = load_functions('handlers/quiz_runner.py', {'send_question_by_ids'},
+                _handle_quiz_completion=complete, log_error=error, logger=Mock())
+            await env['send_question_by_ids'](7, 7, state)
+            complete.assert_not_called()
+            error.assert_not_called()
+
+    async def test_completion_rejects_invalid_attempt_before_database_or_messages(self):
+        env = load_functions('handlers/quiz_runner.py', {'_handle_quiz_completion'})
+        for changes in ({'generation_failed': True}, {'quiz_completed': True},
+                        {'generation_pending': True}, {'questions': []}):
+            await env['_handle_quiz_completion'](7, 7, State(), {'questions': [q()], **changes})
+
     async def test_next_at_buffer_end_does_not_skip_future_question(self):
         state=State();await state.update_data(questions=[q()],current_index=1,generation_pending=True)
         event=types.SimpleNamespace(answer=AsyncMock(),message=types.SimpleNamespace(delete=AsyncMock()))
@@ -495,3 +569,4 @@ class StreamingMiddlewareTests(unittest.IsolatedAsyncioTestCase):
                 'services.quiz_service':types.SimpleNamespace(refund_user_on_failure=refund)}):
             await env['StreamingQuizMiddleware']()(AsyncMock(),Message(),{'state':state})
         refund.assert_awaited_once();self.assertEqual(state.data,{})
+

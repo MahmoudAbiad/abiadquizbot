@@ -108,7 +108,7 @@ class StreamingQuiz:
             raise RuntimeError("Another stream already owns this user")
         self.lease_acquired = True
         await self.state.update_data(stream_id=self.identity, generation_pending=True,
-                                     stream_waiting=False, stream_paused=False)
+                                     stream_waiting=False, stream_paused=False, generation_failed=False)
         await self.main_lock.release()
         self.released = True
 
@@ -180,6 +180,7 @@ class StreamingQuiz:
         # Preserve navigation_session_id for polls already sent with this ID.
         await self.state.update_data(
             generation_pending=False, stream_id=None, total_count=len(questions),
+            generation_failed=False,
             quiz_id=quiz_id, attempt_id=attempt, stream_poll_session=self.identity,
             stream_waiting=False)
         await self.state.set_state(QuizState.answering_quiz)
@@ -204,5 +205,7 @@ class StreamingQuiz:
         if data.get("stream_id") == self.identity:
             await self.state.update_data(generation_pending=False, stream_id=None,
                                          stream_waiting=False, stream_paused=False,
-                                         questions=[], quiz_completed=True)
+                                         questions=[], quiz_completed=True, generation_failed=True,
+                                         stream_poll_session=None, navigation_session_id=None,
+                                         attempt_id=None, quiz_id=None, is_switching_question=False)
 

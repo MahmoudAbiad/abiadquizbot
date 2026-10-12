@@ -310,6 +310,14 @@ async def _generate_pdf_with_context(
             attempts = [ordered.run(index, attempt) for index, attempt in enumerate(attempts)]
         results = await asyncio.gather(*attempts, return_exceptions=True)
         if any(result is None or isinstance(result, BaseException) for result in results):
+            for index, result in enumerate(results, start=1):
+                if isinstance(result, BaseException):
+                    causes = []
+                    cause = result
+                    while cause is not None and len(causes) < 5:
+                        causes.append(type(cause).__name__)
+                        cause = cause.__cause__
+                    logger.error("PDF context chunk %s failed: %s", index, " -> ".join(causes))
             log_error(logger, "PDF: context chunk exhausted its model/key cascade")
             return None
 
@@ -501,3 +509,4 @@ async def _generate_super_images(
         "thoughts_tokens": total_thoughts, "total_tokens": total_tokens,
     })
     return questions, total_tokens
+

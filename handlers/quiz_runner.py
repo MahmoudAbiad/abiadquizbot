@@ -143,7 +143,7 @@ async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuer
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
         is_saved_in_session=False, is_switching_question=False,
         attempt_id=attempt_id, stopped_early=False,
-        share_id=None, stream_poll_session=None, generation_pending=False,
+        share_id=None, stream_poll_session=None, generation_pending=False, generation_failed=False,
         stream_id=None, stream_waiting=False, stream_paused=False,
     )
     await state.set_state(QuizState.answering_quiz)
@@ -170,8 +170,12 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
     """
     try:
         data = await state.get_data()
+        if data.get("generation_failed") or data.get("quiz_completed"):
+            return
         questions = data['questions']
         idx = data['current_index']
+        if not questions and not data.get("generation_pending"):
+            return
 
         # 1. حالة انتهاء الاختبار
         if idx >= len(questions):
@@ -229,6 +233,9 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
             pass
 
 async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext, data: dict):
+    if (data.get("generation_failed") or data.get("quiz_completed")
+            or data.get("generation_pending") or not data.get("questions")):
+        return
     score, total = data['score'], data['total_count']
     quiz_id = data.get('quiz_id')
     # ⚠️ current_index يكون دائماً >= total هنا (send_question لا تستدعي هذه الدالة
@@ -741,6 +748,10 @@ async def save_answer_text_edit(msg: types.Message, state: FSMContext):
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
+        # Router state filters run before this function obtains UserLock.
+        # A queued callback may belong to a stream aborted while it waited.
+        if data.get("generation_failed") or data.get("quiz_completed") or not data.get("questions"):
+            return
         if data.get("is_switching_question") or (data.get("generation_pending") and data.get("current_index", 0) >= len(data.get("questions", []))):
             await call.answer()
             return
@@ -859,7 +870,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         }))
         await state.update_data(
             current_index=0, score=0, answered_questions={}, navigation_session_id=None, quiz_completed=False, is_switching_question=False,
-            stopped_early=False, attempt_id=new_attempt_id, stream_poll_session=None
+            stopped_early=False, attempt_id=new_attempt_id, stream_poll_session=None, generation_failed=False
         )
         try:
             await call.message.delete()
@@ -1134,3 +1145,4 @@ async def delete_warning_msg_handler(call: types.CallbackQuery):
         await call.answer()
 
 quiz_runner_router = router
+

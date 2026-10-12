@@ -80,6 +80,19 @@ class QuestionDecoder:
         return questions
 
 
+async def _publish_outside_provider_timeout(sink, question, timeout_scope):
+    """UI rendering/Redis/Telegram time must not consume the provider budget."""
+    loop = asyncio.get_running_loop()
+    remaining = timeout_scope.when() - loop.time()
+    if remaining <= 0:
+        raise TimeoutError("Provider time budget exhausted")
+    timeout_scope.reschedule(None)
+    try:
+        await sink(question)
+    finally:
+        timeout_scope.reschedule(loop.time() + remaining)
+
+
 async def generate_quiz_response(client, *, model, contents, config, timeout):
     sink = question_sink.get()
     if sink is None:
@@ -90,7 +103,7 @@ async def generate_quiz_response(client, *, model, contents, config, timeout):
     usage = None
     stream = None
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(timeout) as timeout_scope:
             stream = await client.aio.models.generate_content_stream(
                 model=model, contents=contents, config=config)
             async for chunk in stream:
@@ -98,12 +111,12 @@ async def generate_quiz_response(client, *, model, contents, config, timeout):
                     usage = chunk.usage_metadata
                 for question in decoder.feed(getattr(chunk, "text", None) or ""):
                     published = True
-                    await sink(question)
+                    await _publish_outside_provider_timeout(sink, question, timeout_scope)
             decoder.finish()
         return SimpleNamespace(text=decoder.text, parsed=None, usage_metadata=usage)
     except Exception as exc:
         if published:
-            raise StreamingInterrupted("Stream failed after emitting questions") from exc
+            raise StreamingInterrupted(f"Stream failed after {len(decoder.questions)} questions: {type(exc).__name__}") from exc
         raise
     finally:
         if stream is not None and hasattr(stream, "aclose"):
@@ -176,13 +189,13 @@ async def generate_groq_response(client, **kwargs):
     stream = None
     published = False
     try:
-        async with asyncio.timeout(45):
+        async with asyncio.timeout(45) as timeout_scope:
             stream = await client.chat.completions.create(**kwargs, stream=True)
             async for chunk in stream:
                 text = chunk.choices[0].delta.content if chunk.choices else None
                 for question in decoder.feed(text or ""):
                     published = True
-                    await sink(question)
+                    await _publish_outside_provider_timeout(sink, question, timeout_scope)
             decoder.finish()
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=decoder.text))])
     except Exception as exc:
@@ -193,3 +206,4 @@ async def generate_groq_response(client, **kwargs):
         if stream is not None:
             with contextlib.suppress(Exception):
                 await stream.close()
+
