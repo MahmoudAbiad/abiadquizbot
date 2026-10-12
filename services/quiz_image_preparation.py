@@ -23,15 +23,19 @@ def question_image_key(question, idx, total):
 
 
 async def _prepare(question, idx, total, quiz_id):
+    from services.quiz_timing import measured
     from services.image_quiz_renderer import render_question_image_async, looks_arabic
     from services.quiz_engine import _question_image_object_path
     from helpers.supabase_helper import upload_quiz_question_image
-    async with _PREPARATION_SLOTS:
-        image_bytes = await render_question_image_async(
-            question, idx, total, looks_arabic(str(question.get("question", ""))))
-        image_url = await upload_quiz_question_image(
-            image_bytes, _question_image_object_path(quiz_id, idx, question))
+    await measured("image_slot_wait", _PREPARATION_SLOTS.acquire())
+    try:
+        image_bytes = await measured('background_render', render_question_image_async(
+            question, idx, total, looks_arabic(str(question.get("question", "")))))
+        image_url = await measured('image_upload', upload_quiz_question_image(
+            image_bytes, _question_image_object_path(quiz_id, idx, question)))
         return image_url, None if image_url else image_bytes
+    finally:
+        _PREPARATION_SLOTS.release()
 
 
 async def prepare_math_image(question, idx, total, quiz_id=None):

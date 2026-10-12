@@ -249,7 +249,7 @@ class ForegroundTests(unittest.IsolatedAsyncioTestCase):
             bot = types.SimpleNamespace(send_photo=AsyncMock(), send_poll=AsyncMock(return_value=poll))
             render = AsyncMock()
             env = load_functions("services/quiz_engine.py", {"_send_math_image_question"},
-                prepare_math_image=prepare, render_question_image_async=render,
+                logger=Mock(), prepare_math_image=prepare, render_question_image_async=render,
                 looks_arabic=lambda s:True, letters_for=lambda *a:["أ","ب","ج","د"],
                 _is_valid_uuid=lambda s:False, save_question_image_url=AsyncMock(),
                 bot=bot, redis_client=support.FakeRedis(), json=__import__("json"),
