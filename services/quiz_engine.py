@@ -14,7 +14,8 @@ from logger import get_logger, log_warning
 # راجع services/image_quiz_renderer.py للتفاصيل.
 from services.image_quiz_renderer import render_question_image_async, looks_arabic, letters_for
 from services.latex_text import latex_to_plain
-from helpers.supabase_helper import _is_valid_uuid, save_question_image_url, upload_quiz_question_image
+from services.quiz_image_preparation import prepare_math_image
+from helpers.supabase_helper import _is_valid_uuid, save_question_image_url
 
 logger = get_logger(__name__)
 
@@ -107,9 +108,7 @@ async def _send_math_image_question(
     image_url = q.get("image_url")
     image_bytes = None
     if not image_url:
-        image_bytes = await render_question_image_async(q, idx, total, is_ar)
-        object_path = _question_image_object_path(quiz_id, idx, q)
-        image_url = await upload_quiz_question_image(image_bytes, object_path)
+        image_url, image_bytes = await prepare_math_image(q, idx, total, quiz_id)
         if image_url and quiz_id and _is_valid_uuid(quiz_id):
             q["image_url"] = image_url  # يبقى بالذاكرة طوال الجلسة الحالية أيضاً
             spawn(save_question_image_url(quiz_id, idx, image_url))
