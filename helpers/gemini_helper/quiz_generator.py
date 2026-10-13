@@ -13,6 +13,7 @@ from constants import (
     OPTION_COUNT,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
     SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS,
+    SYSTEM_PROMPT_GENERATE_SIMILAR_MATH_QUESTIONS, QUESTION_TYPE_SIMILAR_MATH,
     SYSTEM_PROMPT_GENERATE_ENGLISH_PLAIN_QUESTIONS,
     SYSTEM_PROMPT_GENERATE_ENGLISH_TRANSLATED_QUESTIONS,
     SYSTEM_PROMPT_GENERATE_FRENCH_PLAIN_QUESTIONS,
@@ -133,7 +134,8 @@ async def generate_quiz_smart(
         # إنجليزي (مترجم/عادي) > قياسي. content_language يميّز بين الموجّهين الفرنسيين
         # والإنجليزيين لأن english_mode ("translated"/"plain") وحده لا يكفي للتفريق بينهما.
         if is_math_mode:
-            source_prompt = SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS
+            source_prompt = (SYSTEM_PROMPT_GENERATE_SIMILAR_MATH_QUESTIONS
+                             if question_type == QUESTION_TYPE_SIMILAR_MATH else SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS)
         elif content_language == SUBJECT_FRENCH and english_mode == "translated":
             source_prompt = SYSTEM_PROMPT_GENERATE_FRENCH_TRANSLATED_QUESTIONS
         elif content_language == SUBJECT_FRENCH and english_mode == "plain":
@@ -159,13 +161,16 @@ async def generate_quiz_smart(
         # الأساسي (بغض النظر عن مادته) - تحوّل المهمة من "توليد" إلى "استخراج" كما هي أو
         # حلّها بالذكاء الاصطناعي. لا تأثير إطلاقاً على أي مادة أخرى (تبقى None فتُتجاهل).
         # ملاحظة: {count} داخل هذا النص يُستبدل سوا مع باقي الموجّه بنفس السطر بالأسفل.
-        if quiz_extraction_instruction:
+        if quiz_extraction_instruction and not (is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH):
             base_prompt_template += quiz_extraction_instruction
 
         # حقن الأسئلة السابقة لمنع التكرار
         if previous_questions:
             old_q_texts = "\n".join([f"- {q['question']}" for q in previous_questions if 'question' in q])
-            base_prompt_template += MSG_PREVIOUS_QUESTIONS_INSTRUCTION.format(previous_questions=old_q_texts)
+            if is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH:
+                base_prompt_template += "\n[منع التكرار]: حافظ على الأنماط المطلوبة لكن استخدم مسائل بمعطيات جديدة مختلفة عن هذه المسائل السابقة:\n" + old_q_texts
+            else:
+                base_prompt_template += MSG_PREVIOUS_QUESTIONS_INSTRUCTION.format(previous_questions=old_q_texts)
 
         prompt = base_prompt_template.replace("{count}", str(count))
 
@@ -234,3 +239,4 @@ async def generate_quiz_smart(
                 await animation_task
             except asyncio.CancelledError:
                 pass
+

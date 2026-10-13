@@ -352,12 +352,17 @@ def get_classification_vote_keyboard(file_hash: str, subject: str) -> types.Inli
 # 🆕 لوحة اختيار طريقة استخراج "اختبار محلول" (subject=quiz_solved): اعتماد الأجوبة
 # المدوّنة بالمستند كما هي، أو تجاهلها وحلّ الاختبار بالذكاء الاصطناعي بدلاً منها.
 # لا تُعرض إطلاقاً لـ quiz_unsolved (لا يوجد أجوبة أصلاً لاعتمادها - راجع handlers/files.py).
-def get_quiz_extraction_choice_keyboard() -> types.InlineKeyboardMarkup:
+def get_quiz_extraction_choice_keyboard(is_math: bool = False, solved: bool = True) -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text=BTN_QUIZ_EXTRACT_AS_IS, callback_data="quiz_extract_as_is")],
         [types.InlineKeyboardButton(text=BTN_QUIZ_EXTRACT_AI_SOLVE, callback_data="quiz_extract_ai_solve")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
+    if not solved:
+        kb = [row for row in kb if row[0].callback_data != "quiz_extract_as_is"]
+    if is_math:
+        from constants import BTN_SIMILAR_MATH
+        kb.insert(-1, [types.InlineKeyboardButton(text=BTN_SIMILAR_MATH, callback_data="quiz_generate_similar_math")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -1164,4 +1169,5 @@ def get_group_channel_picker_keyboard(
         rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
     rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
 

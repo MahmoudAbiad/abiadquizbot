@@ -9,6 +9,7 @@ from constants import (
     MAX_ALBUM_IMAGES, MAX_LIMIT_PAGES, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS,
     SUBJECT_MATH, SUBJECT_OTHER, SUBJECT_ENGLISH, SUBJECT_FRENCH, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
     QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM, QUESTION_TYPE_OPTIONS,
+    QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH,
     # 🆕 اختبار محلول/غير محلول
     SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
     QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
@@ -212,6 +213,8 @@ def build_question_type_label(
     question_type أصلاً (لا شاشة نوع/صعوبة تُعرض لهما - راجع handlers/files.py)، فتُبنى
     التسمية هنا من طريقة الاستخراج المختارة بدلاً من ذلك (كما هي / حل بالذكاء الاصطناعي).
     """
+    if question_type == QUESTION_TYPE_SIMILAR_MATH:
+        return BTN_SIMILAR_MATH
     if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
         return QUIZ_EXTRACTION_MODE_LABELS_AR.get(
             extraction_mode or QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR[QUIZ_EXTRACTION_MODE_AI_SOLVE]
@@ -394,7 +397,8 @@ async def execute_quiz_generation_workflow(
         #     الطالب الصريح لـ quiz_solved، أو مباشرة لـ quiz_unsolved بلا تخيير). None لأي
         #     مادة أخرى - لا تأثير على سلوك التوليد الاعتيادي إطلاقاً.
         quiz_extraction_mode = data.get("quiz_extraction_mode")
-        quiz_extraction_instruction = resolve_quiz_extraction_instruction(subject_type, quiz_extraction_mode)
+        quiz_extraction_instruction = (None if is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH
+                                       else resolve_quiz_extraction_instruction(subject_type, quiz_extraction_mode))
 
         # 3. استدعى محرك AI
         quiz_data = await generate_quiz_smart(

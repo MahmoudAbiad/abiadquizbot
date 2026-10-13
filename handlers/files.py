@@ -13,6 +13,7 @@ from aiogram.fsm.context import FSMContext
 from config import QuizState, bot, redis_client, ADMIN_ID
 from helpers.settings_helper import get_setting
 from constants import (
+    QUESTION_TYPE_SIMILAR_MATH, SUBJECT_MATH,
     ADMIN_CONTACT, BTN_CANCEL_REQUEST, ERROR_ALBUM_TOO_LARGE,
     MAX_ALBUM_IMAGES, MAX_SUPER_PAGES, MAX_TEXT_INPUT_SIZE, MSG_NOTHING_TO_CANCEL,
     MSG_PREVIOUS_REQUEST_REPLACED, MSG_PROCESSING, MSG_REQUEST_CANCELLED,
@@ -297,7 +298,7 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     # العدد محدَّد فعلياً بالمستند نفسه وتم رصده تلقائياً (راجع show_question_count_screen
     # أدناه). كيبورد مخصص بزر تعديل يدوي (لو الرصد غير دقيق) + زر بدء الاستخراج فقط.
     subject_type = data.get("subject_type")
-    if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+    if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH:
         keyboard = get_quiz_detected_count_keyboard(selected_count)
     else:
         keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
@@ -336,7 +337,7 @@ async def show_question_count_screen(reply_target: types.Message, state: FSMCont
     """
     data = await state.get_data()
     subject_type = data.get("subject_type")
-    if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+    if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH:
         detected_count = int(data.get("detected_question_count") or DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK)
         notice = data.get("quiz_detection_notice")
         count_text = MSG_QUIZ_DETECTED_COUNT_TEMPLATE.format(count=detected_count)
@@ -384,7 +385,8 @@ async def _proceed_to_quiz_solved_screen(reply_target: types.Message, state: FSM
     """
     await state.update_data(quiz_detection_notice=None)
     await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
-    keyboard = get_quiz_extraction_choice_keyboard()
+    data = await state.get_data()
+    keyboard = get_quiz_extraction_choice_keyboard(is_math=data.get("content_subject_type") == SUBJECT_MATH)
     if edit:
         await reply_target.edit_text(MSG_QUIZ_SOLVED_DETECTED, parse_mode="HTML", reply_markup=keyboard)
     else:
@@ -398,6 +400,16 @@ async def _proceed_to_quiz_unsolved_screen(reply_target: types.Message, state: F
     بالذكاء الاصطناعي لتُدمج هناك بنص العدد المرصود وتكلفته. مستخرجة كدالة مستقلة لنفس سبب
     _proceed_to_quiz_solved_screen أعلاه (راجعها).
     """
+    data = await state.get_data()
+    if data.get("content_subject_type") == SUBJECT_MATH:
+        await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
+        text = "🗂️ <b>هذا المحتوى اختبار رياضيات جاهز بلا إجابات مرفقة.</b>\n\nاختر استخراج أسئلته وحلّها، أو إنشاء مسائل جديدة بنفس النمط."
+        keyboard = get_quiz_extraction_choice_keyboard(is_math=True, solved=False)
+        if edit:
+            await reply_target.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await reply_target.answer(text, parse_mode="HTML", reply_markup=keyboard)
+        return
     await state.update_data(
         quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE,
         quiz_detection_notice=MSG_QUIZ_UNSOLVED_DETECTED,
@@ -887,8 +899,28 @@ async def _apply_quiz_extraction_choice(call: types.CallbackQuery, state: FSMCon
     """يحفظ اختيار الطالب (كما هي/حل بالذكاء الاصطناعي) بالحالة، ثم ينتقل مباشرة لشاشة
     تأكيد خصم النقاط (عدد الأسئلة) - بدون المرور بشاشة نوع/صعوبة الأسئلة (لا معنى لها هنا،
     راجع التعليق الأصلي بـ ask_question_count)."""
-    await state.update_data(quiz_extraction_mode=extraction_mode)
+    data = await state.get_data()
+    if extraction_mode == QUIZ_EXTRACTION_MODE_AS_IS and data.get("subject_type") != SUBJECT_QUIZ_SOLVED:
+        return
+    await state.update_data(quiz_extraction_mode=extraction_mode, question_type=QUESTION_TYPE_GENERAL, custom_question_type_text=None)
     await show_question_count_screen(call.message, state, edit=True)
+
+@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_generate_similar_math")
+async def handle_quiz_generate_similar_math(call: types.CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("content_subject_type") != SUBJECT_MATH:
+        await call.answer("هذا الخيار مخصص لمحتوى الرياضيات.", show_alert=True)
+        return
+    await state.update_data(
+        question_type=QUESTION_TYPE_SIMILAR_MATH, custom_question_type_text=None,
+        quiz_extraction_mode=None, quiz_detection_notice=None,
+        count_prompt_text="🧩 كم مسألة جديدة تريد توليدها بنفس النمط؟",
+    )
+    await state.set_state(QuizState.waiting_for_quiz_options)
+    from handlers.quiz_options import _render_difficulty_screen
+    await _render_difficulty_screen(call.message, state, edit=True)
+    await call.answer()
+
 
 @router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_extract_as_is")
 async def handle_quiz_extract_as_is(call: types.CallbackQuery, state: FSMContext) -> None:
@@ -1134,7 +1166,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # مصمَّم أصلاً لتنويع الكويزات المولَّدة بالذكاء الاصطناعي من نفس الملف (تجنّب
         # تكرار نفس المحتوى بلا داعٍ)، بينما هنا كل استخراج ينقل محتوى اختبار حقيقي محدَّد
         # مسبقاً بالمستند نفسه - لا معنى لتحديد عدد مرات استخراجه.
-        if file_hash and subject_type_for_limit not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        if file_hash and (subject_type_for_limit not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) or data.get("question_type") == QUESTION_TYPE_SIMILAR_MATH):
             # 🆕 نفس فحص سقف التركيبة، مُعاد هنا كخط دفاع أخير مباشرة قبل الخصم (قد يكون
             # طالب آخر ولّد كويزاً بنفس التركيبة بين عرض الشاشة والضغط على "ابدأ التوليد").
             current_quizzes = await get_file_quizzes(file_hash)
@@ -1658,3 +1690,4 @@ async def process_web_uploaded_images(
 
 
 files_router = router
+
