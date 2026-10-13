@@ -864,6 +864,10 @@ def get_ai_provider_choice_keyboard(slot: str) -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="⚪ OpenAI", callback_data=f"admin_ai_provider_openai_{slot}")],
         [types.InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"admin_ai_slot_{slot}")],
     ]
+    if slot == "detection":
+        kb = [row for row in kb if row[0].callback_data in {
+            f"admin_ai_provider_gemini_{slot}", f"admin_ai_provider_groq_{slot}",
+            f"admin_ai_slot_{slot}"}]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -1160,3 +1164,4 @@ def get_group_channel_picker_keyboard(
         rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
     rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
