@@ -30,6 +30,8 @@ from constants import (
     ERROR_CUSTOM_QUESTION_TYPE_TOO_LONG, MAX_CUSTOM_QUESTION_TYPE_LENGTH,
     MSG_CUSTOM_QUESTION_TYPE_PROMPT, MSG_QUIZ_DIFFICULTY_PROMPT, MSG_QUIZ_TYPE_PROMPT,
     QUESTION_TYPE_CUSTOM, QUESTION_TYPE_GENERAL, SUBJECT_OTHER,
+    QUESTION_TYPE_SIMILAR_MATH, MSG_SIMILAR_MATH_NOTICE, SUBJECT_MATH,
+    SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
 )
 from keyboards import get_quiz_difficulty_keyboard, get_quiz_type_keyboard
 from logger import get_logger, log_error
@@ -65,6 +67,11 @@ def _type_display_label(data: dict) -> str:
 
 async def _render_type_screen(target: types.Message, state: FSMContext, edit: bool) -> None:
     data = await state.get_data()
+    if data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("content_subject_type") == SUBJECT_MATH:
+        from handlers.files import _proceed_to_quiz_solved_screen, _proceed_to_quiz_unsolved_screen
+        show = _proceed_to_quiz_solved_screen if data["subject_type"] == SUBJECT_QUIZ_SOLVED else _proceed_to_quiz_unsolved_screen
+        await show(target, state, edit=edit)
+        return
     keyboard = get_quiz_type_keyboard(
         subject_type=data.get("subject_type", SUBJECT_OTHER),
         suggested_types=data.get("suggested_question_types", []),
@@ -79,6 +86,8 @@ async def _render_type_screen(target: types.Message, state: FSMContext, edit: bo
 async def _render_difficulty_screen(target: types.Message, state: FSMContext, edit: bool) -> None:
     data = await state.get_data()
     text = MSG_QUIZ_DIFFICULTY_PROMPT.format(type_label=_type_display_label(data))
+    if data.get("question_type") == QUESTION_TYPE_SIMILAR_MATH:
+        text += "\n\n" + MSG_SIMILAR_MATH_NOTICE
     keyboard = get_quiz_difficulty_keyboard(selected_difficulty=data.get("difficulty", DIFFICULTY_MEDIUM))
     if edit:
         await target.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
@@ -96,6 +105,14 @@ async def handle_type_screen(call: types.CallbackQuery, state: FSMContext) -> No
     """
     value = call.data.replace("qtype_", "", 1)
     try:
+        if value == QUESTION_TYPE_SIMILAR_MATH:
+            data = await state.get_data()
+            if (data.get("content_subject_type") or data.get("subject_type")) != SUBJECT_MATH:
+                return
+            await state.update_data(quiz_extraction_mode=None, quiz_detection_notice=None,
+                                    count_prompt_text="🧩 كم مسألة جديدة تريد توليدها بنفس النمط؟")
+        else:
+            await state.update_data(count_prompt_text="📝 كم سؤالاً تريد توليده من هذا المحتوى؟")
         if value == "custom":
             await state.set_state(QuizState.waiting_for_custom_question_type)
             await call.message.edit_text(
@@ -162,3 +179,4 @@ async def handle_difficulty_screen(call: types.CallbackQuery, state: FSMContext)
         await call.message.answer("❌ حدث خطأ غير متوقع، حاول مجدداً.")
     finally:
         await call.answer()
+

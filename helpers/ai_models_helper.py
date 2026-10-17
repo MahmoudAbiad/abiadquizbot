@@ -22,10 +22,11 @@ MODULE: Dynamic AI Model Configuration (لوحة التحكم بموديلات �
 ⚠️ ملاحظة معمارية مهمة: التنفيذ الفعلي لسلسلة "cascade" مربوط حالياً بمزوّدين اثنين -
 Gemini (AI Studio، عبر مجموعة مفاتيح API_KEYS بالتناوب) وVertex AI (Google Cloud، عبر
 عميل Service Account واحد - راجع _VERTEX_CLIENT بـ helpers/gemini_helper.py) - كلاهما
-يستخدمان google-genai SDK نفسه (وضعان مختلفان لنفس المكتبة). سلسلة "detection" لا تزال
-مربوطة حصراً بـ Gemini (services/detection_common.py). حقل "provider" بالجدول عام ويقبل
+يستخدمان google-genai SDK نفسه (وضعان مختلفان لنفس المكتبة). فحص المحتوى الموحّد يدعم
+Gemini وGroq Vision، مع انتقال تلقائي إلى Groq عند فشل Gemini. الفحوصات القديمة
+yes/no تبقى على Gemini (services/detection_common.py). حقل "provider" بالجدول عام ويقبل
 "gemini"/"vertex"/"groq"/"openai" لإتاحة إضافة مزوّدين جدد مستقبلاً من نفس اللوحة، لكن
-أي صف بمزوّد غير "gemini"/"vertex" ضمن slot="cascade"، أو غير "gemini" ضمن
+أي صف بمزوّد غير "gemini"/"vertex" ضمن slot="cascade"، أو غير "gemini"/"groq" ضمن
 slot="detection"، سيُتخطى تلقائياً وقت التنفيذ الفعلي (مع تسجيل تحذير بالـ logs) لحين
 إضافة تكامل SDK مخصص لذلك المزوّد - راجع _get_models_cascade بـ helpers/gemini_helper.py.
 أما slot="groq_fast" فمربوط فعلياً بعميل Groq الموجود أصلاً (AsyncGroq) ويمكن تغيير اسم
@@ -224,3 +225,4 @@ async def move_model(model_id: int, slot: str, direction: str) -> bool:
     except Exception as e:
         log_error(logger, f"Error moving ai_model_slots id={model_id} direction={direction}: {e}", exception=e)
         return False
+

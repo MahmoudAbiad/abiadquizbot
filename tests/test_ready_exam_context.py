@@ -308,6 +308,7 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
         contexts = [
             ('SYSTEM_PROMPT_GENERATE_QUESTIONS', 'general'),
             ('SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS', 'math'),
+            ('SYSTEM_PROMPT_GENERATE_SIMILAR_MATH_QUESTIONS', 'similar-math'),
             ('SYSTEM_PROMPT_GENERATE_ENGLISH_PLAIN_QUESTIONS', 'english'),
             ('SYSTEM_PROMPT_GENERATE_ENGLISH_TRANSLATED_QUESTIONS', 'translated'),
             ('SYSTEM_PROMPT_GENERATE_FRENCH_PLAIN_QUESTIONS', 'french'),
@@ -328,6 +329,7 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
             MAX_STANDARD_QUESTIONS=30, SUPER_IMAGE_BATCH_THRESHOLD=10,
             DIFFICULTY_PROGRESSIVE='progressive',
             OPTION_COUNT=4, SUBJECT_FRENCH='french',
+            QUESTION_TYPE_SIMILAR_MATH='similar_math',
             MSG_PREVIOUS_QUESTIONS_INSTRUCTION='',
             _resolve_difficulty_instruction=lambda _: '',
             _resolve_question_type_instruction=lambda *_: '',

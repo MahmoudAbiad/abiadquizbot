@@ -120,7 +120,14 @@ async def classify_yes_no(contents: list, *, caller: str = "detection") -> bool:
     # 🆕 اسم الموديل صار ديناميكياً من لوحة تحكم الأدمن (slot="detection") بدل ثابت
     # بالكود - راجع helpers/ai_models_helper.py. مقيّد حالياً بمزوّد Gemini فقط (الوحيد
     # المدعوم فعلياً لقراءة الصور/الملفات multimodal بهذا المسار).
-    detection_model = (await get_detection_model())["model_name"]
+    row = await get_detection_model()
+    if row.get("provider", "gemini") != "gemini":
+        # Legacy yes/no detectors are not used by the unified upload classifier.
+        # Keep their Gemini-only path isolated from Groq model names.
+        from helpers.ai_models_helper import _FALLBACK_DEFAULTS, SLOT_DETECTION
+        detection_model = _FALLBACK_DEFAULTS[SLOT_DETECTION][0]["model_name"]
+    else:
+        detection_model = row["model_name"]
     for client in _GEMINI_CLIENTS:
         try:
             response = await asyncio.wait_for(
@@ -149,3 +156,4 @@ async def classify_yes_no(contents: list, *, caller: str = "detection") -> bool:
             log_warning(logger, f"[{caller}] Detection call failed with one key, trying next key if available: {exc}")
             continue
     return False
+

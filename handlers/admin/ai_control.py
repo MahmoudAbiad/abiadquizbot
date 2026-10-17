@@ -99,7 +99,7 @@ async def _render_slot_screen(event, slot: str, state: FSMContext = None):
     if slot == SLOT_DETECTION:
         extra_note = (
             "\n\n⚠️ ملاحظة: هذا الفحص يحتاج قراءة صور/ملفات مباشرة، لذلك مقيّد حالياً "
-            "بموديلات <b>Gemini</b> فقط."
+            "بموديلات <b>Gemini</b> أو <b>Groq Vision</b>. عند فشل Gemini ينتقل إلى Groq تلقائياً."
         )
 
     text = f"{slot_label}\n━━━━━━━━━━━━━━━━━━\n\n{body}{extra_note}"
@@ -202,7 +202,7 @@ async def prompt_add_model(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
     text = f"➕ <b>إضافة موديل جديد لـ {SLOT_LABELS.get(slot, slot)}</b>\n\nاختر الشركة المزوّدة:"
     if slot == SLOT_DETECTION:
-        text += "\n\n⚠️ هذا الفحص يقرأ صور/ملفات مباشرة، لذا يدعم حالياً Gemini فقط."
+        text += "\n\n⚠️ هذا الفحص يقرأ صور/ملفات مباشرة، لذا اختر Gemini أو Groq بنموذج يدعم الصور (qwen/qwen3.8-27b)."
     await safe_edit_text(call.message, text, reply_markup=get_ai_provider_choice_keyboard(slot))
     try:
         await call.answer()
@@ -219,11 +219,10 @@ async def choose_provider(call: types.CallbackQuery, state: FSMContext):
         await call.answer("❌ قيمة غير معروفة.", show_alert=True)
         return
 
-    # قيد معماري حالي: فحص المحتوى (detection) يحتاج قراءة صور/ملفات مباشرة - مدعوم
-    # فقط عبر Gemini اليوم (راجع ملاحظة helpers/ai_models_helper.py).
-    if slot == SLOT_DETECTION and provider != "gemini":
+    # فحص المحتوى يدعم Gemini وGroq Vision فقط.
+    if slot == SLOT_DETECTION and provider not in ("gemini", "groq"):
         await call.answer(
-            "❌ فحص المحتوى السريع يدعم حالياً موديلات Gemini فقط (يحتاج قراءة صور/ملفات مباشرة).",
+            "❌ فحص المحتوى السريع يدعم Gemini أو Groq بنموذج يدعم الصور فقط.",
             show_alert=True,
         )
         return
@@ -563,3 +562,4 @@ async def show_quiz_generation_log(call: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error rendering quiz generation log: {e}")
         await call.answer("❌ حدث خطأ أثناء جلب السجل.", show_alert=True)
+

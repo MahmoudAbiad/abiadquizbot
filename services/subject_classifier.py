@@ -35,7 +35,9 @@ MODULE: Unified Subject Classifier (الفحص الموحّد لتصنيف ال�
 2. نموذج سريع وخفيف حصراً (MATH_DETECTION_MODEL بـ thinking_level="low") -
    بالتحديد لتعويض تكلفة إرسال محتوى أكبر (ملف كامل بدل صفحة واحدة) والحفاظ
    على سرعة استجابة لا يشعر بها الطالب، بدل موديل تفكير أبطأ وأدق.
-3. فشل آمن (Fail-Safe): أي خطأ يُعتبر تلقائياً subject="other" بلا اقتراحات،
+3. فشل Gemini ينتقل إلى Groq Vision تلقائياً، واختيار Groq من لوحة الأدمن
+   يوجّه الفحص إليه مباشرة. الفشل التشغيلي لا يُخزَّن في كاش التصنيف.
+4. فشل آمن (Fail-Safe): أي خطأ يُعتبر تلقائياً subject="other" بلا اقتراحات،
    ويكمل التدفق بمسار عام بدل تعطيل الاستقبال بأكمله.
 ==============================================================================
 """
@@ -64,6 +66,7 @@ from constants import (
 from logger import get_logger, log_warning
 from services.detection_common import IMAGE_EXTENSIONS, build_text_sample
 from helpers.ai_models_helper import get_detection_model
+from services import groq_subject_detection
 from config import redis_client
 from helpers.supabase_helper import get_classification_lock
 
@@ -77,7 +80,7 @@ logger = get_logger(__name__)
 # لأنه غير مرتبط بزمن انتهاء صلاحية ملفات Gemini Files API (تلك تنتهي خلال ~48 ساعة أصلاً
 # ولا علاقة لها بنتيجة التصنيف المخزَّنة هنا، وهي فقط subject/suggested_types/إلخ نصية).
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
-_CLASSIFY_CACHE_PREFIX = "subject_classify:"
+_CLASSIFY_CACHE_PREFIX = "subject_classify:v2:"
 
 API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") if key.strip()]
 # AI-NOTE: عملاء ثابتون لمرة واحدة (نفس منطق detection_common.py) لتفادي تسريب
@@ -221,14 +224,71 @@ async def _safe_delete_gemini_file(client: genai.Client, file_name: str) -> None
         log_warning(logger, f"[subject_classifier] Could not delete temporary upload {file_name}: {exc}")
 
 
-async def _classify(contents: list) -> SubjectClassification:
+class ClassificationUnavailable(RuntimeError):
+    pass
+
+
+async def _groq_result(*, model=None, paths=None, text=None):
+    results = await groq_subject_detection.classify(
+        SYSTEM_PROMPT_CLASSIFY_SUBJECT, SubjectClassification,
+        model=model, paths=paths, text=text,
+    )
+    # Blank cover pages must not outvote real content. Preserve quiz format and
+    # its underlying academic subject; counts cover every page batch.
+    quizzes = [r for r in results if r.subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)]
+    useful = quizzes or [r for r in results if r.subject != SUBJECT_OTHER] or results
+    from collections import Counter
+    subject = Counter(r.subject for r in useful).most_common(1)[0][0]
+    chosen = next(r for r in useful if r.subject == subject).model_copy(deep=True)
+    if quizzes:
+        counts = [r.question_count for r in quizzes if r.question_count is not None]
+        chosen.question_count = sum(counts) if counts else None
+        academics = [r.content_subject for r in quizzes if r.content_subject not in (None, SUBJECT_OTHER)]
+        if academics:
+            chosen.content_subject = Counter(academics).most_common(1)[0][0]
+    result = _normalize(chosen)
+    logger.info("[subject_classifier] Classification success provider=groq model=%s subject=%s",
+                model or groq_subject_detection.DEFAULT_VISION_MODEL, result.subject)
+    return result
+
+
+async def _dispatch_classification(*, contents=None, paths=None):
+    row = await get_detection_model()
+    provider = row.get("provider", "gemini")
+    if provider == "groq":
+        # Selecting Groq in the admin panel really changes the provider.
+        try:
+            return await _groq_result(model=row["model_name"], paths=paths,
+                                      text="\n".join(contents or []))
+        except Exception as exc:
+            log_warning(logger, f"[subject_classifier] Groq failed: {type(exc).__name__}: {exc}")
+            # A Groq model name must NEVER be passed to Gemini.
+            raise ClassificationUnavailable("Selected Groq classifier failed") from exc
+    if provider != "gemini":
+        raise ClassificationUnavailable(f"Unsupported classification provider: {provider}")
+    try:
+        return await (_classify_media_gemini(paths) if paths else _classify_gemini(contents))
+    except Exception as exc:
+        log_warning(logger, f"[subject_classifier] Switching Gemini -> Groq: {type(exc).__name__}: {exc}")
+        return await _groq_result(paths=paths, text="\n".join(contents or []))
+
+
+async def _classify(contents):
+    return await _dispatch_classification(contents=contents)
+
+
+async def _classify_media(file_paths):
+    return await _dispatch_classification(paths=file_paths)
+
+
+async def _classify_gemini(contents: list) -> SubjectClassification:
     """الاستدعاء الفعلي الموحّد - نفس بنية _attempt بـ gemini_helper.py لكن بموديل خفيف ومخرجات منظّمة."""
     if not API_KEYS:
-        return _fallback()
+        raise ClassificationUnavailable("No Gemini API keys configured")
     # 🆕 اسم الموديل صار ديناميكياً من لوحة تحكم الأدمن (slot="detection") - نفس الموديل
     # المستخدم بفحص الرياضيات السريع بـ services/detection_common.py (سلسلة موحّدة واحدة).
     detection_model = (await get_detection_model())["model_name"]
-    for client in _GEMINI_CLIENTS:
+    for client in _GEMINI_CLIENTS[:2]:
         try:
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
@@ -240,15 +300,17 @@ async def _classify(contents: list) -> SubjectClassification:
                         response_schema=SubjectClassification,
                     ),
                 ),
-                timeout=MATH_DETECTION_TIMEOUT,
+                timeout=min(MATH_DETECTION_TIMEOUT, 10) if groq_subject_detection.available() else MATH_DETECTION_TIMEOUT,
             )
             if response.parsed:
                 return _normalize(response.parsed)
             log_warning(logger, "[subject_classifier] Classification call returned no parsed result")
         except Exception as exc:
-            log_warning(logger, f"[subject_classifier] Classification call failed with one key, trying next key if available: {exc}")
+            log_warning(logger, f"[subject_classifier] Gemini classification failed: {type(exc).__name__}: {exc}")
+            if isinstance(exc, (asyncio.TimeoutError,)) or getattr(exc, "code", None) in (500, 502, 503, 504):
+                break
             continue
-    return _fallback()
+    raise ClassificationUnavailable("Gemini classification exhausted")
 
 
 async def _classify_text(pure_text: str) -> SubjectClassification:
@@ -259,14 +321,14 @@ async def _classify_text(pure_text: str) -> SubjectClassification:
     return await _classify([prompt])
 
 
-async def _classify_media(file_paths: List[str]) -> SubjectClassification:
+async def _classify_media_gemini(file_paths: List[str]) -> SubjectClassification:
     """
     🆕 يفحص الملف/الوسائط بالكامل (بدل صفحة أولى فقط): كل صفحات ملف PDF واحد، أو كل
     صور الألبوم دفعة واحدة. Gemini يقرأ ملفات PDF أصلياً بكل صفحاتها دون أي تحويل
     مسبق لصور (بعكس أسلوب "أول صفحة → صورة PNG" المستخدم سابقاً).
     """
     if not file_paths or not API_KEYS:
-        return _fallback()
+        raise ClassificationUnavailable("No Gemini media client available")
 
     # 🆕 اسم الموديل صار ديناميكياً من لوحة تحكم الأدمن (slot="detection").
     detection_model = (await get_detection_model())["model_name"]
@@ -281,7 +343,7 @@ async def _classify_media(file_paths: List[str]) -> SubjectClassification:
             mime_types.append(IMAGE_EXTENSIONS[ext])
         else:
             # مستندات أوفيس (.docx/.pptx/.txt) تُفحص كنص بعد الاستخراج، وليس هنا مباشرة
-            return _fallback()
+            raise ClassificationUnavailable("Unsupported media type")
         try:
             total_size += os.path.getsize(path)
         except OSError:
@@ -297,9 +359,9 @@ async def _classify_media(file_paths: List[str]) -> SubjectClassification:
                 inline_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
         except Exception as exc:
             log_warning(logger, f"[subject_classifier] Could not read file(s) for classification: {exc}")
-            return _fallback()
+            raise ClassificationUnavailable("Cannot read media") from exc
 
-    for client in _GEMINI_CLIENTS:
+    for client in _GEMINI_CLIENTS[:2]:
         uploaded: List[Any] = []
         try:
             if use_inline:
@@ -323,17 +385,19 @@ async def _classify_media(file_paths: List[str]) -> SubjectClassification:
                         response_schema=SubjectClassification,
                     ),
                 ),
-                timeout=MATH_DETECTION_TIMEOUT,
+                timeout=min(MATH_DETECTION_TIMEOUT, 10) if groq_subject_detection.available() else MATH_DETECTION_TIMEOUT,
             )
             if response.parsed:
                 return _normalize(response.parsed)
             log_warning(logger, "[subject_classifier] Classification call returned no parsed result")
         except Exception as exc:
-            log_warning(logger, f"[subject_classifier] Classification call failed with one key, trying next key if available: {exc}")
+            log_warning(logger, f"[subject_classifier] Gemini classification failed: {type(exc).__name__}: {exc}")
+            if isinstance(exc, (asyncio.TimeoutError,)) or getattr(exc, "code", None) in (500, 502, 503, 504):
+                break
         finally:
             for uploaded_file in uploaded:
                 spawn(_safe_delete_gemini_file(client, uploaded_file.name))
-    return _fallback()
+    raise ClassificationUnavailable("Gemini media classification exhausted")
 
 
 async def get_pending_classification_snapshot(file_hash: Optional[str]) -> Optional[SubjectClassification]:
@@ -385,6 +449,7 @@ async def classify_subject(
             result = _fallback()
     except Exception as exc:
         log_warning(logger, f"[subject_classifier] Unexpected error during classification, defaulting to 'other': {exc}")
-        result = _fallback()
+        return _fallback()
     await _store_cached_classification(file_hash, result)
     return result
+
