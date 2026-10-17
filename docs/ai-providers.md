@@ -80,3 +80,14 @@ node tests/sql/ai_providers_test.mjs
 ```
 
 اختبارات SQL تستخدم PostgreSQL معزولًا عبر PGlite. اختبارات المزوّدين تستخدم استجابات وهمية ولا ترسل المحتوى إلى شركات الذكاء الاصطناعي ولا تستهلك رصيد API.
+
+## التتبّع الآمن للطلبات في Render (برانش test)
+
+سجّل `request_id` للبحث عن أحداث الطلب نفسه:
+- `AI_REQUEST_START` بداية الطلب، `AI_ATTEMPT_START` محاولة نموذج.
+- `AI_ATTEMPT_SUCCESS` نجاح المزوّد والنموذج، المدة `elapsed_ms` والتوكنات، و`fallback=True` إذا فشلت محاولة سابقة.
+- `AI_ATTEMPT_FAILED` رمز HTTP `status`، تصنيف `reason`، و`retry_after_s` عندما يرسله المزوّد كعدد ثوانٍ صالح.
+- `AI_ATTEMPT_SKIPPED` تخطي محاولة خلال التبريد، `AI_MODEL_SKIPPED` لا توجد مفاتيح API.
+- `AI_REQUEST_SUCCESS` أو `AI_REQUEST_FAILED` النتيجة النهائية، و`AI_REQUEST_ABORTED` عند فقدان ملف محلي.
+
+`reason` تصنيف تقريبي من كلمات مفتاحية، ليس نص رسالة المزوّد. لا تسجل الأحداث محتوى الملفات، رسائل الطلاب، المفاتيح، عناوين URL، أو جسم استجابة المزود. `credential_index` فهرس المفتاح فقط. التبريد الحالي للأخطاء 429 هو 24 ساعة (سلوك قديم) ولا يعني بالضرورة أن OpenRouter يمنع الطلب لتلك المدة. التغيير لا يتطلب migration.
