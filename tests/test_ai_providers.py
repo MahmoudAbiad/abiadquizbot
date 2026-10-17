@@ -147,6 +147,21 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
         self.assertIsNone(result)
 
+    async def test_image_batch_failure_waits_for_other_requests(self):
+        finished = []
+        async def execute_chunk(paths, **kwargs):
+            if paths == ['missing.png']:
+                raise FileNotFoundError('missing.png')
+            await asyncio.sleep(0.01)
+            finished.append(True)
+            return ([], 0)
+        env = load_functions('helpers/gemini_helper/generation.py', {'_generate_super_images'},
+            asyncio=asyncio, split_images_into_three_sync=lambda paths: [['missing.png'], ['other.png']],
+            _execute_cascade=execute_chunk, _build_super_chunk_attempt_fn=lambda paths, prompt: paths,
+            log_error=Mock(), logger=Mock())
+        self.assertIsNone(await env['_generate_super_images'](['missing.png', 'other.png'], 4, 'Make {count}'))
+        self.assertEqual(finished, [True])
+
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_payload_schema_images_usage_and_client_cleanup(self):
@@ -234,6 +249,16 @@ class ConfigurationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProviderUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_model_add_preserves_state_for_retry(self):
+        message = types.SimpleNamespace(text='model-name', answer=AsyncMock())
+        state = types.SimpleNamespace(get_data=AsyncMock(return_value={
+            'new_model_slot': 'cascade', 'new_model_provider': 'custom'}), clear=AsyncMock())
+        env = load_functions('handlers/admin/ai_control.py', {'process_new_model_name'},
+            add_model=AsyncMock(return_value=None), get_ai_cancel_keyboard=Mock())
+        await env['process_new_model_name'](message, state)
+        state.clear.assert_not_awaited()
+        message.answer.assert_awaited_once()
+
     async def test_router_registration_and_admin_private_filters(self):
         import importlib.util
         from pathlib import Path

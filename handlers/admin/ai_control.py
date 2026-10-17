@@ -254,7 +254,6 @@ async def process_new_model_name(msg: types.Message, state: FSMContext):
         return
 
     result = await add_model(slot, provider, model_name)
-    await state.clear()
 
     if result is None:
         await msg.answer(
@@ -264,6 +263,7 @@ async def process_new_model_name(msg: types.Message, state: FSMContext):
         )
         return
 
+    await state.clear()
     await msg.answer(f"✅ تمت إضافة <code>{html_escape(model_name)}</code> بنجاح.", parse_mode="HTML")
     await _render_slot_screen(msg, slot)
 

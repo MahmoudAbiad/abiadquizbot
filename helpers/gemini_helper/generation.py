@@ -366,8 +366,8 @@ async def _generate_super_images(
     ]
     if not tasks:
         return None
-    results = await asyncio.gather(*tasks)
-    if any(result is None for result in results):
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    if any(result is None or isinstance(result, BaseException) for result in results):
         log_error(logger, "Super Images: chunk exhausted the entire model/key cascade")
         return None
     questions = [question for result in results for question in result[0]]
