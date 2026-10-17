@@ -9,6 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from helpers.ai_providers_helper import get_providers, save_provider, delete_provider
 from helpers.ai_models_helper import get_all_models, update_model, VALID_SLOTS
 from services.ai.runtime import credentials_for
+from services.ai.provider_presets import provider_preset
 from .dashboard import IsAdminFilter, safe_edit_text
 
 router = Router()
@@ -17,6 +18,7 @@ router.callback_query.filter(IsAdminFilter(), F.message.chat.type == "private")
 
 
 class ProviderState(StatesGroup):
+    account_id = State()
     identifier = State()
     label = State()
     transport = State()
@@ -76,6 +78,50 @@ async def show_provider(call: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "aip:new")
+async def choose_provider_setup(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await safe_edit_text(call.message, "اختر مزوّدًا بإعداد جاهز، أو أضف مزوّدًا آخر:",
+        reply_markup=keyboard([
+            [("OpenRouter", "aip:preset:openrouter")],
+            [("Cloudflare Workers AI", "aip:preset:cloudflare")],
+            [("مزوّد آخر / إعداد مخصص", "aip:custom")],
+            [("إلغاء", "aip:list")]]))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("aip:preset:"))
+async def choose_provider_preset(call: types.CallbackQuery, state: FSMContext):
+    service = call.data.split(":")[2]
+    if service not in {"openrouter", "cloudflare"}:
+        return
+    if service in await get_providers(force_refresh=True):
+        await show_provider(call, state)
+        return
+    await state.clear()
+    await state.update_data(create=True)
+    if service == "cloudflare":
+        await state.set_state(ProviderState.account_id)
+        await call.message.answer("أرسل Cloudflare Account ID من لوحة Cloudflare.\n"
+            "هذا معرّف الحساب، لا ترسل API Token. سنستخدم متغير البيئة CLOUDFLARE_API_TOKEN.",
+            reply_markup=cancel_keyboard())
+    else:
+        await state.update_data(draft=provider_preset(service))
+        await preview_provider(call.message, state)
+    await call.answer()
+
+
+@router.message(ProviderState.account_id)
+async def provider_cloudflare_account(message: types.Message, state: FSMContext):
+    try:
+        draft = provider_preset("cloudflare", account_id=(message.text or "").strip())
+    except ValueError as exc:
+        await message.answer(escape(str(exc)), reply_markup=cancel_keyboard())
+        return
+    await state.update_data(draft=draft)
+    await preview_provider(message, state)
+
+
+@router.callback_query(F.data == "aip:custom")
 async def new_provider(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(create=True, draft={"is_enabled": True})
@@ -187,7 +233,8 @@ async def provider_environment(message: types.Message, state: FSMContext):
 async def preview_provider(message, state):
     data = await state.get_data()
     await state.set_state(ProviderState.confirm)
-    await message.answer("راجع الإعدادات ثم احفظ:\n<pre>" +
+    await message.answer("راجع الإعدادات ثم احفظ. ضع المفتاح في متغير البيئة المذكور على السيرفر، "
+                         "ثم أضف نماذج المزوّد من سلسلة التوليد أو المسار النصي السريع:\n<pre>" +
                          escape(json.dumps(data["draft"], ensure_ascii=False, indent=2)) + "</pre>",
                          reply_markup=keyboard([[("💾 حفظ", "aip:save")], [("إلغاء", "aip:list")]]))
 

@@ -258,7 +258,7 @@ async def process_new_model_name(msg: types.Message, state: FSMContext):
     if result is None:
         await msg.answer(
             "❌ تعذّرت الإضافة - إما الاسم يحتوي رموز غير مسموحة (يُسمح فقط بحروف/أرقام/نقطة/"
-            "شرطة/سلاش/نقطتين)، أو مضاف مسبقاً بنفس الاسم والشركة. حاول مجدداً:",
+            "شرطة/سلاش/نقطتين/@)، أو مضاف مسبقاً بنفس الاسم والشركة. حاول مجدداً:",
             reply_markup=get_ai_cancel_keyboard(slot),
         )
         return

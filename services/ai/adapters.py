@@ -7,6 +7,7 @@ import os
 import httpx
 
 from services.ai.contracts import AIResult, Attachment
+from services.ai.provider_presets import chat_service
 
 
 class ProviderError(Exception):
@@ -32,7 +33,14 @@ def parse_result(result, schema):
 class ChatAdapter:
     capabilities = {"text", "image"}
 
+    def capabilities_for(self, provider):
+        # Workers AI's documented compatible endpoint is for text generation.
+        return {"text"} if chat_service(provider["base_url"]) == "cloudflare" else self.capabilities
+
     async def generate(self, provider, credential, model, request):
+        service = chat_service(provider["base_url"])
+        if not request.capabilities <= self.capabilities_for(provider):
+            raise ValueError("Unsupported attachment for this provider endpoint")
         content = []
         for part in request.contents:
             if isinstance(part, str):
@@ -50,6 +58,11 @@ class ChatAdapter:
             content.append({"type": "text", "text": "Return ONLY valid JSON matching this schema:\n" +
                             json.dumps(request.schema.model_json_schema(), ensure_ascii=False)})
             body["response_format"] = {"type": "json_object"}
+            if service == "openrouter":
+                # Only route structured requests to endpoints honoring JSON mode.
+                body["provider"] = {"require_parameters": True}
+        if service == "cloudflare":
+            body["messages"][0]["content"] = "\n\n".join(part["text"] for part in content)
         # One client per attempt, always closed including cancellation. No SDK retries:
         # the runtime owns the fallback policy. Never forward credentials on redirects.
         async with httpx.AsyncClient(follow_redirects=False, timeout=None) as client:
@@ -58,6 +71,10 @@ class ChatAdapter:
             if response.status_code >= 300:
                 raise ProviderError(response.status_code)
             payload = response.json()
+        if payload.get("error") or payload.get("success") is False:
+            error = payload.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            raise ProviderError(code if type(code) is int else None)
         choice = payload["choices"][0]
         usage = payload.get("usage") or {}
         # Completion tokens already include reasoning tokens on this protocol.

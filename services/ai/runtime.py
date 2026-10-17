@@ -47,7 +47,11 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
         if exclude_vertex and provider["transport"] == "vertex":
             continue
         adapter = ADAPTERS.get(provider["transport"])
-        if adapter is None or not request.capabilities <= (set(entry["capabilities"]) & adapter.capabilities):
+        if adapter is None:
+            continue
+        capabilities = (adapter.capabilities_for(provider) if hasattr(adapter, "capabilities_for")
+                        else adapter.capabilities)
+        if not request.capabilities <= (set(entry["capabilities"]) & capabilities):
             continue
         credentials = credentials_for(provider)
         if not credentials:

@@ -13,6 +13,8 @@ try {
                 VALUES ('cascade','gemini','original',1),('groq_fast','groq','original-fast',1);`);
   const migration = fs.readdirSync('db/migrations').find(name => name.endsWith('_ai_provider_registry.sql'));
   await db.exec(fs.readFileSync('db/migrations/' + migration, 'utf8'));
+  const workersMigration = fs.readdirSync('db/migrations').find(name => name.endsWith('_workers_ai_model_names.sql'));
+  await db.exec(fs.readFileSync('db/migrations/' + workersMigration, 'utf8'));
   await db.exec('GRANT SELECT, INSERT ON ai_model_pricing TO service_role; SET ROLE service_role');
   assert.equal((await db.query('SELECT * FROM ai_providers')).rows.length, 4);
   const original = (await db.query("SELECT * FROM ai_model_slots WHERE model_name='original'")).rows[0];
@@ -24,6 +26,8 @@ try {
                 SELECT * FROM ai_model_add('detection','custom','vision-a');`);
   let model = (await db.query("SELECT * FROM ai_model_slots WHERE model_name='vendor/model-a:free'")).rows[0];
   assert.deepEqual(model.capabilities, ['text']);
+  await db.exec("SELECT * FROM ai_model_add('cascade','custom','@cf/meta/llama-3.1-8b-instruct')");
+  await db.query('SELECT * FROM ai_model_update($1,$2,$3)', [model.id, '@hf/nousresearch/hermes-2-pro-mistral-7b', ['text']]);
   await db.query('SELECT * FROM ai_model_update($1,$2,$3)', [model.id, 'model-b', ['text','image']]);
   await assert.rejects(db.query('SELECT * FROM ai_model_update($1,$2,$3)', [model.id, 'bad', ['text','pdf']]));
   await assert.rejects(db.exec("SELECT * FROM ai_model_add('cascade','missing','x')"));

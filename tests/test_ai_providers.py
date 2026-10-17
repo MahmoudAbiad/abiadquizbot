@@ -17,6 +17,7 @@ from services.ai import runtime
 from services.ai.adapters import ChatAdapter, GoogleAdapter, ProviderError, parse_result
 from services.ai.contracts import AIRequest, AIResult, Attachment
 from services.ai.state import _last_model_used_var, _last_token_usage_var
+from services.ai.provider_presets import provider_preset, cloudflare_base_url, chat_service
 from reliability_support import load_functions
 
 
@@ -36,6 +37,27 @@ class Answer(BaseModel):
 
 
 class ProviderValidationTests(unittest.TestCase):
+    def test_named_provider_presets_have_real_endpoints_and_secret_references(self):
+        router = provider_preset('openrouter')
+        self.assertEqual(providers.validate_provider(router), router)
+        self.assertEqual(router['base_url'], 'https://openrouter.ai/api/v1')
+        cloud = provider_preset('cloudflare', account_id='A' * 32)
+        self.assertEqual(providers.validate_provider(cloud), cloud)
+        self.assertIn('/accounts/' + 'a' * 32 + '/ai/v1', cloud['base_url'])
+        self.assertEqual(cloud['api_keys_env'], 'CLOUDFLARE_API_TOKEN')
+        for bad_id in ['', 'token-value', 'a' * 31, 'g' * 32, 'https://example.com']:
+            with self.subTest(account=bad_id), self.assertRaises(ValueError):
+                cloudflare_base_url(bad_id)
+        for name in ['@cf/meta/llama-3.1-8b-instruct', '@hf/nousresearch/hermes-2-pro-mistral-7b']:
+            self.assertIsNotNone(models._MODEL_NAME_PATTERN.fullmatch(name))
+
+    def test_profiles_match_destination_not_label_or_lookalike_hosts(self):
+        self.assertEqual(chat_service(provider_preset('openrouter')['base_url']), 'openrouter')
+        self.assertEqual(chat_service(provider_preset('cloudflare', account_id='1' * 32)['base_url']), 'cloudflare')
+        for url in ['https://openrouter.ai.example.com/api/v1', 'https://example.com/openrouter',
+                    'https://openrouter.ai/other', 'https://openrouter.ai:invalid/api/v1', 'https://api.cloudflare.com/client/v4/accounts/invalid/ai/v1']:
+            self.assertEqual(chat_service(url), 'generic')
+
     def test_custom_provider_and_environment_reference(self):
         self.assertEqual(providers.validate_provider(provider())["id"], "custom")
         for changes in ({"api_keys_env": "sk-secret"}, {"base_url": "http://example.com"},
@@ -164,6 +186,56 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def capture_named_request(self, config, request):
+        calls = []
+        original = httpx.AsyncClient
+        def handler(wire_request):
+            calls.append(wire_request)
+            return httpx.Response(200, json={'choices': [{'message': {'content': '{"answer":"ok"}'},
+                'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 2, 'completion_tokens': 3, 'total_tokens': 5}})
+        with patch('services.ai.adapters.httpx.AsyncClient', side_effect=lambda **kwargs:
+                   original(transport=httpx.MockTransport(handler), **kwargs)):
+            result = await ChatAdapter().generate(config, 'test-token', '@cf/model' if config['id'] == 'cloudflare' else 'vendor/model', request)
+        self.assertEqual(result.parsed.answer if request.schema else result.text, 'ok' if request.schema else '{"answer":"ok"}')
+        return calls[0], json.loads(calls[0].content)
+
+    async def test_cloudflare_uses_account_endpoint_string_content_and_json_mode(self):
+        config = provider_preset('cloudflare', account_id='2' * 32)
+        wire, body = await self.capture_named_request(config, AIRequest(('Create a quiz', 'material'), Answer))
+        self.assertEqual(str(wire.url), 'https://api.cloudflare.com/client/v4/accounts/' + '2' * 32 + '/ai/v1/chat/completions')
+        self.assertEqual(wire.headers['Authorization'], 'Bearer test-token')
+        self.assertIsInstance(body['messages'][0]['content'], str)
+        self.assertIn('material', body['messages'][0]['content'])
+        self.assertIn('Return ONLY valid JSON', body['messages'][0]['content'])
+        self.assertEqual(body['response_format'], {'type': 'json_object'})
+        self.assertNotIn('provider', body)
+        self.assertEqual(ChatAdapter().capabilities_for(config), {'text'})
+        with self.assertRaises(ValueError):
+            await ChatAdapter().generate(config, 'key', '@cf/model', AIRequest((Attachment('image/png', data=b'x'),)))
+
+    async def test_openrouter_requires_json_support_only_for_structured_requests(self):
+        config = provider_preset('openrouter')
+        wire, body = await self.capture_named_request(config, AIRequest(('material',), Answer))
+        self.assertEqual(str(wire.url), 'https://openrouter.ai/api/v1/chat/completions')
+        self.assertEqual(body['provider'], {'require_parameters': True})
+        self.assertEqual(body['response_format'], {'type': 'json_object'})
+        self.assertIsInstance(body['messages'][0]['content'], list)
+        _, plain = await self.capture_named_request(config, AIRequest(('Summarize',)))
+        self.assertNotIn('provider', plain)
+        self.assertNotIn('response_format', plain)
+
+    async def test_json_error_response_is_treated_as_failure_without_leaking_body(self):
+        original = httpx.AsyncClient
+        for payload in [{'error': {'code': 429, 'message': 'secret token'}},
+                        {'success': False, 'errors': [{'message': 'secret token'}]}]:
+            with self.subTest(payload=payload):
+                client = original(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
+                with patch('services.ai.adapters.httpx.AsyncClient', return_value=client):
+                    with self.assertRaises(ProviderError) as caught:
+                        await ChatAdapter().generate(provider_preset('openrouter'), 'secret', 'model', AIRequest(('hi',)))
+                self.assertNotIn('secret', str(caught.exception))
+                self.assertTrue(client.is_closed)
+
     async def test_chat_payload_schema_images_usage_and_client_cleanup(self):
         calls, clients = [], []
         def handler(request):
@@ -258,6 +330,35 @@ class ProviderUITests(unittest.IsolatedAsyncioTestCase):
         await env['process_new_model_name'](message, state)
         state.clear.assert_not_awaited()
         message.answer.assert_awaited_once()
+
+    async def test_preset_wizard_previews_openrouter_and_requests_cloudflare_account(self):
+        for service in ['openrouter', 'cloudflare']:
+            state = types.SimpleNamespace(clear=AsyncMock(), update_data=AsyncMock(), set_state=AsyncMock())
+            call = types.SimpleNamespace(data='aip:preset:' + service, message=types.SimpleNamespace(answer=AsyncMock()), answer=AsyncMock())
+            env = load_functions('handlers/admin/ai_providers.py', {'choose_provider_preset'},
+                get_providers=AsyncMock(return_value={}), show_provider=AsyncMock(),
+                provider_preset=provider_preset, ProviderState=types.SimpleNamespace(account_id='account'),
+                cancel_keyboard=Mock(), preview_provider=AsyncMock())
+            await env['choose_provider_preset'](call, state)
+            if service == 'openrouter':
+                state.update_data.assert_any_await(draft=provider_preset('openrouter'))
+                env['preview_provider'].assert_awaited_once()
+            else:
+                state.set_state.assert_awaited_once_with('account')
+                env['preview_provider'].assert_not_awaited()
+
+    async def test_cloudflare_account_validation_preserves_state_for_retry(self):
+        state = types.SimpleNamespace(update_data=AsyncMock())
+        message = types.SimpleNamespace(text='wrong-account', answer=AsyncMock())
+        env = load_functions('handlers/admin/ai_providers.py', {'provider_cloudflare_account'},
+            provider_preset=provider_preset, escape=lambda text: text, cancel_keyboard=Mock(), preview_provider=AsyncMock())
+        await env['provider_cloudflare_account'](message, state)
+        state.update_data.assert_not_awaited()
+        env['preview_provider'].assert_not_awaited()
+        message.text = 'f' * 32
+        await env['provider_cloudflare_account'](message, state)
+        state.update_data.assert_awaited_once_with(draft=provider_preset('cloudflare', account_id=message.text))
+        env['preview_provider'].assert_awaited_once_with(message, state)
 
     async def test_router_registration_and_admin_private_filters(self):
         import importlib.util
