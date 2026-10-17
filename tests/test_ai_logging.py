@@ -1,6 +1,7 @@
 """Provider success/failure logs, with safe upstream error detail."""
 import contextlib
 import os
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -16,6 +17,7 @@ class LoggingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         runtime._blocked.clear()
         runtime._pointers.clear()
+        runtime._shared_blocked.clear()
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.dict(os.environ, {"OPENROUTER_API_KEY": "SECRET-KEY"}))
@@ -52,7 +54,7 @@ class LoggingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProviderError) as caught:
                 await ChatAdapter().generate(self.providers["openrouter"], "SECRET-KEY", "gemma", AIRequest(("private",)))
         error = caught.exception
-        self.assertEqual((error.status, error.reason, error.retry_after_s), (429, "quota_or_daily_limit", 17))
+        self.assertEqual((error.status, error.reason, error.retry_after_s), (429, "daily_quota", 17))
         self.assertNotIn("SECRET-KEY", str(error))
         self.providers["backup"] = {**self.providers["openrouter"], "id": "backup"}
         self.entries.append({"provider": "backup", "model_name": "other",
@@ -67,7 +69,7 @@ class LoggingTests(unittest.IsolatedAsyncioTestCase):
             result = await runtime.execute(AIRequest(("PRIVATE_STUDENT_TEXT",)), slot="detection", timeout=2)
         self.assertEqual(result.text, "PRIVATE_REPLY")
         data = "\n".join(capture.output)
-        for marker in ("AI_ATTEMPT_FAILED", "status=429", "reason=quota_or_daily_limit",
+        for marker in ("AI_ATTEMPT_FAILED", "status=429", "reason=daily_quota",
                        "retry_after_s=17", "AI_ATTEMPT_SUCCESS", "provider=backup",
                        "fallback=True", "AI_REQUEST_SUCCESS"):
             self.assertIn(marker, data)
@@ -84,6 +86,53 @@ class LoggingTests(unittest.IsolatedAsyncioTestCase):
         data = "\n".join(capture.output)
         for event in ("AI_ATTEMPT_FAILED", "AI_ATTEMPT_SKIPPED", "AI_REQUEST_FAILED"):
             self.assertIn(event, data)
+
+
+    async def test_platform_429_blocks_all_free_models_for_same_account(self):
+        self.providers["backup"] = {**provider_preset("openrouter"),
+                                    "id": "backup", "base_url": "https://example.net/v1"}
+        self.entries[:] = [
+            {"provider": "openrouter", "model_name": "vendor/first:free",
+             "capabilities": ["text"], "is_enabled": True},
+            {"provider": "openrouter", "model_name": "vendor/second:free",
+             "capabilities": ["text"], "is_enabled": True},
+            {"provider": "backup", "model_name": "backup-model",
+             "capabilities": ["text"], "is_enabled": True},
+        ]
+        async def generate(provider, credential, model, request):
+            if provider["id"] == "openrouter":
+                raise ProviderError(429, reason="minute_rate_limit", retry_after_s=40)
+            return AIResult("backup result")
+        adapter = type("Fake", (), {"capabilities": {"text"}, "generate": AsyncMock(side_effect=generate)})()
+        self.stack.enter_context(patch.dict(runtime.ADAPTERS, {"openai_compatible": adapter}))
+        with self.assertLogs("services.ai.runtime", level="INFO") as capture:
+            self.assertEqual((await runtime.execute(AIRequest(("hello",)), timeout=2)).text, "backup result")
+            self.assertEqual((await runtime.execute(AIRequest(("hello",)), timeout=2)).text, "backup result")
+        self.assertEqual([v.args[2] for v in adapter.generate.await_args_list],
+                         ["vendor/first:free", "backup-model", "backup-model"])
+        self.assertIn("reason=shared_rate_limit", "\\n".join(capture.output))
+        for key, (_, why) in list(runtime._shared_blocked.items()):
+            runtime._shared_blocked[key] = (time.monotonic() - 1, why)
+        await runtime.execute(AIRequest(("hello",)), timeout=2)
+        self.assertEqual(adapter.generate.await_args_list[-2].args[2], "vendor/first:free")
+
+    async def test_upstream_429_keeps_other_free_model_eligible(self):
+        self.entries[:] = [
+            {"provider": "openrouter", "model_name": "vendor/first:free",
+             "capabilities": ["text"], "is_enabled": True},
+            {"provider": "openrouter", "model_name": "vendor/second:free",
+             "capabilities": ["text"], "is_enabled": True},
+        ]
+        async def generate(provider, credential, model, request):
+            if model == "vendor/first:free":
+                raise ProviderError(429, reason="upstream_rate_limit")
+            return AIResult("next model works")
+        adapter = type("Fake", (), {"capabilities": {"text"}, "generate": AsyncMock(side_effect=generate)})()
+        self.stack.enter_context(patch.dict(runtime.ADAPTERS, {"openai_compatible": adapter}))
+        self.assertEqual((await runtime.execute(AIRequest(("hello",)), timeout=2)).text, "next model works")
+        self.assertEqual([v.args[2] for v in adapter.generate.await_args_list],
+                         ["vendor/first:free", "vendor/second:free"])
+        self.assertFalse(runtime._shared_blocked)
 
 
 if __name__ == "__main__":

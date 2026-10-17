@@ -8,53 +8,31 @@ import httpx
 
 from services.ai.contracts import AIResult, Attachment
 from services.ai.provider_presets import chat_service
+from services.ai.rate_limits import classify
 
 
 class ProviderError(Exception):
     """Upstream failure with only safe, structured diagnostic fields."""
 
-    def __init__(self, status=None, *, reason="upstream_error", retry_after_s=None):
+    def __init__(self, status=None, *, reason="upstream_error", retry_after_s=None,
+                 reset_after_s=None):
         self.status = status if type(status) is int else None
         self.reason = reason
         self.retry_after_s = retry_after_s
+        self.reset_after_s = reset_after_s
         super().__init__(f"Provider request failed (status={self.status}, reason={reason})")
 
 
-def _safe_upstream_reason(status, payload=None):
-    """Never put untrusted provider messages in logs; return a fixed reason label."""
-    error = payload.get("error") if isinstance(payload, dict) else None
-    message = error.get("message") if isinstance(error, dict) else error
-    hint = message[:1024].casefold() if isinstance(message, str) else ""
-    if status == 429:
-        if any(s in hint for s in ("free-models-per-day", "daily", "per day", "quota", "insufficient credit")):
-            return "quota_or_daily_limit"
-        if any(s in hint for s in ("per minute", "rpm", "requests/min", "minute limit")):
-            return "minute_rate_limit"
-        if any(s in hint for s in ("capacity", "overloaded", "provider busy")):
-            return "provider_capacity"
-        return "rate_limited"
-    return {
-        400: "invalid_request_or_parameters", 401: "invalid_api_key",
-        402: "insufficient_credits", 403: "access_forbidden",
-        404: "model_or_route_not_found", 408: "upstream_timeout",
-        422: "invalid_request_or_parameters", 500: "upstream_server_error",
-        502: "upstream_unavailable", 503: "upstream_unavailable",
-        504: "upstream_timeout",
-    }.get(status, "upstream_error")
-
-
 def _http_provider_error(response):
+    # Never log or store raw error messages: they may contain student data or tokens.
     try:
-        payload = response.json()
+        payload = response.json() if len(response.content) <= 65536 else None
     except ValueError:
         payload = None
-    raw_retry = response.headers.get("retry-after")
-    retry = (int(raw_retry) if isinstance(raw_retry, str) and
-             raw_retry.isascii() and raw_retry.isdecimal() and
-             0 <= int(raw_retry) <= 86400 else None)
-    return ProviderError(response.status_code,
-                         reason=_safe_upstream_reason(response.status_code, payload),
-                         retry_after_s=retry)
+    info = classify(response.status_code, payload, response.headers)
+    return ProviderError(response.status_code, reason=info.reason,
+                         retry_after_s=info.retry_after_s,
+                         reset_after_s=info.reset_after_s)
 
 
 def parse_result(result, schema):
@@ -165,7 +143,10 @@ class ChatAdapter:
             error = payload.get("error")
             code = error.get("code") if isinstance(error, dict) else None
             status = code if type(code) is int else None
-            raise ProviderError(status, reason=_safe_upstream_reason(status, payload))
+            info = classify(status, payload)
+            raise ProviderError(status, reason=info.reason,
+                                retry_after_s=info.retry_after_s,
+                                reset_after_s=info.reset_after_s)
         choice = payload["choices"][0]
         usage = payload.get("usage") or {}
         # Completion tokens already include reasoning tokens on this protocol.

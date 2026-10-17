@@ -90,4 +90,28 @@ node tests/sql/ai_providers_test.mjs
 - `AI_ATTEMPT_SKIPPED` تخطي محاولة خلال التبريد، `AI_MODEL_SKIPPED` لا توجد مفاتيح API.
 - `AI_REQUEST_SUCCESS` أو `AI_REQUEST_FAILED` النتيجة النهائية، و`AI_REQUEST_ABORTED` عند فقدان ملف محلي.
 
-`reason` تصنيف تقريبي من كلمات مفتاحية، ليس نص رسالة المزوّد. لا تسجل الأحداث محتوى الملفات، رسائل الطلاب، المفاتيح، عناوين URL، أو جسم استجابة المزود. `credential_index` فهرس المفتاح فقط. التبريد الحالي للأخطاء 429 هو 24 ساعة (سلوك قديم) ولا يعني بالضرورة أن OpenRouter يمنع الطلب لتلك المدة. التغيير لا يتطلب migration.
+`reason` تصنيف تقريبي من كلمات مفتاحية، ليس نص رسالة المزوّد. لا تسجل الأحداث محتوى الملفات، رسائل الطلاب، المفاتيح، عناوين URL، أو جسم استجابة المزود. `credential_index` فهرس المفتاح فقط. التبريد لم يعد 24 ساعة بشكل افتراضي ولا يعني بالضرورة أن OpenRouter يمنع الطلب لتلك المدة. التغيير لا يتطلب migration.
+
+## تبريد OpenRouter المتكيّف (test)
+
+يتحقق التصنيف الآمن من `error.metadata.provider_code` و`error.metadata.error_type`
+و`error.metadata.limit_source` ومن مؤشرات رسالة الخطأ دون تسجيل جسم الرسالة،
+ومن `Retry-After` و`X-RateLimit-Reset` و`X-RateLimit-Remaining`
+و`X-RateLimit-Limit` (أو نسختها ضمن `error.metadata.headers`).
+
+- `daily_quota`: حتى موعد إعادة الضبط، أو حتى منتصف الليل UTC عند غياب موعد موثوق.
+- `minute_rate_limit`: حسب الترويسات أو 65 ثانية عند غيابها.
+- `platform_rate_limit`: حد للمنصة مجهول المدة مع احترام إعادة الضبط المعلنة.
+- `upstream_rate_limit`: يخص مزوّد النموذج؛ تبريد افتراضي 45 ثانية.
+- `rate_limited_unknown`: حد غير محسوم؛ تبريد افتراضي 30 ثانية، دون افتراض أنه يومي.
+
+عند ثبوت أن الحظر خاص بمنصة OpenRouter، يطبّق على مجموعة النماذج
+`:free` لنفس إعداد المزوّد ومفاتيحه الحالية (`cooldown_scope=openrouter_free_models`)،
+ولا يشمل النماذج المدفوعة ولا مزوّداً آخر. ضغط مزوّد النموذج يقتصر على نموذج
+ومفتاح محددين (`cooldown_scope=model_credential`). تُحدَّد المدة من
+`Retry-After` أو `X-RateLimit-Reset` ضمن سقف آمن. السجلات تتضمن
+`cooldown_basis` و`reset_after_s` وسبب تخطي النماذج غير المؤهلة.
+
+هذه تشخيصات احتمالية وليست ضماناً لمعرفة نافذة 429 عندما يخفي OpenRouter
+التفاصيل. التبريد محلي للعملية، ويتصفّر بإعادة تشغيل الخدمة.
+لا يحتاج التعديل لأي SQL migration أو تعديل سلسلة النماذج.

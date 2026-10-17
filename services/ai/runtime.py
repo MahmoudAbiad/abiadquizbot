@@ -9,10 +9,13 @@ from helpers.ai_models_helper import get_enabled_models
 from helpers.ai_providers_helper import get_providers
 from logger import get_logger
 from services.ai.adapters import ADAPTERS, ProviderError
+from services.ai.provider_presets import chat_service
+from services.ai.rate_limits import RateLimitInfo, decide_cooldown
 
 logger = get_logger(__name__)
 _blocked = {}
 _pointers = {}
+_shared_blocked = {}  # (provider id, hash of configured key-set) -> (deadline, reason)
 
 
 def credentials_for(provider):
@@ -26,6 +29,15 @@ def _attempt_identity(provider, credential, model):
     # Credential/endpoint changes must not inherit old credentials' cooldown.
     fingerprint = hashlib.sha256((provider["transport"] + str(provider["base_url"]) + credential).encode()).digest()
     return provider["id"], fingerprint, model
+
+
+def _free_pool_identity(provider, credentials):
+    # Changing keys or endpoint invalidates previous shared cooldown.
+    fingerprint = hashlib.sha256(
+        (provider["transport"] + str(provider["base_url"]) +
+         "\\0".join(sorted(credentials))).encode()
+    ).digest()
+    return provider["id"], fingerprint
 
 
 async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regular", timeout=None):
@@ -45,24 +57,37 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     for key, until in list(_blocked.items()):
         if now >= until or key[0] not in providers:
             _blocked.pop(key, None)
+    for key, (until, _) in list(_shared_blocked.items()):
+        if now >= until or key[0] not in providers:
+            _shared_blocked.pop(key, None)
     for key in list(_pointers):
         if key not in providers:
             _pointers.pop(key, None)
     for rank, entry in enumerate(models, start=1):
         provider = providers.get(entry["provider"])
         if not provider or not provider["is_enabled"]:
+            logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=provider_disabled_or_missing",
+                        request_id, slot, entry["provider"], entry["model_name"])
             continue
         if exclude_vertex and provider["transport"] == "vertex":
+            logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=vertex_excluded",
+                        request_id, slot, provider["id"], entry["model_name"])
             continue
         adapter = ADAPTERS.get(provider["transport"])
         if adapter is None:
+            logger.warning("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=unsupported_transport",
+                           request_id, slot, provider["id"], entry["model_name"])
             continue
         capabilities = (adapter.capabilities_for(provider) if hasattr(adapter, "capabilities_for")
                         else adapter.capabilities)
         if not request.capabilities <= (set(entry["capabilities"]) & capabilities):
+            logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=incompatible_capabilities required=%s",
+                        request_id, slot, provider["id"], entry["model_name"], sorted(request.capabilities))
             continue
         if (hasattr(adapter, "supports_request") and
                 not adapter.supports_request(provider, entry["model_name"], request)):
+            logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=unsupported_request",
+                        request_id, slot, provider["id"], entry["model_name"])
             continue
         credentials = credentials_for(provider)
         if not credentials:
@@ -71,6 +96,22 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                 request_id, slot, provider["id"], entry["model_name"],
             )
             continue
+        is_openrouter_free = (
+            chat_service(provider.get("base_url") or "") == "openrouter"
+            and entry["model_name"].endswith(":free")
+        )
+        pool_identity = _free_pool_identity(provider, credentials) if is_openrouter_free else None
+        if pool_identity is not None:
+            shared = _shared_blocked.get(pool_identity)
+            if shared and shared[0] > time.monotonic():
+                logger.info(
+                    "AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s "
+                    "reason=shared_rate_limit cooldown_scope=openrouter_free_models "
+                    "limit_reason=%s cooldown_s=%d",
+                    request_id, slot, provider["id"], entry["model_name"],
+                    shared[1], max(1, round(shared[0] - time.monotonic())),
+                )
+                continue
         start = _pointers.get(provider["id"], 0) % len(credentials)
         _pointers[provider["id"]] = (start + 1) % len(credentials)
         for offset in range(len(credentials)):
@@ -129,17 +170,31 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                           "invalid_response" if isinstance(exc, (ValueError, KeyError, IndexError, TypeError)) else
                           "request_error")
                 retry_after_s = exc.retry_after_s if isinstance(exc, ProviderError) else None
-                cooldown_s = 86400 if status == 429 else 60
-                _blocked[identity] = time.monotonic() + cooldown_s
-                # Never log exception text, image/text contents, credentials or HTTP response bodies.
+                reset_after_s = exc.reset_after_s if isinstance(exc, ProviderError) else None
+                cooldown = decide_cooldown(
+                    status, RateLimitInfo(reason, retry_after_s, reset_after_s),
+                    is_openrouter_free=is_openrouter_free,
+                )
+                until = time.monotonic() + cooldown.seconds
+                if cooldown.scope == "openrouter_free_models" and pool_identity is not None:
+                    _shared_blocked[pool_identity] = (until, reason)
+                else:
+                    _blocked[identity] = until
+                # Never log raw upstream responses, user content or credentials.
                 logger.warning(
                     "AI_ATTEMPT_FAILED request_id=%s slot=%s provider=%s model=%s credential_index=%d "
                     "rank=%d/%d elapsed_ms=%d error_type=%s status=%s reason=%s "
-                    "retry_after_s=%s cooldown_s=%d",
+                    "retry_after_s=%s reset_after_s=%s cooldown_s=%d "
+                    "cooldown_scope=%s cooldown_basis=%s",
                     request_id, slot, provider["id"], entry["model_name"], index, rank, len(models),
                     round((time.monotonic() - started) * 1000),
-                    type(exc).__name__, status, reason, retry_after_s, cooldown_s,
+                    type(exc).__name__, status, reason, retry_after_s, reset_after_s,
+                    cooldown.seconds, cooldown.scope, cooldown.basis,
                 )
+                if cooldown.scope == "openrouter_free_models":
+                    # Other OpenRouter keys under this provider share the same free quota.
+                    # Do not burn another request against a known account-wide limit.
+                    break
     logger.warning(
         "AI_REQUEST_FAILED request_id=%s slot=%s capabilities=%s elapsed_ms=%d failed_attempts=%d reason=no_eligible_success",
         request_id, slot, sorted(request.capabilities),
