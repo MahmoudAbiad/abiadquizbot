@@ -68,7 +68,12 @@ async def show_provider(call: types.CallbackQuery, state: FSMContext):
         await call.answer("المزوّد غير موجود", show_alert=True)
         return
     summary = escape(json.dumps(provider, ensure_ascii=False, indent=2))
-    await safe_edit_text(call.message, f"<b>{escape(provider['label'])}</b>\n<pre>{summary}</pre>",
+    from services.ai.provider_presets import chat_service
+    hint = ("\nلفحص الصور وPDF أضف النموذج <code>@cf/meta/llama-3.2-11b-vision-instruct</code> "
+            "إلى سلسلة الفحص، وعدّل قدراته إلى <code>text,image</code>. "
+            "يفحص أول صورة أو أول صفحة PDF فقط. يجب قبول ترخيص Meta في حساب Cloudflare قبل أول استخدام."
+            if provider["base_url"] and chat_service(provider["base_url"]) == "cloudflare" else "")
+    await safe_edit_text(call.message, f"<b>{escape(provider['label'])}</b>\n<pre>{summary}</pre>" + hint,
         reply_markup=keyboard([
             [("✏️ تعديل الإعدادات", "aip:edit:" + identifier)],
             [("⏸ تعطيل" if provider["is_enabled"] else "✅ تفعيل", "aip:toggle:" + identifier)],
@@ -234,7 +239,7 @@ async def preview_provider(message, state):
     data = await state.get_data()
     await state.set_state(ProviderState.confirm)
     await message.answer("راجع الإعدادات ثم احفظ. ضع المفتاح في متغير البيئة المذكور على السيرفر، "
-                         "ثم أضف نماذج المزوّد من سلسلة التوليد أو المسار النصي السريع:\n<pre>" +
+                         "ثم أضف نماذج المزوّد من سلسلة التوليد أو الفحص أو المسار النصي السريع:\n<pre>" +
                          escape(json.dumps(data["draft"], ensure_ascii=False, indent=2)) + "</pre>",
                          reply_markup=keyboard([[("💾 حفظ", "aip:save")], [("إلغاء", "aip:list")]]))
 

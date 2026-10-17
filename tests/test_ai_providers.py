@@ -209,7 +209,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Return ONLY valid JSON', body['messages'][0]['content'])
         self.assertEqual(body['response_format'], {'type': 'json_object'})
         self.assertNotIn('provider', body)
-        self.assertEqual(ChatAdapter().capabilities_for(config), {'text'})
+        self.assertEqual(ChatAdapter().capabilities_for(config), {'text', 'image'})
         with self.assertRaises(ValueError):
             await ChatAdapter().generate(config, 'key', '@cf/model', AIRequest((Attachment('image/png', data=b'x'),)))
 

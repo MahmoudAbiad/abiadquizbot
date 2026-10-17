@@ -34,13 +34,62 @@ class ChatAdapter:
     capabilities = {"text", "image"}
 
     def capabilities_for(self, provider):
-        # Workers AI's documented compatible endpoint is for text generation.
-        return {"text"} if chat_service(provider["base_url"]) == "cloudflare" else self.capabilities
+        return self.capabilities
+
+    def supports_request(self, provider, model, request):
+        if chat_service(provider["base_url"]) == "cloudflare" and "image" in request.capabilities:
+            # This native model takes one image; classification samples the first.
+            image_count = sum(isinstance(part, Attachment) and part.capability == "image"
+                              for part in request.contents)
+            return (model == "@cf/meta/llama-3.2-11b-vision-instruct" and
+                    (image_count == 1 or request.allow_image_sampling))
+        return True
+
+    async def _generate_cloudflare_vision(self, provider, credential, model, request):
+        texts, image = [], None
+        for part in request.contents:
+            if isinstance(part, str):
+                texts.append(part)
+            elif part.capability == "text":
+                texts.append((await asyncio.to_thread(part.read)).decode("utf-8"))
+            elif part.capability == "image" and image is None:
+                encoded = base64.b64encode(await asyncio.to_thread(part.read)).decode("ascii")
+                image = f"data:{part.mime_type};base64,{encoded}"
+        if request.schema:
+            # Llama 3.2 Vision has no response_format input. Validate its JSON locally.
+            texts.append("Return ONLY valid JSON matching this schema:\n" +
+                         json.dumps(request.schema.model_json_schema(), ensure_ascii=False))
+        body = {"prompt": "\n\n".join(texts), "stream": False, "max_tokens": 1024}
+        if image is not None:
+            body["image"] = image
+        url = provider["base_url"].rstrip("/").removesuffix("/v1") + "/run/" + model
+        async with httpx.AsyncClient(follow_redirects=False, timeout=None) as client:
+            response = await client.post(url, headers={"Authorization": "Bearer " + credential}, json=body)
+            if response.status_code >= 300:
+                raise ProviderError(response.status_code)
+            payload = response.json()
+        if payload.get("success") is False or payload.get("errors"):
+            raise ProviderError()
+        output = payload.get("result")
+        if not isinstance(output, dict):
+            raise ValueError("Invalid Workers AI response")
+        usage = output.get("usage") or {}
+        result = AIResult(text=output.get("response") or "",
+                          input_tokens=int(usage.get("prompt_tokens") or 0),
+                          output_tokens=int(usage.get("completion_tokens") or 0),
+                          total_tokens=int(usage.get("total_tokens") or 0),
+                          truncated=output.get("finish_reason") == "length",
+                          sampled=sum(isinstance(part, Attachment) and part.capability == "image"
+                                      for part in request.contents) > 1)
+        return parse_result(result, request.schema)
 
     async def generate(self, provider, credential, model, request):
         service = chat_service(provider["base_url"])
-        if not request.capabilities <= self.capabilities_for(provider):
+        if (not request.capabilities <= self.capabilities_for(provider) or
+                not self.supports_request(provider, model, request)):
             raise ValueError("Unsupported attachment for this provider endpoint")
+        if service == "cloudflare" and model == "@cf/meta/llama-3.2-11b-vision-instruct":
+            return await self._generate_cloudflare_vision(provider, credential, model, request)
         content = []
         for part in request.contents:
             if isinstance(part, str):

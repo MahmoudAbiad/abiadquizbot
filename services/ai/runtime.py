@@ -53,6 +53,9 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                         else adapter.capabilities)
         if not request.capabilities <= (set(entry["capabilities"]) & capabilities):
             continue
+        if (hasattr(adapter, "supports_request") and
+                not adapter.supports_request(provider, entry["model_name"], request)):
+            continue
         credentials = credentials_for(provider)
         if not credentials:
             continue

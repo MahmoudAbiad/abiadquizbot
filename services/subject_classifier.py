@@ -3,7 +3,8 @@
 
 Native PDF models receive full files. Vision-only fallback processes at most
 three rasterized pages at once and combines validated classifications. Failed
-or partial classification results are not cached.
+classification results are not cached. Single-image endpoints deliberately sample
+the first image/page and never estimate whole-document question counts from it.
 """
 
 import asyncio
@@ -191,9 +192,11 @@ async def _dispatch_classification(*, contents=None, paths=None):
     from services.ai.runtime import execute
     parts = ((SYSTEM_PROMPT_CLASSIFY_SUBJECT, *(Attachment.from_path(path) for path in paths))
              if paths else tuple(contents or []))
-    result = await execute(AIRequest(parts, SubjectClassification), slot="detection", mode="detection",
+    result = await execute(AIRequest(parts, SubjectClassification, allow_image_sampling=True), slot="detection", mode="detection",
                            timeout=MATH_DETECTION_TIMEOUT)
     if result:
+        if getattr(result, "sampled", False):
+            result.parsed.question_count = None
         return _normalize(result.parsed)
     # Vision-only models can read PDF pages as images. Keep three pages in
     # memory at a time, matching the previous bounded Groq classifier.
@@ -201,13 +204,17 @@ async def _dispatch_classification(*, contents=None, paths=None):
         from services.ai.media import page_batches
         results = []
         async for batch in page_batches(paths):
-            result = await execute(AIRequest((SYSTEM_PROMPT_CLASSIFY_SUBJECT +
-                "\nThese pages belong to one document. Count only questions STARTING on these pages.",
-                *batch), SubjectClassification), slot="detection", mode="detection",
-                timeout=MATH_DETECTION_TIMEOUT)
-            if not result:
-                raise ClassificationUnavailable("PDF classification batch failed")
-            results.append(result.parsed)
+            prompt = (SYSTEM_PROMPT_CLASSIFY_SUBJECT +
+                      "\nThese pages belong to one document. Count only questions STARTING on these pages.")
+            result = await execute(AIRequest((prompt, *batch), SubjectClassification, allow_image_sampling=True),
+                slot="detection", mode="detection", timeout=MATH_DETECTION_TIMEOUT)
+            if result:
+                if getattr(result, "sampled", False):
+                    result.parsed.question_count = None
+                    return _normalize(result.parsed)
+                results.append(result.parsed)
+            else:
+                raise ClassificationUnavailable("Page classification failed")
         if results:
             return _merge_classification_results(results)
     raise ClassificationUnavailable("No configured classifier succeeded")

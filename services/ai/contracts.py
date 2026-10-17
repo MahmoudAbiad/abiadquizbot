@@ -36,6 +36,7 @@ class Attachment:
 class AIRequest:
     contents: tuple
     schema: type | None = None
+    allow_image_sampling: bool = False
 
     @property
     def capabilities(self):
@@ -51,6 +52,7 @@ class AIResult:
     thoughts_tokens: int = 0
     total_tokens: int = 0
     truncated: bool = False
+    sampled: bool = False
 
     @property
     def usage(self):
