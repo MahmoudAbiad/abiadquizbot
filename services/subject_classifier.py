@@ -1,54 +1,14 @@
 # services/subject_classifier.py
-"""
-==============================================================================
-MODULE: Unified Subject Classifier (الفحص الموحّد لتصنيف المادة)
-==============================================================================
-الوصف:
-يحل هذا الموديول محل الاستدعاءين المنفصلين اللذين كانا موجودين سابقاً
-(services/math_detector.py و services/english_detector.py) باستدعاء AI واحد
-فقط لكل عملية توليد، يُنفَّذ مبكراً (قبل شاشة اختيار نوع/عدد الأسئلة) ويُعاد
-استخدام نتيجته لاحقاً وقت التوليد الفعلي بدل إعادة الفحص من جديد.
+"""Unified subject classification using the configured detection slot.
 
-قبل هذا التوحيد: حتى استدعاءان منفصلان لكل عملية (فحص إنجليزي مبكراً + فحص
-رياضيات متأخراً وقت التوليد)، كل وحدة برد نصي حر (yes/no) يُفسَّر يدوياً.
-
-بعد التوحيد: استدعاء واحد فقط، مبكراً، يرجع تصنيفاً منظّماً (Structured Output
-عبر response_schema بنفس نمط QuizResponse بـ helpers/gemini_helper.py):
-- subject: "math" | "english" | "french" | "other"
-- suggested_types: قائمة 2-4 اقتراحات AI لنوع الأسئلة (تُملأ فقط لو
-  subject == "other"؛ لمواد الرياضيات والإنجليزي والفرنسي الأنواع ثابتة مسبقاً
-  بـ constants.QUESTION_TYPE_OPTIONS ولا حاجة لاقتراح AI لها).
-
-النتيجة تُخزَّن بحالة الـ FSM (state.update_data) من قبل الجهة المستدعية
-(handlers/files.py) وتُعاد قراءتها لاحقاً بـ services/quiz_service.py بدل
-إعادة تنفيذ أي فحص إضافي على نفس المحتوى.
-
-القرارات الهندسية:
-1. 🆕 فحص الملف/الوسائط كاملة، لا عيّنة صفحة واحدة: كان الفحص سابقاً يكتفي بأول
-   صفحة (PDF) أو أول صورة من الألبوم فقط، ما قد يُخطئ التصنيف لو كانت خصائص
-   المادة (رياضيات/إنجليزي) غير واضحة إلا بصفحات لاحقة (مثلاً: صفحة غلاف عامة
-   ثم محتوى رياضي بباقي الصفحات). الآن يُرسل الملف بالكامل (كل صفحات الـ PDF -
-   Gemini يقرأها أصلاً بشكل أصلي دون تحويلها لصور - أو كل صور الألبوم دفعة
-   واحدة) لنفس الموديل الخفيف. نفس أسلوب Inline-vs-Files API المستخدم بمسار
-   التوليد الفعلي (helpers/gemini_helper.py) يُطبَّق هنا أيضاً لضمان صلاحية
-   الطلب حتى على الملفات الأكبر حجماً.
-2. نموذج سريع وخفيف حصراً (MATH_DETECTION_MODEL بـ thinking_level="low") -
-   بالتحديد لتعويض تكلفة إرسال محتوى أكبر (ملف كامل بدل صفحة واحدة) والحفاظ
-   على سرعة استجابة لا يشعر بها الطالب، بدل موديل تفكير أبطأ وأدق.
-3. فشل Gemini ينتقل إلى Groq Vision تلقائياً، واختيار Groq من لوحة الأدمن
-   يوجّه الفحص إليه مباشرة. الفشل التشغيلي لا يُخزَّن في كاش التصنيف.
-4. فشل آمن (Fail-Safe): أي خطأ يُعتبر تلقائياً subject="other" بلا اقتراحات،
-   ويكمل التدفق بمسار عام بدل تعطيل الاستقبال بأكمله.
-==============================================================================
+Native PDF models receive full files. Vision-only fallback processes at most
+three rasterized pages at once and combines validated classifications. Failed
+or partial classification results are not cached.
 """
 
 import asyncio
-from task_utils import spawn
-import os
 from typing import Any, List, Literal, Optional
 
-from google import genai
-from google.genai import types
 from pydantic import BaseModel, Field
 
 from constants import (
@@ -65,8 +25,6 @@ from constants import (
 )
 from logger import get_logger, log_warning
 from services.detection_common import IMAGE_EXTENSIONS, build_text_sample
-from helpers.ai_models_helper import get_detection_model
-from services import groq_subject_detection
 from config import redis_client
 from helpers.supabase_helper import get_classification_lock
 
@@ -81,11 +39,6 @@ logger = get_logger(__name__)
 # ولا علاقة لها بنتيجة التصنيف المخزَّنة هنا، وهي فقط subject/suggested_types/إلخ نصية).
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
 _CLASSIFY_CACHE_PREFIX = "subject_classify:v2:"
-
-API_KEYS = [key.strip() for key in os.getenv("GEMINI_API_KEYS", "").split(",") if key.strip()]
-# AI-NOTE: عملاء ثابتون لمرة واحدة (نفس منطق detection_common.py) لتفادي تسريب
-# الذاكرة الناتج عن إنشاء genai.Client() جديد بكل استدعاء على المسار الساخن.
-_GEMINI_CLIENTS: List[genai.Client] = [genai.Client(api_key=key) for key in API_KEYS]
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
 _VALID_SUBJECTS = {
@@ -211,28 +164,11 @@ def _normalize(result: Optional[SubjectClassification]) -> SubjectClassification
     )
 
 
-def _read_bytes_sync(path: str) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
-
-
-async def _safe_delete_gemini_file(client: genai.Client, file_name: str) -> None:
-    """حذف أي ملف رُفع مؤقتاً عبر Files API بعد انتهاء الفحص (نفس منطق gemini_helper.py)."""
-    try:
-        await asyncio.to_thread(client.files.delete, name=file_name)
-    except Exception as exc:
-        log_warning(logger, f"[subject_classifier] Could not delete temporary upload {file_name}: {exc}")
-
-
 class ClassificationUnavailable(RuntimeError):
     pass
 
 
-async def _groq_result(*, model=None, paths=None, text=None):
-    results = await groq_subject_detection.classify(
-        SYSTEM_PROMPT_CLASSIFY_SUBJECT, SubjectClassification,
-        model=model, paths=paths, text=text,
-    )
+def _merge_classification_results(results):
     # Blank cover pages must not outvote real content. Preserve quiz format and
     # its underlying academic subject; counts cover every page batch.
     quizzes = [r for r in results if r.subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)]
@@ -247,30 +183,34 @@ async def _groq_result(*, model=None, paths=None, text=None):
         if academics:
             chosen.content_subject = Counter(academics).most_common(1)[0][0]
     result = _normalize(chosen)
-    logger.info("[subject_classifier] Classification success provider=groq model=%s subject=%s",
-                model or groq_subject_detection.DEFAULT_VISION_MODEL, result.subject)
     return result
 
 
 async def _dispatch_classification(*, contents=None, paths=None):
-    row = await get_detection_model()
-    provider = row.get("provider", "gemini")
-    if provider == "groq":
-        # Selecting Groq in the admin panel really changes the provider.
-        try:
-            return await _groq_result(model=row["model_name"], paths=paths,
-                                      text="\n".join(contents or []))
-        except Exception as exc:
-            log_warning(logger, f"[subject_classifier] Groq failed: {type(exc).__name__}: {exc}")
-            # A Groq model name must NEVER be passed to Gemini.
-            raise ClassificationUnavailable("Selected Groq classifier failed") from exc
-    if provider != "gemini":
-        raise ClassificationUnavailable(f"Unsupported classification provider: {provider}")
-    try:
-        return await (_classify_media_gemini(paths) if paths else _classify_gemini(contents))
-    except Exception as exc:
-        log_warning(logger, f"[subject_classifier] Switching Gemini -> Groq: {type(exc).__name__}: {exc}")
-        return await _groq_result(paths=paths, text="\n".join(contents or []))
+    from services.ai.contracts import AIRequest, Attachment
+    from services.ai.runtime import execute
+    parts = ((SYSTEM_PROMPT_CLASSIFY_SUBJECT, *(Attachment.from_path(path) for path in paths))
+             if paths else tuple(contents or []))
+    result = await execute(AIRequest(parts, SubjectClassification), slot="detection", mode="detection",
+                           timeout=MATH_DETECTION_TIMEOUT)
+    if result:
+        return _normalize(result.parsed)
+    # Vision-only models can read PDF pages as images. Keep three pages in
+    # memory at a time, matching the previous bounded Groq classifier.
+    if paths and any(path.lower().endswith(".pdf") for path in paths):
+        from services.ai.media import page_batches
+        results = []
+        async for batch in page_batches(paths):
+            result = await execute(AIRequest((SYSTEM_PROMPT_CLASSIFY_SUBJECT +
+                "\nThese pages belong to one document. Count only questions STARTING on these pages.",
+                *batch), SubjectClassification), slot="detection", mode="detection",
+                timeout=MATH_DETECTION_TIMEOUT)
+            if not result:
+                raise ClassificationUnavailable("PDF classification batch failed")
+            results.append(result.parsed)
+        if results:
+            return _merge_classification_results(results)
+    raise ClassificationUnavailable("No configured classifier succeeded")
 
 
 async def _classify(contents):
@@ -281,123 +221,12 @@ async def _classify_media(file_paths):
     return await _dispatch_classification(paths=file_paths)
 
 
-async def _classify_gemini(contents: list) -> SubjectClassification:
-    """الاستدعاء الفعلي الموحّد - نفس بنية _attempt بـ gemini_helper.py لكن بموديل خفيف ومخرجات منظّمة."""
-    if not API_KEYS:
-        raise ClassificationUnavailable("No Gemini API keys configured")
-    # 🆕 اسم الموديل صار ديناميكياً من لوحة تحكم الأدمن (slot="detection") - نفس الموديل
-    # المستخدم بفحص الرياضيات السريع بـ services/detection_common.py (سلسلة موحّدة واحدة).
-    detection_model = (await get_detection_model())["model_name"]
-    for client in _GEMINI_CLIENTS[:2]:
-        try:
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=detection_model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        thinking_config=types.ThinkingConfig(thinking_level="low"),
-                        response_mime_type="application/json",
-                        response_schema=SubjectClassification,
-                    ),
-                ),
-                timeout=min(MATH_DETECTION_TIMEOUT, 10) if groq_subject_detection.available() else MATH_DETECTION_TIMEOUT,
-            )
-            if response.parsed:
-                return _normalize(response.parsed)
-            log_warning(logger, "[subject_classifier] Classification call returned no parsed result")
-        except Exception as exc:
-            log_warning(logger, f"[subject_classifier] Gemini classification failed: {type(exc).__name__}: {exc}")
-            if isinstance(exc, (asyncio.TimeoutError,)) or getattr(exc, "code", None) in (500, 502, 503, 504):
-                break
-            continue
-    raise ClassificationUnavailable("Gemini classification exhausted")
-
-
 async def _classify_text(pure_text: str) -> SubjectClassification:
     if not pure_text or not pure_text.strip():
         return _fallback()
     sample = build_text_sample(pure_text)
     prompt = f"{SYSTEM_PROMPT_CLASSIFY_SUBJECT}\n\n[عينة النص]:\n{sample}"
     return await _classify([prompt])
-
-
-async def _classify_media_gemini(file_paths: List[str]) -> SubjectClassification:
-    """
-    🆕 يفحص الملف/الوسائط بالكامل (بدل صفحة أولى فقط): كل صفحات ملف PDF واحد، أو كل
-    صور الألبوم دفعة واحدة. Gemini يقرأ ملفات PDF أصلياً بكل صفحاتها دون أي تحويل
-    مسبق لصور (بعكس أسلوب "أول صفحة → صورة PNG" المستخدم سابقاً).
-    """
-    if not file_paths or not API_KEYS:
-        raise ClassificationUnavailable("No Gemini media client available")
-
-    # 🆕 اسم الموديل صار ديناميكياً من لوحة تحكم الأدمن (slot="detection").
-    detection_model = (await get_detection_model())["model_name"]
-
-    mime_types: List[str] = []
-    total_size = 0
-    for path in file_paths:
-        ext = os.path.splitext(path)[1].lower()
-        if ext == ".pdf":
-            mime_types.append("application/pdf")
-        elif ext in IMAGE_EXTENSIONS:
-            mime_types.append(IMAGE_EXTENSIONS[ext])
-        else:
-            # مستندات أوفيس (.docx/.pptx/.txt) تُفحص كنص بعد الاستخراج، وليس هنا مباشرة
-            raise ClassificationUnavailable("Unsupported media type")
-        try:
-            total_size += os.path.getsize(path)
-        except OSError:
-            total_size = DETECTION_INLINE_SIZE_THRESHOLD + 1
-
-    use_inline = total_size <= DETECTION_INLINE_SIZE_THRESHOLD
-    inline_parts: Optional[List[types.Part]] = None
-    if use_inline:
-        try:
-            inline_parts = []
-            for path, mime_type in zip(file_paths, mime_types):
-                file_bytes = await asyncio.to_thread(_read_bytes_sync, path)
-                inline_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
-        except Exception as exc:
-            log_warning(logger, f"[subject_classifier] Could not read file(s) for classification: {exc}")
-            raise ClassificationUnavailable("Cannot read media") from exc
-
-    for client in _GEMINI_CLIENTS[:2]:
-        uploaded: List[Any] = []
-        try:
-            if use_inline:
-                parts = inline_parts
-            else:
-                # ملف/ألبوم أكبر من الحد الآمن للإرسال المباشر - يُرفع مؤقتاً عبر Files API
-                # (نفس مسار helpers.gemini_helper._generate_with_key للملفات الكبيرة).
-                parts = []
-                for path in file_paths:
-                    uploaded_file = await asyncio.to_thread(client.files.upload, file=path)
-                    uploaded.append(uploaded_file)
-                    parts.append(uploaded_file)
-
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=detection_model,
-                    contents=[SYSTEM_PROMPT_CLASSIFY_SUBJECT, *parts],
-                    config=types.GenerateContentConfig(
-                        thinking_config=types.ThinkingConfig(thinking_level="low"),
-                        response_mime_type="application/json",
-                        response_schema=SubjectClassification,
-                    ),
-                ),
-                timeout=min(MATH_DETECTION_TIMEOUT, 10) if groq_subject_detection.available() else MATH_DETECTION_TIMEOUT,
-            )
-            if response.parsed:
-                return _normalize(response.parsed)
-            log_warning(logger, "[subject_classifier] Classification call returned no parsed result")
-        except Exception as exc:
-            log_warning(logger, f"[subject_classifier] Gemini classification failed: {type(exc).__name__}: {exc}")
-            if isinstance(exc, (asyncio.TimeoutError,)) or getattr(exc, "code", None) in (500, 502, 503, 504):
-                break
-        finally:
-            for uploaded_file in uploaded:
-                spawn(_safe_delete_gemini_file(client, uploaded_file.name))
-    raise ClassificationUnavailable("Gemini media classification exhausted")
 
 
 async def get_pending_classification_snapshot(file_hash: Optional[str]) -> Optional[SubjectClassification]:

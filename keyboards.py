@@ -825,9 +825,10 @@ def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboa
     ملاحظة: إعدادات النقاط ما عادت هون - انتقلت لقسم "الإعدادات العامة" المستقل
     (راجع get_admin_settings_general_keyboard) لأنها مالها علاقة بموديلات الذكاء الاصطناعي."""
     kb = [
+        [types.InlineKeyboardButton(text="🔌 إدارة المزوّدين", callback_data="aip:list")],
         [types.InlineKeyboardButton(text="🧠 سلسلة توليد الأسئلة (Cascade)", callback_data="admin_ai_slot_cascade")],
         [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
-        [types.InlineKeyboardButton(text="⚡ موديل Groq السريع", callback_data="admin_ai_slot_groq_fast")],
+        [types.InlineKeyboardButton(text="⚡ المسار النصي السريع", callback_data="admin_ai_slot_groq_fast")],
         [types.InlineKeyboardButton(text="📊 سجل توليد الكويزات (الوقت + الموديل)", callback_data="admin_quiz_gen_log")],
     ]
     if request_timeout is not None:
@@ -857,6 +858,7 @@ def get_ai_slot_keyboard(slot: str, models: list) -> types.InlineKeyboardMarkup:
             nav_row.append(types.InlineKeyboardButton(text="⬇️", callback_data=f"admin_ai_move_down_{model['id']}_{slot}"))
         toggle_text = "🚫 تعطيل" if model.get("is_enabled") else "✅ تفعيل"
         nav_row.append(types.InlineKeyboardButton(text=toggle_text, callback_data=f"admin_ai_toggle_{model['id']}_{slot}"))
+        nav_row.append(types.InlineKeyboardButton(text="✏️ تعديل", callback_data=f"aim:edit:{slot}:{model['id']}"))
         nav_row.append(types.InlineKeyboardButton(text="🗑 حذف", callback_data=f"admin_ai_delete_{model['id']}_{slot}"))
         kb.append(nav_row)
     kb.append([types.InlineKeyboardButton(text="➕ إضافة موديل جديد", callback_data=f"admin_ai_add_{slot}")])
@@ -864,20 +866,12 @@ def get_ai_slot_keyboard(slot: str, models: list) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_ai_provider_choice_keyboard(slot: str) -> types.InlineKeyboardMarkup:
-    """اختيار الشركة (Provider) عند إضافة موديل جديد لسلسلة معيّنة."""
-    kb = [
-        [types.InlineKeyboardButton(text="🟦 Gemini (Google)", callback_data=f"admin_ai_provider_gemini_{slot}")],
-        [types.InlineKeyboardButton(text="🟪 Vertex AI (Google Cloud)", callback_data=f"admin_ai_provider_vertex_{slot}")],
-        [types.InlineKeyboardButton(text="🟩 Groq", callback_data=f"admin_ai_provider_groq_{slot}")],
-        [types.InlineKeyboardButton(text="⚪ OpenAI", callback_data=f"admin_ai_provider_openai_{slot}")],
-        [types.InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"admin_ai_slot_{slot}")],
-    ]
-    if slot == "detection":
-        kb = [row for row in kb if row[0].callback_data in {
-            f"admin_ai_provider_gemini_{slot}", f"admin_ai_provider_groq_{slot}",
-            f"admin_ai_slot_{slot}"}]
-    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+def get_ai_provider_choice_keyboard(slot: str, providers: dict) -> types.InlineKeyboardMarkup:
+    rows = [[types.InlineKeyboardButton(text=p["label"], callback_data=f"admin_ai_provider_{p['id']}_{slot}")]
+            for p in providers.values() if p["is_enabled"]]
+    rows.append([types.InlineKeyboardButton(text="إدارة المزوّدين", callback_data="aip:list")])
+    rows.append([types.InlineKeyboardButton(text="إلغاء", callback_data=f"admin_ai_slot_{slot}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_ai_cancel_keyboard(slot: str) -> types.InlineKeyboardMarkup:

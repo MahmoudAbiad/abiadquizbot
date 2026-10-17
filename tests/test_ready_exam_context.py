@@ -232,7 +232,7 @@ class PdfContextTests(unittest.IsolatedAsyncioTestCase):
             return (
                 [{'question': f'Q{number}', 'options': ['a', 'b', 'c', 'd'],
                   'correct_option_id': 0}],
-                10, 3, 5, 2, 'mock-model', 0, 1, 1,
+                10, 3, 5, 2, 'mock-model', 0, 1, 1, 'custom',
             )
         env = load_functions(
             'helpers/gemini_helper/generation.py',

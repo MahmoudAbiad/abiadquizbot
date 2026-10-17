@@ -1,142 +1,43 @@
-"""
-helpers/gemini_helper/generation.py
-توليد الكويز من الملفات: المسار العادي وSuper PDF / Super Images.
-"""
-
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+"""Quiz prompts, chunk planning and merging; transport lives in services.ai."""
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import asyncio
 
-from google import genai
-from google.genai import types
-
-from task_utils import spawn
-from helpers.settings_helper import get_ai_request_timeout
 from logger import get_logger, log_error
 from mem_utils import release_memory_to_os
 from utils import safe_file_cleanup
-from helpers.gemini_helper.clients import API_KEYS
-from helpers.gemini_helper.state import (
-    _last_model_used_var,
-    _last_token_usage_var,
-    _record_token_usage,
-)
-from helpers.gemini_helper.parsing import _parse_structured_gemini_response
-from helpers.gemini_helper.cascade import _execute_cascade
+from helpers.gemini_helper.state import _last_model_used_var, _last_token_usage_var
 from helpers.gemini_helper.media import (
-    _build_contents_for_paths,
-    _safe_delete_gemini_file,
-    split_images_into_three_sync,
-    split_pdf_into_three_sync, split_pdf_without_orphans,
+    split_images_into_three_sync, split_pdf_without_orphans,
     split_pdf_with_context_without_orphans,
 )
 from helpers.gemini_helper.schemas import QuizResponse
+from services.ai.contracts import AIRequest, Attachment
+from services.ai.runtime import execute as _execute_request
 
 logger = get_logger(__name__)
 
 
-# ==============================================================================
-# CORE GENERATION LOGIC (GEMINI & GROQ)
-# ==============================================================================
-async def _generate_regular(paths: Sequence[str], prompt: str) -> Optional[Tuple[List[Dict[str, Any]], int]]:
-    """المسار العادي لتوليد الكويز من ملفات: يُشغّل كامل سلسلة الأولوية (نماذج × مفاتيح)
-    عبر _execute_cascade، بحيث تُبنى محتويات الطلب (Inline أو Files API) لكل محاولة بعميلها
-    الخاص (ضروري لأن رفعات Files API غير قابلة للمشاركة بين مفاتيح/عملاء مختلفين)."""
-    if not API_KEYS:
-        log_error(logger, "GEMINI_API_KEYS is not configured")
+def _build_super_chunk_attempt_fn(paths, prompt):
+    # Historical private name retained for import compatibility; now builds data.
+    return AIRequest((prompt, *(Attachment.from_path(path) for path in paths)), QuizResponse)
+
+
+async def _execute_cascade(request, exclude_vertex=False):
+    result = await _execute_request(request, exclude_vertex=exclude_vertex)
+    if not result:
         return None
-
-    async def _attempt(client: genai.Client, key_index: int, model: str, cascade_rank: int, cascade_total: int) -> Tuple[List[Dict[str, Any]], int]:
-        uploaded: List[Any] = []
-        try:
-            contents = await _build_contents_for_paths(client, paths, prompt, uploaded)
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=QuizResponse,
-                    ),
-                ),
-                timeout=await get_ai_request_timeout(),
-            )
-            parsed = _parse_structured_gemini_response(response, QuizResponse, model)
-            if not hasattr(parsed, "questions"):
-                raise ValueError("Gemini returned no structured questions")
-            questions = [question.model_dump() for question in parsed.questions]
-            token_count = _record_token_usage(response)
-            return questions, int(token_count)
-        finally:
-            # AI-NOTE: تنظيف وتفريغ أي ملفات رُفعت مؤقتاً لـ Files API في الخلفية
-            for uploaded_file in uploaded:
-                spawn(_safe_delete_gemini_file(client, uploaded_file.name))
-
-    return await _execute_cascade(_attempt)
+    meta = _last_model_used_var.get() or {}
+    questions = [question.model_dump() for question in result.parsed.questions]
+    if not questions:
+        raise ValueError("Provider returned no questions")
+    return (questions, result.total_tokens, result.input_tokens, result.output_tokens,
+            result.thoughts_tokens, meta.get("model"), meta.get("key_index"),
+            meta.get("cascade_rank"), meta.get("cascade_total"), meta.get("provider"))
 
 
-def _build_super_chunk_attempt_fn(
-    paths: Sequence[str], prompt: str
-) -> Callable[[genai.Client, int, str, int, int], Awaitable[Tuple[List[Dict[str, Any]], int, int, int, int, str, int, int, int]]]:
-    """🆕 (طلب صريح من المستخدم: كاسكيد نظامي كامل بدل تثبيت مفتاح واحد + محاولة احتياطية
-    وحيدة) يبني attempt_fn متوافقة تماماً مع توقيع _execute_cascade العام (نفس المُنفِّذ
-    المستخدَم بمسار التوليد العادي بالضبط) لجزء واحد ثابت (مسار/مسارات + برومبت) ضمن
-    Super PDF/Images.
-
-    الفرق الجوهري عن التصميم السابق: client/key_index/model هلق كلها تُمرَّر من
-    _execute_cascade نفسه حسب مكانه الحالي بالسلسلة (رتبة الموديل × دورة المفاتيح)، بدل ما
-    تكون مُثبَّتة سلفاً لكل جزء. عملياً: يجرَّب أقوى موديل (MODELS_CASCADE[0]) على كل مفتاح
-    متاح بالتتالي؛ لو فشل على كل المفاتيح، ينتقل الكاسكيد كامل للموديل التالي بالسلسلة على كل
-    المفاتيح من جديد، وهكذا - تماماً نفس منطق التوليد العادي، مطبَّق هون على مستوى كل جزء
-    (Chunk) على حدة، بالتوازي مع بقية الأجزاء (لكل جزء نسخته الخاصة من هذا الكاسكيد، تعمل
-    بنفس اللحظة عبر asyncio.gather بالمستدعي - راجع _generate_super_pdf).
-
-    🆕 نُعيد أيضاً model/key_index الفائزين صراحة ضمن القيمة المُرجَعة (وليس فقط عبر
-    ContextVar الذي يضبطه _execute_cascade داخلياً) لأن كل جزء يُنفَّذ بمهمة (Task) منفصلة
-    عبر asyncio.gather بالمستدعي، وContextVar لا يتسرّب تلقائياً من مهمة فرعية لمهمة أصلية -
-    بدونها ما كان بالإمكان معرفة أي موديل/مفتاح فاز فعلياً بكل جزء من نطاق الدالة المستدعية.
-
-    ملاحظة تصميم: تسجيل فشل كل زوج (مفتاح، موديل) هون من مسؤولية _execute_cascade نفسه
-    (يستدعي _mark_model_key_failure تلقائياً بكل استثناء) - لا نكرّر ذلك هون تفادياً لأي
-    ازدواجية بالحظر.
-
-    🆕 نرجّع أيضاً cascade_rank/cascade_total الفائزين (ممرَّرين هلق من _execute_cascade
-    نفسه لكل attempt - راجع الملاحظة الموازية فوق _execute_cascade) لنفس سبب model/key_index:
-    كل جزء Task منفصل، فلازم يرجّع رقم ترتيبه صراحة بقيمة العودة بدل الاعتماد على ContextVar.
-    يُستخدم لاحقاً من _generate_super_pdf/_generate_super_images لبناء تفصيل دقيق لكل جزء
-    (أي موديل فاز، وبأي ترتيب ضمن الكاسكيد وقتها) - يُعرض بلوحة الأدمن ("📊 سجل توليد
-    الكويزات") بدل وصف عام واحد لكل السوبر."""
-    async def _attempt(client: genai.Client, key_index: int, model: str, cascade_rank: int, cascade_total: int):
-        uploaded: List[Any] = []
-        try:
-            contents = await _build_contents_for_paths(client, paths, prompt, uploaded)
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=QuizResponse,
-                    ),
-                ),
-                timeout=await get_ai_request_timeout(),
-            )
-            parsed = _parse_structured_gemini_response(response, QuizResponse, model)
-            if not hasattr(parsed, "questions"):
-                raise ValueError("Gemini returned no structured questions")
-            questions = [question.model_dump() for question in parsed.questions]
-            usage = getattr(response, "usage_metadata", None)
-            input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
-            output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
-            thoughts_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
-            token_count = int(getattr(usage, "total_token_count", 0) or 0)
-            return (
-                questions, int(token_count), input_tokens, output_tokens, thoughts_tokens,
-                model, key_index, cascade_rank, cascade_total,
-            )
-        finally:
-            for uploaded_file in uploaded:
-                spawn(_safe_delete_gemini_file(client, uploaded_file.name))
-    return _attempt
+async def _generate_regular(paths, prompt):
+    result = await _execute_cascade(_build_super_chunk_attempt_fn(paths, prompt))
+    return (result[0], result[1]) if result else None
 
 
 def _ready_exam_chunk_prompt(prompt_template: str, question_limit: int, chunk: Dict[str, Any]) -> str:
@@ -258,9 +159,6 @@ async def _generate_pdf_with_context(
     Generated tests assign questions to owned source pages, with adjacent
     context pages available only for completing a topic at the boundary.
     """
-    if not API_KEYS or (part_count == 3 and len(API_KEYS) < 3):
-        log_error(logger, "Insufficient GEMINI_API_KEYS for context-aware PDF processing")
-        return None
     chunks = await split_pdf_with_context_without_orphans(file_path, part_count)
     try:
         await asyncio.to_thread(release_memory_to_os)
@@ -331,13 +229,13 @@ async def _generate_pdf_with_context(
             )
         winning_models = [result[5] for result in results]
         _last_model_used_var.set({
-            "provider": "gemini",
+            "provider": results[0][9] if len({result[9] for result in results}) == 1 else "mixed",
             "model": winning_models[0] if len(set(winning_models)) == 1 else "mixed",
             "key_index": None,
             "mode": "super_pdf" if part_count == 3 else "over_limit_pdf",
             "chunk_details": [
                 {
-                    "model": result[5],
+                    "provider": result[9], "model": result[5],
                     "key_index": result[6],
                     "cascade_rank": result[7],
                     "cascade_total": result[8],
@@ -370,9 +268,6 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
     النجاح). يعني الأجزاء الثلاثة لم تعد "مقفولة" كل واحدة بمفتاح مختلف من البداية - ممكن
     جزءين ينتهي بهم المطاف يجربون نفس المفتاح لو الأول فشل عليه، وهذا مقبول ومقصود (كل مفتاح
     يتحمّل عدة طلبات متزامنة براحة)."""
-    if len(API_KEYS) < 3:
-        log_error(logger, "Super processing requires three distinct GEMINI_API_KEYS")
-        return None
     chunk_paths = await split_pdf_without_orphans(file_path)
     try:
         # 🩹 FIX (memory-leak): fitz (PyMuPDF) يخصّص ذاكرة كبيرة أثناء فتح/تقسيم PDF
@@ -411,7 +306,7 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
         # لاحقاً بلوحة الأدمن ("📊 سجل توليد الكويزات") لعرض كل جزء برقمه الحقيقي بدل وصف
         # عام واحد لكل عملية Super. راجع _build_super_chunk_attempt_fn لمصدر هالحقول.
         chunk_details = [
-            {"model": result[5], "key_index": result[6], "cascade_rank": result[7], "cascade_total": result[8]}
+            {"provider": result[9], "model": result[5], "key_index": result[6], "cascade_rank": result[7], "cascade_total": result[8]}
             for result in results
         ]
         # 🆕 كل جزء نُفِّذ بمهمة (Task) منفصلة عبر asyncio.gather - ContextVar لا يتسرّب
@@ -421,7 +316,7 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
         # أو "mixed" صراحة لو اختلفت (كاسكيد فعلي صار فيه انتقال لموديل/مفتاح آخر لبعض
         # الأجزاء) - chunk_details يحفظ التفصيل الكامل (موديل + مفتاح + رتبة) لكل جزء بأي حال.
         _last_model_used_var.set({
-            "provider": "gemini",
+            "provider": results[0][9] if len({result[9] for result in results}) == 1 else "mixed",
             "model": winning_models[0] if len(set(winning_models)) == 1 else "mixed",
             "key_index": None, "mode": "super_pdf",
             "chunk_details": chunk_details,
@@ -455,9 +350,6 @@ async def _generate_super_images(
     المستخدمة هون تدعم حتى 3,600 ملف صورة بالطلب الواحد، أعلى بكثير من أي ألبوم
     واقعي هون).
     """
-    if len(API_KEYS) < 3:
-        log_error(logger, "Super image processing requires three distinct GEMINI_API_KEYS")
-        return None
     chunks = [chunk for chunk in await asyncio.to_thread(split_images_into_three_sync, file_paths) if chunk]
     if len(chunks) < 2:
         return await _generate_regular(file_paths, prompt_template.replace("{count}", str(count)))
@@ -486,11 +378,11 @@ async def _generate_super_images(
     winning_models = [result[5] for result in results]
     # 🆕 راجع نفس الملاحظة بـ _generate_super_pdf أعلاه حول ContextVar/asyncio.gather وchunk_details.
     chunk_details = [
-        {"model": result[5], "key_index": result[6], "cascade_rank": result[7], "cascade_total": result[8]}
+        {"provider": result[9], "model": result[5], "key_index": result[6], "cascade_rank": result[7], "cascade_total": result[8]}
         for result in results
     ]
     _last_model_used_var.set({
-        "provider": "gemini",
+        "provider": results[0][9] if len({result[9] for result in results}) == 1 else "mixed",
         "model": winning_models[0] if len(set(winning_models)) == 1 else "mixed",
         "key_index": None, "mode": "super_images",
         "chunk_details": chunk_details,

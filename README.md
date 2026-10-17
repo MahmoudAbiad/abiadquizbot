@@ -4,7 +4,7 @@
 
 ## ✨ المميزات:
 
-- 🤖 **توليد أسئلة ذكية** بمساعدة Google Gemini AI (مع Groq كمزوّد احتياطي لتوليد الأسئلة من النص)
+- 🤖 **توليد أسئلة ذكية** عبر مزوّدين قابلين للإدارة من لوحة الأدمن: Gemini وVertex وواجهات متوافقة مع OpenAI مثل Groq. راجع [دليل المزوّدين](docs/ai-providers.md) لتطبيق ترحيل قاعدة البيانات والإعداد.
 - 📄 **معالجة PDF والصور والألبومات** مع استخراج نص تلقائي
 - 📐 **كويزات رياضية بصيغة صورة** (LaTeX) عند اكتشاف محتوى رياضي تلقائياً
 - 🎯 **تخصيص نوع الأسئلة والصعوبة** حسب المادة (رياضيات/إنجليزي/عام)
@@ -58,7 +58,7 @@ abiadquizbot/
 │   └── group_quiz_store.py, group_permissions.py
 │
 └── helpers/
-    ├── gemini_helper/           # حزمة: كاسكيد Gemini/Vertex/Groq، العملاء، التوليد، التحليل
+    ├── gemini_helper/           # واجهة الكويزات: البرومبت والتقسيم والدمج؛ التنفيذ في services/ai
     ├── supabase_helper/         # حزمة: مقسّمة حسب المجال (users, quiz_cache, analytics, ...)
     ├── ai_models_helper.py, settings_helper.py, r2_helper.py, points_calculator.py
 ```

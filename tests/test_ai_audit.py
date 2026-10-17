@@ -47,16 +47,14 @@ class AIAuditTests(unittest.IsolatedAsyncioTestCase):
         model=contextvars.ContextVar('model',default=None)
         usage=contextvars.ContextVar('usage',default=None)
         metadata=contextvars.ContextVar('metadata',default=None)
-        response=types.SimpleNamespace(text='transcript',candidates=[],usage_metadata=None)
-        client=types.SimpleNamespace(aio=types.SimpleNamespace(models=types.SimpleNamespace(generate_content=AsyncMock(return_value=response))))
-        def record(response):usage.set({'input_tokens':10,'output_tokens':20,'total_tokens':30});return 30
-        async def cascade(attempt):
-            result=await attempt(client,0,'audio-model',1,2)
-            model.set({'provider':'gemini','model':'audio-model','cascade_rank':1,'cascade_total':2})
-            return result
-        env=load_functions('helpers/gemini_helper/generic.py',{'generate_text_with_cascade'},asyncio=asyncio,time=time,
+        from services.ai.contracts import AIRequest, AIResult
+        async def cascade(request):
+            model.set({'provider':'custom','model':'audio-model','cascade_rank':1,'cascade_total':2})
+            usage.set({'input_tokens':10,'output_tokens':20,'total_tokens':30})
+            return AIResult('transcript', total_tokens=30)
+        env=load_functions('helpers/gemini_helper/generic.py',{'generate_text_with_cascade'},time=time,
             _last_model_used_var=model,_last_token_usage_var=usage,_last_generation_metadata_var=metadata,
-            _execute_cascade=cascade,_record_token_usage=record,get_ai_request_timeout=AsyncMock(return_value=1))
+            _execute_cascade=cascade,AIRequest=AIRequest,_normalize_contents=tuple)
         result=await env['generate_text_with_cascade'](['audio'])
         self.assertEqual(result,('transcript',30,False))
         self.assertEqual(metadata.get()['model'],'audio-model')
