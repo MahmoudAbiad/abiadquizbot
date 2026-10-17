@@ -143,8 +143,7 @@ async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuer
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
         is_saved_in_session=False, is_switching_question=False,
         attempt_id=attempt_id, stopped_early=False,
-        share_id=None, stream_poll_session=None, generation_pending=False, generation_failed=False,
-        stream_id=None, stream_waiting=False, stream_paused=False,
+        share_id=None
     )
     await state.set_state(QuizState.answering_quiz)
     if isinstance(msg_or_call, types.CallbackQuery):
@@ -168,23 +167,13 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
     save_question_edit_from_web أدناه وwebhook_server.py). send_question نفسها
     صارت غلاف رقيق فوقها لتفادي تكرار أي منطق.
     """
-    from services.quiz_timing import measured
     try:
-        data = await measured('state_read', state.get_data())
-        if data.get("generation_failed") or data.get("quiz_completed"):
-            return
+        data = await state.get_data()
         questions = data['questions']
         idx = data['current_index']
-        if not questions and not data.get("generation_pending"):
-            return
 
         # 1. حالة انتهاء الاختبار
         if idx >= len(questions):
-            if data.get("generation_pending"):
-                if not data.get("stream_waiting"):
-                    await bot.send_message(chat_id, "⏳ عم نجهّز السؤال التالي… رح يوصلك تلقائياً أول ما يجهز.")
-                await measured('state_write', state.update_data(stream_waiting=True, is_switching_question=False))
-                return
             await _handle_quiz_completion(chat_id, user_id, state, data)
             return
 
@@ -192,7 +181,7 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
         #    _prepare_question_for_send أعلاه لسبب استبدال _sanitize_question_for_render هنا)
         q = _prepare_question_for_send(questions[idx])
         questions[idx] = q
-        await measured('state_write', state.update_data(questions=questions))
+        await state.update_data(questions=questions)
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
             [
@@ -202,26 +191,21 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
             ],
             [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
         ])
-        if data.get("generation_pending"):
-            control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint"),
-                 types.InlineKeyboardButton(text="⏸ إيقاف الحل", callback_data="quiz_stop")],
-                [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]])
 
         from handlers.session_navigation import session_id
-        identity = await measured('session_identity', session_id(state))
-        await measured('question_delivery', send_quiz_poll(chat_id, user_id, q, idx, max(len(questions), data.get("total_count", 0)), control_kb,
-                             quiz_id=data.get('quiz_id'), poll_meta={"session_id": identity}))
+        identity = await session_id(state)
+        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb,
+                             quiz_id=data.get('quiz_id'), poll_meta={"session_id": identity})
         # 🆕 send_quiz_poll (لسؤال رياضي) قد يملأ q["image_url"] بعد الرسم/الرفع الفعلي -
         # q هو نفس الكائن المرجعي questions[idx] أعلاه، فنعيد كتابة questions لـ state هنا
         # لضمان تخزين الرابط الجديد فعلياً (وليس فقط بالذاكرة المحلية لهذه الدالة)، حتى
         # تستفيد منه إعادة تشغيل هذا الكويز بنفس الجلسة (quiz_replay) بلا إعادة رسم لاحقة.
         if q.get("image_url"):
-            await measured('state_write', state.update_data(questions=questions))
-        await measured('state_write', state.update_data(is_switching_question=False))
+            await state.update_data(questions=questions)
+        await state.update_data(is_switching_question=False)
     except Exception as e:
         log_error(logger, f"Error in send_question_by_ids: {e}", exception=e)
-        await measured('state_write', state.update_data(is_switching_question=False))
+        await state.update_data(is_switching_question=False)
         try:
             await bot.send_message(
                 chat_id=chat_id,
@@ -234,9 +218,6 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
             pass
 
 async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext, data: dict):
-    if (data.get("generation_failed") or data.get("quiz_completed")
-            or data.get("generation_pending") or not data.get("questions")):
-        return
     score, total = data['score'], data['total_count']
     quiz_id = data.get('quiz_id')
     # ⚠️ current_index يكون دائماً >= total هنا (send_question لا تستدعي هذه الدالة
@@ -351,8 +332,6 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
             if not await active_quiz(state):
                 return
             current_data = await state.get_data()
-            if current_data.get("generation_pending") and current_data.get("stream_paused"):
-                return
             identity = await session_id(state)
             if quiz_info.get("session_id") != identity:
                 return
@@ -747,35 +726,28 @@ async def save_answer_text_edit(msg: types.Message, state: FSMContext):
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "next_question")
 @user_locked()
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
-    from services.quiz_timing import measured
     try:
-        data = await measured('state_read', state.get_data())
-        # Router state filters run before this function obtains UserLock.
-        # A queued callback may belong to a stream aborted while it waited.
-        if data.get("generation_failed") or data.get("quiz_completed") or not data.get("questions"):
-            return
-        if data.get("is_switching_question") or (data.get("generation_pending") and data.get("current_index", 0) >= len(data.get("questions", []))):
-            await measured('callback_answer', call.answer())
+        data = await state.get_data()
+        if data.get("is_switching_question"):
+            await call.answer()
             return
             
-        await measured('state_write', state.update_data(is_switching_question=True, current_index=data['current_index'] + 1))
+        await state.update_data(is_switching_question=True, current_index=data['current_index'] + 1)
         try:
-            await measured('delete_previous', call.message.delete())
+            await call.message.delete()
         except Exception:
             pass
-        await measured('next_delivery', send_question(call, state))
+        await send_question(call, state)
     except Exception as e:
         log_error(logger, f"Error in handle_next: {e}", exception=e)
-        await measured('state_write', state.update_data(is_switching_question=False))
+        await state.update_data(is_switching_question=False)
     finally:
-        await measured('callback_answer', call.answer())
+        await call.answer()
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "get_hint")
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
-        if data.get("current_index", 0) >= len(data.get("questions", [])):
-            return await call.answer("⏳ انتظر وصول السؤال التالي.")
         q = data['questions'][data['current_index']]
         hint_text = q['hint']
         if q.get("is_math"):
@@ -872,7 +844,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
         }))
         await state.update_data(
             current_index=0, score=0, answered_questions={}, navigation_session_id=None, quiz_completed=False, is_switching_question=False,
-            stopped_early=False, attempt_id=new_attempt_id, stream_poll_session=None, generation_failed=False
+            stopped_early=False, attempt_id=new_attempt_id
         )
         try:
             await call.message.delete()
@@ -1147,4 +1119,3 @@ async def delete_warning_msg_handler(call: types.CallbackQuery):
         await call.answer()
 
 quiz_runner_router = router
-

@@ -56,7 +56,6 @@ from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanu
 from validators import validate_file_size, validate_question_count
 from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, InvalidUploadError
 from services.redis_reliability import UserLock, user_locked
-from services.streaming_quiz import StreamingSessionDetached
 
 # استيراد الخدمات الجديدة
 from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
@@ -1076,7 +1075,6 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
     # محذوف فيفشل التوليد لاحقاً عند الضغط مجدداً (راجع finally بنهاية الدالة). الحذف يصير
     # فقط عند الإلغاء/استبدال الطلب (handle_cancel_upload/handle_media) أو انتهاء التوليد.
     preserve_upload = False
-    stream_session = None
     quiz_ready = False  # True بعد نجاح التوليد (لتمييز "فشل بالعرض" عن "فشل قبل/أثناء التوليد")
     data = {}
     try:
@@ -1197,18 +1195,9 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # execute_quiz_generation_workflow (نجاحاً أو فشلاً) عبر finally.
         heartbeat_task = asyncio.create_task(_run_processing_heartbeat(status_msg))
         try:
-            from services.streaming_quiz import StreamingQuiz, streaming_enabled
-            if await streaming_enabled():
-                stream_session = StreamingQuiz(state, user_id, call.message.chat.id, data, count, lock, redis_client)
-                await stream_session.begin()
-                quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(
-                    user_id, data, count, status_msg, on_question=stream_session.publish)
-            else:
-                quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(user_id, data, count, status_msg)
+            quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
         finally:
             heartbeat_task.cancel()
-            if stream_session:
-                await stream_session.reacquire()
 
         if error_code == "unreadable_office":
             if charged_this_attempt:
@@ -1226,10 +1215,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
                 refunded_this_attempt = True
             await _clear_quiz_charge_markers(state)
             await state.set_state(None)
-            if stream_session and stream_session.started:
-                await call.message.answer("⚠️ انقطع توليد بقية الأسئلة، فتوقفت هذه المحاولة وأُعيدت نقاط الطلب. أعد المحاولة لتوليد اختبار كامل.")
-            else:
-                await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
+            await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
             return
 
         # 🆕 (لوحة الأدمن: "📊 سجل توليد الكويزات") - نُرفق بيانات آخر توليد ناجح (الموديل
@@ -1298,18 +1284,9 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         await _clear_quiz_charge_markers(state)
 
         # Generation already owns UserLock; do not try to acquire it twice.
-        if stream_session and stream_session.started:
-            await stream_session.finish(quiz_data, new_quiz_id)
-        else:
-            await start_loaded_quiz.__wrapped__(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
+        await start_loaded_quiz.__wrapped__(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
 
-    except StreamingSessionDetached:
-        # A recovered/replaced stream may finish late. Its receipt is idempotent;
-        # refund only that old debit and leave the newer FSM data untouched.
-        if charged_this_attempt:
-            await refund_user_on_failure(user_id, data)
-            charged_this_attempt = False
     except (FileNotFoundError, InvalidUploadError) as exc:
         # 🩹 رسالة تطابق السبب الفعلي بدل رسالة عامة: ملف مفقود من القرص، أو PDF محمي/تالف.
         # الخصم (إن حصل) يُسترجع، والحالة تُمسح لأن هذا الطلب لا يمكن إكماله بهذا الملف.
@@ -1357,11 +1334,6 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         finally:
             raise
     finally:
-        if stream_session:
-            try:
-                await stream_session.close()
-            except Exception as exc:
-                log_warning(logger, f"Stream cleanup failed (lease will expire): {exc}")
         if not preserve_upload:
             for path in data.get("file_paths", []):
                 safe_file_cleanup(path)

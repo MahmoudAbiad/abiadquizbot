@@ -4,7 +4,6 @@ Production functions are isolated with load_functions so these deterministic
 tests need neither the AI SDK nor a real API key.
 """
 import asyncio
-from contextvars import ContextVar
 import os
 import tempfile
 import unittest
@@ -240,7 +239,7 @@ class PdfContextTests(unittest.IsolatedAsyncioTestCase):
             {'_generate_pdf_with_context', '_ready_exam_chunk_prompt',
              '_generated_pdf_chunk_prompt', '_generated_pdf_chunk_targets',
              '_merge_pdf_chunk_questions'},
-            asyncio=asyncio, API_KEYS=['key1', 'key2', 'key3'], question_sink=ContextVar('sink', default=None),
+            asyncio=asyncio, API_KEYS=['key1', 'key2', 'key3'],
             split_pdf_with_context_without_orphans=split,
             release_memory_to_os=lambda: None,
             _generate_regular=Mock(), _execute_cascade=cascade,

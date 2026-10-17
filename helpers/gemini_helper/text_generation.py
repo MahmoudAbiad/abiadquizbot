@@ -14,7 +14,6 @@ from helpers.gemini_helper.clients import API_KEYS, GROQ_API_KEY, _GROQ_CLIENT, 
 from helpers.gemini_helper.state import _groq_skip_reason_var, _last_model_used_var
 from helpers.gemini_helper.parsing import _repair_json_backslashes
 from helpers.gemini_helper.schemas import QuizResponse
-from helpers.gemini_helper.streaming import generate_groq_response, StreamingInterrupted
 from helpers.gemini_helper.generic import generate_structured_with_cascade
 
 logger = get_logger(__name__)
@@ -85,10 +84,14 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
 
         # 🆕 اسم الموديل صار ديناميكياً من لوحة التحكم (slot="groq_fast") بدل ثابت بالكود.
         groq_model = (await get_groq_fast_model())["model_name"]
-        response = await generate_groq_response(
-            client, model=groq_model,
-            messages=[{"role": "user", "content": formatted_content}],
-            response_format={"type": "json_object"}, temperature=0.7,
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=groq_model,
+                messages=[{"role": "user", "content": formatted_content}],
+                response_format={"type": "json_object"},
+                temperature=0.7,
+            ),
+            timeout=45,
         )
         raw_content = response.choices[0].message.content
         # 🛠️ FIX (Defense in Depth): نموذجات Groq أحياناً تكتب backslash خام داخل نص JSON
@@ -104,8 +107,6 @@ Note: "correct_option_id" MUST be an integer representing the 0-based index of t
             "cascade_rank": None, "cascade_total": None,
         })
         return [question.model_dump() for question in parsed.questions]
-    except StreamingInterrupted:
-        raise
     except Exception as exc:
         log_error(logger, f"Groq text generation failed, will fall back to Gemini: {exc}")
         return None

@@ -221,9 +221,6 @@ async def _execute_cascade(
                 })
                 return result
             except Exception as exc:
-                from helpers.gemini_helper.streaming import StreamingInterrupted
-                if isinstance(exc, StreamingInterrupted):
-                    raise
                 last_exc = exc
                 if isinstance(exc, FileNotFoundError):
                     log_error(logger, f"Local file missing during Vertex upload attempt (not a key/model issue, aborting cascade without penalizing keys): {exc}")
@@ -253,9 +250,6 @@ async def _execute_cascade(
                 })
                 return result
             except Exception as exc:
-                from helpers.gemini_helper.streaming import StreamingInterrupted
-                if isinstance(exc, StreamingInterrupted):
-                    raise
                 last_exc = exc
                 # 🩹 إصلاح خلل حقيقي: FileNotFoundError خطأ محلي (ملف حُذف من القرص من
                 # جهتنا) لا علاقة له إطلاقاً بحالة مفتاح/موديل Gemini الفعلية. معاملته

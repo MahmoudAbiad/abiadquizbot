@@ -14,8 +14,7 @@ from logger import get_logger, log_warning
 # راجع services/image_quiz_renderer.py للتفاصيل.
 from services.image_quiz_renderer import render_question_image_async, looks_arabic, letters_for
 from services.latex_text import latex_to_plain
-from services.quiz_image_preparation import prepare_math_image
-from helpers.supabase_helper import _is_valid_uuid, save_question_image_url
+from helpers.supabase_helper import _is_valid_uuid, save_question_image_url, upload_quiz_question_image
 
 logger = get_logger(__name__)
 
@@ -101,16 +100,16 @@ async def _send_math_image_question(
     الصورة. برضو هاد النمط بيستهلك ضعف حصّة الـ rate limit للغروب - يُحسب
     عند اختيار الفاصل الزمني بمسار الغروب.
     """
-    from services.quiz_timing import measured
     is_ar = looks_arabic(str(q.get("question", "")))
     options = q.get("options") or []
     letters = letters_for(is_ar, len(options))
 
-    logger.info("quiz_delivery question=%s image_cached=%s", idx + 1, bool(q.get("image_url")))
     image_url = q.get("image_url")
     image_bytes = None
     if not image_url:
-        image_url, image_bytes = await measured('image_ready_wait', prepare_math_image(q, idx, total, quiz_id))
+        image_bytes = await render_question_image_async(q, idx, total, is_ar)
+        object_path = _question_image_object_path(quiz_id, idx, q)
+        image_url = await upload_quiz_question_image(image_bytes, object_path)
         if image_url and quiz_id and _is_valid_uuid(quiz_id):
             q["image_url"] = image_url  # يبقى بالذاكرة طوال الجلسة الحالية أيضاً
             spawn(save_question_image_url(quiz_id, idx, image_url))
@@ -118,17 +117,17 @@ async def _send_math_image_question(
     caption = f"السؤال {idx + 1} من {total} 📝"
     try:
         if image_url:
-            await measured('telegram_photo', bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, message_thread_id=message_thread_id))
+            await bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, message_thread_id=message_thread_id)
         else:
             # فشل الرفع لسبب ما (مثال: الباكت غير مُهيّأ) - نرسل الصورة مباشرة كملف بدل رابط
             if image_bytes is None:
-                image_bytes = await measured('fallback_render', render_question_image_async(q, idx, total, is_ar))
-            await measured('telegram_photo', bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption, message_thread_id=message_thread_id))
+                image_bytes = await render_question_image_async(q, idx, total, is_ar)
+            await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption, message_thread_id=message_thread_id)
     except Exception as exc:
         log_warning(logger, f"Failed sending math question image, retrying with raw bytes: {exc}")
         if image_bytes is None:
-            image_bytes = await measured('fallback_render', render_question_image_async(q, idx, total, is_ar))
-        await measured('telegram_photo', bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption, message_thread_id=message_thread_id))
+            image_bytes = await render_question_image_async(q, idx, total, is_ar)
+        await bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(image_bytes, filename="question.png"), caption=caption, message_thread_id=message_thread_id)
 
     poll_question = "اختر الإجابة الصحيحة بالاعتماد على الصورة أعلاه 👆" if is_ar else "Choose the correct answer based on the image above 👆"
     # نمط الكويز المصوّر: explanation يُعرض بحقل Poll نصي عادي (وليس صورة)، لذا لازم
@@ -136,7 +135,7 @@ async def _send_math_image_question(
     raw_exp = latex_to_plain(q.get("explanation") or ("إجابة صحيحة!" if is_ar else "Correct answer!"))
     clean_exp = raw_exp if len(raw_exp) <= 200 else raw_exp[:197] + "..."
 
-    poll_msg = await measured('telegram_poll', bot.send_poll(
+    poll_msg = await bot.send_poll(
         chat_id=chat_id,
         question=poll_question,
         options=letters,
@@ -147,12 +146,12 @@ async def _send_math_image_question(
         is_anonymous=is_anonymous,
         open_period=_sanitize_open_period(open_period),
         message_thread_id=message_thread_id,
-    ))
+    )
 
     quiz_data = {"chat_id": chat_id, "user_id": user_id, "correct_option_id": int(q["correct_option_id"]), "question_index": idx}
     if poll_meta:
         quiz_data.update(poll_meta)
-    await measured('poll_redis_write', redis_client.set(f"poll:{poll_msg.poll.id}", json.dumps(quiz_data), ex=7200))
+    await redis_client.set(f"poll:{poll_msg.poll.id}", json.dumps(quiz_data), ex=7200)
     return poll_msg
 
 
@@ -191,7 +190,6 @@ async def send_quiz_poll(
       فيه، إن وجد. `None` = بلا تغيير (سلوك النمط الفردي القديم بالضبط - يظهر
       بالغروب عادي بلا استهداف توبيك معيّن).
     """
-    from services.quiz_timing import measured
     if q.get("is_math"):
         return await _send_math_image_question(
             chat_id, user_id, q, idx, total, control_kb, quiz_id,
@@ -208,13 +206,13 @@ async def send_quiz_poll(
             full_text += f"**{i}.** {str(opt).strip()}\n"
             poll_options.append(f"الخيار رقم {i}")
 
-        await measured('telegram_text', bot.send_message(chat_id=chat_id, text=full_text, parse_mode="Markdown", message_thread_id=message_thread_id))
+        await bot.send_message(chat_id=chat_id, text=full_text, parse_mode="Markdown", message_thread_id=message_thread_id)
         clean_q = "اختر الإجابة الصحيحة بناءً على التفاصيل أعلاه 👆:"
         clean_opts = poll_options
     else:
         clean_q = raw_q
 
-    poll_msg = await measured('telegram_poll', bot.send_poll(
+    poll_msg = await bot.send_poll(
         chat_id=chat_id,
         question=clean_q,
         options=clean_opts,
@@ -225,7 +223,7 @@ async def send_quiz_poll(
         is_anonymous=is_anonymous,
         open_period=_sanitize_open_period(open_period),
         message_thread_id=message_thread_id,
-    ))
+    )
 
     # حفظ حالة الـ Poll في Redis
     quiz_data = {
@@ -236,5 +234,5 @@ async def send_quiz_poll(
     }
     if poll_meta:
         quiz_data.update(poll_meta)
-    await measured('poll_redis_write', redis_client.set(f"poll:{poll_msg.poll.id}", json.dumps(quiz_data), ex=7200))
+    await redis_client.set(f"poll:{poll_msg.poll.id}", json.dumps(quiz_data), ex=7200)
     return poll_msg

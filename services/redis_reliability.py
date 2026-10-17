@@ -89,11 +89,7 @@ def user_locked(*, web_kind=None, delay=0, wait_seconds=0):
             user_id = bound.get('user_id') or event.from_user.id
             lock = UserLock(redis_client, user_id)
             try:
-                if fn.__name__ == "handle_next":
-                    from services.quiz_timing import measured
-                    acquired = await measured("next_lock_acquire", lock.acquire())
-                else:
-                    acquired = await lock.acquire()
+                acquired = await lock.acquire()
                 deadline = asyncio.get_running_loop().time() + wait_seconds
                 while not acquired and asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(0.05)
@@ -141,4 +137,3 @@ def user_locked(*, web_kind=None, delay=0, wait_seconds=0):
                     logging.getLogger(__name__).exception('User lock release failed; relying on TTL')
         return wrapped
     return decorate
-

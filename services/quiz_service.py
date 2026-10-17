@@ -14,9 +14,10 @@ from constants import (
     QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
 )
 from helpers.gemini_helper import generate_quiz_smart, get_last_generation_metadata
-from helpers.gemini_helper.streaming import question_sink
 from logger import get_logger, log_warning
 from services.file_service import extract_office_text_if_needed
+from services.image_quiz_renderer import render_question_image_async, looks_arabic
+from services.quiz_engine import _question_image_object_path
 from helpers.supabase_helper import (
     get_file_quizzes,
     log_ai_generation,
@@ -24,6 +25,7 @@ from helpers.supabase_helper import (
     refund_user_points_split,
     save_file_quiz_multiple,
     save_question_image_url,
+    upload_quiz_question_image,
 )
 
 logger = get_logger(__name__)
@@ -38,12 +40,16 @@ from services.processing_limits import HEAVY_PROCESSING_SEMAPHORE as _HEAVY_PROC
 # وصول دوره فعلياً (services/quiz_engine._send_math_image_question - الطالب ينتظر
 # الرسم+الرفع أثناء تقدمه بالكويز، سؤال-سؤال)، نُطلق مهمة خلفية فور نجاح التوليد ترسم
 # وترفع بقية أسئلة الكويز (من السؤال الثاني فصاعداً - الأول يُترك لمساره الفوري الحالي
-# بـ quiz_engine) مسبقاً بالتوازي. الرسم والرفع يشتركان مع الإرسال الفوري عبر
-# prepare_math_image بسقف عمليتين متزامنتين وبدون تكرار الرسم عند ضغط التالي.
+# بـ quiz_engine كما هو تماماً، تفادياً لرسمه مرتين بالتزامن) مسبقاً بالتوازي. لا حاجة
+# لسقف تزامن إضافي هنا - render_question_image_async يفرض RENDER_SEMAPHORE (نفس السقف
+# المستخدم بالمسار الفوري) داخلياً، فلا يمكن لهذه المهمة أن تتجاوز حد الذاكرة المسموح
+# حتى لو تزامنت مع طلاب آخرين يفتحون كويزات رياضية بنفس اللحظة.
 async def _prefetch_one_math_image(quiz_id: str, question: Dict[str, Any], idx: int, total: int) -> None:
     try:
-        from services.quiz_image_preparation import prepare_math_image
-        image_url, _ = await prepare_math_image(question, idx, total, quiz_id)
+        is_ar = looks_arabic(str(question.get("question", "")))
+        image_bytes = await render_question_image_async(question, idx, total, is_ar)
+        object_path = _question_image_object_path(quiz_id, idx, question)
+        image_url = await upload_quiz_question_image(image_bytes, object_path)
         if image_url:
             question["image_url"] = image_url  # يبقى بالذاكرة طوال الجلسة الحالية أيضاً
             await save_question_image_url(quiz_id, idx, image_url)
@@ -56,8 +62,9 @@ async def _prefetch_one_math_image(quiz_id: str, question: Dict[str, Any], idx: 
 
 async def _prefetch_math_quiz_images(quiz_id: str, quiz_data: List[Dict[str, Any]]) -> None:
     total = len(quiz_data)
-    # prepare_math_image limits active render/upload jobs globally and shares
-    # them with foreground playback. Streaming uses its own ordered worker.
+    # asyncio.gather (لا حلقة تسلسلية) عشان تتداخل عمليات الرفع (I/O) لسؤال مع رسم السؤال
+    # التالي - render_question_image_async يفرض RENDER_SEMAPHORE (سقف 3) داخلياً بأي حال،
+    # فلا خطر تجاوز ذاكرة حتى مع الإطلاق المتزامن الكامل هنا.
     tasks = [
         _prefetch_one_math_image(quiz_id, question, idx, total)
         for idx, question in enumerate(quiz_data)
@@ -307,8 +314,7 @@ async def execute_quiz_generation_workflow(
     user_id: int,
     data: Dict[str, Any],
     count: int,
-    status_message: Any,
-    on_question=None,
+    status_message: Any
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], str, Optional[Dict[str, Any]]]:
     """
     التدفق التنفيذي المركزي لتوليد الكويز:
@@ -416,43 +422,22 @@ async def execute_quiz_generation_workflow(
         quiz_extraction_instruction = resolve_quiz_extraction_instruction(subject_type, quiz_extraction_mode)
 
         # 3. استدعى محرك AI
-        streamed_raw, streamed_prepared = [], []
-        async def publish_question(question):
-            import copy
-            prepared = copy.deepcopy(question)
-            if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
-                prepared = normalize_quiz_option_count([prepared])[0]
-            elif len(prepared.get("options", [])) != OPTION_COUNT:
-                raise ValueError("Invalid streamed option count")
-            prepared = _shuffle_question_options(prepared)
-            if is_math_mode:
-                prepared["is_math"] = True
-            streamed_raw.append(copy.deepcopy(question))
-            streamed_prepared.append(prepared)
-            await on_question(copy.deepcopy(prepared))
-
-        sink_token = question_sink.set(publish_question if on_question else None)
-        try:
-            quiz_data = await generate_quiz_smart(
-                file_paths=file_paths if is_media else None,
-                pure_text=pure_text if not is_media else None,
-                count=count,
-                skip_cache=True,
-                file_hash=file_hash,
-                status_message=status_message,
-                previous_questions=previous_questions if previous_questions else None,
-                is_math_mode=is_math_mode,
-                english_mode=english_mode,
-                content_language=content_language,
-                difficulty=difficulty,
-                question_type=question_type,
-                custom_question_type_text=custom_question_type_text,
-                quiz_extraction_instruction=quiz_extraction_instruction,
-            )
-        finally:
-            question_sink.reset(sink_token)
-        if on_question and quiz_data and streamed_raw != quiz_data:
-            raise ValueError("Streamed and final quiz differ; refusing to replace visible questions")
+        quiz_data = await generate_quiz_smart(
+            file_paths=file_paths if is_media else None,
+            pure_text=pure_text if not is_media else None,
+            count=count,
+            skip_cache=True,
+            file_hash=file_hash,
+            status_message=status_message,
+            previous_questions=previous_questions if previous_questions else None,
+            is_math_mode=is_math_mode,
+            english_mode=english_mode,
+            content_language=content_language,
+            difficulty=difficulty,
+            question_type=question_type,
+            custom_question_type_text=custom_question_type_text,
+            quiz_extraction_instruction=quiz_extraction_instruction,
+        )
 
         if not quiz_data:
             return None, None, "ai_failed", None
@@ -492,7 +477,7 @@ async def execute_quiz_generation_workflow(
 
         # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
         #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
-        quiz_data = streamed_prepared if on_question else shuffle_quiz_options(quiz_data)
+        quiz_data = shuffle_quiz_options(quiz_data)
 
         # 3.6 تعليم كل سؤال بنمط الكويز المصوّر LaTeX ليتحول التنفيذ لاحقاً
         #     (services/quiz_engine.py) لمسار الصورة + Poll الحروف بدل النص العادي
@@ -529,9 +514,8 @@ async def execute_quiz_generation_workflow(
 
         # 🆕 راجع تعليق _prefetch_math_quiz_images أعلاه - يشمل فقط كويزات رياضية بمعرّف
         # UUID صالح فعلياً (بدونه save_question_image_url لن يجد صفاً ليحدّثه لاحقاً).
-        if is_math_mode and new_quiz_id and quiz_data and not on_question:
+        if is_math_mode and new_quiz_id and quiz_data:
             spawn(_prefetch_math_quiz_images(new_quiz_id, quiz_data))
 
         return quiz_data, new_quiz_id, "", get_last_generation_metadata()
-
 
