@@ -488,9 +488,11 @@ async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
             await bot.send_rich_message(
                 chat_id=call.message.chat.id, rich_message=rich, reply_markup=keyboard)
         elif getattr(call.message, "photo", None):
-            # A previous rich send failed and this review is a photo fallback.
-            await call.message.edit_caption(
-                caption=plain[:1000], parse_mode="HTML", reply_markup=keyboard)
+            # Photo captions cannot contain rich buttons, so use the fallback
+            # keyboard with the appropriate explanation/back control.
+            await _review_fallback(
+                call, plain, _review_pager(token, page, len(items),
+                    explanation=explanation, fallback_controls=True), media, False)
         else:
             await bot.edit_message_text(
                 chat_id=call.message.chat.id, message_id=call.message.message_id,
