@@ -41,9 +41,10 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
                 env['WEBAPP_PUBLIC_BASE_URL'] = web
                 menu = await env['get_main_menu_keyboard']('bot', 42)
                 data = callbacks(menu)
-                self.assertEqual(data[0], 'student_create_quiz')
+                self.assertEqual(data[0], 'student_help')
                 self.assertEqual(data[1], 'favorites_menu')
-                self.assertIn('student_help', data)
+                self.assertEqual(data.count('student_help'), 1)
+                self.assertNotIn('student_create_quiz', data)
                 self.assertEqual('upload_open:all' in data, bool(web))
                 self.assertNotIn('recharge_info', data)
                 self.assertNotIn('cg:home:0', data)
@@ -57,6 +58,8 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('هدايا 5.50', text)
         self.assertNotIn('مدفوع 20.00', text)
         self.assertIn('رصيدي وهداياي', text)
+        self.assertIn('«كيف أستخدم البوت؟»', text)
+        self.assertNotIn('«إنشاء كويز»', text)
 
     async def test_help_create_and_home_do_not_touch_active_state(self):
         env = load_functions('handlers/start.py', {'student_navigation'},
