@@ -12,6 +12,7 @@ import datetime
 import os
 import traceback
 import uuid
+from cachetools import TTLCache
 from typing import Optional, Dict, List, Any
 
 from config import redis_client
@@ -216,6 +217,54 @@ async def mark_quiz_attempt_stopped(attempt_ref: Optional[str]) -> None:
 
 # 4️⃣ دوال الاستعلامات الخاصة بـ لوحة التحكم والإدارة (Admin Analytics Queries)
 
+_usage_summary_cache = TTLCache(maxsize=3, ttl=30)
+_usage_summary_lock = asyncio.Lock()
+
+
+async def _analytics_rows(table, columns, time_column, since, until):
+    """Read every page with deterministic ordering and a fixed time window."""
+    offset = 0
+    while True:
+        query = (supabase.table(table).select(columns)
+                 .gte(time_column, since).lte(time_column, until))
+        if ADMIN_ID:
+            query = query.neq("user_id", ADMIN_ID)
+        result = await query.order("id").range(offset, offset + 499).execute()
+        rows = result.data or []
+        if not rows:
+            break
+        for row in rows:
+            yield row
+        # Do not assume the server row cap equals our requested page size.
+        offset += len(rows)
+
+
+async def _get_usage_summary(days):
+    if days not in (7, 30, 90):
+        raise ValueError("Unsupported analytics period")
+    async with _usage_summary_lock:
+        if days in _usage_summary_cache:
+            return _usage_summary_cache[days]
+        now = datetime.datetime.now(datetime.timezone.utc)
+        counts, users, error_users = {}, set(), set()
+        async for row in _analytics_rows("usage_events", "user_id,event_type", "created_at",
+                                        (now-datetime.timedelta(days=days)).isoformat(), now.isoformat()):
+            name = row["event_type"]
+            counts[name] = counts.get(name, 0) + 1
+            users.add(row["user_id"])
+            if name == "error_occurred":
+                error_users.add(row["user_id"])
+        result = {"event_counts": counts, "active_users": len(users),
+                  "error_count": counts.get("error_occurred", 0), "users_with_errors": len(error_users)}
+        _usage_summary_cache[days] = result
+        return result
+
+
+async def admin_get_event_counts(days=7):
+    """All observed types, cached briefly so paging does not rescan on every click."""
+    return dict((await _get_usage_summary(days))["event_counts"])
+
+
 async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
     """ملخص شامل لسلوك الاستخدام لـ الطلاب حصراً."""
     empty = {
@@ -226,30 +275,14 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
     try:
         since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
 
-        # استعلام الأحداث مع استبعاد الآدمن
-        events_query = supabase.table("usage_events").select("user_id, event_type").gte("created_at", since)
-        if ADMIN_ID:
-            events_query = events_query.neq("user_id", ADMIN_ID)
-        events_res = await events_query.execute()
-        events = events_res.data or []
-
-        active_users = len({e["user_id"] for e in events})
-        event_counts: Dict[str, int] = {}
-        for e in events:
-            event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
-
-        error_events = [e for e in events if e["event_type"] == "error_occurred"]
-        error_count = len(error_events)
-        users_with_errors = len({e["user_id"] for e in error_events})
-
-        # استعلام المحاولات مع استبعاد الآدمن
-        attempts_query = supabase.table("quiz_attempts").select(
-            "is_completed, source_type, duration_seconds, score, total_questions"
-        ).gte("started_at", since)
-        if ADMIN_ID:
-            attempts_query = attempts_query.neq("user_id", ADMIN_ID)
-        attempts_res = await attempts_query.execute()
-        attempts = attempts_res.data or []
+        summary = await _get_usage_summary(days)
+        active_users = summary["active_users"]
+        event_counts = summary["event_counts"]
+        error_count = summary["error_count"]
+        users_with_errors = summary["users_with_errors"]
+        attempts = [row async for row in _analytics_rows(
+            "quiz_attempts", "is_completed,source_type,duration_seconds,score,total_questions",
+            "started_at", since, datetime.datetime.now(datetime.timezone.utc).isoformat())]
 
         total_attempts = len(attempts)
         completed_attempts = sum(1 for a in attempts if a.get("is_completed"))
@@ -264,7 +297,7 @@ async def admin_get_usage_overview(days: int = 7) -> Dict[str, Any]:
             source_breakdown[src] = source_breakdown.get(src, 0) + 1
 
         scored = [a for a in attempts if a.get("total_questions")]
-        pct_list = [(a["score"] / a["total_questions"]) * 100 for a in scored if a["total_questions"] > 0]
+        pct_list = [((a.get("score") or 0) / a["total_questions"]) * 100 for a in scored if a["total_questions"] > 0]
         avg_score_pct = (sum(pct_list) / len(pct_list)) if pct_list else 0.0
 
         return {
@@ -343,7 +376,7 @@ async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[s
         total_attempts = len(attempts)
         completed = sum(1 for a in attempts if a.get("is_completed"))
         scored = [a for a in attempts if a.get("total_questions")]
-        pct_list = [(a["score"] / a["total_questions"]) * 100 for a in scored if a["total_questions"] > 0]
+        pct_list = [((a.get("score") or 0) / a["total_questions"]) * 100 for a in scored if a["total_questions"] > 0]
         avg_pct = (sum(pct_list) / len(pct_list)) if pct_list else 0.0
 
         return {
@@ -748,3 +781,4 @@ async def admin_get_shared_links_stats(days: int, limit: int, offset: int) -> Li
     except Exception as e:
         log_error(logger, f"Error fetching shared links stats: {e}")
         raise
+

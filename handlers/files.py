@@ -1226,7 +1226,8 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         charged_this_attempt = True
 
         spawn(log_usage_event(call.from_user.id, "quiz_generation_requested", {
-            "requested_count": count, "items_count": items, "cost": cost, "mode": mode
+            "requested_count": count, "items_count": items, "cost": cost, "mode": mode,
+            "question_type": data.get("question_type"), "quiz_extraction_mode": data.get("quiz_extraction_mode")
         }))
 
         # 🆕 [طبقة 2] نخزّن التقسيم الفعلي (كم اتخصم من free_points وكم من paid_points -
@@ -1302,6 +1303,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             generation_meta = generation_meta or {}
             await log_usage_event(call.from_user.id, "quiz_generated", {
                 "quiz_id": new_quiz_id, "questions_generated": len(quiz_data), "cost": cost,
+                "question_type": data.get("question_type"), "quiz_extraction_mode": data.get("quiz_extraction_mode"),
                 "ai_provider": generation_meta.get("provider"),
                 "ai_model": generation_meta.get("model"),
                 "generation_seconds": generation_meta.get("duration_seconds"),
@@ -1717,5 +1719,6 @@ async def process_web_uploaded_images(
 
 
 files_router = router
+
 
 

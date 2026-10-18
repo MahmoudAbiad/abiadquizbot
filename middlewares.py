@@ -92,6 +92,25 @@ class ErrorTrackingMiddleware(BaseMiddleware):
         finally:
             reset_error_context(token)
 
+class UsageCallbackMiddleware(BaseMiddleware):
+    """Track selected user intents; never claim a callback succeeded or log raw data."""
+
+    async def __call__(self, handler, event, data):
+        coroutine = None
+        try:
+            from services.usage_events import callback_event
+            event_type = callback_event(event.data)
+            if event_type and event.from_user.id != ADMIN_ID and event.message.chat.type == "private":
+                from helpers.supabase_helper import log_usage_event
+                coroutine = log_usage_event(event.from_user.id, event_type, {"kind": "button_click"})
+                spawn(coroutine)
+        except Exception:
+            if coroutine is not None:
+                coroutine.close()
+            logger.warning("Could not schedule callback analytics")
+        return await handler(event, data)
+
+
 class MaintenanceMiddleware(BaseMiddleware):
     """Gate updates before handlers, spending points or generating work."""
 
@@ -188,3 +207,4 @@ class ThrottlingMiddleware(BaseMiddleware):
             if isinstance(event, (Message, CallbackQuery)):
                 self.cache.pop(event.from_user.id, None)
             raise
+

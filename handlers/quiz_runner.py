@@ -461,6 +461,9 @@ async def start_mistake_practice(call: types.CallbackQuery, state: FSMContext):
     await bot.send_message(call.message.chat.id,
         f"🎯 تدريب على أخطائك · المحاولة {snapshot['round']}\n"
         f"عدد الأسئلة: {len(snapshot['questions'])}. نتيجتك الأصلية محفوظة.")
+    spawn(log_usage_event(call.from_user.id, "mistake_practice_started", {
+        "questions": len(snapshot["questions"]), "round": snapshot["round"],
+    }))
     await send_question(call, state)
 
 
@@ -490,6 +493,10 @@ async def _handle_practice_completion(chat_id, user_id, state, data):
     await _send_quiz_completion(chat_id, text, keyboard, review_token, count, practice_token)
     await state.update_data(quiz_completed=True, is_switching_question=False)
     await state.set_state(None)
+    spawn(log_usage_event(user_id, "mistake_practice_stopped" if stopped else "mistake_practice_completed", {
+        "score": score, "questions": total, "round": data["practice_round"],
+        "wrong": len(wrong), "skipped": skipped,
+    }))
 
 
 async def _review_resolve_image(user_id: int, token: str, page: int, items: list):
@@ -1573,3 +1580,4 @@ async def delete_warning_msg_handler(call: types.CallbackQuery):
         await call.answer()
 
 quiz_runner_router = router
+

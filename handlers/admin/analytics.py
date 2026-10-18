@@ -18,6 +18,7 @@ from helpers.supabase_helper import (
     admin_get_recent_errors,
     admin_get_referral_leaderboard,
 )
+from helpers.supabase_helper.analytics import admin_get_event_counts
 from keyboards import get_analytics_keyboard
 from logger import get_logger
 from .dashboard import IsAdminFilter
@@ -43,47 +44,7 @@ REFERRED_PAGE_SIZE = 15    # عدد الأسماء المعروضة بالقائ
 RECENT_ERRORS_PAGE_SIZE = 5    # 🆕 عدد الأخطاء المعروضة بالصفحة الواحدة بلوحة "آخر الأخطاء"
 RECENT_ERRORS_FETCH_LIMIT = 100  # 🆕 السقف الأقصى للأخطاء التي تُجلب من قاعدة البيانات دفعة واحدة قبل تصفحها محلياً
 
-EVENT_LABELS = {
-    "bot_start": "▶️ تشغيل البوت",
-    "content_uploaded": "📤 رفع محتوى/ملف",
-    "quiz_generation_requested": "🧮 طلب توليد كويز",
-    "quiz_generated": "🆕 توليد كويز جديد",
-    "cached_quiz_used": "♻️ استخدام كويز مخزن",
-    "quiz_started": "🚀 بدء كويز",
-    "quiz_completed": "🏁 إكمال كويز",
-    "quiz_stopped": "⏹ إيقاف كويز مبكراً",
-    "quiz_question_edited": "✏️ تعديل سؤال أثناء الكويز",
-    "quiz_shared": "🔗 مشاركة كويز",
-    "share_link_created": "🔗 إنشاء رابط مشاركة",
-    "shared_link_opened": "📬 فتح رابط مشترك",
-    "quiz_saved_favorite": "⭐ حفظ بالمفضلة",
-    "quiz_rated": "👍👎 تقييم كويز",
-    "feedback_submitted": "✍️ إرسال ملاحظة",
-    "score_published": "🏆 نشر نتيجة",
-    "leaderboard_viewed": "📋 عرض لوحة الشرف",
-    "error_occurred": "🐞 خطأ واجهه الطالب",
-    # 🆕 كانت هذه الأحداث تُسجَّل فعلياً بقاعدة البيانات من قبل، لكن بدون تسمية عربية هنا
-    "score_hidden": "🙈 إخفاء نتيجة منشورة",
-    "audio_uploaded": "🎙 رفع محاضرة صوتية",
-    "audio_transcription_confirmed": "🎙 تأكيد تفريغ الصوت",
-    "audio_transcription_completed": "🎙 اكتمال تفريغ الصوت",
-    "audio_transcription_truncated": "🎙 تفريغ صوت مقطوع (طويل)",
-    "tutorial_opened": "📘 فتح الشرح التعريفي",
-    "tutorial_completed": "📘 إنهاء الشرح التعريفي",
-    # 🆕 (2026-08-28) الدليل التفاعلي حُذف بالكامل من الكود - الحدثان أعلاه ما عادوا
-    # يُسجَّلان بعد الآن، لكن أبقيناهما هنا فقط لتبقى التسمية العربية صحيحة لأي بيانات
-    # تاريخية قديمة بقاعدة البيانات. البديل الجديد لحدث "بدء الاستخدام":
-    "start_cta_acknowledged": "🚀 تأكيد بدء الاستخدام (زر أول ملف)",
-    "recharge_info_viewed": "💳 عرض معلومات الشحن",
-    "support_opened": "🆘 فتح الدعم الفني",
-    "channel_opened": "📢 فتح القناة",
-    "request_cancelled": "🚫 إلغاء طلب أثناء العملية",
-    # 🆕 أحداث جديدة أضيفت بهذا التحديث
-    "quiz_exported": "📄 تصدير كويز (Word/PDF)",
-    "favorite_opened": "⭐ فتح كويز من المفضلة",
-    "favorite_deleted": "🗑 حذف كويز من المفضلة",
-    "joined_via_referral": "🎯 انضمام عبر رابط دعوة",
-}
+from services.usage_events import EVENT_LABELS, event_page
 
 SOURCE_LABELS = {
     "file": "📄 ملف", "photo": "🖼 صورة", "album": "🖼🖼 ألبوم", "text": "📝 نص مباشر",
@@ -247,7 +208,7 @@ async def show_usage_analytics(call: types.CallbackQuery):
     try:
         overview = await admin_get_usage_overview(days=days)
         top_events = sorted(overview["event_counts"].items(), key=lambda x: x[1], reverse=True)[:8]
-        events_lines = "\n".join(f"┣ {EVENT_LABELS.get(ev, ev)}: <code>{count}</code>" for ev, count in top_events) or "┣ لا توجد أحداث."
+        events_lines = "\n".join(f"┣ {html.escape(EVENT_LABELS.get(ev, ev))}: <code>{count}</code>" for ev, count in top_events) or "┣ لا توجد أحداث."
         source_lines = "\n".join(f"┣ {SOURCE_LABELS.get(src, src)}: <code>{count}</code>" for src, count in sorted(overview["source_breakdown"].items(), key=lambda x: x[1], reverse=True)) or "┣ لا توجد بيانات."
 
         text = (
@@ -267,6 +228,35 @@ async def show_usage_analytics(call: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error rendering analytics: {e}")
         await call.answer("❌ تعذر تحميل بيانات التحليلات.", show_alert=True)
+
+@router.callback_query(F.data.regexp(r"^admin_events_(7|30|90)_([0-9]{1,6})$"))
+async def show_all_usage_events(call: types.CallbackQuery):
+    _, _, days_raw, page_raw = call.data.split("_")
+    days = int(days_raw)
+    await call.answer()
+    try:
+        counts = await admin_get_event_counts(days)
+        items, page, pages, total = event_page(counts, int(page_raw))
+        lines = "\n".join(
+            f"┣ {html.escape(EVENT_LABELS.get(event, event))}: <code>{count}</code>"
+            for event, count in items
+        ) or "لا توجد أحداث مسجّلة خلال هذه الفترة."
+        nav = []
+        if page > 1:
+            nav.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"admin_events_{days}_{page-1}"))
+        if page < pages:
+            nav.append(types.InlineKeyboardButton(text="التالي ➡️", callback_data=f"admin_events_{days}_{page+1}"))
+        rows = ([nav] if nav else []) + [[types.InlineKeyboardButton(
+            text="🔙 ملخص التحليلات", callback_data=f"admin_analytics_{days}")]]
+        await safe_edit_text(call.message,
+            f"📊 <b>جميع أنواع الأحداث — آخر {days} يوم</b>\n"
+            f"الصفحة {page}/{pages} · {total} نوع حدث\n\n{lines}\n\n"
+            "الضغط على زر لا يعني نجاح العملية. الأعداد تُحدّث خلال 30 ثانية.",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception as exc:
+        logger.error(f"Error rendering all usage events: {exc}")
+        await call.message.answer("تعذر تحميل الأحداث. حاول مجدداً.")
+
 
 # 📅 4. معالج النشاط اليومي (آخر 14 يوم)
 @router.callback_query(F.data == "admin_analytics_daily")

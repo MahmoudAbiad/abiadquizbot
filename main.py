@@ -40,7 +40,7 @@ from handlers import (
     gifts_router,
 )
 from handlers.session_navigation import router as session_navigation_router
-from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware
+from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware
 from services.mistake_practice import PracticeCallbackGuard
 
 # تهيئة Sentry للتتبع
@@ -80,6 +80,7 @@ def main():
     dp.message.middleware(ThrottlingMiddleware(limit=1.2))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
     dp.callback_query.middleware(PracticeCallbackGuard())
+    dp.callback_query.middleware(UsageCallbackMiddleware())
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
     dp.include_routers(
@@ -167,4 +168,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

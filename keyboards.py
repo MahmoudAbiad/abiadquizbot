@@ -955,6 +955,7 @@ def get_analytics_keyboard(days: int) -> types.InlineKeyboardMarkup:
     
     kb = [
         period_row,
+        [types.InlineKeyboardButton(text="📊 جميع أنواع الأحداث", callback_data=f"admin_events_{days}_1")],
         [
             types.InlineKeyboardButton(text="⚡ النشطون اليوم", callback_data="admin_analytics_today"),
             types.InlineKeyboardButton(text="🎯 كويزات اليوم", callback_data="admin_today_quizzes_p_1"),
@@ -1175,5 +1176,6 @@ def get_group_channel_picker_keyboard(
         rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
     rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 

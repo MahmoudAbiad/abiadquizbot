@@ -136,7 +136,11 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         self.env["get_or_update_high_score"].assert_awaited_once_with(42, "original-quiz", 32, 40)
         self.env["complete_quiz_attempt"].assert_called_once_with("original-attempt", 32)
         self.env["start_quiz_attempt"].assert_not_called()
-        self.env["log_usage_event"].assert_called_once()
+        events = [call.args[1] for call in self.env["log_usage_event"].call_args_list]
+        self.assertEqual(events.count("quiz_completed"), 1)
+        self.assertEqual(events.count("mistake_practice_started"), 3)
+        self.assertEqual(events.count("mistake_practice_completed"), 3)
+        self.assertNotIn("quiz_started", events)
 
     async def test_stopped_original_only_explicit_errors_and_original_skips_do_not_block_mastery(self):
         token = await self.seed(total=10, wrong=2, skipped=7)
@@ -368,3 +372,4 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

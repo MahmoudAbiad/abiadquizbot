@@ -197,7 +197,7 @@ class GiftNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.message.edit_text.await_args.kwargs['parse_mode'], 'HTML')
         keyboard = call.message.edit_text.await_args.kwargs['reply_markup']
         self.assertEqual([b.callback_data for row in keyboard.inline_keyboard for b in row],
-                         ['recharge_info', 'gift:list:0', 'gift:redeem'])
+                         ['recharge_info', 'gift:list:0', 'gift:redeem', 'student_home'])
 
     async def test_duplicate_page_edit_is_acknowledged_without_extra_message(self):
         call = self.call()
@@ -205,3 +205,4 @@ class GiftNavigationTests(unittest.IsolatedAsyncioTestCase):
         await self.env['show_gifts'](call)
         call.message.answer.assert_not_awaited()
         call.answer.assert_awaited_once_with()
+

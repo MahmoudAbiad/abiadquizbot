@@ -118,6 +118,7 @@ async def cancel_code(call, state: FSMContext):
 
 @router.message(GiftState.code, F.text, ~F.text.startswith('/'))
 async def redeem_message(message, state: FSMContext):
+    from services.usage_tracking import track_usage
     code = message.text.strip().upper()
     if not re.fullmatch(r'[A-Z0-9-]{12,64}', code):
         await message.answer('❌ صيغة الكود غير صحيحة. انسخه كاملًا ثم أعد المحاولة.')
@@ -132,6 +133,7 @@ async def redeem_message(message, state: FSMContext):
               'already_used':'سبق لك استخدام هذا الكود. يمكن لكل طالب استخدامه مرة واحدة فقط.',
               'missing_user':'شغّل البوت باستخدام /start أولًا.'}
     if result['status'] != 'ok':
+        track_usage(message.from_user.id, "gift_code_rejected", {"reason": result['status']})
         await message.answer('❌ '+errors.get(result['status'], 'تعذر الشحن. حاول مجددًا.'))
         return
     await state.set_state(None)
@@ -139,7 +141,9 @@ async def redeem_message(message, state: FSMContext):
         [types.InlineKeyboardButton(text='📝 إنشاء كويز', callback_data='student_create_quiz')],
         [types.InlineKeyboardButton(text='🔙 رصيدي وهداياي', callback_data='gift:wallet')],
     ])
+    track_usage(message.from_user.id, "gift_code_redeemed", {"points": result['points']})
     await message.answer(f"✅ أُضيفت <b>{result['points']:g} نقطة هدية</b>.\n"
                          f"⏳ {remaining_expiry_text(result.get('expires_at'))}\n"
                          f"📅 انتهاء الهدية: {expiry_text(result.get('expires_at'))}",
                          parse_mode='HTML', reply_markup=keyboard)
+
