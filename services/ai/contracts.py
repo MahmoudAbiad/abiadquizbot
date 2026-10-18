@@ -37,6 +37,8 @@ class AIRequest:
     contents: tuple
     schema: type | None = None
     allow_image_sampling: bool = False
+    # Trusted task instructions; never place uploaded student content here.
+    system_instruction: str | None = None
 
     @property
     def capabilities(self):

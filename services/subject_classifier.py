@@ -192,9 +192,11 @@ def _merge_classification_results(results):
 async def _dispatch_classification(*, contents=None, paths=None):
     from services.ai.contracts import AIRequest, Attachment
     from services.ai.runtime import execute
-    parts = ((SYSTEM_PROMPT_CLASSIFY_SUBJECT, *(Attachment.from_path(path) for path in paths))
+    parts = (tuple(Attachment.from_path(path) for path in paths)
              if paths else tuple(contents or []))
-    result = await execute(AIRequest(parts, SubjectClassification, allow_image_sampling=True), slot="detection", mode="detection",
+    result = await execute(AIRequest(parts, SubjectClassification, allow_image_sampling=True,
+                                     system_instruction=SYSTEM_PROMPT_CLASSIFY_SUBJECT),
+                           slot="detection", mode="detection",
                            timeout=MATH_DETECTION_TIMEOUT)
     if result:
         if getattr(result, "sampled", False):
@@ -208,7 +210,8 @@ async def _dispatch_classification(*, contents=None, paths=None):
         async for batch in page_batches(paths):
             prompt = (SYSTEM_PROMPT_CLASSIFY_SUBJECT +
                       "\nThese pages belong to one document. Count only questions STARTING on these pages.")
-            result = await execute(AIRequest((prompt, *batch), SubjectClassification, allow_image_sampling=True),
+            result = await execute(AIRequest(tuple(batch), SubjectClassification, allow_image_sampling=True,
+                                             system_instruction=prompt),
                 slot="detection", mode="detection", timeout=MATH_DETECTION_TIMEOUT)
             if result:
                 if getattr(result, "sampled", False):
@@ -234,8 +237,7 @@ async def _classify_text(pure_text: str) -> SubjectClassification:
     if not pure_text or not pure_text.strip():
         return _fallback()
     sample = build_text_sample(pure_text)
-    prompt = f"{SYSTEM_PROMPT_CLASSIFY_SUBJECT}\n\n[عينة النص]:\n{sample}"
-    return await _classify([prompt])
+    return await _classify([f"[عينة النص]:\n{sample}"])
 
 
 async def get_pending_classification_snapshot(file_hash: Optional[str]) -> Optional[SubjectClassification]:
