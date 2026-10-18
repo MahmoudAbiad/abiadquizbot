@@ -111,7 +111,7 @@ class MaintenanceMiddleware(BaseMiddleware):
                 await tg_event.answer(notice, parse_mode=None)
             elif isinstance(tg_event, CallbackQuery):
                 await tg_event.answer()
-                if tg_event.message:
+                if isinstance(tg_event.message, Message):
                     await tg_event.message.answer(notice, parse_mode=None)
                 else:
                     await data["bot"].send_message(tg_event.from_user.id, notice, parse_mode=None)
