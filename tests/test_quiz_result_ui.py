@@ -26,6 +26,10 @@ class ErrorReviewPresentationTests(unittest.TestCase):
         self.assertIn("2 + 2", review_page_text(errors, 0))
         self.assertIn("&lt;ما الحل?&gt;", review_page_text(errors, 1))
         self.assertIn("&lt;A&gt;", review_page_text(errors, 1))
+        self.assertIn(
+            "🔴 <b>إجابتك:</b> B\n\n🟢 <b>الإجابة الصحيحة:</b> &lt;A&gt;",
+            review_page_text(errors, 1),
+        )
         self.assertNotIn("Skipped", json.dumps(errors))
         self.assertNotIn("Correct", json.dumps(errors))
 
@@ -88,7 +92,7 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
             log_warning=Mock(), logger=self.log)
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
             types.InlineKeyboardButton(text="لوحة الشرف", callback_data="leaderboard_id")]])
-        await env["_send_quiz_completion"](42, "🏁 <b>نتيجتك</b>\n📊 50%", keyboard, "abcdef1234567890", 2)
+        await env["_send_quiz_completion"](42, "🏁 <b>نتيجتك</b>\n📊 50%\n🏆 ممتاز!", keyboard, "abcdef1234567890", 2)
         self.bot.send_rich_message.assert_awaited_once()
         rich = self.bot.send_rich_message.await_args.kwargs["rich_message"]
         self.assertIn("qrev:abcdef1234567890:0", rich.html)
@@ -97,6 +101,8 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("❌ الإجابات الخاطئة: 2", rich.html)
         self.assertLess(rich.html.index("📊 50%"), rich.html.index("❌ الإجابات الخاطئة: 2"))
         self.assertLess(rich.html.index("❌ الإجابات الخاطئة: 2"), rich.html.index('<tg-button-row'))
+        self.assertTrue(rich.html.endswith(review_inline_button("abcdef1234567890", 2)))
+        self.assertLess(rich.html.index("🏆 ممتاز!"), rich.html.index('<tg-button-row'))
         self.assertIs(self.bot.send_rich_message.await_args.kwargs["reply_markup"], keyboard)
         self.bot.send_message.assert_not_awaited()
         self.bot.send_rich_message.side_effect = RuntimeError("Unsupported rich message")
