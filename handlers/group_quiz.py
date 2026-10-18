@@ -1296,8 +1296,9 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
     """نسخة الغروب من معالج الإجابات.
 
     ما في فلتر نوع محادثة على `poll_answer` (التحديث بلا chat)، فمنميّز عبر
-    وجود `session_id` بسجل Redis. أي استفتاء من النمط الفردي بينزل لمعالج
-    `handlers/quiz_runner.py` عبر SkipHandler - سلوكه ما بيتغيّر إطلاقاً.
+    وجود العلم الصريح `is_group=True` بسجل Redis. الاختبارات الفردية تستخدم
+    `session_id` أيضاً، لذلك لا يصلح كمعيار للتمييز بينها وبين الجماعية.
+    أي استفتاء فردي ينتقل لمعالج `handlers/quiz_runner.py` عبر SkipHandler.
 
     بخلاف النمط الفردي، ما في فحص `user.id != quiz_info["user_id"]` هون -
     أي عضو بالغروب إجابته محسوبة.
@@ -1314,7 +1315,8 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
         info = json.loads(raw)
     except Exception:
         raise SkipHandler()
-    if not info.get("session_id"):
+    # A session_id also exists on private quizzes. Only group polls carry is_group.
+    if info.get("is_group") is not True or not info.get("session_id"):
         raise SkipHandler()
 
     if not info.get("has_timer"):
