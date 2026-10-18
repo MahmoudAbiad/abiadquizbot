@@ -135,7 +135,7 @@ class ChatAdapter:
                 # Only route structured requests to endpoints honoring JSON mode.
                 body["provider"] = {"require_parameters": True}
         if service == "cloudflare":
-            body["messages"][0]["content"] = "\n\n".join(part["text"] for part in content)
+            body["messages"][-1]["content"] = "\n\n".join(part["text"] for part in content)
         # One client per attempt, always closed including cancellation. No SDK retries:
         # the runtime owns the fallback policy. Never forward credentials on redirects.
         async with httpx.AsyncClient(follow_redirects=False, timeout=None) as client:
