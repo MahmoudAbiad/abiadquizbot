@@ -78,7 +78,9 @@ class ChatAdapter:
             # Llama 3.2 Vision has no response_format input. Validate its JSON locally.
             texts.append("Return ONLY valid JSON matching this schema:\n" +
                          json.dumps(request.schema.model_json_schema(), ensure_ascii=False))
-        body = {"prompt": "\n\n".join(texts), "stream": False, "max_tokens": 1024}
+        # Workers AI vision accepts a single prompt, not distinct system/user roles.
+        body = {"prompt": "\n\n".join(([request.system_instruction] if request.system_instruction else []) + texts),
+                "stream": False, "max_tokens": 1024}
         if image is not None:
             body["image"] = image
         url = provider["base_url"].rstrip("/").removesuffix("/v1") + "/run/" + model
@@ -121,7 +123,10 @@ class ChatAdapter:
                     "url": f"data:{part.mime_type};base64,{encoded}"}})
             else:
                 raise ValueError("Unsupported attachment for chat transport")
-        body = {"model": model, "messages": [{"role": "user", "content": content}]}
+        messages = ([{"role": "system", "content": request.system_instruction}]
+                    if request.system_instruction else [])
+        messages.append({"role": "user", "content": content})
+        body = {"model": model, "messages": messages}
         if request.schema:
             content.append({"type": "text", "text": "Return ONLY valid JSON matching this schema:\n" +
                             json.dumps(request.schema.model_json_schema(), ensure_ascii=False)})
@@ -194,14 +199,19 @@ class GoogleAdapter:
                     contents.append(types.Part.from_bytes(
                         data=await asyncio.to_thread(part.read), mime_type=part.mime_type))
             config = (types.GenerateContentConfig(response_mime_type="application/json",
-                                                 response_schema=request.schema)
-                      if request.schema else None)
+                                                 response_schema=request.schema,
+                                                 system_instruction=request.system_instruction)
+                      if request.schema else
+                      types.GenerateContentConfig(system_instruction=request.system_instruction)
+                      if request.system_instruction else None)
             if (provider["transport"] == "gemini" and request.schema is not None
                     and getattr(request.schema, "__name__", "") == "SubjectClassification"):
                 # Match the catalog probe's low-latency configuration for
                 # Gemini 3.8 Flash classification. Do not change quiz generation.
                 from services.ai.google_catalog import classification_config
                 config = classification_config(model, request.schema, types)
+                if request.system_instruction:
+                    config.system_instruction = request.system_instruction
             response = await client.aio.models.generate_content(model=model, contents=contents, config=config)
             usage = response.usage_metadata
             finish = response.candidates[0].finish_reason if response.candidates else None
