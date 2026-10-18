@@ -57,7 +57,8 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('يومي 10.00', text)
         self.assertNotIn('هدايا 5.50', text)
         self.assertNotIn('مدفوع 20.00', text)
-        self.assertIn('رصيدي وهداياي', text)
+        self.assertIn('تفاصيل الرصيد موجودة في «رصيدي وهداياي».', text)
+        self.assertNotIn('تفاصيل التقسيم والصلاحية', text)
         self.assertIn('«كيف أستخدم البوت؟»', text)
         self.assertNotIn('«إنشاء كويز»', text)
 
