@@ -61,6 +61,69 @@ class WalletFlow(unittest.IsolatedAsyncioTestCase):
         callbacks = [b.callback_data for row in wallet_buttons().inline_keyboard for b in row if b.callback_data]
         self.assertIn('recharge_info', callbacks)
 
+    async def test_code_prompt_and_cancel_edit_the_existing_message(self):
+        class BadRequest(Exception):
+            pass
+
+        gift_state = types.SimpleNamespace(code=types.SimpleNamespace(state='gift-code'))
+        env = load_functions('handlers/gifts.py',
+            {'_show_code_screen', 'prompt_code', 'cancel_code'},
+            types=tg, GiftState=gift_state, TelegramBadRequest=BadRequest)
+        message = types.SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock())
+        call = types.SimpleNamespace(message=message, answer=AsyncMock())
+        state = types.SimpleNamespace(get_state=AsyncMock(return_value=None), set_state=AsyncMock())
+        await env['prompt_code'](call, state)
+        state.set_state.assert_awaited_once_with(gift_state.code)
+        text = message.edit_text.await_args.args[0]
+        kb = message.edit_text.await_args.kwargs['reply_markup']
+        self.assertIn('أرسل كود الهدية', text)
+        self.assertEqual(kb.inline_keyboard[0][0].callback_data, 'gift:cancel')
+        message.answer.assert_not_awaited()
+
+        state.get_state.return_value = gift_state.code.state
+        state.set_state.reset_mock()
+        message.edit_text.reset_mock()
+        call.answer.reset_mock()
+        await env['cancel_code'](call, state)
+        state.set_state.assert_awaited_once_with(None)
+        text = message.edit_text.await_args.args[0]
+        kb = message.edit_text.await_args.kwargs['reply_markup']
+        self.assertIn('تم إلغاء إدخال كود الهدية', text)
+        self.assertEqual(kb.inline_keyboard[0][0].callback_data, 'student_home')
+        self.assertNotIn('gift:cancel', [
+            button.callback_data for row in kb.inline_keyboard for button in row])
+        message.answer.assert_not_awaited()
+        call.answer.assert_awaited_once_with('تم الإلغاء')
+
+    async def test_cancel_old_code_prompt_does_not_clear_other_state(self):
+        gift_state = types.SimpleNamespace(code=types.SimpleNamespace(state='gift-code'))
+        env = load_functions('handlers/gifts.py', {'cancel_code'}, GiftState=gift_state)
+        state = types.SimpleNamespace(get_state=AsyncMock(return_value='quiz-active'),
+                                     set_state=AsyncMock())
+        call = types.SimpleNamespace(message=types.SimpleNamespace(edit_text=AsyncMock()),
+                                     answer=AsyncMock())
+        await env['cancel_code'](call, state)
+        state.set_state.assert_not_awaited()
+        call.message.edit_text.assert_not_awaited()
+        call.answer.assert_awaited_once_with('طلب إدخال الكود لم يعد نشطاً.', show_alert=True)
+
+    async def test_code_screen_handles_telegram_edit_failure(self):
+        class BadRequest(Exception):
+            pass
+
+        env = load_functions('handlers/gifts.py', {'_show_code_screen'},
+            TelegramBadRequest=BadRequest)
+        message = types.SimpleNamespace(
+            edit_text=AsyncMock(side_effect=BadRequest('message to edit not found')),
+            answer=AsyncMock())
+        call = types.SimpleNamespace(message=message)
+        await env['_show_code_screen'](call, 'تم الإلغاء', 'buttons')
+        message.answer.assert_awaited_once_with('تم الإلغاء', reply_markup='buttons')
+        message.answer.reset_mock()
+        message.edit_text.side_effect = BadRequest('Bad Request: message is not modified')
+        await env['_show_code_screen'](call, 'تم الإلغاء', 'buttons')
+        message.answer.assert_not_awaited()
+
     async def test_gift_only_generation_refunds_by_receipt(self):
         fn=load_functions('services/quiz_service.py',{'refund_user_on_failure'})['refund_user_on_failure']
         refund=AsyncMock(return_value=True)
