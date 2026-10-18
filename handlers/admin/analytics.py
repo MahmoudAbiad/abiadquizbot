@@ -1,4 +1,5 @@
 import html
+import time
 import io
 import csv
 import json
@@ -18,7 +19,7 @@ from helpers.supabase_helper import (
     admin_get_recent_errors,
     admin_get_referral_leaderboard,
 )
-from helpers.supabase_helper.analytics import admin_get_event_counts
+from helpers.supabase_helper.analytics import admin_get_event_counts, admin_get_user_activity_page
 from keyboards import get_analytics_keyboard
 from logger import get_logger
 from .dashboard import IsAdminFilter
@@ -59,11 +60,14 @@ def _format_event_label(event_type: str, metadata: dict) -> str:
     بدون تسمية عربية ولا عرض لعدد النقاط الناقصة (deficit).
     """
     if event_type == "insufficient_balance_blocked":
-        meta = metadata or {}
+        meta = metadata if isinstance(metadata, dict) else {}
         deficit = meta.get("deficit_points")
-        deficit_str = f"{float(deficit):.2f}" if deficit is not None else "غير معروف"
+        try:
+            deficit_str = f"{float(deficit):.2f}" if deficit is not None else "غير معروف"
+        except (ValueError, TypeError):
+            deficit_str = "غير معروف"
         return f"🚫 لم تكفِ النقاط - عجز مطلوب شحنه: <code>{deficit_str}</code>"
-    return EVENT_LABELS.get(event_type, event_type)
+    return html.escape(str(EVENT_LABELS.get(event_type, event_type))[:160])
 
 
 def _format_seconds(total_seconds: float) -> str:
@@ -506,7 +510,10 @@ async def show_user_activity(call: types.CallbackQuery):
             f"📝 <b>آخر المحاولات:</b>\n{attempts_lines}\n\n"
             f"🕒 <b>آخر الأحداث:</b>\n{events_lines}"
         )
+        snapshot = int(time.time() * 1000)
         kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🕒 جميع الأحداث", callback_data=f"aua:{target_id}:e:1:{snapshot}"),
+             types.InlineKeyboardButton(text="📝 جميع المحاولات", callback_data=f"aua:{target_id}:a:1:{snapshot}")],
             [types.InlineKeyboardButton(text="🔙 رجوع لبيانات الطالب", callback_data=f"admin_user_profile_{target_id}")]
         ])
         await safe_edit_text(call.message, text, reply_markup=kb)
@@ -514,3 +521,70 @@ async def show_user_activity(call: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error rendering user activity: {e}")
         await call.answer("❌ تعذر تحميل نشاط هذا الطالب.", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^aua:[0-9]{1,16}:[ea]:[0-9]{1,6}:[0-9]{13}$"))
+async def show_user_activity_page(call: types.CallbackQuery):
+    _, user_raw, kind, page_raw, snapshot_raw = call.data.split(":")
+    target_id, snapshot = int(user_raw), int(snapshot_raw)
+    await call.answer()
+    try:
+        activity = await admin_get_user_activity_page(target_id, kind, int(page_raw), snapshot)
+        page, pages = activity["page"], activity["pages"]
+        lines = []
+        for index, row in enumerate(activity["rows"], start=(page - 1) * 8 + 1):
+            if kind == "e":
+                label = _format_event_label(row["event_type"], row.get("metadata"))
+                detail = _activity_event_detail(row.get("metadata"))
+                stamp = row["created_at"]
+            else:
+                source = html.escape(str(SOURCE_LABELS.get(row.get("source_type"), row.get("source_type") or "غير معروف")))
+                status = "✅ مكتملة" if row.get("is_completed") else (
+                    "⏹ متوقفة" if row.get("completed_at") else "⏳ غير مكتملة")
+                label = f"{source} · {status} · {row.get('score') or 0}/{row.get('total_questions') or 0}"
+                detail = ("المدة: " + _format_seconds(row["duration_seconds"])) if row.get("duration_seconds") is not None else ""
+                stamp = row["started_at"]
+            lines.append(f"{index}. {label}\n🕒 <code>{format_syria_time(stamp)}</code>" +
+                         (f"\n{detail}" if detail else ""))
+        body = "\n\n".join(lines) or "لا يوجد نشاط مسجّل في هذا القسم."
+        title = "جميع الأحداث" if kind == "e" else "جميع محاولات الاختبارات"
+        rows = [[types.InlineKeyboardButton(
+            text=("✅ " if kind == tab else "") + label,
+            callback_data=f"aua:{target_id}:{tab}:1:{snapshot}")
+            for tab, label in [("e", "🕒 الأحداث"), ("a", "📝 المحاولات")]]]
+        navigation = []
+        if page > 1:
+            navigation.append(types.InlineKeyboardButton(text="⬅️ الأحدث", callback_data=f"aua:{target_id}:{kind}:{page-1}:{snapshot}"))
+        if page < pages:
+            navigation.append(types.InlineKeyboardButton(text="الأقدم ➡️", callback_data=f"aua:{target_id}:{kind}:{page+1}:{snapshot}"))
+        if navigation:
+            rows.append(navigation)
+        rows.append([types.InlineKeyboardButton(text="🔄 تحديث السجل", callback_data=f"aua:{target_id}:{kind}:1:{int(time.time()*1000)}")])
+        rows.append([types.InlineKeyboardButton(text="📈 ملخص النشاط", callback_data=f"admin_user_activity_{target_id}"),
+                     types.InlineKeyboardButton(text="🔙 بيانات الطالب", callback_data=f"admin_user_profile_{target_id}")])
+        await safe_edit_text(call.message,
+            f"📈 <b>{title}</b> · <code>{target_id}</code>\n"
+            f"الصفحة {page}/{pages} · الإجمالي {activity['total']}\n\n{body}\n\n"
+            "الأحدث أولاً. لإظهار النشاط الجديد اضغط تحديث السجل.",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception as exc:
+        logger.error(f"Error rendering activity page for {target_id}: {exc}")
+        await call.message.answer("تعذر تحميل صفحة النشاط. حاول مجدداً.")
+
+
+def _activity_event_detail(metadata):
+    """Bounded useful facts, never raw metadata, tokens or gift codes."""
+    if not isinstance(metadata, dict):
+        return ""
+    labels = [("questions", "أسئلة"), ("questions_generated", "أسئلة مولّدة"),
+              ("requested_count", "المطلوب"), ("round", "جولة"), ("score", "صحيحة"),
+              ("points", "نقاط"), ("cost", "التكلفة"), ("format", "الصيغة"),
+              ("content_type", "المحتوى"), ("input_channel", "المصدر"), ("reason", "السبب")]
+    parts = []
+    for key, label in labels:
+        value = metadata.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            parts.append(f"{label}: {html.escape(str(value)[:32])}")
+        if len(parts) == 3:
+            break
+    return " · ".join(parts)

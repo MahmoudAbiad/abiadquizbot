@@ -391,6 +391,38 @@ async def admin_get_user_activity(user_id: int, event_limit: int = 15) -> Dict[s
         return empty
 
 
+async def admin_get_user_activity_page(user_id: int, kind: str, page: int, snapshot_ms: int,
+                                       page_size: int = 8) -> Dict[str, Any]:
+    """Fetch only one user's requested page. No lifetime limit, no raw-history preload."""
+    if kind not in ("e", "a") or user_id <= 0 or not 1 <= page_size <= 10:
+        raise ValueError("Invalid activity page")
+    page = max(1, min(int(page), 999999))
+    cutoff = datetime.datetime.fromtimestamp(snapshot_ms / 1000, datetime.timezone.utc).isoformat()
+    table = "usage_events" if kind == "e" else "quiz_attempts"
+    time_column = "created_at" if kind == "e" else "started_at"
+    columns = ("id,event_type,metadata,created_at" if kind == "e" else
+               "id,source_type,score,total_questions,is_completed,duration_seconds,started_at,completed_at")
+
+    async def fetch(requested_page):
+        offset = (requested_page - 1) * page_size
+        return await (supabase.table(table).select(columns, count="exact")
+                      .eq("user_id", user_id).lte(time_column, cutoff)
+                      .order(time_column, desc=True).order("id", desc=True)
+                      .range(offset, offset + page_size - 1).execute())
+
+    result = await fetch(page)
+    if result.count is None:
+        raise RuntimeError("Activity count unavailable")
+    total = result.count
+    pages = max(1, (total + page_size - 1) // page_size)
+    # Cleanup may have deleted old records after the navigation was rendered.
+    if page > pages:
+        page = pages
+        result = await fetch(page)
+    return {"rows": result.data or [], "total": total, "page": page, "pages": pages,
+            "snapshot_ms": snapshot_ms}
+
+
 async def admin_get_all_usage_events(limit: int = 5000) -> List[Dict[str, Any]]:
     """جلب سجل الأحداث الخام لـ الطلاب حصراً كملف CSV."""
     try:
