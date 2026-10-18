@@ -67,6 +67,11 @@ class ErrorReviewPresentationTests(unittest.TestCase):
         self.assertIn("🟢 <b>الإجابة الصحيحة:</b> ج", rich)
         self.assertIn("qrevexp:abcdef1234567890:0", rich)
         self.assertNotIn("نستخدم قاعدة الفرق", rich)
+        text_when_missing_image = review_question_rich_html(
+            entry, 0, 1, "abcdef1234567890", "")
+        self.assertIn("أ:", text_when_missing_image)
+        self.assertIn("ب:", text_when_missing_image)
+        self.assertIn("ج:", text_when_missing_image)
         explain = review_explanation_rich_html(entry, 0, 1, "abcdef1234567890")
         self.assertIn("<blockquote>نستخدم قاعدة الفرق بين مربعين.</blockquote>", explain)
         self.assertIn("qrevback:abcdef1234567890:0", explain)
@@ -184,6 +189,11 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         call.message = review
         await env["_review_show"](call, "abcdef1234567890", 0, explanation=True)
         self.bot.edit_message_text.assert_awaited_once()
+        # Explanation/back controls belong to the rich body, not duplicate
+        # buttons below the message.
+        buttons = self.bot.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+        self.assertFalse(any(b.callback_data.startswith("qrevback:")
+                             for row in buttons for b in row))
         edited = self.bot.edit_message_text.await_args.kwargs["rich_message"].html
         self.assertIn("qrevback:abcdef1234567890:0", edited)
         self.assertIn("لا يوجد شرح محفوظ", edited)
@@ -225,6 +235,24 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("qrevexp:abcdef1234567890:0", rich)
         self.assertIn("🔴 <b>إجابتك:</b> أ", rich)
         self.assertIn("🟢 <b>الإجابة الصحيحة:</b> ب", rich)
+
+    async def test_photo_fallback_keeps_explanation_and_back_in_place(self):
+        env = load_functions("handlers/quiz_runner.py",
+            {"_review_pager", "_review_fallback"},
+            types=types, html=__import__("html"), re=__import__("re"))
+        message = SimpleNamespace(photo=[SimpleNamespace(file_id="photo")],
+                                  edit_caption=AsyncMock(), edit_text=AsyncMock())
+        call = SimpleNamespace(message=message)
+        fallback = env["_review_pager"](
+            "abcdef1234567890", 0, 1, explanation=True, fallback_controls=True)
+        await env["_review_fallback"](
+            call, "💡 <b>الشرح</b>", fallback, None, False)
+        message.edit_caption.assert_awaited_once()
+        self.assertEqual(message.edit_caption.await_args.kwargs["caption"],
+                         "💡 الشرح")
+        action = fallback.inline_keyboard[0][0].callback_data
+        self.assertEqual(action, "qrevback:abcdef1234567890:0")
+        message.edit_text.assert_not_awaited()
 
     async def test_feedback_hub_preserves_rating_actions(self):
         env = load_functions("handlers/quiz_runner.py", {"open_quiz_feedback_panel"},
