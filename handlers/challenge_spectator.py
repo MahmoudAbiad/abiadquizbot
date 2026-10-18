@@ -154,14 +154,21 @@ async def challenge_spectator_loop(bot):
     """Independent worker: slow spectators never delay the async attack timer."""
     while True:
         _wake.clear()
+        delay = 3
         try:
-            await beat(bot)
+            # Event hints must still reach viewers of in-flight attacks after
+            # the admin disables new spectators. With no hints and the feature
+            # off, don't run the Redis Lua discovery script every three seconds.
+            if not _pending and not await is_feature_enabled('spectator_mode_enabled', default=False):
+                delay = 60
+            else:
+                await beat(bot)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.info('spectator_beat_unavailable')
         try:
-            await asyncio.wait_for(_wake.wait(),timeout=3)
+            await asyncio.wait_for(_wake.wait(),timeout=delay)
         except asyncio.TimeoutError:
             pass
 

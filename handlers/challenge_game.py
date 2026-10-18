@@ -363,22 +363,17 @@ async def game_callback(c: types.CallbackQuery):
 
 
 async def challenge_heartbeat_loop(bot):
-    """One bounded indexed due-query per 3s, only after schema readiness.
-    Multiple workers are safe for rewards/answers; notifications are claimed atomically.
-    No Redis state is needed to recover an attack after restart.
+    """Poll due attacks every 3s while enabled or while attacks remain in flight.
+    Once disabled and drained, avoid due-attack and notification DB queries.
     """
-    ready=False
     while True:
         try:
-            if not ready:
-                # Probe schema without requiring flags to remain on after a restart.
-                # Existing attacks must continue even when new game entry is disabled.
-                active = await repo.has_active_attacks()
-                enabled = await is_feature_enabled("challenge_system_enabled",default=False)
-                if not active and not enabled:
-                    await asyncio.sleep(30)
-                    continue
-                ready=True
+            # Re-read on EVERY iteration: the feature may be disabled while running.
+            # Even if disabled, the last attacks must be settled normally.
+            enabled = await is_feature_enabled("challenge_system_enabled", default=False)
+            if not enabled and not await repo.has_active_attacks():
+                await asyncio.sleep(60)
+                continue
             now=dt.datetime.now(dt.timezone.utc).isoformat()
             for item in await repo.due_attacks(now):
                 try:
@@ -407,7 +402,6 @@ async def challenge_heartbeat_loop(bot):
         except asyncio.CancelledError:
             raise
         except Exception:
-            ready=False
             logger.debug("game_heartbeat_unavailable_or_migrations_not_applied")
             await asyncio.sleep(30)
         await asyncio.sleep(3)
