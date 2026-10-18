@@ -53,6 +53,7 @@ from services.quiz_result_ui import (
     build_wrong_answer_review, review_page_text, review_inline_button,
     review_question_rich_html, review_explanation_rich_html,
     review_question_fallback_text, review_explanation_fallback_text,
+    review_expanded_fallback_text,
 )
 
 logger = get_logger(__name__)
@@ -456,28 +457,29 @@ async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
 
     entry = items[page]
     media = None
-    if not explanation and entry.get("is_math"):
+    # Explanation expands below the same original math image, so it must be
+    # present on both views (also after changing review pages).
+    if entry.get("is_math"):
         try:
             media = await _review_resolve_image(call.from_user.id, token, page, items)
         except Exception as exc:
             log_warning(logger, f"Could not render math review image: {exc}")
 
     image_url = media if isinstance(media, str) else ""
-    if not explanation and entry.get("is_math") and media is not None and not image_url:
+    plain = (review_expanded_fallback_text(entry, page, len(items))
+             if explanation else review_question_fallback_text(entry, page, len(items)))
+    if entry.get("is_math") and media is not None and not image_url:
         # A local rendered image cannot be embedded via an HTTP URL in a rich
-        # message; prefer a real photo with editable caption over text-only UI.
+        # message; keep the question image and expandable caption instead.
         await _review_fallback(
-            call, review_question_fallback_text(entry, page, len(items)),
-            _review_pager(token, page, len(items), fallback_controls=True),
+            call, plain,
+            _review_pager(token, page, len(items),
+                          explanation=explanation, fallback_controls=True),
             media, new_message)
         await call.answer()
         return
-    if explanation:
-        rich_html = review_explanation_rich_html(entry, page, len(items), token)
-        plain = review_explanation_fallback_text(entry)
-    else:
-        rich_html = review_question_rich_html(entry, page, len(items), token, image_url)
-        plain = review_question_fallback_text(entry, page, len(items))
+    rich_html = review_question_rich_html(
+        entry, page, len(items), token, image_url, show_explanation=explanation)
     keyboard = _review_pager(token, page, len(items), explanation=explanation)
     rich = types.InputRichMessage(html=rich_html, is_rtl=True)
 
