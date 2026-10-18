@@ -221,17 +221,39 @@ def _student_info_keyboard():
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def _show_student_navigation_screen(call: types.CallbackQuery, text: str, reply_markup):
+    """Navigate within one Telegram message; fall back only if editing is unavailable."""
+    try:
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        return
+    except TelegramBadRequest as exc:
+        # Repeated taps on an already-open screen must not create extra messages.
+        if "message is not modified" in str(exc).lower():
+            return
+        logger.warning(f"Could not edit student navigation message: {exc}")
+    except (AttributeError, TypeError) as exc:
+        # Old/inaccessible callback messages may not support edit_text.
+        logger.warning(f"Student navigation message is not editable: {exc}")
+
+    # Fallback for messages that Telegram no longer allows us to edit.
+    send = getattr(call.message, "answer", None)
+    if callable(send):
+        await send(text, parse_mode="HTML", reply_markup=reply_markup)
+    else:
+        await bot.send_message(call.from_user.id, text, parse_mode="HTML", reply_markup=reply_markup)
+
+
 @router.callback_query(F.data.in_({"student_create_quiz", "student_help", "student_home"}), F.message.chat.type == "private")
 async def student_navigation(call: types.CallbackQuery):
     # Informational screens never clear FSM or replace an ongoing quiz/upload.
     await call.answer()
     if call.data == "student_home":
         info = await bot.get_me()
-        await call.message.answer(HOME_TEXT, parse_mode="HTML",
-            reply_markup=await get_main_menu_keyboard(info.username, call.from_user.id))
+        menu = await get_main_menu_keyboard(info.username, call.from_user.id)
+        await _show_student_navigation_screen(call, HOME_TEXT, menu)
     else:
-        await call.message.answer(UPLOAD_TEXT if call.data == "student_create_quiz" else HELP_TEXT,
-            parse_mode="HTML", reply_markup=_student_info_keyboard())
+        content = UPLOAD_TEXT if call.data == "student_create_quiz" else HELP_TEXT
+        await _show_student_navigation_screen(call, content, _student_info_keyboard())
 
 
 @router.message(Command("help"))
