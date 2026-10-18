@@ -16,6 +16,7 @@ await db.exec("INSERT INTO public.app_settings(key,value) VALUES('welcome_points
 await db.exec("INSERT INTO public.users(user_id,free_points,paid_points) VALUES(99,50,25);");
 const migration=readdirSync('db/migrations').find(f=>f.endsWith('_gift_wallet_codes.sql'));
 await db.exec(readFileSync(`db/migrations/${migration}`,'utf8'));
+await db.exec(readFileSync('db/migrations/20261018093843_wallet_debit_numeric_arithmetic.sql','utf8'));
 const scalar=async (sql,args=[]) => (await db.query(sql,args)).rows[0]?.v;
 const rpc=async (name,args) => scalar(`SELECT public.${name}(${args.map((_,i)=>'$'+(i+1)).join(',')}) AS v`,args);
 const user=async id => rpc('register_user_with_gift',[JSON.stringify({user_id:id,username:'user'+id,first_name:'طالب',last_name:'اختبار',last_renewal:'2026-10-08',join_source:'bot'})]);

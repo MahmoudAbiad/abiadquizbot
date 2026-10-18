@@ -27,6 +27,7 @@ try {
     INSERT INTO users(user_id,free_points,paid_points) VALUES(1,10,20),(2,11,21),(3,12,22);`);
   await db.exec(fs.readFileSync('db/migrations/20261008141907_gift_wallet_codes.sql', 'utf8'));
   await db.exec(fs.readFileSync('db/migrations/20261018084726_gift_admin_campaigns.sql', 'utf8'));
+  await db.exec(fs.readFileSync('db/migrations/20261018093843_wallet_debit_numeric_arithmetic.sql', 'utf8'));
   await db.exec('GRANT ALL ON users,app_settings,usage_events TO service_role; SET ROLE service_role;');
 
   const codeId = randomUUID();
@@ -157,7 +158,42 @@ try {
       assert.equal(Number(await value("SELECT count(*) AS v FROM point_gifts WHERE source_key=$1", ['campaign:'+concurrent])), 3);
     } finally { a.release(); b.release(); }
   }
-  console.log('PASS gift admin SQL: archive/delete/revoke, refunds, snapshots, once-only grants, notices, recovery, permissions'+(pool?', concurrent PostgreSQL locks':''));
+  // Reproduce legacy float balances: numeric deductions must not be converted
+  // back into float arithmetic before assignment. This exact positive residue
+  // previously became -4.33873497871556e-30 and violated users_free_points_check.
+  await db.exec(`INSERT INTO users(user_id,free_points,paid_points) VALUES
+    (101,2.6645352591003757e-15,9684.10),(102,0.1,0.2),(103,0,6),(104,3,25.30);`);
+  for (const [userId, amount, expectedPaid] of [[101,6,9678.10],[102,0.3,0],[103,6,0],[104,28.30,0]]) {
+    const id = randomUUID();
+    const receipt = await value('SELECT wallet_debit($1,$2,5,$3) AS v', [userId,amount,id]);
+    assert.ok(receipt);
+    const row = (await db.query('SELECT free_points,paid_points,total_questions FROM users WHERE user_id=$1',[userId])).rows[0];
+    assert.equal(Number(row.free_points),0);
+    assert.equal(Number(row.paid_points),expectedPaid);
+    assert.equal(Number(row.total_questions),5);
+    assert.ok(receipt.debited_free>=0 && receipt.debited_paid>=0 && receipt.debited_gift>=0);
+    assert.ok(Math.abs(receipt.debited_free+receipt.debited_paid+receipt.debited_gift-amount)<1e-12);
+    assert.equal(await value('SELECT wallet_debit($1,10000,1,$2) AS v',[userId,randomUUID()]),null);
+    assert.equal(Number(await value('SELECT count(*) AS v FROM wallet_debits WHERE user_id=$1',[userId])),1);
+  }
+  // Fractional gifts keep their normal priority; no insufficient-balance
+  // rejection may leave a partial debit or a receipt behind.
+  await db.exec(`INSERT INTO users(user_id,free_points,paid_points) VALUES(105,0.1,0.1);
+    INSERT INTO point_gifts(user_id,source,source_key,title,original_amount,remaining_amount)
+      VALUES(105,'admin','precision','Fractional gift',0.1,0.1);`);
+  const fractionId=randomUUID();
+  const fraction=await value('SELECT wallet_debit(105,0.30,5,$1) AS v',[fractionId]);
+  assert.equal(fraction.debited_free,0.1);
+  assert.equal(fraction.debited_gift,0.1);
+  assert.equal(fraction.debited_paid,0.1);
+  assert.equal(Number(await value('SELECT free_points+paid_points AS v FROM users WHERE user_id=105')),0);
+  await value('SELECT wallet_refund(105,$1) AS v',[fractionId]);
+  await value('SELECT wallet_refund(105,$1) AS v',[fractionId]);
+  assert.equal(Number(await value('SELECT free_points AS v FROM users WHERE user_id=105')),0.1);
+  assert.equal(Number(await value('SELECT paid_points AS v FROM users WHERE user_id=105')),0.1);
+  assert.equal(Number(await value('SELECT gift_points AS v FROM wallet_gift_balances(ARRAY[105]::bigint[])')),0.1);
+  assert.equal(await value("SELECT has_function_privilege('anon','wallet_debit(bigint,numeric,integer,uuid)','EXECUTE') AS v"),false);
+  console.log('PASS gift admin SQL: archive/delete/revoke, refunds, snapshots, once-only grants, notices, recovery, permissions, decimal wallet precision'+(pool?', concurrent PostgreSQL locks':''));
 } catch (error) {
   console.error('FAIL gift admin SQL:', error.message, error.detail || '', error.where || '', error.stack?.split('\n').slice(-3).join('\n'));
   process.exitCode = 1;

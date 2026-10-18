@@ -66,6 +66,7 @@ from services.quiz_service import (
     combo_quiz_count, build_question_type_label, estimate_pages_from_text,
 )
 from services.flow_state import build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لرفع الصوت عبر الويب
+from services.wallet_errors import WalletDebitError, WALLET_DEBIT_ERROR_TEXT
 from handlers.quiz_runner import start_loaded_quiz
 
 logger = get_logger(__name__)
@@ -172,6 +173,11 @@ async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> 
 
 async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float, action: str = "unknown") -> None:
     balance = float(user_info.get("points") or 0)
+    if balance >= required:
+        # A failed debit or a stale balance snapshot must not prompt a funded
+        # student to recharge, nor count as an insufficient-balance event.
+        await message.answer(WALLET_DEBIT_ERROR_TEXT)
+        return
     deficit = max(0.0, required - balance)
 
     # 🆕 تتبع تحليلي: تسجيل كل مرة يُعترَض فيها إجراء الطالب بسبب رصيد غير كافٍ،
@@ -978,7 +984,11 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
             await _insufficient_balance(call.message, user_info, cost, action="cached_quiz_use")
             return
             
-        remaining = await update_user_stats(call.from_user.id, cost, len(selected_quiz["quiz_data"]))
+        try:
+            remaining = await update_user_stats(call.from_user.id, cost, len(selected_quiz["quiz_data"]))
+        except WalletDebitError:
+            await call.message.answer(WALLET_DEBIT_ERROR_TEXT)
+            return
         if remaining is None:
             await _insufficient_balance(call.message, await _current_user(call.message, call.from_user), cost, action="cached_quiz_use")
             return
@@ -1194,14 +1204,21 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
 
         deduction = None
         if float(user_info["points"]) >= cost:
-            deduction = await update_user_stats(call.from_user.id, cost, count)
+            try:
+                deduction = await update_user_stats(call.from_user.id, cost, count)
+            except WalletDebitError:
+                await state.set_state(QuizState.waiting_for_count)
+                preserve_upload = True
+                await call.message.answer(WALLET_DEBIT_ERROR_TEXT)
+                return
         if deduction is None:
             # 🩹 لسا ما بدأنا الخصم/التوليد فعلياً - نرجّع الحالة لـ waiting_for_count
             # (بدل ما تضل عالقة بـ processing_file_quiz بلا أي توليد شغال فعلياً) حتى
             # يقدر الطالب يلغي الطلب أو يستبدله بملف جديد عادي.
             await state.set_state(QuizState.waiting_for_count)
             preserve_upload = True  # الطالب سيشحن/ينتظر التجديد ثم يعيد الضغط على نفس الملف
-            await _insufficient_balance(call.message, user_info, cost, action="quiz_generation")
+            fresh_balance = await _current_user(call.message, call.from_user)
+            await _insufficient_balance(call.message, fresh_balance, cost, action="quiz_generation")
             return
 
         # من هذه اللحظة فقط يحق لهذا التنفيذ أن يعمل refund. هذا يمنع أي بيانات

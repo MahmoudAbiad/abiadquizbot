@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any
 from ._client import supabase, logger, log_error, log_warning, log_info
 from .analytics import log_usage_event
 from .gifts import gift_balances, debit
+from services.wallet_errors import WalletDebitError
 from zoneinfo import ZoneInfo
 from validators import validate_user_id
 from helpers.settings_helper import get_setting
@@ -157,16 +158,17 @@ async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dic
         return _balance_payload(user_data.get('free_points'), user_data.get('paid_points'), status="error", referrer=None)
     
 async def update_user_stats(user_id: int, points_to_deduct: float, questions_generated: Optional[int] = None) -> Optional[Dict[str, float]]:
-    """Debit all wallet buckets atomically; return a durable refund receipt."""
+    """Return a receipt or a confirmed rejection; raise on an unconfirmed RPC."""
     try:
         is_valid, error = validate_user_id(user_id)
-        if not is_valid: return None
+        if not is_valid:
+            raise ValueError("Invalid wallet user")
 
         if questions_generated is None:
             questions_generated = int(points_to_deduct)
         
         row = await debit(user_id, points_to_deduct, questions_generated)
-        if not row:
+        if row is None:
             return None
         return {
             "remaining_points": float(row["remaining_points"]),
@@ -177,7 +179,7 @@ async def update_user_stats(user_id: int, points_to_deduct: float, questions_gen
         }
     except Exception as e:
         log_error(logger, f"Error updating user stats via RPC: {e}", exception=e)
-        return None
+        raise WalletDebitError("Wallet debit could not be confirmed") from e
 
 async def refund_user_points_split(user_id: int, free_amount: float, paid_amount: float) -> bool:
     """

@@ -50,4 +50,6 @@ jobs:
       - name: Verify gift wallet admin and concurrent transactions
         env:
           TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/gift_admin_test
-        run: node tests/sql/gift_admin_test.mjs
+        run: |
+          node tests/sql/gift_wallet_test.mjs
+          node tests/sql/gift_admin_test.mjs

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 from reliability_support import FakeRedis, load_functions
 from services.redis_reliability import UserLock
 from services.upload_validation import InvalidUploadError
+from services.wallet_errors import WalletDebitError, WALLET_DEBIT_ERROR_TEXT
 
 
 class State:
@@ -35,6 +36,7 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
         loaded.__wrapped__ = loaded
         self.env=load_functions('handlers/files.py', {'handle_count_start','_clear_quiz_charge_markers','_missing_upload_paths'},
             asyncio=asyncio, redis_client=FakeRedis(), UserLock=UserLock, QuizState=states,
+            WalletDebitError=WalletDebitError, WALLET_DEBIT_ERROR_TEXT=WALLET_DEBIT_ERROR_TEXT,
             _QUIZ_CHARGE_STATE_KEYS=('debited_cost','debited_free','debited_paid','debit_id','debited_gift'),
             validate_question_count=lambda count:(True,''), SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
             calculate_quiz_points_cost=AsyncMock(return_value=2),determine_execution_mode=lambda *a,**kw:'Standard',
@@ -122,6 +124,30 @@ class UploadRetentionTests(DebitTests):
             self.assertTrue(os.path.exists(path))
             self.assertEqual(self.state.status,'waiting_for_count')
             self.call.message.answer.assert_awaited_with('❌ bad count')
+
+    async def test_wallet_rpc_failure_keeps_upload_without_low_balance_or_refund(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn,path=self.make_with_file(d)
+            self.env['update_user_stats'].side_effect=WalletDebitError('Database constraint')
+            await fn(self.call,self.state)
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(self.state.status,'waiting_for_count')
+            self.call.message.answer.assert_awaited_once_with(WALLET_DEBIT_ERROR_TEXT)
+            self.env['_insufficient_balance'].assert_not_awaited()
+            self.env['execute_quiz_generation_workflow'].assert_not_awaited()
+            self.env['refund_user_on_failure'].assert_not_awaited()
+
+    async def test_balance_race_uses_fresh_balance_after_confirmed_rejection(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn,path=self.make_with_file(d)
+            self.env['_current_user'].side_effect=[{'points':100},{'points':0}]
+            self.env['update_user_stats'].return_value=None
+            await fn(self.call,self.state)
+            self.assertTrue(os.path.exists(path))
+            self.env['_insufficient_balance'].assert_awaited_once_with(
+                self.call.message,{'points':0},2,action='quiz_generation')
+            self.env['execute_quiz_generation_workflow'].assert_not_awaited()
+            self.env['refund_user_on_failure'].assert_not_awaited()
 
     async def test_missing_file_checked_before_any_debit(self):
         with tempfile.TemporaryDirectory() as d:
