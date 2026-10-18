@@ -183,7 +183,7 @@ async def generate_quiz_smart(
         if previous_questions and not is_extraction:
             old_q_texts = "\n".join(
                 f"- {str(question['question'])[:350]}"
-                for question in previous_questions if question.get("question")
+                for question in previous_questions if isinstance(question, dict) and question.get("question")
             )[:14000]
             if old_q_texts:
                 context_parts.append("[أسئلة سابقة لا تكررها]:\n" + old_q_texts)
@@ -214,7 +214,7 @@ async def generate_quiz_smart(
                 return _finalize(await _generate_text_quiz_with_gemini(pure_text, prompt, user_context=user_context))
             questions = await _generate_text_quiz(pure_text, prompt, english_mode=english_mode, user_context=user_context)
             if not questions:
-                questions = await _generate_text_quiz_with_gemini(pure_text, prompt)
+                questions = await _generate_text_quiz_with_gemini(pure_text, prompt, user_context=user_context)
             return _finalize(questions)
 
         if not file_paths:
