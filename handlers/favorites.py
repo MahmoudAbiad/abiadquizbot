@@ -350,8 +350,11 @@ async def manage_favorite(call: types.CallbackQuery):
         if not favorite:
             await call.answer("الاختبار غير موجود في قائمتك.", show_alert=True)
             return
-        rows = [[types.InlineKeyboardButton(text="🗑 إزالة من اختباراتي", callback_data=f"fav_remove_{fid}")]]
+        rows = [[types.InlineKeyboardButton(text="🗑 إزالة من اختباراتي", callback_data=f"fav_remove_{fid}", style="danger")]]
         rows.extend(get_delete_quiz_button_row(favorite.get("quiz_id"), call.from_user.id, favorite.get("creator_id")))
+        for row in rows:
+            for button in row:
+                button.style = "danger"
         rows.append([types.InlineKeyboardButton(text="🔙 رجوع للاختبار", callback_data=f"fav_details_{fid}")])
         text = (f"⚙️ <b>إدارة الاختبار</b>\n\n{escape((favorite.get('title') or 'اختبار محفوظ')[:180])}\n\n"
                 "«إزالة من اختباراتي» تزيله من قائمتك الشخصية فقط.")
@@ -369,7 +372,7 @@ async def confirm_remove_favorite(call: types.CallbackQuery):
             await call.answer("الاختبار غير موجود في قائمتك.", show_alert=True)
             return
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="🗑 نعم، إزالة من قائمتي", callback_data=f"fav_del_{fid}")],
+            [types.InlineKeyboardButton(text="🗑 نعم، إزالة من قائمتي", callback_data=f"fav_del_{fid}", style="danger")],
             [types.InlineKeyboardButton(text="🔙 الاحتفاظ بالاختبار", callback_data=f"fav_details_{fid}")],
         ])
         await _show_favorites_screen(call,

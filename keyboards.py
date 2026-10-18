@@ -46,7 +46,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         referral_bonus_points = await get_setting("referral_bonus_points")
         kb = [
             [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
-            [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu")],
+            [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu", style="primary")],
             [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
@@ -534,9 +534,9 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
         fid = item.get("favorite_id") or item.get("id")
         count = len(item.get("quiz_data") or [])
         kb.append([types.InlineKeyboardButton(
-            text=f"{number}. {title} · {count} سؤال", callback_data=f"fav_details_{fid}")])
+            text=f"{number}. {title} · {count} سؤال", callback_data=f"fav_details_{fid}", style="primary")])
     if not favorites and not search_query and not section_filter:
-        kb.append([types.InlineKeyboardButton(text="📝 إنشاء أول كويز", callback_data="student_create_quiz")])
+        kb.append([types.InlineKeyboardButton(text="📝 إنشاء أول كويز", callback_data="student_create_quiz", style="success")])
     navigation = []
     if current_page > 1:
         navigation.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"fav_page_{current_page - 1}"))
@@ -562,8 +562,8 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
 
 def get_favorite_details_keyboard(favorite_id: str, section_id: str = None, quiz_id=None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="▶️ ابدأ الاختبار", callback_data=f"fav_open_{favorite_id}")],
-        [types.InlineKeyboardButton(text="📄 تحميل PDF أو Word", callback_data=f"fav_export_menu_{favorite_id}")],
+        [types.InlineKeyboardButton(text="▶️ ابدأ الاختبار", callback_data=f"fav_open_{favorite_id}", style="success")],
+        [types.InlineKeyboardButton(text="📄 تحميل PDF أو Word", callback_data=f"fav_export_menu_{favorite_id}", style="primary")],
         [types.InlineKeyboardButton(text="⚙️ إدارة الاختبار", callback_data=f"fav_manage_{favorite_id}")],
         [types.InlineKeyboardButton(text="🔙 رجوع لاختباراتي", callback_data="favorites_resume"),
          types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="student_home")],
@@ -583,7 +583,7 @@ def get_sections_list_keyboard(sections: list, quiz_counts: dict = None, current
         title = title if len(title) <= 35 else title[:34] + "…"
         kb.append([types.InlineKeyboardButton(
             text=f"📁 {title} · {quiz_counts.get(sid, 0)} اختبار",
-            callback_data=f"fav_sec_view_{sid}")])
+            callback_data=f"fav_sec_view_{sid}", style="primary")])
     navigation = []
     if current_page > 1:
         navigation.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"fav_sections_{current_page - 1}"))
