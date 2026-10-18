@@ -143,7 +143,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         # المحذوف الآن بالكامل - راجع docs/HISTORY_LOG.md لتفاصيل الإزالة).
         if status == "new":
             intro_text = (
-                "👋 <b>أهلاً بك في أبيض كويز</b>\n\n"
+                "👋 <b>أهلاً بك في أبيض منشئ الكويزات</b>\n\n"
                 "حوّل ملفاتك وصورك ونصوصك إلى أسئلة تفاعلية للمراجعة.\n"
                 f"🎁 رصيد هديتك: <b>{gift_points:g} نقطة</b>.\n\n"
                 "ابدأ بإرسال محتواك، وراجع التكلفة قبل تأكيد التوليد."
@@ -364,5 +364,4 @@ async def cmd_channel(message: types.Message):
     
     # تسجيل حدث فتح القناة
     spawn(log_usage_event(message.from_user.id, "channel_opened"))
-
 
