@@ -8,6 +8,8 @@ from aiogram import types
 from reliability_support import load_functions
 from services.quiz_result_ui import (
     build_wrong_answer_review, review_page_text, review_inline_button,
+    review_question_rich_html, review_explanation_rich_html,
+    review_question_fallback_text, review_explanation_fallback_text,
 )
 
 
@@ -36,7 +38,43 @@ class ErrorReviewPresentationTests(unittest.TestCase):
     def test_no_mistakes_means_no_review_cta(self):
         self.assertEqual(build_wrong_answer_review(self.questions[:1], {"0": 1}), [])
         self.assertEqual(build_wrong_answer_review(self.questions[:1], {}), [])
-        self.assertIn('data="qrev:abcdef1234567890:0"', review_inline_button('abcdef1234567890', 3))
+        self.assertIn('data="qrevstart:abcdef1234567890"', review_inline_button('abcdef1234567890', 3))
+
+    def test_math_snapshot_keeps_image_original_order_and_explanation(self):
+        question = {
+            "question": "أوجد: $x^2-4$",
+            "options": ["$1$", "$2$", "$3$"],
+            "correct_option_id": 2, "is_math": True,
+            "image_url": "https://example.org/math-review.png",
+            "explanation": "نستخدم قاعدة الفرق بين مربعين.",
+            "table": {"headers": ["س"], "rows": [["1"]]},
+            "matrices": [{"rows": [["1", "2"], ["3", "4"]]}],
+        }
+        entry = build_wrong_answer_review([
+            {"question": "Earlier", "options": ["a", "b"], "correct_option_id": 0},
+            question,
+        ], {"1": 0})[0]
+        self.assertEqual(entry["number"], 2)
+        self.assertEqual(entry["total_questions"], 2)
+        self.assertEqual(entry["chosen_index"], 0)
+        self.assertEqual(entry["correct_index"], 2)
+        self.assertEqual(entry["math_question"]["table"], question["table"])
+        self.assertEqual(entry["math_question"]["matrices"], question["matrices"])
+        rich = review_question_rich_html(entry, 0, 1, "abcdef1234567890",
+                                          entry["image_url"])
+        self.assertIn('<img src="https://example.org/math-review.png"/>', rich)
+        self.assertIn("🔴 <b>إجابتك:</b> أ", rich)
+        self.assertIn("🟢 <b>الإجابة الصحيحة:</b> ج", rich)
+        self.assertIn("qrevexp:abcdef1234567890:0", rich)
+        self.assertNotIn("نستخدم قاعدة الفرق", rich)
+        explain = review_explanation_rich_html(entry, 0, 1, "abcdef1234567890")
+        self.assertIn("<blockquote>نستخدم قاعدة الفرق بين مربعين.</blockquote>", explain)
+        self.assertIn("qrevback:abcdef1234567890:0", explain)
+
+    def test_missing_explanation_is_disclosed(self):
+        entry = build_wrong_answer_review(self.questions[:1], {"0": 0})[0]
+        html = review_explanation_rich_html(entry, 0, 1, "abcdef1234567890")
+        self.assertIn("لا يوجد شرح محفوظ لهذا السؤال.", html)
 
     def test_leaderboard_keeps_its_main_row_and_feedback_is_consolidated(self):
         base = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -95,7 +133,7 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         await env["_send_quiz_completion"](42, "🏁 <b>نتيجتك</b>\n📊 50%\n🏆 ممتاز!", keyboard, "abcdef1234567890", 2)
         self.bot.send_rich_message.assert_awaited_once()
         rich = self.bot.send_rich_message.await_args.kwargs["rich_message"]
-        self.assertIn("qrev:abcdef1234567890:0", rich.html)
+        self.assertIn("qrevstart:abcdef1234567890", rich.html)
         self.assertIn('<tg-button-row align="center">', rich.html)
         self.assertIn('<tg-button type="callback_data" style="primary"', rich.html)
         self.assertIn("❌ الإجابات الخاطئة: 2", rich.html)
@@ -111,32 +149,82 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         data = [b.callback_data for row in fallback.inline_keyboard for b in row]
         self.assertEqual(data, ["qrev:abcdef1234567890:0", "leaderboard_id"])
 
-    async def test_review_pages_leave_the_result_intact(self):
-        env = load_functions("handlers/quiz_runner.py", {"show_quiz_error_review"},
-            types=types, redis_client=self.redis, json=json,
+    async def test_review_pages_toggle_in_place_without_touching_result(self):
+        class BadRequest(Exception):
+            pass
+
+        self.bot.edit_message_text = AsyncMock()
+        self.redis.ttl = AsyncMock(return_value=600)
+        env = load_functions("handlers/quiz_runner.py",
+            {"_review_pager", "_review_show", "_review_fallback"},
+            types=types, redis_client=self.redis, json=json, html=__import__("html"),
+            re=__import__("re"), bot=self.bot,
             _quiz_review_key=lambda user_id, token: f"quiz:error_review:{user_id}:{token}",
-            review_page_text=review_page_text,
+            _review_resolve_image=AsyncMock(return_value=None),
+            review_question_rich_html=review_question_rich_html,
+            review_explanation_rich_html=review_explanation_rich_html,
+            review_question_fallback_text=review_question_fallback_text,
+            review_explanation_fallback_text=review_explanation_fallback_text,
+            TelegramBadRequest=BadRequest, log_warning=Mock(), logger=self.log)
+
+        # Pressing the button in the result sends a new review below it.
+        result = SimpleNamespace(chat=SimpleNamespace(id=42), message_id=100,
+            text="🏁 اكتمل الاختبار", answer=AsyncMock(), photo=None)
+        call = SimpleNamespace(from_user=SimpleNamespace(id=42),
+            message=result, answer=AsyncMock())
+        await env["_review_show"](call, "abcdef1234567890", 0, new_message=True)
+        self.bot.send_rich_message.assert_awaited_once()
+        self.bot.edit_message_text.assert_not_awaited()
+        opened = self.bot.send_rich_message.await_args.kwargs["rich_message"].html
+        self.assertIn("qrevexp:abcdef1234567890:0", opened)
+
+        # Opening explanation edits the already-created review message.
+        review = SimpleNamespace(chat=SimpleNamespace(id=42), message_id=101,
+            photo=None)
+        call.message = review
+        await env["_review_show"](call, "abcdef1234567890", 0, explanation=True)
+        self.bot.edit_message_text.assert_awaited_once()
+        edited = self.bot.edit_message_text.await_args.kwargs["rich_message"].html
+        self.assertIn("qrevback:abcdef1234567890:0", edited)
+        self.assertIn("لا يوجد شرح محفوظ", edited)
+
+        # Back to question reuses the exact same message_id.
+        await env["_review_show"](call, "abcdef1234567890", 0)
+        self.assertEqual(self.bot.edit_message_text.await_count, 2)
+        self.assertEqual(self.bot.edit_message_text.await_args.kwargs["message_id"], 101)
+        returned = self.bot.edit_message_text.await_args.kwargs["rich_message"].html
+        self.assertIn("qrevexp:abcdef1234567890:0", returned)
+        self.redis.get.assert_awaited_with("quiz:error_review:42:abcdef1234567890")
+
+    async def test_math_review_uses_own_original_image_in_rich_message(self):
+        math_question = {"question": "أوجد الناتج", "options": ["1", "2"],
+                         "correct_option_id": 1, "is_math": True,
+                         "image_url": "https://example.com/math.png",
+                         "explanation": "نختار ب."}
+        self.redis.get.return_value = json.dumps(
+            build_wrong_answer_review([math_question], {"0": 0})).encode()
+        self.bot.edit_message_text = AsyncMock()
+        env = load_functions("handlers/quiz_runner.py",
+            {"_review_pager", "_review_show", "_review_fallback", "_review_resolve_image"},
+            types=types, redis_client=self.redis, json=json, html=__import__("html"),
+            re=__import__("re"), bot=self.bot,
+            _quiz_review_key=lambda user_id, token: f"quiz:error_review:{user_id}:{token}",
+            review_question_rich_html=review_question_rich_html,
+            review_explanation_rich_html=review_explanation_rich_html,
+            review_question_fallback_text=review_question_fallback_text,
+            review_explanation_fallback_text=review_explanation_fallback_text,
             TelegramBadRequest=type("BadRequest", (Exception,), {}),
             log_warning=Mock(), logger=self.log)
-        message = SimpleNamespace(text="🏁 اكتمل الاختبار",
-                                  answer=AsyncMock(), edit_text=AsyncMock())
-        call = SimpleNamespace(data="qrev:abcdef1234567890:0",
-                               from_user=SimpleNamespace(id=42),
-                               message=message, answer=AsyncMock())
-        await env["show_quiz_error_review"](call)
-        message.answer.assert_awaited_once()
-        message.edit_text.assert_not_awaited()
-        keyboard = message.answer.await_args.kwargs["reply_markup"]
-        self.assertEqual(keyboard.inline_keyboard[0][0].callback_data,
-                         "qrev:abcdef1234567890:1")
-
-        message.text = "📚 مراجعة الأخطاء · 1 من 2"
-        message.answer.reset_mock()
-        call.data = "qrev:abcdef1234567890:1"
-        await env["show_quiz_error_review"](call)
-        message.edit_text.assert_awaited_once()
-        message.answer.assert_not_awaited()
-        self.redis.get.assert_awaited_with("quiz:error_review:42:abcdef1234567890")
+        call = SimpleNamespace(from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(chat=SimpleNamespace(id=42), message_id=104,
+                                    photo=None),
+            answer=AsyncMock())
+        await env["_review_show"](call, "abcdef1234567890", 0)
+        rich = self.bot.edit_message_text.await_args.kwargs["rich_message"].html
+        self.assertIn('<img src="https://example.com/math.png"/>', rich)
+        self.assertIn("qrevexp:abcdef1234567890:0", rich)
+        self.assertIn("🔴 <b>إجابتك:</b> أ", rich)
+        self.assertIn("🟢 <b>الإجابة الصحيحة:</b> ب", rich)
 
     async def test_feedback_hub_preserves_rating_actions(self):
         env = load_functions("handlers/quiz_runner.py", {"open_quiz_feedback_panel"},
