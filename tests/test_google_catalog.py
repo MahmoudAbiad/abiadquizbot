@@ -3,7 +3,10 @@ import asyncio
 import contextlib
 import json
 import types
+import sys
 import unittest
+from typing import Literal
+from pydantic import BaseModel, Field
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -78,6 +81,20 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProbeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # The production classifier imports Supabase/Redis. Test the exact fields
+        # and enums without a live DB or any previously stubbed Supabase modules.
+        class SubjectSchema(BaseModel):
+            subject: Literal["math", "english", "french", "quiz_solved", "quiz_unsolved", "other"]
+            suggested_types: list[str] = Field(default_factory=list, max_length=4)
+            question_count: int | None = None
+            content_subject: Literal["math", "english", "french", "other"] | None = None
+        module = types.ModuleType("services.subject_classifier")
+        module.SubjectClassification = SubjectSchema
+        self.schema_mock = patch.dict(sys.modules, {"services.subject_classifier": module})
+        self.schema_mock.start()
+        self.addCleanup(self.schema_mock.stop)
+
     async def test_passes_arabic_text_and_image_using_real_classifier_schema(self):
         fake = Mock()
         fake.close = Mock()
