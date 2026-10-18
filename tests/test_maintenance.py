@@ -3,6 +3,7 @@ import importlib
 import sys
 import types
 import unittest
+from cachetools import TTLCache
 from unittest.mock import AsyncMock, Mock, patch
 
 from reliability_support import load_functions
@@ -102,12 +103,12 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 self.message = Message()
                 self.answer = AsyncMock()
         env = load_functions('middlewares.py', {'MaintenanceMiddleware'},
-            BaseMiddleware=object, Message=Message, CallbackQuery=CallbackQuery, logger=Mock())
-        gate = env['MaintenanceMiddleware']()
+            BaseMiddleware=object, Message=Message, CallbackQuery=CallbackQuery, logger=Mock(), TTLCache=TTLCache)
         bot = types.SimpleNamespace(send_message=AsyncMock())
         for kind, tg in [('message', Message()), ('callback_query', CallbackQuery()),
                          ('poll_answer', types.SimpleNamespace(user=types.SimpleNamespace(id=1)))]:
             with self.subTest(kind=kind), patch('services.maintenance.maintenance_notice', AsyncMock(return_value='<صيانة>')):
+                gate = env['MaintenanceMiddleware']()
                 handler = AsyncMock()
                 await gate(handler, types.SimpleNamespace(event=tg, event_type=kind), {'bot': bot})
                 handler.assert_not_awaited()
@@ -121,10 +122,54 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_off_or_admin_passes_through(self):
         gate = load_functions('middlewares.py', {'MaintenanceMiddleware'}, BaseMiddleware=object,
-            Message=object, CallbackQuery=object, logger=Mock())['MaintenanceMiddleware']()
+            Message=object, CallbackQuery=object, logger=Mock(), TTLCache=TTLCache)['MaintenanceMiddleware']()
         handler = AsyncMock(return_value='passed')
         with patch('services.maintenance.maintenance_notice', AsyncMock(return_value=None)):
             self.assertEqual(await gate(handler, types.SimpleNamespace(event=types.SimpleNamespace(), event_type='message'), {}), 'passed')
+
+    async def test_notice_cooldown_shared_by_messages_buttons_and_polls(self):
+        class Message:
+            def __init__(self, user_id=1):
+                self.from_user = types.SimpleNamespace(id=user_id)
+                self.answer = AsyncMock()
+        class CallbackQuery:
+            def __init__(self):
+                self.from_user = types.SimpleNamespace(id=1)
+                self.message = Message()
+                self.answer = AsyncMock()
+        clock = [0.0]
+        env = load_functions('middlewares.py', {'MaintenanceMiddleware'}, BaseMiddleware=object,
+            Message=Message, CallbackQuery=CallbackQuery, logger=Mock(),
+            TTLCache=lambda **kw: TTLCache(**kw, timer=lambda: clock[0]))
+        gate = env['MaintenanceMiddleware']()
+        handler = AsyncMock()
+        bot = types.SimpleNamespace(send_message=AsyncMock())
+        async def run(kind, event):
+            await gate(handler, types.SimpleNamespace(event=event, event_type=kind), {'bot': bot})
+        with patch('services.maintenance.maintenance_notice', AsyncMock(return_value='صيانة')) as notice:
+            first = Message()
+            await asyncio.gather(*(run('message', first) for _ in range(10)))
+            first.answer.assert_awaited_once()
+            button = CallbackQuery()
+            await run('callback_query', button)
+            button.answer.assert_awaited_once_with()
+            button.message.answer.assert_not_awaited()
+            await run('poll_answer', types.SimpleNamespace(user=types.SimpleNamespace(id=1)))
+            bot.send_message.assert_not_awaited()
+            other = Message(2)
+            await run('message', other)
+            other.answer.assert_awaited_once()
+            clock[0] = 9.99
+            await run('message', first)
+            self.assertEqual(first.answer.await_count, 1)
+            clock[0] = 10
+            await run('message', first)
+            self.assertEqual(first.answer.await_count, 2)
+            handler.assert_not_awaited()
+            # Disabling maintenance is effective even inside the notice cooldown.
+            notice.return_value = None
+            await run('message', first)
+            handler.assert_awaited_once()
 
     async def test_miniapp_rejected_before_consuming_rate_limit(self):
         env = load_functions('webhook_server.py', {'_enforce_upload_rate_limit'},

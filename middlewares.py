@@ -95,6 +95,9 @@ class ErrorTrackingMiddleware(BaseMiddleware):
 class MaintenanceMiddleware(BaseMiddleware):
     """Gate updates before handlers, spending points or generating work."""
 
+    def __init__(self):
+        self._notices = TTLCache(maxsize=10000, ttl=10)
+
     async def __call__(self, handler, event, data):
         from services.maintenance import maintenance_notice
         from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
@@ -107,6 +110,19 @@ class MaintenanceMiddleware(BaseMiddleware):
         if notice is None:
             return await handler(event, data)
         try:
+            key = ("user", user.id) if user else ("chat", getattr(getattr(tg_event, "chat", None), "id", None))
+            if key in self._notices:
+                # Acknowledge buttons without another chat message or alert.
+                # Protocol queries still need their negative/empty answer.
+                if isinstance(tg_event, CallbackQuery):
+                    await tg_event.answer()
+                elif event.event_type == "inline_query":
+                    await tg_event.answer([], cache_time=0, is_personal=True)
+                elif event.event_type in {"pre_checkout_query", "shipping_query"}:
+                    await tg_event.answer(ok=False, error_message=notice[:200])
+                return None
+            # Reserve before the first await so simultaneous updates share the limit.
+            self._notices[key] = True
             if isinstance(tg_event, Message):
                 await tg_event.answer(notice, parse_mode=None)
             elif isinstance(tg_event, CallbackQuery):
