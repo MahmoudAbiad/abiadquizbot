@@ -92,7 +92,8 @@ def review_rich_button(callback_data, title):
     )
 
 
-def review_question_rich_html(entry, page, total, token, image_url=""):
+def review_question_rich_html(entry, page, total, token, image_url="", show_explanation=False):
+    """Keep the question visible while expanding the saved explanation beneath it."""
     parts = [
         f"<p>📚 <b>مراجعة الأخطاء · {page + 1} من {total}</b></p>",
         f"<p>❓ <b>السؤال {entry['number']}:</b></p>",
@@ -119,21 +120,27 @@ def review_question_rich_html(entry, page, total, token, image_url=""):
     parts.extend([
         f"<p>🔴 <b>إجابتك:</b> {escape(chosen)}</p>",
         f"<p>🟢 <b>الإجابة الصحيحة:</b> {escape(correct)}</p>",
-        review_rich_button(f"qrevexp:{token}:{page}", "💡 انقر لعرض الشرح"),
     ])
+    if show_explanation:
+        from services.latex_text import latex_to_plain
+        explanation = entry.get("explanation") or "لا يوجد شرح محفوظ لهذا السؤال."
+        if entry.get("is_math"):
+            explanation = latex_to_plain(explanation)
+        explanation_html = escape(explanation).replace("\n", "<br>")
+        parts.extend([
+            "<p>💡 <b>الشرح:</b></p>",
+            f"<blockquote>{explanation_html}</blockquote>",
+            review_rich_button(f"qrevback:{token}:{page}", "🙈 إخفاء الشرح"),
+        ])
+    else:
+        parts.append(review_rich_button(f"qrevexp:{token}:{page}", "💡 انقر لعرض الشرح"))
     return "".join(parts)
 
 
-def review_explanation_rich_html(entry, page, total, token):
-    from services.latex_text import latex_to_plain
-    explanation = entry.get("explanation") or "لا يوجد شرح محفوظ لهذا السؤال."
-    if entry.get("is_math"):
-        explanation = latex_to_plain(explanation)
-    explanation = escape(explanation).replace("\n", "<br>")
-    return (
-        f"<p>💡 <b>شرح السؤال {entry['number']} · {page + 1} من {total}</b></p>"
-        f"<blockquote>{explanation}</blockquote>"
-        + review_rich_button(f"qrevback:{token}:{page}", "↩️ العودة للسؤال")
+def review_explanation_rich_html(entry, page, total, token, image_url=""):
+    """Compatibility wrapper: expanded review includes the original question."""
+    return review_question_rich_html(
+        entry, page, total, token, image_url, show_explanation=True
     )
 
 
@@ -159,3 +166,12 @@ def review_explanation_fallback_text(entry):
     if entry.get("is_math"):
         explanation = latex_to_plain(explanation)
     return f"💡 <b>شرح السؤال {entry['number']}</b>\n\n{escape(explanation)}"
+
+
+def review_expanded_fallback_text(entry, page, total):
+    """Include the original question/answers when showing a fallback explanation."""
+    return (
+        review_question_fallback_text(entry, page, total)
+        + "\n\n"
+        + review_explanation_fallback_text(entry)
+    )
