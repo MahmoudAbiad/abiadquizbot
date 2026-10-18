@@ -1,6 +1,7 @@
 """Private student wallet, gift details and redemption flow."""
 import re
 from aiogram import Router, F, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -62,22 +63,41 @@ async def show_gifts(call):
     await call.answer()
 
 
+async def _show_code_screen(call, text, keyboard):
+    """Keep the code-entry and cancellation screens inside the same message."""
+    try:
+        await call.message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest as exc:
+        if 'message is not modified' in str(exc).lower():
+            return
+        await call.message.answer(text, reply_markup=keyboard)
+    except (AttributeError, TypeError):
+        # Older callbacks might not expose an editable message.
+        await call.message.answer(text, reply_markup=keyboard)
+
+
 @router.callback_query(F.data == 'gift:redeem')
 async def prompt_code(call, state: FSMContext):
     current = await state.get_state()
     if current and current != GiftState.code.state:
         await call.answer('أنهِ العملية الحالية أولًا أو ألغِها، ثم أدخل الكود.', show_alert=True)
         return
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text='إلغاء', callback_data='gift:cancel')]])
+    await _show_code_screen(call, '🎟 أرسل كود الهدية:', keyboard)
     await state.set_state(GiftState.code)
-    await call.message.answer('🎟 أرسل كود الهدية:', reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text='إلغاء', callback_data='gift:cancel')]]))
     await call.answer()
 
 
 @router.callback_query(F.data == 'gift:cancel')
 async def cancel_code(call, state: FSMContext):
-    if await state.get_state() == GiftState.code.state:
-        await state.set_state(None)
+    if await state.get_state() != GiftState.code.state:
+        await call.answer('طلب إدخال الكود لم يعد نشطاً.', show_alert=True)
+        return
+    await state.set_state(None)
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text='🏠 العودة للرئيسية', callback_data='student_home')]])
+    await _show_code_screen(call, '✅ تم إلغاء إدخال كود الهدية.', keyboard)
     await call.answer('تم الإلغاء')
 
 
