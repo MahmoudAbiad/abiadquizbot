@@ -487,7 +487,7 @@ async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
         if new_message:
             await bot.send_rich_message(
                 chat_id=call.message.chat.id, rich_message=rich, reply_markup=keyboard)
-        elif getattr(call.message, "photo", None):
+        elif getattr(call.message, "photo", None) and not getattr(call.message, "rich_message", None):
             # Photo captions cannot contain rich buttons, so use the fallback
             # keyboard with the appropriate explanation/back control.
             await _review_fallback(
@@ -524,7 +524,7 @@ async def _review_fallback(call, body, keyboard, media, new_message):
                 photo=media, caption=plain_caption, reply_markup=keyboard)
         else:
             await message.answer(body, parse_mode="HTML", reply_markup=keyboard)
-    elif getattr(message, "photo", None):
+    elif getattr(message, "photo", None) and not getattr(message, "rich_message", None):
         await message.edit_caption(caption=plain_caption, reply_markup=keyboard)
     else:
         await message.edit_text(body, parse_mode="HTML", reply_markup=keyboard)
