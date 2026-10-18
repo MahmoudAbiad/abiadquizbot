@@ -17,6 +17,7 @@ from handlers.quiz_runner import start_loaded_quiz
 from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 from utils import safe_title
 from helpers.student_ui import UPLOAD_TEXT, HELP_TEXT, HOME_TEXT, welcome_text as build_welcome_text
+from helpers.supabase_helper.gifts import gift_balances
 
 logger = get_logger(__name__)
 router = Router()
@@ -221,6 +222,23 @@ def _student_info_keyboard():
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def _student_home_text(user_id: int) -> str:
+    """Rebuild the home copy with the current wallet without modifying user/FSM state."""
+    try:
+        result = await supabase.table("users").select("free_points,paid_points").eq("user_id", user_id).limit(1).execute()
+        if not result.data:
+            return HOME_TEXT
+        wallet = result.data[0]
+        gifts = await gift_balances([user_id])
+        free = float(wallet.get("free_points") or 0)
+        paid = float(wallet.get("paid_points") or 0)
+        gift = float(gifts.get(user_id, 0))
+        return build_welcome_text(free + paid + gift, free, gift, paid)
+    except Exception as exc:
+        logger.warning(f"Could not refresh student home balance: {exc}")
+        return HOME_TEXT
+
+
 async def _show_student_navigation_screen(call: types.CallbackQuery, text: str, reply_markup):
     """Navigate within one Telegram message; fall back only if editing is unavailable."""
     try:
@@ -250,7 +268,7 @@ async def student_navigation(call: types.CallbackQuery):
     if call.data == "student_home":
         info = await bot.get_me()
         menu = await get_main_menu_keyboard(info.username, call.from_user.id)
-        await _show_student_navigation_screen(call, HOME_TEXT, menu)
+        await _show_student_navigation_screen(call, await _student_home_text(call.from_user.id), menu)
     else:
         content = UPLOAD_TEXT if call.data == "student_create_quiz" else HELP_TEXT
         await _show_student_navigation_screen(call, content, _student_info_keyboard())
