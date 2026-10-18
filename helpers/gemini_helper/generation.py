@@ -39,7 +39,9 @@ async def _execute_cascade(request, exclude_vertex=False):
 
 
 async def _generate_regular(paths, prompt, user_context=None):
-    result = await _execute_cascade(_build_super_chunk_attempt_fn(paths, prompt, user_context))
+    request = (_build_super_chunk_attempt_fn(paths, prompt, user_context)
+               if user_context else _build_super_chunk_attempt_fn(paths, prompt))
+    result = await _execute_cascade(request)
     return (result[0], result[1]) if result else None
 
 
@@ -198,9 +200,13 @@ async def _generate_pdf_with_context(
                 "المرحلة الأخيرة: ركّز على الأسئلة المتقدمة والأصعب تدريجياً.",
             )
         ) if progressive and not ready_exam else None
+        def make_request(paths, instruction):
+            return (_build_super_chunk_attempt_fn(paths, instruction, user_context)
+                    if user_context else _build_super_chunk_attempt_fn(paths, instruction))
+
         attempts = [
             _execute_cascade(
-                _build_super_chunk_attempt_fn(
+                make_request(
                     [chunk["path"]],
                     (
                         _ready_exam_chunk_prompt(prompt_template, target, chunk)
@@ -210,7 +216,6 @@ async def _generate_pdf_with_context(
                             progressive_segments[index] if progressive_segments else None,
                         )
                     ),
-                    user_context,
                 ),
                 # Retain the current three-part Super-PDF provider policy.
                 exclude_vertex=(part_count == 3),
@@ -373,13 +378,16 @@ async def _generate_super_images(
         ("الدفعة الأولى: أسئلة سهلة إلى متوسطة.",
          "الدفعة الأخيرة: أسئلة متوسطة إلى متقدمة.")
     ) if progressive else ()
+    def make_request(paths, instruction):
+        return (_build_super_chunk_attempt_fn(paths, instruction, user_context)
+                if user_context else _build_super_chunk_attempt_fn(paths, instruction))
+
     tasks = [
         _execute_cascade(
-            _build_super_chunk_attempt_fn(
+            make_request(
                 chunk, prompt_template.replace("{count}", str(question_count)) +
                 ("\n[موقع هذه الدفعة ضمن التدرج العام]: " + segments[index]
-                 if progressive else ""),
-                user_context,
+                 if progressive else "")
             ),
             exclude_vertex=True,
         )
