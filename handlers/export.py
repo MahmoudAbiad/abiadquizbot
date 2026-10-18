@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile
 
 from keyboards import get_export_format_keyboard, get_export_style_keyboard
+from helpers.student_ui import EXPORT_STYLE_TEXT, export_format_text
 from logger import get_logger, log_error
 from mem_utils import release_memory_to_os
 from services import offload
@@ -56,8 +57,8 @@ logger = get_logger(__name__)
 router = Router()
 
 MSG_NO_QUESTIONS = "❌ لا يوجد كويز متاح للتصدير حالياً."
-MSG_GENERATING = "⏳ جاري تجهيز الملف، لحظات..."
-MSG_FAILED = "❌ تعذّر إنشاء الملف، حاول مجدداً بعد قليل."
+MSG_GENERATING = "⏳ جارٍ تجهيز ملفك. سنرسله هنا عند الانتهاء؛ لا تحتاج لإعادة الطلب."
+MSG_FAILED = "تعذّر تجهيز الملف الآن. الكويز ما زال متاحاً؛ أعد المحاولة من خيارات التحميل بعد قليل."
 
 _FORMAT_RE = re.compile(r"^export_(docx|pdf)([st]?)_([sma])$")
 _STYLE_RE = re.compile(r"^export_style_([sma])$")
@@ -134,6 +135,32 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
 
 # ==================== تصدير الكويز الحالي (من شاشة النتيجة) ====================
 
+async def _edit_export_screen(call, text, keyboard):
+    try:
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            await call.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "export_close")
+async def close_export(call: types.CallbackQuery):
+    await _edit_export_screen(call, "تم إغلاق خيارات التحميل. يمكنك فتحها مجدداً من رسالة نتيجة الكويز.", None)
+    await _safe_answer(call)
+
+
+@router.callback_query(F.data == "export_back")
+async def export_back(call: types.CallbackQuery):
+    await _edit_export_screen(call, EXPORT_STYLE_TEXT, get_export_style_keyboard())
+    await _safe_answer(call)
+
+
+@router.callback_query(F.data.startswith("fav_export_back_"))
+async def export_favorite_back(call: types.CallbackQuery):
+    favorite_id = call.data.removeprefix("fav_export_back_")
+    await _edit_export_screen(call, EXPORT_STYLE_TEXT, get_export_style_keyboard(favorite_id))
+    await _safe_answer(call)
+
 @router.callback_query(F.data == "export_menu")
 async def export_menu(call: types.CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
@@ -141,7 +168,7 @@ async def export_menu(call: types.CallbackQuery, state: FSMContext) -> None:
     if not questions:
         await _safe_answer(call, MSG_NO_QUESTIONS, show_alert=True)
         return
-    await call.message.answer("🎨 اختر شكل تنسيق الملف:", reply_markup=get_export_style_keyboard())
+    await call.message.answer(EXPORT_STYLE_TEXT, parse_mode="HTML", reply_markup=get_export_style_keyboard())
     await _safe_answer(call)
 
 
@@ -149,8 +176,7 @@ async def export_menu(call: types.CallbackQuery, state: FSMContext) -> None:
 async def export_style_chosen(call: types.CallbackQuery) -> None:
     style_code = _STYLE_RE.match(call.data).group(1)
     label = STYLE_LABELS_AR[STYLE_CODE_TO_NAME[style_code]]
-    await call.message.answer(f"📁 اخترت: {label}\nهلق اختر صيغة تحميل الكويز:",
-                               reply_markup=get_export_format_keyboard(style_code))
+    await _edit_export_screen(call, export_format_text(label), get_export_format_keyboard(style_code))
     await _safe_answer(call)
 
 
@@ -169,7 +195,7 @@ async def export_current_quiz(call: types.CallbackQuery, state: FSMContext) -> N
 @router.callback_query(F.data.startswith("fav_export_menu_"))
 async def export_favorite_menu(call: types.CallbackQuery) -> None:
     fav_id = call.data.replace("fav_export_menu_", "", 1)
-    await call.message.answer("🎨 اختر شكل تنسيق الملف:", reply_markup=get_export_style_keyboard(fav_id))
+    await call.message.answer(EXPORT_STYLE_TEXT, parse_mode="HTML", reply_markup=get_export_style_keyboard(fav_id))
     await _safe_answer(call)
 
 
@@ -177,8 +203,7 @@ async def export_favorite_menu(call: types.CallbackQuery) -> None:
 async def export_favorite_style_chosen(call: types.CallbackQuery) -> None:
     style_code, fav_id = _FAV_STYLE_RE.match(call.data).groups()
     label = STYLE_LABELS_AR[STYLE_CODE_TO_NAME[style_code]]
-    await call.message.answer(f"📁 اخترت: {label}\nهلق اختر صيغة تحميل الكويز:",
-                               reply_markup=get_export_format_keyboard(style_code, fav_id))
+    await _edit_export_screen(call, export_format_text(label), get_export_format_keyboard(style_code, fav_id))
     await _safe_answer(call)
 
 

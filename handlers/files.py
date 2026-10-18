@@ -292,7 +292,10 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         extraction_mode=data.get("quiz_extraction_mode"),
     )
 
-    text = f"{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
+    ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
+    heading = "✅ مراجعة العدد والتكلفة" if ready_exam else "3 من 3 · مراجعة وتوليد"
+    text = f"<b>{heading}</b>\n\n{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
+    text += "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك."
     if mode in ("Super-PDF", "Super-Images"):
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
@@ -349,7 +352,8 @@ async def show_question_count_screen(reply_target: types.Message, state: FSMCont
             count_prompt_text=f"{notice}\n\n{count_text}" if notice else count_text,
         )
     else:
-        await state.update_data(selected_question_count=DEFAULT_COUNT_SUGGESTIONS[1], count_screen_message_id=None)
+        await state.update_data(selected_question_count=data.get("review_count_to_restore") or DEFAULT_COUNT_SUGGESTIONS[1],
+                                review_count_to_restore=None, count_screen_message_id=None)
     await state.set_state(QuizState.waiting_for_count)
     if edit:
         await _render_question_count_screen(reply_target.bot, reply_target.chat.id, reply_target.message_id, state, target_for_send=reply_target)
@@ -1030,6 +1034,7 @@ async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContex
         await call.message.edit_text(
             "✏️ اكتب الآن عدد الأسئلة المطلوب (رقم فقط):",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="🔙 الرجوع للملخص", callback_data="qcount_review")],
                 [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
             ]),
         )
@@ -1037,6 +1042,13 @@ async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContex
         log_error(logger, f"Custom count prompt failed: {exc}", exception=exc)
     finally:
         await call.answer()
+
+
+@router.callback_query(QuizState.waiting_for_count, F.data == "qcount_review")
+async def back_to_count_review(call: types.CallbackQuery, state: FSMContext):
+    await _render_question_count_screen(call.bot, call.message.chat.id,
+        call.message.message_id, state, target_for_send=call.message)
+    await call.answer()
 
 
 @router.message(QuizState.waiting_for_count, F.text.isdigit())

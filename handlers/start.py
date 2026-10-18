@@ -16,6 +16,7 @@ from logger import get_logger, log_info
 from handlers.quiz_runner import start_loaded_quiz
 from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 from utils import safe_title
+from helpers.student_ui import UPLOAD_TEXT, HELP_TEXT, HOME_TEXT, welcome_text as build_welcome_text
 
 logger = get_logger(__name__)
 router = Router()
@@ -142,11 +143,13 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         # المحذوف الآن بالكامل - راجع docs/HISTORY_LOG.md لتفاصيل الإزالة).
         if status == "new":
             intro_text = (
-                "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
-                f"🎁 أضفنا لحسابك <b>{gift_points:g} نقطة هدية</b> — استخدمها الآن لتوليد أول اختبار لك 🚀"
+                "👋 <b>أهلاً بك في أبيض كويز</b>\n\n"
+                "حوّل ملفاتك وصورك ونصوصك إلى أسئلة تفاعلية للمراجعة.\n"
+                f"🎁 رصيد هديتك: <b>{gift_points:g} نقطة</b>.\n\n"
+                "ابدأ بإرسال محتواك، وراجع التكلفة قبل تأكيد التوليد."
             )
             start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="🚀 أرسل أول ملف الآن", callback_data="new_user_send_now")],
+                [types.InlineKeyboardButton(text="📝 إنشاء أول كويز", callback_data="new_user_send_now")],
                 [types.InlineKeyboardButton(text="🎁 صلاحية هديتي", callback_data="gift:list:0")]
             ])
 
@@ -154,24 +157,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             log_info(logger, f"User {msg.from_user.id} started bot. Status: new, Points: {points}")
             return
 
-        if status == "renewed":
-            welcome_text = (
-                "☀️ <b>يا أهلاً، يومك سعيد!</b>\n\n"
-                f"دائماً معك في رحلتك الدراسية.. تم تجديد رصيدك اليومي وإضافة <b>{free_points:.0f} نقطة مجانية جديدة</b> لحسابك. 🔄\n"
-            )
-        else:
-            welcome_text = "👋 <b>يا مرحباً بك مجدداً!</b>\n جاهز لاختبار جديد اليوم؟ ✍️\n"
-        
-        # 📌 نسخة مختصرة وقابلة للمسح البصري (Scannable): سطر واحد للبدء + صندوق مضغوط
-        # للتكلفة والرصيد. الشرح التفصيلي لخطوات الاستخدام انتقل بالكامل إلى الدليل
-        # التفاعلي (/help أو زر «كيف يعمل البوت؟») لتفادي إغراق المستخدم بجدار نصوص.
-        welcome_text += (
-            f"\n📥 <b>ابدأ الآن:</b> أرسل ملف (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشراً — وحدد عدد الأسئلة. ذلك كل شيء! 🔥\n\n"
-            f"💰 <code>1</code> نقطة تقريباً لكل صفحة/سؤال، وخصم <code>90%</code> عند إعادة استخدام كويز جاهز.\n"
-            f"📊 رصيدك: <code>{points:.2f}</code> نقطة \n🔄 مجانية: {free_points:.2f} · 🎁 هدايا: {gift_points:.2f} · 💳 مدفوعة: {paid_points:.2f}\n\n"
-            f"🎯 شارك رابط دعوتك مع زملائك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁\n"
-           #f"❓ محتاج شرح أوضح بالخطوات؟ اضغط 🎬 «كيف يعمل البوت؟» بالأسفل، أو أرسل /help بأي وقت."
-        )
+        welcome_text = build_welcome_text(points, free_points, gift_points, paid_points, status == "renewed")
         
         await msg.answer(
             welcome_text,
@@ -215,7 +201,7 @@ async def ack_new_user_start(call: types.CallbackQuery):
     أزرار/خيارات إضافية قبل أن يجرّب صلب المنتج فعلياً ويحصل على أول نتيجة ملموسة."""
     try:
         await call.message.edit_text(
-            "📥 تمام! أرسل الآن ملفك (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشرة في هذه المحادثة 🔥",
+            UPLOAD_TEXT,
             parse_mode="HTML",
         )
         spawn(log_usage_event(call.from_user.id, "start_cta_acknowledged"))
@@ -223,6 +209,34 @@ async def ack_new_user_start(call: types.CallbackQuery):
         logger.error(f"Error in ack_new_user_start: {e}")
     finally:
         await call.answer()
+
+
+def _student_info_keyboard():
+    from constants import WEBAPP_PUBLIC_BASE_URL
+    rows = []
+    if WEBAPP_PUBLIC_BASE_URL:
+        rows.append([types.InlineKeyboardButton(text="📤 رفع ملف كبير أو محاضرة", callback_data="upload_open:all")])
+    rows.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="student_home"),
+                 types.InlineKeyboardButton(text="💬 الدعم", url=SUPPORT_BOT_URL)])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.in_({"student_create_quiz", "student_help", "student_home"}), F.message.chat.type == "private")
+async def student_navigation(call: types.CallbackQuery):
+    # Informational screens never clear FSM or replace an ongoing quiz/upload.
+    await call.answer()
+    if call.data == "student_home":
+        info = await bot.get_me()
+        await call.message.answer(HOME_TEXT, parse_mode="HTML",
+            reply_markup=await get_main_menu_keyboard(info.username, call.from_user.id))
+    else:
+        await call.message.answer(UPLOAD_TEXT if call.data == "student_create_quiz" else HELP_TEXT,
+            parse_mode="HTML", reply_markup=_student_info_keyboard())
+
+
+@router.message(Command("help"))
+async def student_help(msg: types.Message):
+    await msg.answer(HELP_TEXT, parse_mode="HTML", reply_markup=_student_info_keyboard())
 
 
 @router.callback_query(F.data == "recharge_info")

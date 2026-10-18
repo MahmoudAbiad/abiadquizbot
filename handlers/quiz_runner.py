@@ -102,11 +102,12 @@ SAVE_WIZARD_STATES = ACTIVE_QUIZ_STATES + (None,)
 async def send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
     bot_info = await bot.get_me()
     menu = await get_main_menu_keyboard(bot_info.username, user_id)
-    text = "🏠 القائمة الرئيسية"
+    from helpers.student_ui import HOME_TEXT
+    text = HOME_TEXT
     if isinstance(call_or_message, types.CallbackQuery):
-        await call_or_message.message.answer(text, reply_markup=menu)
+        await call_or_message.message.answer(text, reply_markup=menu, parse_mode="HTML")
     else:
-        await call_or_message.answer(text, reply_markup=menu)
+        await call_or_message.answer(text, reply_markup=menu, parse_mode="HTML")
 
 @router.callback_query(F.data == "show_menu_after_first_quiz")
 async def show_menu_after_first_quiz(call: types.CallbackQuery) -> None:
@@ -189,7 +190,7 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
                 types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
                 types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
             ],
-            [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
+            [types.InlineKeyboardButton(text="🏁 عرض النتيجة" if idx + 1 == len(questions) else "➡️ السؤال التالي", callback_data="next_question")]
         ])
 
         from handlers.session_navigation import session_id
@@ -268,7 +269,7 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
         quiz_row = await admin_get_quiz_by_id(quiz_id)
         creator_id = quiz_row.get("creator_id") if quiz_row else None
         keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, viewer_id=user_id, creator_id=creator_id)
-        result_text += "\n\n⭐ <b>كيف تقيم هذا الكويز؟</b> تقييمك المباشر يساعد الدفعة على فرز الكويزات الممتازة وتصفية الرديئة تلقائياً!"
+        result_text += "\n\nاحفظ الكويز للمراجعة أو حمّله من الأزرار أدناه.\n⭐ تقييم الأسئلة اختياري ويساعدنا على تحسينها."
     else:
         keyboard = get_quiz_result_keyboard(quiz_id=quiz_id)
 
@@ -283,8 +284,8 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
             await bot.send_message(
                 chat_id,
                 "🎉 <b>أحسنت في أول اختبار لك!</b>\n\n"
-                "💡 تقدر تولّد كويزات جديدة في أي وقت تحب بنفس الطريقة اللي سويتها قبل شوي.\n"
-                "🔄 ونقاطك تتجدد يومياً، فما تحتاج تقلق إذا خلصتها.",
+                "تقدر ترجع للكويز من المفضلة إذا حفظته، أو تبدأ كويزاً جديداً بإرسال محتواك.\n"
+                "رصيدك وخيارات المساعدة موجودة في القائمة الرئيسية.",
                 reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                     [types.InlineKeyboardButton(text="📋 عرض القائمة", callback_data="show_menu_after_first_quiz")]
                 ]),
@@ -860,7 +861,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "quiz_home")
 async def quiz_home(call: types.CallbackQuery, state: FSMContext):
     try:
-        await state.clear()
+        # Old result messages can be tapped during a newer quiz. Navigation is read-only.
         await send_main_menu(call, call.from_user.id)
     finally:
         await call.answer()

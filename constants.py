@@ -152,13 +152,14 @@ QUESTION_TYPE_PROMPT_INSTRUCTIONS = {
 # كأسئلة عامة عن المادة غير مرتبطة تحديداً بالملف المرسل).
 BTN_QUESTION_TYPE_GENERAL = "🔀 متنوع"
 BTN_QUESTION_TYPE_CUSTOM = "✏️ تفضيل خاص"
-BTN_BACK_TO_TYPE_SCREEN = "🔙 رجوع"
+BTN_BACK_TO_TYPE_SCREEN = "🔙 تعديل نوع الأسئلة"
 
-MSG_QUIZ_TYPE_PROMPT = "🎛️ <b>اختر نوع الأسئلة</b> (أو اختر «متنوع» لتغطية شاملة من نفس المحتوى):"
-MSG_QUIZ_DIFFICULTY_PROMPT = "✅ النوع: <b>{type_label}</b>\n\n🎚️ الآن اختر مستوى الصعوبة:"
+MSG_QUIZ_TYPE_PROMPT = "<b>1 من 3 · نوع الأسئلة</b>\n\nاختر ما تريد التدرب عليه.\n«متنوع» يغطي جوانب مختلفة من المحتوى المرسل."
+MSG_QUIZ_DIFFICULTY_PROMPT = "<b>2 من 3 · مستوى الصعوبة</b>\n\nالنوع: <b>{type_label}</b>\nاختر المستوى المناسب؛ ستراجع العدد والتكلفة في الخطوة التالية."
 MSG_CUSTOM_QUESTION_TYPE_PROMPT = (
-    "✏️ اكتب الآن نوع الأسئلة اللي بدك ياه بالضبط (مثال: أسئلة عن الفصل الثالث فقط، "
-    "أسئلة على شكل مقارنات، إلخ):"
+    "✏️ اكتب ما تريد التركيز عليه في رسالة قصيرة.\n\n"
+    "مثال: «مقارنات بين المفاهيم» أو «أسئلة عن الفصل الثالث فقط».\n"
+    "بعد الإرسال تختار مستوى الصعوبة."
 )
 ERROR_CUSTOM_QUESTION_TYPE_TOO_LONG = "❌ النص طويل كتير، الرجاء اختصاره لأقل من {max_len} حرفاً."
 MAX_CUSTOM_QUESTION_TYPE_LENGTH = 150
@@ -228,7 +229,7 @@ MSG_FAVORITE_SECTION_PROMPT = "📁 اختر قسمًا لهذا الكويز أ
 MSG_FAVORITE_SECTION_CREATE = "➕ أرسل اسم القسم الجديد:"
 MSG_FAVORITE_SAVED = "⭐ تم حفظ الكويز في المفضلة بنجاح."
 MSG_FAVORITES_SEARCH_PROMPT = "🔍 أرسل كلمة البحث داخل المفضلة:"
-MSG_FAVORITES_SEARCH_EMPTY = "❌ لم يتم العثور على نتائج مطابقة."
+MSG_FAVORITES_SEARCH_EMPTY = "لا توجد نتائج بهذا الاسم. جرّب كلمة أقصر، أو اضغط «مسح البحث» لعرض جميع اختباراتك."
 MSG_QUIZ_STOPPED = "⏹ تم إيقاف الكويز والخروج منه."
 
 # ==================== Rating & Feedback Messages ====================

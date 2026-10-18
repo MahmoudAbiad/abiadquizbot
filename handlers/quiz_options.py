@@ -23,6 +23,7 @@ aiogram ينفّذ أول معالج مطابق بترتيب التسجيل فق
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
+from html import escape
 
 from config import QuizState
 from constants import (
@@ -85,7 +86,7 @@ async def _render_type_screen(target: types.Message, state: FSMContext, edit: bo
 
 async def _render_difficulty_screen(target: types.Message, state: FSMContext, edit: bool) -> None:
     data = await state.get_data()
-    text = MSG_QUIZ_DIFFICULTY_PROMPT.format(type_label=_type_display_label(data))
+    text = MSG_QUIZ_DIFFICULTY_PROMPT.format(type_label=escape(_type_display_label(data)))
     if data.get("question_type") == QUESTION_TYPE_SIMILAR_MATH:
         text += "\n\n" + MSG_SIMILAR_MATH_NOTICE
     keyboard = get_quiz_difficulty_keyboard(selected_difficulty=data.get("difficulty", DIFFICULTY_MEDIUM))
@@ -162,6 +163,17 @@ async def handle_custom_question_type_text(message: types.Message, state: FSMCon
 
 
 # ==================== المرحلة 2: اختيار الصعوبة ====================
+
+@router.callback_query(QuizState.waiting_for_count, F.data == "qback_to_difficulty")
+async def back_to_difficulty(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH:
+        await call.answer("هذا الاختبار لا يحتاج اختيار الصعوبة.", show_alert=True)
+        return
+    await state.update_data(review_count_to_restore=data.get("selected_question_count"))
+    await state.set_state(QuizState.waiting_for_quiz_options)
+    await _render_difficulty_screen(call.message, state, edit=True)
+    await call.answer()
 
 @router.callback_query(QuizState.waiting_for_quiz_options, F.data.startswith("qdiff_"))
 async def handle_difficulty_screen(call: types.CallbackQuery, state: FSMContext) -> None:

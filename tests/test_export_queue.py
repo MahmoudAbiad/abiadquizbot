@@ -69,6 +69,8 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
             for row in kb.inline_keyboard:
                 for button in row:
                     self.assertLessEqual(len(button.callback_data.encode()), 64)
+                    if button.callback_data == 'export_back' or button.callback_data.startswith('fav_export_back_'):
+                        continue
                     self.assertIsNotNone(regex.fullmatch(button.callback_data))
         self.assertIsNotNone(patterns['_FORMAT_RE'].fullmatch('export_pdf_s'))
         self.assertIsNotNone(patterns['_FAV_FORMAT_RE'].fullmatch('fav_export_docx_a_old-id'))

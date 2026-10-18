@@ -45,15 +45,17 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
         referral_bonus_points = await get_setting("referral_bonus_points")
         kb = [
+            [types.InlineKeyboardButton(text="📝 إنشاء كويز جديد", callback_data="student_create_quiz")],
+            [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu")],
             [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
-            [types.InlineKeyboardButton(text="🎟 شحن كود هدية", callback_data="gift:redeem")],
-            [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
-            [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
+            [types.InlineKeyboardButton(text="💳 شحن الرصيد", callback_data="recharge_info"),
+             types.InlineKeyboardButton(text="🎟 استخدام كود هدية", callback_data="gift:redeem")],
+            [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
-            [types.InlineKeyboardButton(text=f"🔗 شارك واربح {referral_bonus_points:.0f} نقاط هدية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
+            [types.InlineKeyboardButton(text=f"🎁 دعوة صديق · {referral_bonus_points:g} نقاط", switch_inline_query=f"\nحوّل محتواك الدراسي إلى كويز عبر البوت: {ref_link}")]
         ]
         from helpers.supabase_helper.feature_flags import is_feature_enabled
         if await is_feature_enabled("challenge_system_enabled", default=False):
@@ -65,9 +67,9 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         # (صوت/ملف/صور) الاختيار يصير داخل الصفحة نفسها بلمسة وحدة، بدل تشتيت قائمة
         # البوت بـ 3 أزرار WebApp منفصلة. يُخفى تلقائياً لو WEBAPP_PUBLIC_BASE_URL فاضي.
         if WEBAPP_PUBLIC_BASE_URL:
-            kb.append([
+            kb.insert(2, [
                 types.InlineKeyboardButton(
-                    text="📤 رفع صوت / ملف / صور كبيرة",
+                    text="📤 ملفات كبيرة ومحاضرات صوتية",
                     callback_data="upload_open:all",
                 )
             ])
@@ -100,6 +102,8 @@ def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMark
         [types.InlineKeyboardButton(text=f"⚪ {STYLE_LABELS_AR[name]}", callback_data=f"{prefix}{code}{suffix}")]
         for code, name in STYLE_CODE_TO_NAME.items()
     ]
+    kb.append([types.InlineKeyboardButton(text="🔙 تفاصيل الكويز" if favorite_id else "إغلاق خيارات التحميل",
+        callback_data=f"fav_details_{favorite_id}" if favorite_id else "export_close")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
@@ -113,6 +117,8 @@ def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> 
             types.InlineKeyboardButton(text=f"📕 PDF — {label}", callback_data=f"{prefix}pdf{variant}_{style_code}{suffix}"),
             types.InlineKeyboardButton(text=f"📄 Word — {label}", callback_data=f"{prefix}docx{variant}_{style_code}{suffix}"),
         ])
+    kb.append([types.InlineKeyboardButton(text="🔙 تغيير التنسيق",
+        callback_data=f"fav_export_back_{favorite_id}" if favorite_id else "export_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -126,7 +132,7 @@ def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=Non
         ],
         [
             types.InlineKeyboardButton(text="⭐ حفظ بالمفضلة", callback_data="quiz_favorite"),
-            types.InlineKeyboardButton(text="📁pdf تحميل الكويز", callback_data="export_menu"),
+            types.InlineKeyboardButton(text="📄 تحميل الكويز", callback_data="export_menu"),
         ],
     ]
 
@@ -138,7 +144,8 @@ def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=Non
     # 🆕 زر "حذف الكويز نهائياً" - يظهر فقط للأدمن أو لمالك الكويز الفعلي.
     kb.extend(get_delete_quiz_button_row(quiz_id, viewer_id, creator_id))
 
-    kb.append([types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="quiz_home")])
+    kb.append([types.InlineKeyboardButton(text="📝 كويز جديد", callback_data="student_create_quiz"),
+               types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="student_home")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_leaderboard_keyboard(quiz_id: str, is_public: bool = None) -> types.InlineKeyboardMarkup:
@@ -237,7 +244,8 @@ def get_question_count_keyboard(
         kb.append(row)
 
     kb.append([types.InlineKeyboardButton(text="✏️ عدد مخصص (اكتبه مباشرة)", callback_data="qcount_custom")])
-    kb.append([types.InlineKeyboardButton(text="🚀 ابدأ التوليد", callback_data="qcount_start")])
+    kb.append([types.InlineKeyboardButton(text=f"🚀 توليد {selected_count} أسئلة", callback_data="qcount_start")])
+    kb.append([types.InlineKeyboardButton(text="🔙 تعديل الصعوبة", callback_data="qback_to_difficulty")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -509,17 +517,19 @@ def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None, viewer_id=None, 
     فتصير 6 صفوف إجمالاً بدل 9 - أخف بصرياً وأسهل مسحاً بالعين."""
     base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id, viewer_id=viewer_id, creator_id=creator_id)
     kb = list(base_kb.inline_keyboard)
-    kb.insert(0, [
+    kb.insert(2, [
         types.InlineKeyboardButton(text="👍 عجبتني الأسئلة", callback_data=f"rate_like_{file_quiz_id}"),
         types.InlineKeyboardButton(text="👎 فيها خلل", callback_data=f"rate_dislike_{file_quiz_id}")
     ])
-    kb.insert(1, [types.InlineKeyboardButton(text="✍️ ملاحظة أو شكوى", callback_data=f"rate_feedback_{file_quiz_id}")])
+    kb.insert(3, [types.InlineKeyboardButton(text="✍️ إرسال ملاحظة", callback_data=f"rate_feedback_{file_quiz_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 # ==================== لوحات إدارة المفضلة والأقسام ====================
 
 def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_size: int = 5, sort_mode: str = "latest", search_query: str = "") -> types.InlineKeyboardMarkup:
     kb = []
+    if not favorites and not search_query:
+        kb.append([types.InlineKeyboardButton(text="📝 إنشاء أول كويز", callback_data="student_create_quiz")])
     
     sort_latest_label = "✅ الأحدث" if sort_mode == "latest" else "⬇️ حسب الأحدث"
     sort_section_label = "✅ حسب القسم" if sort_mode == "section" else "📁 حسب القسم"
@@ -546,6 +556,8 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
         favorite_id = item.get("id") or item.get("favorite_id") or item.get("created_at")
         section_title = item.get("section_title") or "عام"
         
+        title = title if len(title) <= 34 else title[:33] + "…"
+        section_title = section_title if len(section_title) <= 18 else section_title[:17] + "…"
         label = f"📚 {title}"
         if section_title and sort_mode != "section":
             label = f"📚 {title} • {section_title}"
@@ -560,7 +572,7 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
     if pagination_row:
         kb.append(pagination_row)
 
-    kb.append([types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")])
+    kb.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="favorites_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_favorite_details_keyboard(favorite_id: str, section_id: str = None, quiz_id=None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
@@ -617,7 +629,7 @@ def get_quiz_question_keyboard(options: list, show_hint: bool = True) -> types.I
         types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
     ]
     kb.append(control_buttons)
-    kb.append([types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")])
+    kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: int) -> types.InlineKeyboardMarkup:

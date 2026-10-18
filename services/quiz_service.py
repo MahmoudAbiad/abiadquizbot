@@ -129,18 +129,17 @@ def build_transparency_text(
     """رسالة الشفافية المالية لعرض تفاصيل الخصم.
     🆕 difficulty/question_type_label اختياريان (لعرض تفاصيل الاختيار عند تفعيل شاشة
     نوع/صعوبة الأسئلة لاحقاً) - لا يؤثران على الاستدعاءات الحالية التي لا تمررهما."""
-    mode_label = MODE_LABELS_AR.get(mode, mode)
+    from html import escape
     lines = [
-        "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n",
-        f"• العناصر/الصفحات: <code>{items}</code>",
-        f"• الأسئلة المطلوبة: <code>{questions}</code>",
+        "📋 <b>ملخص الكويز</b>\n",
+        f"• حجم المحتوى: <code>{items}</code> صفحة / عنصر",
+        f"• عدد الأسئلة: <b>{questions}</b>",
     ]
     if question_type_label:
-        lines.append(f"• نوع الأسئلة: <code>{question_type_label}</code>")
+        lines.append(f"• نوع الأسئلة: {escape(question_type_label)}")
     if difficulty:
-        lines.append(f"• الصعوبة: <code>{DIFFICULTY_LABELS_AR.get(difficulty, difficulty)}</code>")
-    lines.append(f"• وضع المعالجة: <code>{mode_label}</code>")
-    lines.append(f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>")
+        lines.append(f"• الصعوبة: {escape(DIFFICULTY_LABELS_AR.get(difficulty, difficulty))}")
+    lines.append(f"\n💰 <b>التكلفة: {cost:.2f} نقطة</b>")
     return "\n".join(lines)
 
 def normalize_quiz_option_count(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
