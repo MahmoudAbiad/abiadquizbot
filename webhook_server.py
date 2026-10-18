@@ -196,6 +196,8 @@ async def lifespan(app: FastAPI):
         spawn(scheduled_cleanup_loop())
         from handlers.session_navigation import pending_cleanup_loop
         spawn(pending_cleanup_loop())
+        from services.gift_campaigns import gift_campaign_loop
+        spawn(gift_campaign_loop())
         print("🔄 تم جدولة تنظيف البيانات التلقائي كل 12 ساعة.")
 
         # 👥 إطلاق نبضة الكويز الجماعي الدورية (وضع fixed_interval) - راجع

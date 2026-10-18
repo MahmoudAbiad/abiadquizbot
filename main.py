@@ -152,6 +152,8 @@ def main():
 
                 from handlers.session_navigation import pending_cleanup_loop
                 spawn(pending_cleanup_loop())
+                from services.gift_campaigns import gift_campaign_loop
+                spawn(gift_campaign_loop())
                 await dp.start_polling(bot)
                 
             except Exception as e:

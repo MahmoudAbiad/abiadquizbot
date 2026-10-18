@@ -11,6 +11,15 @@ jobs:
   regressions:
     runs-on: ubuntu-latest
     services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: gift_admin_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gift_admin_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
       redis:
         image: redis:7-alpine
         ports: ['6379:6379']
@@ -38,3 +47,7 @@ jobs:
         run: |
           npm ci --prefix tests/sql --ignore-scripts
           node tests/sql/ai_providers_test.mjs
+      - name: Verify gift wallet admin and concurrent transactions
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/gift_admin_test
+        run: node tests/sql/gift_admin_test.mjs
