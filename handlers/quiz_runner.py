@@ -398,7 +398,8 @@ async def _review_resolve_image(user_id: int, token: str, page: int, items: list
 
     question = entry.get("math_question") or {}
     raw = await render_question_image_async(
-        question, int(entry.get("index", entry["number"] - 1)), len(items),
+        question, int(entry.get("index", entry["number"] - 1)),
+        int(entry.get("total_questions", len(items))),
         looks_arabic(str(question.get("question") or "")),
     )
     # The original upload path may have failed during the quiz, so try again
@@ -461,6 +462,14 @@ async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
             log_warning(logger, f"Could not render math review image: {exc}")
 
     image_url = media if isinstance(media, str) else ""
+    if not explanation and entry.get("is_math") and media is not None and not image_url:
+        # A local rendered image cannot be embedded via an HTTP URL in a rich
+        # message; prefer a real photo with editable caption over text-only UI.
+        await _review_fallback(
+            call, review_question_fallback_text(entry, page, len(items)),
+            _review_pager(token, page, len(items)), media, new_message)
+        await call.answer()
+        return
     if explanation:
         rich_html = review_explanation_rich_html(entry, page, len(items), token)
         plain = review_explanation_fallback_text(entry)
@@ -490,24 +499,25 @@ async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
             return
         log_warning(logger, f"Rich review unavailable, using fallback: {exc}")
         await _review_fallback(call, plain, keyboard, media, new_message)
-    except (AttributeError, TypeError) as exc:
+    except Exception as exc:
         log_warning(logger, f"Rich review unsupported, using fallback: {exc}")
         await _review_fallback(call, plain, keyboard, media, new_message)
     await call.answer()
 
 
 async def _review_fallback(call, body, keyboard, media, new_message):
-    """On legacy clients, keep the math image and caption editable in place."""
+    """Keep fallback media/editing safe even with long or HTML-rich explanations."""
     message = call.message
+    # Telegram photo captions have a lower length limit than messages.
+    plain_caption = html.unescape(re.sub(r"<[^>]*>", "", body))[:950]
     if new_message:
         if media:
             await message.answer_photo(
-                photo=media, caption=body[:1000], parse_mode="HTML", reply_markup=keyboard)
+                photo=media, caption=plain_caption, reply_markup=keyboard)
         else:
             await message.answer(body, parse_mode="HTML", reply_markup=keyboard)
     elif getattr(message, "photo", None):
-        await message.edit_caption(
-            caption=body[:1000], parse_mode="HTML", reply_markup=keyboard)
+        await message.edit_caption(caption=plain_caption, reply_markup=keyboard)
     else:
         await message.edit_text(body, parse_mode="HTML", reply_markup=keyboard)
 
