@@ -81,6 +81,7 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
             get_main_menu_keyboard=AsyncMock(return_value='main-menu'),
             _student_info_keyboard=lambda: 'info-menu',
             HOME_TEXT=ui.HOME_TEXT, HELP_TEXT=ui.HELP_TEXT, UPLOAD_TEXT=ui.UPLOAD_TEXT,
+            _student_home_text=AsyncMock(return_value=ui.HOME_TEXT),
             TelegramBadRequest=BadRequest, logger=Mock())
         for action in ('student_create_quiz', 'student_help', 'student_home'):
             message = types.SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock())
@@ -101,6 +102,29 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
             send_main_menu=AsyncMock())
         await env_quiz['quiz_home'](call, state)
         state.clear.assert_not_awaited()
+
+    async def test_student_home_restores_live_balance_without_mutating_user(self):
+        query = Mock()
+        query.select.return_value = query
+        query.eq.return_value = query
+        query.limit.return_value = query
+        query.execute = AsyncMock(return_value=types.SimpleNamespace(
+            data=[{'free_points': 10.5, 'paid_points': 20.0}]))
+        supabase = types.SimpleNamespace(table=Mock(return_value=query))
+        gift_balances = AsyncMock(return_value={42: 5.0})
+        env = load_functions('handlers/start.py', {'_student_home_text'},
+            supabase=supabase, gift_balances=gift_balances,
+            build_welcome_text=ui.welcome_text, HOME_TEXT=ui.HOME_TEXT, logger=Mock())
+        text = await env['_student_home_text'](42)
+        self.assertIn('رصيدك المتاح: 35.50 نقطة', text)
+        self.assertIn('تفاصيل الرصيد موجودة في «رصيدي وهداياي».', text)
+        supabase.table.assert_called_once_with('users')
+        query.select.assert_called_once_with('free_points,paid_points')
+        query.eq.assert_called_once_with('user_id', 42)
+        gift_balances.assert_awaited_once_with([42])
+
+        query.execute.side_effect = ValueError('database unavailable')
+        self.assertEqual(await env['_student_home_text'](42), ui.HOME_TEXT)
 
     async def test_student_navigation_falls_back_only_if_edit_fails(self):
         class BadRequest(Exception):
