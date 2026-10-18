@@ -9,20 +9,22 @@ Redis قصير (راجع migration_feature_flags.sql + constants.FEATURE_FLAGS_R
 import datetime
 from typing import Dict, Any
 
+from cachetools import TTLCache
+
 from config import redis_client
 from ._client import supabase, logger, log_error
 
 # ==================== 🆕 مفاتيح التحكم العامة (Feature Flags) ====================
-# راجع migration_feature_flags.sql + constants.FEATURE_FLAGS_REGISTRY +
-# handlers/admin/feature_flags.py للتفاصيل الكاملة. كاش بـ Redis (TTL قصير) بدل
-# قاموس بايثون محلي، لأن is_feature_enabled قد يُستدعى مع كل رفع محتوى من أي طالب -
-# نتجنّب استعلام Supabase منفصل بكل مرة لمفتاح نادراً ما يتغيّر. استخدام Redis (بدل
-# كاش داخل عملية Python وحدها) يضمن أنّ تبديل مفتاح من لوحة الأدمن ينعكس فوراً على
-# كل نسخ/عمليات (processes/instances) البوت الشغّالة مع بعض، لا نسخة واحدة فقط.
-# نفس redis_client المستخدم أصلاً بـ config.py لطابور التحليلات وتخزين حالة FSM.
+# Two bounded layers: 30-second in-process TTL cache avoids a Redis round-trip on
+# each idle worker iteration, while Redis remains the shared cache between workers.
+# A successful admin write invalidates this process immediately and updates Redis;
+# other processes observe it no later than their local TTL expiry.
 
 _FEATURE_FLAG_REDIS_PREFIX = "feature_flag:"
 FEATURE_FLAG_CACHE_TTL_SECONDS = 30
+_FEATURE_FLAG_LOCAL_CACHE = TTLCache(maxsize=128, ttl=30)
+# Prevent an in-flight read from re-caching an old value after an admin update.
+_FEATURE_FLAG_CACHE_EPOCH = 0
 _GAME_FLAGS = {"challenge_system_enabled", "async_attacks_enabled", "spectator_mode_enabled", "live_matches_enabled"}
 
 
@@ -42,15 +44,24 @@ async def is_feature_enabled(key: str, default: bool = True) -> bool:
     لا تعطيل غير مقصود لميزة قائمة بمجرد مشكلة اتصال عابرة)."""
     if key in _GAME_FLAGS:
         default = False
+    local = _FEATURE_FLAG_LOCAL_CACHE.get(key)
+    if local is not None:
+        return local
+    epoch = _FEATURE_FLAG_CACHE_EPOCH
     try:
         cached = await redis_client.get(_flag_redis_key(key))
         if cached is not None:
-            return _decode_flag_value(cached)
+            enabled = _decode_flag_value(cached)
+            if epoch == _FEATURE_FLAG_CACHE_EPOCH:
+                _FEATURE_FLAG_LOCAL_CACHE[key] = enabled
+            return enabled
     except Exception as e:
         log_error(logger, f"Redis error reading feature flag '{key}' (falling back to Supabase): {e}")
     try:
         res = await supabase.table("feature_flags").select("enabled").eq("key", key).limit(1).execute()
         enabled = bool(res.data[0]["enabled"]) if res.data else default
+        if epoch == _FEATURE_FLAG_CACHE_EPOCH:
+            _FEATURE_FLAG_LOCAL_CACHE[key] = enabled
         try:
             await redis_client.set(_flag_redis_key(key), "1" if enabled else "0", ex=FEATURE_FLAG_CACHE_TTL_SECONDS)
         except Exception as re:
@@ -65,10 +76,14 @@ async def set_feature_flag(key: str, enabled: bool) -> bool:
     """يحفظ حالة مفتاح (تشغيل/إيقاف) من لوحة الأدمن بـ Supabase (المصدر الدائم للحقيقة)،
     ويحدّث كاش Redis المشترك فوراً لنفس اللحظة (بدل انتظار انتهاء TTL) حتى ينعكس القرار
     على أول طلب طالب تالٍ مباشرة، وعلى كل نسخ البوت الأخرى بنفس اللحظة أيضاً."""
+    global _FEATURE_FLAG_CACHE_EPOCH
     try:
         await supabase.table("feature_flags").upsert({
             "key": key, "enabled": enabled, "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }).execute()
+        # Only invalidate after the durable write succeeds.
+        _FEATURE_FLAG_CACHE_EPOCH += 1
+        _FEATURE_FLAG_LOCAL_CACHE.pop(key, None)
         try:
             await redis_client.set(_flag_redis_key(key), "1" if enabled else "0", ex=FEATURE_FLAG_CACHE_TTL_SECONDS)
         except Exception as re:
