@@ -232,6 +232,9 @@ def _quiz_review_key(user_id: int, token: str) -> str:
 async def _store_quiz_error_review(user_id: int, data: dict):
     """Keep a user-scoped snapshot independent of later FSM sessions."""
     entries = build_wrong_answer_review(data.get("questions"), data.get("answered_questions"))
+    answers = data.get("answered_questions") or {}
+    logger.info("QUIZ_REVIEW_SNAPSHOT questions=%s recorded_answers=%s errors=%s",
+                len(data.get("questions") or []), len(answers), len(entries))
     if not entries:
         return None, 0
     token = secrets.token_hex(8)
