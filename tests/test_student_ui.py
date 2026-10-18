@@ -62,6 +62,14 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('«كيف أستخدم البوت؟»', text)
         self.assertNotIn('«إنشاء كويز»', text)
 
+    def test_main_help_includes_quiz_creation_instructions(self):
+        self.assertIn('كيف أستخدم البوت؟', ui.HELP_TEXT)
+        self.assertIn('PDF أو Word أو PowerPoint أو TXT', ui.HELP_TEXT)
+        self.assertIn('صورة أو مجموعة صور واضحة', ui.HELP_TEXT)
+        self.assertIn('نص تلصقه مباشرة', ui.HELP_TEXT)
+        self.assertIn('نوع الأسئلة والصعوبة والعدد', ui.HELP_TEXT)
+        self.assertIn('التكلفة قبل التأكيد', ui.HELP_TEXT)
+
     async def test_help_create_and_home_do_not_touch_active_state(self):
         env = load_functions('handlers/start.py', {'student_navigation'},
             bot=types.SimpleNamespace(get_me=AsyncMock(return_value=types.SimpleNamespace(username='bot'))),
