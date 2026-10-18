@@ -103,8 +103,17 @@ def review_question_rich_html(entry, page, total, token, image_url=""):
         question_text = entry["question"]
         if entry.get("is_math"):
             from services.latex_text import latex_to_plain
+            from services.image_quiz_renderer import looks_arabic, letters_for
+            question_data = entry.get("math_question") or {}
             question_text = latex_to_plain(question_text)
-        parts.append(f"<p>{escape(question_text)}</p>")
+            options = question_data.get("options") or []
+            letters = letters_for(looks_arabic(str(question_data.get("question") or "")), len(options))
+            parts.append(f"<p>{escape(question_text)}</p>")
+            # Only used when the original image and image regeneration are unavailable.
+            for label, value in zip(letters, options):
+                parts.append(f"<p>{escape(label)}: {escape(latex_to_plain(str(value)))}</p>")
+        else:
+            parts.append(f"<p>{escape(question_text)}</p>")
     chosen = review_choice_label(entry, "chosen")
     correct = review_choice_label(entry, "correct")
     parts.extend([
