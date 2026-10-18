@@ -39,7 +39,9 @@ logger = get_logger(__name__)
 # لأنه غير مرتبط بزمن انتهاء صلاحية ملفات Gemini Files API (تلك تنتهي خلال ~48 ساعة أصلاً
 # ولا علاقة لها بنتيجة التصنيف المخزَّنة هنا، وهي فقط subject/suggested_types/إلخ نصية).
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
-_CLASSIFY_CACHE_PREFIX = "subject_classify:v2:"
+# v2 could associate a retained text input with a newly uploaded file's hash.
+# Ignore those temporary results without deleting votes, locks or saved quizzes.
+_CLASSIFY_CACHE_PREFIX = "subject_classify:v3:"
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
 _VALID_SUBJECTS = {
@@ -268,24 +270,32 @@ async def classify_subject(
     locked = await get_classification_lock(file_hash) if file_hash else None
     if locked is not None:
         try:
-            return SubjectClassification.model_validate(locked["classification_data"])
+            result = SubjectClassification.model_validate(locked["classification_data"])
+            logger.info("SUBJECT_CLASSIFICATION source=community_lock subject=%s", result.subject)
+            return result
         except Exception as exc:
             log_warning(logger, f"[subject_classifier] Failed to parse locked classification for {file_hash}: {exc}")
             # لا نمنع التدفق العادي لو كانت بيانات التثبيت تالفة لأي سبب - نكمل كالمعتاد (فشل آمن)
 
     cached = await _get_cached_classification(file_hash)
     if cached is not None:
+        logger.info("SUBJECT_CLASSIFICATION source=redis subject=%s", cached.subject)
         return cached
     try:
-        if pure_text:
-            result = await _classify_text(pure_text)
-        elif file_paths:
+        # Explicit media takes precedence even for pre-existing dirty FSM data.
+        # Office extraction supplies only text, with no media paths, upstream.
+        if file_paths:
             result = await _classify_media(file_paths)
+            source = "media"
+        elif pure_text:
+            result = await _classify_text(pure_text)
+            source = "text"
         else:
-            result = _fallback()
+            return _fallback()
     except Exception as exc:
         log_warning(logger, f"[subject_classifier] Unexpected error during classification, defaulting to 'other': {exc}")
         return _fallback()
     await _store_cached_classification(file_hash, result)
+    logger.info("SUBJECT_CLASSIFICATION source=%s subject=%s", source, result.subject)
     return result
 

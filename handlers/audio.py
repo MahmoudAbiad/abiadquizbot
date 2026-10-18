@@ -630,17 +630,19 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
             return
 
 
-        await state.update_data(
-            pure_text=pure_text,
-            source_title=data.get("source_title", "كويز من محاضرة صوتية"),
-            input_type="text",
-            items_count=1,
-            is_album=False,
+        # The transcript starts a new quiz input; no previous document hash,
+        # office text, quiz result or debit marker belongs to this request.
+        await state.set_data({
+            "pure_text": pure_text,
+            "source_title": data.get("source_title", "كويز من محاضرة صوتية"),
+            "input_type": "text",
+            "items_count": 1,
+            "is_album": False,
             # 🆕 مصدر/نوع المحتوى الصريح لسجل توليد الكويزات بلوحة الأدمن - راجع
             # handlers/files.py::handle_count_start حيث يُرحَّل هذا الحقل لحدث quiz_generated.
-            content_source="audio_transcript",
-            input_channel=data.get("input_channel"),
-        )
+            "content_source": "audio_transcript",
+            "input_channel": data.get("input_channel"),
+        })
         await ask_question_count(
             call.message,
             state,

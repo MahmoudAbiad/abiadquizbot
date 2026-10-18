@@ -443,7 +443,9 @@ async def ask_question_count(
     data = await state.get_data()
     is_media = data.get("input_type") == "media"
     file_paths = data.get("file_paths", []) or []
-    pure_text = data.get("pure_text")
+    # Completed quizzes retain their state for review/replay. Only the current
+    # input type may supply text; an uploaded PDF/image must never classify it.
+    pure_text = data.get("pure_text") if not is_media else None
 
     # 🆕 رسالة حالة "جار التعرف على المحتوى" قبل استدعاء classify_subject (فحص فعلي عبر
     # Gemini قد يستغرق بضع ثوانٍ خصوصاً للملفات الكبيرة/الألبومات)، حتى لا يظن الطالب أن
@@ -694,6 +696,10 @@ async def _finalize_media_processing(
             "content_source": content_source,
             "input_channel": input_channel,
         }
+        # This is a new, validated input, not an update to the completed quiz.
+        # Drop old text, extracted office text, result controls and charge IDs
+        # before either the cache-choice or classification path can read them.
+        await state.set_data(common_state)
         
         if cached_quizzes:
             # 🩹 إصلاح خلل حقيقي: التصنيف لسا ما صار بهالمرحلة (يصير فقط بعد ضغط "توليد
@@ -706,14 +712,13 @@ async def _finalize_media_processing(
             # كل كويز ياخد سعره الحقيقي حسب عدد أسئلته، محسوب مباشرة بـ
             # get_multiple_quizzes_keyboard وبـ handle_multi_cache_selection.
             await state.update_data(
-                **common_state, available_quizzes=cached_quizzes,
+                available_quizzes=cached_quizzes,
                 cache_filter_type="all", cache_filter_difficulty="all",
             )
             await state.set_state(QuizState.waiting_for_cache_decision)
             await _render_cache_decision_screen(message, state, edit=False, viewer_id=resolved_user_id)
             return
 
-        await state.update_data(**common_state)
         await ask_question_count(message, state, SUCCESS_MEDIA_RECEIVED)
     except Exception as exc:
         for path in file_paths: safe_file_cleanup(path)
@@ -824,10 +829,13 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         "content_type": "text", "text_length": len(text)
     }))
 
-    await state.update_data(
-        pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False,
-        content_source="telegram_text", input_channel="telegram",
-    )
+    # Text has no file identity. Retaining a previous file_hash would read or
+    # overwrite the shared classification/quiz cache for an unrelated file.
+    await state.set_data({
+        "pure_text": text, "source_title": text[:20] + "...", "input_type": "text",
+        "items_count": 1, "is_album": False,
+        "content_source": "telegram_text", "input_channel": "telegram",
+    })
     await ask_question_count(
         message, state,
         "✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة."
