@@ -27,6 +27,9 @@ def build_wrong_answer_review(questions, answered_questions):
         is_math = bool(question.get("is_math"))
         results.append({
             "index": index,
+            "total_questions": len(questions or []),
+            "chosen_index": chosen,
+            "correct_index": correct,
             "is_math": is_math,
             "image_url": str(question.get("image_url") or "")[:2048] if is_math else "",
             "explanation": str(question.get("explanation") or "")[:3500],
@@ -59,7 +62,7 @@ def review_inline_button(token, wrong_count):
     """Rich-message inline button markup (callback names use a random review token)."""
     return (
         '<tg-button-row align="center">'
-        f'<tg-button type="callback_data" style="primary" data="qrev:{token}:0">'
+        f'<tg-button type="callback_data" style="primary" data="qrevstart:{token}">'
         f"📚 مراجعة الأخطاء ({wrong_count})</tg-button>"
         '</tg-button-row>'
     )
@@ -72,7 +75,8 @@ def review_choice_label(entry, key):
     question = entry.get("math_question") or {}
     options = question.get("options") or []
     try:
-        option_index = options.index(entry[key])
+        saved_index = entry.get("chosen_index" if key == "chosen" else "correct_index")
+        option_index = int(saved_index) if saved_index is not None else options.index(entry[key])
         from services.image_quiz_renderer import looks_arabic, letters_for
         letters = letters_for(looks_arabic(str(question.get("question") or "")), len(options))
         return letters[option_index]
@@ -132,7 +136,12 @@ def review_question_fallback_text(entry, page, total):
             f"🔴 <b>إجابتك:</b> {escape(review_choice_label(entry, 'chosen'))}\n\n"
             f"🟢 <b>الإجابة الصحيحة:</b> {escape(review_choice_label(entry, 'correct'))}"
         )
-    return review_page_text([entry], 0)
+    return (
+        f"📚 <b>مراجعة الأخطاء · {page + 1} من {total}</b>\n\n"
+        f"❓ <b>السؤال {entry['number']}:</b>\n{escape(entry['question'])}\n\n"
+        f"🔴 <b>إجابتك:</b> {escape(entry['chosen'])}\n\n"
+        f"🟢 <b>الإجابة الصحيحة:</b> {escape(entry['correct'])}"
+    )
 
 
 def review_explanation_fallback_text(entry):
