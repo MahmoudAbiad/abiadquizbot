@@ -253,7 +253,10 @@ async def generate_quiz_smart(
                 progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
             )
         elif is_super_images:
-            generated = await _generate_super_images(file_paths, count, base_prompt_template)
+            generated = await _generate_super_images(
+                file_paths, count, base_prompt_template,
+                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+            )
         else:
             generated = await _generate_regular(file_paths, prompt)
         if not generated:
