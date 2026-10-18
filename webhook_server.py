@@ -399,6 +399,10 @@ async def _enforce_upload_rate_limit(user_id: int, bucket: str, max_requests: in
 
     يرمي HTTPException 429 عند تجاوز الحد، ولا يفعل شيئاً غير ذلك.
     """
+    from services.maintenance import maintenance_notice
+    notice = await maintenance_notice(user_id)
+    if notice:
+        raise HTTPException(status_code=503, detail=notice)
     key = f"upload_rl:{bucket}:{user_id}"
     try:
         current = await redis_client.incr(key)

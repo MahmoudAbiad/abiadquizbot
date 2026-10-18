@@ -668,6 +668,7 @@ def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="👥 إحصائيات الكويز الجماعي", callback_data="admin_group_quiz_stats")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
         [types.InlineKeyboardButton(text="⚙️ الإعدادات العامة", callback_data="admin_settings_general")],
+        [types.InlineKeyboardButton(text="🛠 وضع الصيانة", callback_data="admin_maintenance")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
