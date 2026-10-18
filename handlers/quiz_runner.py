@@ -254,7 +254,8 @@ async def _send_quiz_completion(chat_id: int, result_text: str, keyboard, review
     """Prefer a rich in-message review CTA; normal keyboard stays as a fallback."""
     if review_token:
         button = review_inline_button(review_token, wrong_count)
-        # Keep the error count and its action together, directly under the grade.
+        # Keep the error count close to the grade, but place the actual
+        # interactive button after the whole result body for a cleaner layout.
         paragraphs = []
         inserted = False
         for line in result_text.split("\n"):
@@ -263,11 +264,10 @@ async def _send_quiz_completion(chat_id: int, result_text: str, keyboard, review
             paragraphs.append(f"<p>{line}</p>")
             if not inserted and "📊 النسبة المئوية:" in line:
                 paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}</p>")
-                paragraphs.append(button)
                 inserted = True
         if not inserted:
             paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}</p>")
-            paragraphs.append(button)
+        paragraphs.append(button)
         rich_html = "".join(paragraphs)
         logger.info("QUIZ_RESULT_RICH_ATTEMPT review_errors=%s", wrong_count)
         try:
