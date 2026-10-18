@@ -49,6 +49,6 @@ def review_page_text(entries, index):
 def review_inline_button(token, wrong_count):
     """Rich-message inline button markup (callback names use a random review token)."""
     return (
-        f'<tg-button type="callback_data" style="link" data="qrev:{token}:0">'
+        f'<tg-button type="callback_data" style="primary" data="qrev:{token}:0">'
         f"❌ مراجعة الأخطاء ({wrong_count})</tg-button>"
     )
