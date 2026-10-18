@@ -3,11 +3,14 @@ import asyncio
 from task_utils import spawn
 import html
 import json
+import re
+import secrets
 from typing import Union, Optional, List, Dict, Any, Tuple
 
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
+from aiogram.exceptions import TelegramBadRequest
 
 from config import bot, QuizState, redis_client
 from constants import (
@@ -46,6 +49,7 @@ from helpers.supabase_helper import (
     _is_valid_uuid
 )
 from services.quiz_engine import send_quiz_poll
+from services.quiz_result_ui import build_wrong_answer_review, review_page_text, review_inline_button
 
 logger = get_logger(__name__)
 router = Router()
@@ -218,6 +222,53 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
         except Exception:
             pass
 
+_REVIEW_TTL_SECONDS = 7 * 24 * 3600
+
+
+def _quiz_review_key(user_id: int, token: str) -> str:
+    return f"quiz:error_review:{user_id}:{token}"
+
+
+async def _store_quiz_error_review(user_id: int, data: dict):
+    """Keep a user-scoped snapshot independent of later FSM sessions."""
+    entries = build_wrong_answer_review(data.get("questions"), data.get("answered_questions"))
+    if not entries:
+        return None, 0
+    token = secrets.token_hex(8)
+    try:
+        await redis_client.set(
+            _quiz_review_key(user_id, token),
+            json.dumps(entries, ensure_ascii=False),
+            ex=_REVIEW_TTL_SECONDS,
+        )
+    except Exception as exc:
+        log_warning(logger, f"Could not save error review for {user_id}: {exc}")
+        return None, 0
+    return token, len(entries)
+
+
+async def _send_quiz_completion(chat_id: int, result_text: str, keyboard, review_token, wrong_count: int):
+    """Prefer a rich in-message review CTA; normal keyboard stays as a fallback."""
+    if review_token:
+        button = review_inline_button(review_token, wrong_count)
+        rich_html = "".join(f"<p>{line}</p>" for line in result_text.split("\n") if line.strip())
+        rich_html += f"<p>{button}</p>"
+        try:
+            return await bot.send_rich_message(
+                chat_id=chat_id, rich_message=types.InputRichMessage(html=rich_html, is_rtl=True),
+                reply_markup=keyboard,
+            )
+        except Exception as exc:
+            log_warning(logger, f"Rich result is unavailable; using legacy result keyboard: {exc}")
+        fallback = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(
+                text=f"❌ مراجعة الأخطاء ({wrong_count})", callback_data=f"qrev:{review_token}:0")],
+            *keyboard.inline_keyboard,
+        ])
+        return await bot.send_message(chat_id, result_text, reply_markup=fallback, parse_mode="HTML")
+    return await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
+
+
 async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext, data: dict):
     score, total = data['score'], data['total_count']
     quiz_id = data.get('quiz_id')
@@ -269,11 +320,12 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
         quiz_row = await admin_get_quiz_by_id(quiz_id)
         creator_id = quiz_row.get("creator_id") if quiz_row else None
         keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, viewer_id=user_id, creator_id=creator_id)
-        result_text += "\n\nاحفظ الكويز للمراجعة أو حمّله من الأزرار أدناه.\n⭐ تقييم الأسئلة اختياري ويساعدنا على تحسينها."
+        result_text += "\n\nاحفظ الكويز للمراجعة أو حمّله من الأزرار أدناه.\n💬 عندك ملاحظات عن الأسئلة؟ شاركنا رأيك من الزر أدناه."
     else:
         keyboard = get_quiz_result_keyboard(quiz_id=quiz_id)
 
-    await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
+    review_token, wrong_count = await _store_quiz_error_review(user_id, data)
+    await _send_quiz_completion(chat_id, result_text, keyboard, review_token, wrong_count)
 
     # 🆕 أول اختبار كامل لمستخدم جديد: نعرض رسالة تهنئة قصيرة بعد النتيجة مباشرة، لكن
     # بزر واحد فقط "📋 عرض القائمة" بدل إرفاق القائمة الرئيسية كاملة مباشرة - تخفيفاً
