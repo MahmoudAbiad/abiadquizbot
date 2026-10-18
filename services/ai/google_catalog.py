@@ -21,11 +21,24 @@ MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._/:-]{1,100}$")
 PAGE_SIZE = 500
 MAX_PAGES = 8
 MAX_MODELS = 600
-PROBE_TIMEOUT = 13.0
+PROBE_TIMEOUT = 24.0
 
 
 class CatalogError(RuntimeError):
     """A sanitized catalog/network failure visible to the admin."""
+
+
+def classification_config(model, schema, types):
+    """Use the same fast, structured config in both probe and live detection.
+
+    Gemini 3.8 Flash defaults to medium thinking. Google recommends low for
+    latency-sensitive work. Do not apply it to Gemma or other model families
+    whose thinking-level support differs.
+    """
+    values = {"response_mime_type": "application/json", "response_schema": schema}
+    if model == "gemini-3.8-flash":
+        values["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
+    return types.GenerateContentConfig(**values)
 
 
 @dataclass(frozen=True)
@@ -36,6 +49,8 @@ class ProbeResult:
     text_reason: str
     image_reason: str
     elapsed_ms: int
+    text_elapsed_ms: int = 0
+    image_elapsed_ms: int = 0
 
     @property
     def ready(self):
@@ -132,6 +147,7 @@ async def probe_google_model(api_key: str, model: str, timeout_s: float = PROBE_
 
     started = time.monotonic()
     checks = []
+    stage_elapsed = []
     http_options = types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1))
     client = genai.Client(api_key=api_key, http_options=http_options)
     try:
@@ -147,14 +163,13 @@ async def probe_google_model(api_key: str, model: str, timeout_s: float = PROBE_
                     "هذه مسألة جبر: أوجد س في المعادلة 2س + 3 = 7. "
                     "صنّف مادة النص ورد بالحقول المطلوبة: math للرياضيات."
                 )
+            stage_start = time.monotonic()
+            status_code = "success"
             try:
                 response = await asyncio.wait_for(
                     client.aio.models.generate_content(
                         model=model, contents=contents,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=SubjectClassification,
-                        ),
+                        config=classification_config(model, SubjectClassification, types),
                     ),
                     timeout=timeout_s,
                 )
@@ -163,19 +178,38 @@ async def probe_google_model(api_key: str, model: str, timeout_s: float = PROBE_
                     checks.append((True, "نجح"))
                 else:
                     checks.append((False, "تصنيف غير صحيح"))
+                    status_code = "wrong_subject"
             except (asyncio.TimeoutError, TimeoutError):
-                checks.append((False, "انتهت مهلة الاختبار"))
+                status_code = "timeout"
+                checks.append((False, "انتهت المهلة دون استجابة من النموذج"))
             except Exception as exc:
-                # Do not include exception messages; providers may echo sensitive data.
+                # Never log raw vendor errors: some echo credentials or request bodies.
                 code = getattr(exc, "code", None)
                 if type(code) is int and 400 <= code <= 599:
-                    checks.append((False, f"رفض API: HTTP {code}"))
+                    status_code = f"http_{code}"
+                    if code == 429:
+                        checks.append((False, "حد طلبات أو حصة Google (HTTP 429)"))
+                    elif code in (401, 403):
+                        checks.append((False, f"مفتاح أو صلاحيات Google (HTTP {code})"))
+                    elif code == 404:
+                        checks.append((False, "النموذج غير متاح لهذا المفتاح (HTTP 404)"))
+                    else:
+                        checks.append((False, f"رفض API: HTTP {code}"))
                 elif isinstance(exc, (ValueError, TypeError, KeyError)):
+                    status_code = "invalid_json"
                     checks.append((False, "JSON غير صالح"))
                 else:
+                    status_code = "request_error"
                     logger.info("GOOGLE_MODEL_PROBE_FAILURE model=%s stage=%s error_type=%s",
                                 model, "image" if image_mode else "text", type(exc).__name__)
                     checks.append((False, "تعذّر الاختبار"))
+            finally:
+                elapsed = round((time.monotonic() - stage_start) * 1000)
+                stage_elapsed.append(elapsed)
+                logger.info(
+                    "GOOGLE_MODEL_PROBE_STAGE model=%s stage=%s result=%s elapsed_ms=%d",
+                    model, "image" if image_mode else "text", status_code, elapsed,
+                )
     finally:
         await client.aio.aclose()
         client.close()
@@ -183,4 +217,5 @@ async def probe_google_model(api_key: str, model: str, timeout_s: float = PROBE_
     logger.info("GOOGLE_MODEL_PROBE model=%s text_ok=%s image_ok=%s elapsed_ms=%d",
                 model, checks[0][0], checks[1][0], duration)
     return ProbeResult(model, checks[0][0], checks[1][0],
-                       checks[0][1], checks[1][1], duration)
+                       checks[0][1], checks[1][1], duration,
+                       stage_elapsed[0], stage_elapsed[1])

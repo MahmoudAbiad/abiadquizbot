@@ -176,7 +176,8 @@ async def test_catalog_model(call: types.CallbackQuery, state: FSMContext):
     await safe_edit_text(call.message,
         f"🧪 جاري فحص <code>{escape(model)}</code>\n"
         "اختبار نص عربي مع JSON ثم صورة تجريبية مع JSON.\n"
-        "قد يستغرق الفحص نصف دقيقة، وقد يُحتسب من حصة Google.")
+        "قد يستغرق الفحص حتى 50 ثانية عند بطء المزوّد، "
+        "وقد يُحتسب من حصة Google.")
     try:
         result = await probe_google_model(key, model)
     except CatalogError as exc:
@@ -199,15 +200,22 @@ async def test_catalog_model(call: types.CallbackQuery, state: FSMContext):
         rows.append([("✅ أضف وفعّل في فحص المحتوى", f"gmc:enable:{index}")])
     rows.append([("🔄 إعادة الاختبار", f"gmc:test:{index}")])
     rows.append([("🔙 قائمة النماذج", "gmc:page:0")])
+    timed_out = "انتهت المهلة" in result.text_reason or "انتهت المهلة" in result.image_reason
     text = (
         f"🧪 <b>نتيجة فحص {escape(model)}</b>\n\n"
-        f"{'✅' if result.text_ok else '❌'} النص العربي + JSON: {escape(result.text_reason)}\n"
-        f"{'✅' if result.image_ok else '❌'} الصورة + JSON: {escape(result.image_reason)}\n"
-        f"⏱ المدة: {result.elapsed_ms / 1000:.1f} ثانية\n\n"
+        f"{'✅' if result.text_ok else '❌'} النص العربي + JSON: {escape(result.text_reason)} "
+        f"({result.text_elapsed_ms / 1000:.1f} ث)\n"
+        f"{'✅' if result.image_ok else '❌'} الصورة + JSON: {escape(result.image_reason)} "
+        f"({result.image_elapsed_ms / 1000:.1f} ث)\n"
+        f"⏱ الإجمالي: {result.elapsed_ms / 1000:.1f} ثانية\n\n"
         + ("✅ النموذج اجتاز اختباراً مصغّراً، وليس ضماناً لدقته مع جميع ملفات الطلاب.\n"
            "⚠️ Google لا تحدد لنا إذا كانت الحصة مجانية. التفعيل قد يُسبب تكاليف."
            if result.ready else
-           "لن يُضاف النموذج إلى سلسلة الفحص قبل نجاح كلا الاختبارين.")
+           "⚠️ انتهاء المهلة لا يعني أن النموذج غير متوافق؛ "
+           "يمكن إعادة الاختبار عند انخفاض الضغط.\n"
+           "لن يتم تفعيل النموذج تلقائياً."
+           if timed_out else
+           "لن يُضاف النموذج إلى سلسلة الفحص قبل نجاح الاختبارين.")
     )
     await safe_edit_text(call.message, text, reply_markup=_kb(rows))
 

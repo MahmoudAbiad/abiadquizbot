@@ -196,6 +196,12 @@ class GoogleAdapter:
             config = (types.GenerateContentConfig(response_mime_type="application/json",
                                                  response_schema=request.schema)
                       if request.schema else None)
+            if (provider["transport"] == "gemini" and request.schema is not None
+                    and getattr(request.schema, "__name__", "") == "SubjectClassification"):
+                # Match the catalog probe's low-latency configuration for
+                # Gemini 3.8 Flash classification. Do not change quiz generation.
+                from services.ai.google_catalog import classification_config
+                config = classification_config(model, request.schema, types)
             response = await client.aio.models.generate_content(model=model, contents=contents, config=config)
             usage = response.usage_metadata
             finish = response.candidates[0].finish_reason if response.candidates else None

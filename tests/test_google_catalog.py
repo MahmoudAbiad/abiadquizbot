@@ -13,7 +13,7 @@ import httpx
 
 from services.ai.google_catalog import (
     CatalogError, ProbeResult, _synthetic_equation_image,
-    list_google_models, probe_google_model,
+    list_google_models, probe_google_model, classification_config, PROBE_TIMEOUT,
 )
 
 
@@ -84,13 +84,13 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         # The production classifier imports Supabase/Redis. Test the exact fields
         # and enums without a live DB or any previously stubbed Supabase modules.
-        class SubjectSchema(BaseModel):
+        class SubjectClassification(BaseModel):
             subject: Literal["math", "english", "french", "quiz_solved", "quiz_unsolved", "other"]
             suggested_types: list[str] = Field(default_factory=list, max_length=4)
             question_count: int | None = None
             content_subject: Literal["math", "english", "french", "other"] | None = None
         module = types.ModuleType("services.subject_classifier")
-        module.SubjectClassification = SubjectSchema
+        module.SubjectClassification = SubjectClassification
         self.schema_mock = patch.dict(sys.modules, {"services.subject_classifier": module})
         self.schema_mock.start()
         self.addCleanup(self.schema_mock.stop)
@@ -142,9 +142,54 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             result = await probe_google_model("SECRET-KEY", "model", timeout_s=0.01)
         self.assertFalse(result.ready)
         self.assertEqual(result.text_reason, "JSON غير صالح")
-        self.assertEqual(result.image_reason, "انتهت مهلة الاختبار")
+        self.assertEqual(result.image_reason, "انتهت المهلة دون استجابة من النموذج")
+        self.assertGreaterEqual(result.image_elapsed_ms, 9)
         self.assertNotIn("SECRET-KEY", str(result))
         fake.aio.aclose.assert_awaited_once()
+
+    async def test_thinking_low_is_3_8_specific_and_consistent_with_adapter(self):
+        from google.genai import types as google_types
+        from services.ai.adapters import GoogleAdapter
+        from services.ai.contracts import AIRequest
+        schema = sys.modules["services.subject_classifier"].SubjectClassification
+        self.assertEqual(PROBE_TIMEOUT, 24.0)
+        fast = classification_config("gemini-3.8-flash", schema, google_types)
+        normal = classification_config("gemma-4-31b-it", schema, google_types)
+        self.assertEqual(str(fast.thinking_config.thinking_level).split(".")[-1].upper(), "LOW")
+        self.assertIsNone(normal.thinking_config)
+
+        fake = Mock()
+        fake.close = Mock()
+        fake.aio.aclose = AsyncMock()
+        fake.aio.models.generate_content = AsyncMock(return_value=types.SimpleNamespace(
+            text='{"subject":"math"}', usage_metadata=None, candidates=[]))
+        with patch("google.genai.Client", return_value=fake):
+            result = await GoogleAdapter().generate(
+                {"transport": "gemini"}, "KEY", "gemini-3.8-flash",
+                AIRequest(("مسألة رياضيات",), schema))
+        self.assertEqual(result.parsed.subject, "math")
+        adapter_config = fake.aio.models.generate_content.await_args.kwargs["config"]
+        self.assertEqual(str(adapter_config.thinking_config.thinking_level).split(".")[-1].upper(), "LOW")
+        fake.aio.aclose.assert_awaited_once()
+        fake.close.assert_called_once()
+
+    async def test_each_stage_reports_reason_and_duration(self):
+        fake = Mock()
+        fake.close = Mock()
+        fake.aio.aclose = AsyncMock()
+        async def respond(**kwargs):
+            if isinstance(kwargs["contents"], str):
+                await asyncio.sleep(0.06)
+            return types.SimpleNamespace(text='{"subject":"math"}')
+        fake.aio.models.generate_content = AsyncMock(side_effect=respond)
+        with patch("google.genai.Client", return_value=fake):
+            result = await probe_google_model("KEY", "gemini-3.8-flash", timeout_s=0.02)
+        self.assertFalse(result.text_ok)
+        self.assertTrue(result.image_ok)
+        self.assertGreaterEqual(result.text_elapsed_ms, 19)
+        self.assertGreaterEqual(result.elapsed_ms, result.text_elapsed_ms)
+        self.assertEqual(result.text_reason, "انتهت المهلة دون استجابة من النموذج")
+        self.assertGreaterEqual(result.image_elapsed_ms, 0)
 
     async def test_http_error_is_safe_and_limited_to_status(self):
         fake = Mock()
@@ -155,7 +200,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         fake.aio.models.generate_content = AsyncMock(side_effect=failure)
         with patch("google.genai.Client", return_value=fake):
             result = await probe_google_model("SECRET-KEY", "model")
-        self.assertEqual(result.text_reason, "رفض API: HTTP 429")
+        self.assertEqual(result.text_reason, "حد طلبات أو حصة Google (HTTP 429)")
         self.assertNotIn("SECRET-KEY", str(result))
 
 
