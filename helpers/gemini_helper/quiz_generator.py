@@ -15,6 +15,8 @@ from constants import (
     SUPER_IMAGE_BATCH_THRESHOLD,
     OPTION_COUNT,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
+    SYSTEM_PROMPT_EXTRACT_READY_QUIZ,
+    SYSTEM_PROMPT_EXTRACT_READY_MATH_FORMAT,
     SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS,
     SYSTEM_PROMPT_GENERATE_SIMILAR_MATH_QUESTIONS, QUESTION_TYPE_SIMILAR_MATH,
     SYSTEM_PROMPT_GENERATE_ENGLISH_PLAIN_QUESTIONS,
@@ -136,7 +138,15 @@ async def generate_quiz_smart(
         # 🆕 اختيار الموجّه المناسب حسب الأولوية: رياضي (LaTeX) > فرنسي (مترجم/عادي) >
         # إنجليزي (مترجم/عادي) > قياسي. content_language يميّز بين الموجّهين الفرنسيين
         # والإنجليزيين لأن english_mode ("translated"/"plain") وحده لا يكفي للتفريق بينهما.
-        if is_math_mode:
+        if quiz_extraction_instruction and not (is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH):
+            source_prompt = SYSTEM_PROMPT_EXTRACT_READY_QUIZ
+            if is_math_mode:
+                source_prompt += SYSTEM_PROMPT_EXTRACT_READY_MATH_FORMAT
+            elif content_language in (SUBJECT_FRENCH,):
+                source_prompt += "\nانقل الأسئلة بلغتها الفرنسية الأصلية دون فرض ترجمة.\n"
+            elif english_mode == "plain":
+                source_prompt += "\nانقل الأسئلة بلغتها الأصلية دون فرض ترجمة.\n"
+        elif is_math_mode:
             source_prompt = (SYSTEM_PROMPT_GENERATE_SIMILAR_MATH_QUESTIONS
                              if question_type == QUESTION_TYPE_SIMILAR_MATH else SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS)
         elif content_language == SUBJECT_FRENCH and english_mode == "translated":
@@ -152,23 +162,22 @@ async def generate_quiz_smart(
         # IMPORTANT: استبدال {option_count} أولاً لضمان وصول العدد الصحيح للخيارات لكافة النماذج
         base_prompt_template = source_prompt.replace("{option_count}", str(OPTION_COUNT))
 
-        # 🆕 حقن تعليمات الصعوبة ونوع الأسئلة - موجودتان بالأربع موجّهات على حد سواء
-        base_prompt_template = base_prompt_template.replace(
-            "{difficulty_instruction}", _resolve_difficulty_instruction(difficulty)
-        ).replace(
-            "{question_type_instruction}",
-            _resolve_question_type_instruction(question_type, custom_question_type_text),
+        is_extraction = bool(quiz_extraction_instruction) and not (
+            is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH
         )
-
-        # 🆕 اختبار جاهز (محلول/غير محلول): تُلحَق تعليمة الاستخراج الخاصة بنهاية الموجّه
-        # الأساسي (بغض النظر عن مادته) - تحوّل المهمة من "توليد" إلى "استخراج" كما هي أو
-        # حلّها بالذكاء الاصطناعي. لا تأثير إطلاقاً على أي مادة أخرى (تبقى None فتُتجاهل).
-        # ملاحظة: {count} داخل هذا النص يُستبدل سوا مع باقي الموجّه بنفس السطر بالأسفل.
-        if quiz_extraction_instruction and not (is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH):
+        if is_extraction:
+            # Never ask an extractor to invent different questions or to reorder the original exam.
             base_prompt_template += quiz_extraction_instruction
+        else:
+            base_prompt_template = base_prompt_template.replace(
+                "{difficulty_instruction}", _resolve_difficulty_instruction(difficulty)
+            ).replace(
+                "{question_type_instruction}",
+                _resolve_question_type_instruction(question_type, custom_question_type_text),
+            )
 
-        # حقن الأسئلة السابقة لمنع التكرار
-        if previous_questions:
+        # The previously generated questions constraint applies ONLY to creation.
+        if previous_questions and not is_extraction:
             old_q_texts = "\n".join([f"- {q['question']}" for q in previous_questions if 'question' in q])
             if is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH:
                 base_prompt_template += "\n[منع التكرار]: حافظ على الأنماط المطلوبة لكن استخدم مسائل بمعطيات جديدة مختلفة عن هذه المسائل السابقة:\n" + old_q_texts
@@ -228,7 +237,7 @@ async def generate_quiz_smart(
         # For ready-made exams the prompt extracts only original questions
         # starting on owned pages; all other subjects generate questions from
         # the owned content, using boundary pages for context only.
-        is_ready_exam = bool(quiz_extraction_instruction)
+        is_ready_exam = is_extraction
         if is_super_pdf:
             generated = await _generate_pdf_with_context(
                 file_paths[0], count, base_prompt_template,
