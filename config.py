@@ -8,7 +8,7 @@ import os
 from aiogram import Bot, Dispatcher, types
 # إضافة مكتبات Redis
 from aiogram.fsm.storage.redis import RedisStorage
-from redis.asyncio import Redis
+from redis.asyncio import Redis, BlockingConnectionPool
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
@@ -69,6 +69,17 @@ def _get_admin_id() -> int:
         logger.warning("Invalid ADMIN_ID in .env, defaulting to 0")
         return 0
 
+def _redis_pool_limit() -> int:
+    """Bound Redis sockets per bot process, including background webhook workers."""
+    raw = os.getenv("REDIS_MAX_CONNECTIONS", "8")
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid REDIS_MAX_CONNECTIONS=%r; using 8", raw)
+        return 8
+    return max(2, min(32, parsed))
+
+
 # ==================== Initialization ====================
 try:
     # إعداد الاتصال بـ Redis
@@ -85,14 +96,22 @@ try:
     # الحل: health_check_interval بيخلي المكتبة تفحص كل اتصال دورياً وتستبدله لو ميت *قبل*
     # الاستخدام الفعلي، وsocket_keepalive بيقلل احتمال انقطاعه بالأساس، وretry_on_error
     # بيعطي محاولة تلقائية إضافية فوراً (بنفس الاتصال الجديد من الـ pool) لو انقطع رغم كل هيك.
-    redis_client = Redis.from_url(
+    # Upstash/Redis has a server-side limit on simultaneous clients. The default
+    # Redis.from_url pool expands without a cap, particularly under webhook bursts.
+    # An async blocking pool bounds sockets and waits briefly for a free one.
+    redis_pool_limit = _redis_pool_limit()
+    redis_pool = BlockingConnectionPool.from_url(
         redis_url,
+        max_connections=redis_pool_limit,
+        timeout=5,
         socket_keepalive=True,
         health_check_interval=30,
         retry_on_error=[RedisConnectionError, RedisTimeoutError, ConnectionResetError],
         retry=Retry(ExponentialBackoff(base=0.1, cap=1), retries=2),
         **redis_kwargs,
     )
+    redis_client = Redis(connection_pool=redis_pool)
+    logger.info("Redis connection pool capped at %s per process", redis_pool_limit)
     # إعداد التخزين الدائم (RedisStorage)
     # جعل حالة المستخدم وبياناته المؤقتة تنتهي وتُحذف تلقائياً من Redis بعد 15 ساعة من خمول المستخدم
     storage = RedisStorage(redis=redis_client, state_ttl=86400, data_ttl=86400)
