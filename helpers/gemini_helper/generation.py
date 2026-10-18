@@ -19,7 +19,8 @@ logger = get_logger(__name__)
 
 def _build_super_chunk_attempt_fn(paths, prompt):
     # Historical private name retained for import compatibility; now builds data.
-    return AIRequest((prompt, *(Attachment.from_path(path) for path in paths)), QuizResponse)
+    return AIRequest(tuple(Attachment.from_path(path) for path in paths), QuizResponse,
+                     system_instruction=prompt)
 
 
 async def _execute_cascade(request, exclude_vertex=False):
