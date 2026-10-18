@@ -331,6 +331,8 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
             OPTION_COUNT=4, SUBJECT_FRENCH='french',
             QUESTION_TYPE_SIMILAR_MATH='similar_math',
             MSG_PREVIOUS_QUESTIONS_INSTRUCTION='',
+            SYSTEM_PROMPT_EXTRACT_READY_QUIZ='Extract original questions {count}',
+            SYSTEM_PROMPT_EXTRACT_READY_MATH_FORMAT='Math display only',
             _resolve_difficulty_instruction=lambda _: '',
             _resolve_question_type_instruction=lambda *_: '',
             _last_model_used_var=state, _last_token_usage_var=state,
