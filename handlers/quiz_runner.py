@@ -418,7 +418,8 @@ async def _review_resolve_image(user_id: int, token: str, page: int, items: list
     return types.BufferedInputFile(raw, filename="math-review.png")
 
 
-def _review_pager(token: str, page: int, count: int, *, explanation: bool = False):
+def _review_pager(token: str, page: int, count: int, *, explanation: bool = False,
+                  fallback_controls: bool = False):
     navigation = []
     if not explanation:
         if page > 0:
@@ -430,13 +431,13 @@ def _review_pager(token: str, page: int, count: int, *, explanation: bool = Fals
     rows = [navigation] if navigation else []
     rows.append([types.InlineKeyboardButton(
         text="✖️ إغلاق المراجعة", callback_data=f"qrev_close:{token}")])
-    if explanation:
-        # The normal-keyboard fallback needs a back button too.
-        rows.insert(0, [types.InlineKeyboardButton(
-            text="↩️ العودة للسؤال", callback_data=f"qrevback:{token}:{page}")])
-    else:
-        rows.insert(0, [types.InlineKeyboardButton(
-            text="💡 عرض الشرح", callback_data=f"qrevexp:{token}:{page}")])
+    if fallback_controls:
+        if explanation:
+            rows.insert(0, [types.InlineKeyboardButton(
+                text="↩️ العودة للسؤال", callback_data=f"qrevback:{token}:{page}")])
+        else:
+            rows.insert(0, [types.InlineKeyboardButton(
+                text="💡 عرض الشرح", callback_data=f"qrevexp:{token}:{page}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -467,7 +468,8 @@ async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
         # message; prefer a real photo with editable caption over text-only UI.
         await _review_fallback(
             call, review_question_fallback_text(entry, page, len(items)),
-            _review_pager(token, page, len(items)), media, new_message)
+            _review_pager(token, page, len(items), fallback_controls=True),
+            media, new_message)
         await call.answer()
         return
     if explanation:
@@ -498,10 +500,14 @@ async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
             await call.answer()
             return
         log_warning(logger, f"Rich review unavailable, using fallback: {exc}")
-        await _review_fallback(call, plain, keyboard, media, new_message)
+        await _review_fallback(
+            call, plain, _review_pager(token, page, len(items),
+                explanation=explanation, fallback_controls=True), media, new_message)
     except Exception as exc:
         log_warning(logger, f"Rich review unsupported, using fallback: {exc}")
-        await _review_fallback(call, plain, keyboard, media, new_message)
+        await _review_fallback(
+            call, plain, _review_pager(token, page, len(items),
+                explanation=explanation, fallback_controls=True), media, new_message)
     await call.answer()
 
 
