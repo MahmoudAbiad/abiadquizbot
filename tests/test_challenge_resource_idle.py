@@ -78,6 +78,7 @@ class FeatureFlagCacheTests(unittest.IsolatedAsyncioTestCase):
             _FEATURE_FLAG_LOCAL_CACHE=self.cache, _FEATURE_FLAG_CACHE_EPOCH=0,
             _GAME_FLAGS={"challenge_system_enabled", "live_matches_enabled", "spectator_mode_enabled"},
             FEATURE_FLAG_CACHE_TTL_SECONDS=30,
+            _FEATURE_FLAG_REDIS_PREFIX="feature_flag:",
             datetime=datetime, logger=Mock(), log_error=Mock(),
         )
         self.flag = self.f["is_feature_enabled"]
