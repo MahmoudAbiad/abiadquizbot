@@ -65,13 +65,24 @@ async def _run_case(base, token, name, body):
                         except (ValueError, UnicodeDecodeError):
                             pass
                     result_type, text_chars, codes = _result_details(payload)
+                    schema_valid = None
+                    if "full" in name and isinstance(payload, dict):
+                        result = payload.get("result")
+                        message = result.get("response") if isinstance(result, dict) else None
+                        if isinstance(message, str):
+                            try:
+                                from services.subject_classifier import SubjectClassification
+                                SubjectClassification.model_validate(json.loads(message))
+                                schema_valid = True
+                            except (ValueError, TypeError):
+                                schema_valid = False
                     logger.info(
                         "CF_PROBE_RESULT case=%s status=%d headers_ms=%d body_ms=%d total_ms=%d "
-                        "response_bytes=%d json=%s success_flag=%s result_type=%s text_chars=%d error_codes=%s",
+                        "response_bytes=%d json=%s success_flag=%s result_type=%s text_chars=%d error_codes=%s schema_valid=%s",
                         name, response.status_code, headers_elapsed_ms, body_elapsed_ms,
                         round((time.monotonic() - t0) * 1000), len(raw),
                         payload is not None, payload.get("success") if isinstance(payload, dict) else None,
-                        result_type, text_chars, codes,
+                        result_type, text_chars, codes, schema_valid,
                     )
                     return response.status_code == 200 and text_chars > 0
     except (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
@@ -117,14 +128,12 @@ async def run_cloudflare_probe():
         json.dumps(schema, ensure_ascii=False)
     )
     cases = [
-        ("messages_short_en", {"messages": [{"role": "user", "content": "Reply ONLY OK."}],
-                               "max_tokens": 32, "stream": False}),
-        ("prompt_short_en", {"prompt": "Reply ONLY OK.", "max_tokens": 32, "stream": False}),
-        ("messages_short_ar", {"messages": [{"role": "user", "content": "اكتب كلمة نعم فقط."}],
-                               "max_tokens": 96, "stream": False}),
-        ("messages_full_classification", {"messages": [{"role": "user", "content": full}],
-                                          "max_tokens": 256, "stream": False}),
-        ("prompt_full_classification", {"prompt": full, "max_tokens": 1024, "stream": False}),
+        ("messages_full_256_repeat", {"messages": [{"role": "user", "content": full}],
+                                     "max_tokens": 256, "stream": False}),
+        ("prompt_full_256", {"prompt": full, "max_tokens": 256, "stream": False}),
+        ("messages_full_1024", {"messages": [{"role": "user", "content": full}],
+                               "max_tokens": 1024, "stream": False}),
+        ("prompt_full_128", {"prompt": full, "max_tokens": 128, "stream": False}),
     ]
     logger.info("CF_PROBE_BEGIN cases=%d timeout_per_case_s=%d", len(cases), MAX_SECONDS_PER_CASE)
     started = time.monotonic()
