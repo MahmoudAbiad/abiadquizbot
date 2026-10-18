@@ -198,12 +198,14 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
         await state.update_data(question_control_token=control_token)
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data=f"qctl:{control_token}:hint")],
-            [types.InlineKeyboardButton(text="⏹ إنهاء", callback_data=f"qctl:{control_token}:stop")],
-            *([[
-                types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
-                types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
-            ]] if not data.get("is_mistake_practice") else []),
-            [types.InlineKeyboardButton(text="🏁 عرض النتيجة" if idx + 1 == len(questions) else "➡️ السؤال التالي", callback_data=f"qctl:{control_token}:next")]
+            [
+                types.InlineKeyboardButton(text="⏹ إنهاء", callback_data=f"qctl:{control_token}:stop"),
+                *([
+                    types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
+                    types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
+                ] if not data.get("is_mistake_practice") else []),
+            ],
+            [types.InlineKeyboardButton(text="🏁 عرض النتيجة" if idx + 1 == len(questions) else "➡️ التالي", callback_data=f"qctl:{control_token}:next")]
         ])
 
         from handlers.session_navigation import session_id
