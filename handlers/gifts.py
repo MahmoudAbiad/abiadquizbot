@@ -20,8 +20,8 @@ class GiftState(StatesGroup):
 def wallet_buttons():
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text='💳 شحن الرصيد', callback_data='recharge_info')],
-        [types.InlineKeyboardButton(text='🎟 شحن كود هدية', callback_data='gift:redeem')],
         [types.InlineKeyboardButton(text='🎁 هداياي وصلاحيتها', callback_data='gift:list:0')],
+        [types.InlineKeyboardButton(text='🎟 شحن كود هدية', callback_data='gift:redeem')],
     ])
 
 
