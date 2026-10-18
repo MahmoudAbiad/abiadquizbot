@@ -92,9 +92,11 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.bot.send_rich_message.assert_awaited_once()
         rich = self.bot.send_rich_message.await_args.kwargs["rich_message"]
         self.assertIn("qrev:abcdef1234567890:0", rich.html)
+        self.assertIn('<tg-button-row align="center">', rich.html)
         self.assertIn('<tg-button type="callback_data" style="primary"', rich.html)
         self.assertIn("❌ الإجابات الخاطئة: 2", rich.html)
         self.assertLess(rich.html.index("📊 50%"), rich.html.index("❌ الإجابات الخاطئة: 2"))
+        self.assertLess(rich.html.index("❌ الإجابات الخاطئة: 2"), rich.html.index('<tg-button-row'))
         self.assertIs(self.bot.send_rich_message.await_args.kwargs["reply_markup"], keyboard)
         self.bot.send_message.assert_not_awaited()
         self.bot.send_rich_message.side_effect = RuntimeError("Unsupported rich message")
