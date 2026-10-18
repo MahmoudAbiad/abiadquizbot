@@ -17,10 +17,12 @@ from services.ai.runtime import execute as _execute_request
 logger = get_logger(__name__)
 
 
-def _build_super_chunk_attempt_fn(paths, prompt):
+def _build_super_chunk_attempt_fn(paths, prompt, user_context=None):
     # Historical private name retained for import compatibility; now builds data.
-    return AIRequest(tuple(Attachment.from_path(path) for path in paths), QuizResponse,
-                     system_instruction=prompt)
+    parts = ((user_context,) if user_context else ()) + tuple(
+        Attachment.from_path(path) for path in paths
+    )
+    return AIRequest(parts, QuizResponse, system_instruction=prompt)
 
 
 async def _execute_cascade(request, exclude_vertex=False):
@@ -36,8 +38,8 @@ async def _execute_cascade(request, exclude_vertex=False):
             meta.get("cascade_rank"), meta.get("cascade_total"), meta.get("provider"))
 
 
-async def _generate_regular(paths, prompt):
-    result = await _execute_cascade(_build_super_chunk_attempt_fn(paths, prompt))
+async def _generate_regular(paths, prompt, user_context=None):
+    result = await _execute_cascade(_build_super_chunk_attempt_fn(paths, prompt, user_context))
     return (result[0], result[1]) if result else None
 
 
@@ -152,6 +154,7 @@ def _merge_pdf_chunk_questions(
 async def _generate_pdf_with_context(
     file_path: str, count: int, prompt_template: str, part_count: int,
     ready_exam: bool = False, progressive: bool = False,
+    user_context: Optional[str] = None,
 ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     """Context-overlap PDF generation for all subject types.
 
@@ -164,7 +167,8 @@ async def _generate_pdf_with_context(
     try:
         await asyncio.to_thread(release_memory_to_os)
         if len(chunks) != part_count:
-            return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)))
+            return await _generate_regular([file_path], prompt_template.replace("{count}", str(count)),
+                                           user_context=user_context)
 
         # Keep per-chunk count a generous UPPER bound for extracting existing
         # questions; density varies. For generating questions, quotas are
@@ -206,6 +210,7 @@ async def _generate_pdf_with_context(
                             progressive_segments[index] if progressive_segments else None,
                         )
                     ),
+                    user_context,
                 ),
                 # Retain the current three-part Super-PDF provider policy.
                 exclude_vertex=(part_count == 3),
@@ -338,7 +343,8 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
 
 
 async def _generate_super_images(
-    file_paths: List[str], count: int, prompt_template: str, progressive: bool = False
+    file_paths: List[str], count: int, prompt_template: str, progressive: bool = False,
+    user_context: Optional[str] = None
 ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     """🆕 معالجة متوازية لألبومات الصور الكبيرة (أكبر من SUPER_IMAGE_BATCH_THRESHOLD -
     مصدرها حصراً رفع الويب حالياً، راجع handlers/files.py::process_web_uploaded_images)،
@@ -353,7 +359,8 @@ async def _generate_super_images(
     """
     chunks = [chunk for chunk in await asyncio.to_thread(split_images_into_three_sync, file_paths) if chunk]
     if len(chunks) < 2:
-        return await _generate_regular(file_paths, prompt_template.replace("{count}", str(count)))
+        return await _generate_regular(file_paths, prompt_template.replace("{count}", str(count)),
+                                       user_context=user_context)
 
     base, remainder = divmod(count, len(chunks))
     question_counts = [base + (1 if index < remainder else 0) for index in range(len(chunks))]
@@ -371,7 +378,8 @@ async def _generate_super_images(
             _build_super_chunk_attempt_fn(
                 chunk, prompt_template.replace("{count}", str(question_count)) +
                 ("\n[موقع هذه الدفعة ضمن التدرج العام]: " + segments[index]
-                 if progressive else "")
+                 if progressive else ""),
+                user_context,
             ),
             exclude_vertex=True,
         )
