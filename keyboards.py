@@ -45,11 +45,10 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
         referral_bonus_points = await get_setting("referral_bonus_points")
         kb = [
-            [types.InlineKeyboardButton(text="📝 إنشاء كويز جديد", callback_data="student_create_quiz")],
+            [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
             [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu")],
             [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
             [types.InlineKeyboardButton(text="🎟 استخدام كود هدية", callback_data="gift:redeem")],
-            [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
