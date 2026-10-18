@@ -66,23 +66,33 @@ async def _run_case(base, token, name, body):
                             pass
                     result_type, text_chars, codes = _result_details(payload)
                     schema_valid = None
-                    if "full" in name and isinstance(payload, dict):
+                    parse_reason = "no_text"
+                    output_tokens = None
+                    if isinstance(payload, dict):
                         result = payload.get("result")
-                        message = result.get("response") if isinstance(result, dict) else None
-                        if isinstance(message, str):
-                            try:
+                        if isinstance(result, dict):
+                            usage = result.get("usage") or {}
+                            if isinstance(usage, dict):
+                                output_tokens = usage.get("completion_tokens")
+                            message = result.get("response")
+                            if isinstance(message, str):
+                                from services.ai.adapters import parse_result
+                                from services.ai.contracts import AIResult
                                 from services.subject_classifier import SubjectClassification
-                                SubjectClassification.model_validate(json.loads(message))
-                                schema_valid = True
-                            except (ValueError, TypeError):
-                                schema_valid = False
+                                try:
+                                    parsed = parse_result(AIResult(message), SubjectClassification)
+                                    schema_valid = True
+                                    parse_reason = "valid"
+                                except (ValueError, TypeError, KeyError, IndexError) as exc:
+                                    schema_valid = False
+                                    parse_reason = type(exc).__name__
                     logger.info(
                         "CF_PROBE_RESULT case=%s status=%d headers_ms=%d body_ms=%d total_ms=%d "
-                        "response_bytes=%d json=%s success_flag=%s result_type=%s text_chars=%d error_codes=%s schema_valid=%s",
+                        "response_bytes=%d json=%s success_flag=%s result_type=%s text_chars=%d error_codes=%s schema_valid=%s parse_reason=%s output_tokens=%s",
                         name, response.status_code, headers_elapsed_ms, body_elapsed_ms,
                         round((time.monotonic() - t0) * 1000), len(raw),
                         payload is not None, payload.get("success") if isinstance(payload, dict) else None,
-                        result_type, text_chars, codes, schema_valid,
+                        result_type, text_chars, codes, schema_valid, parse_reason, output_tokens,
                     )
                     return response.status_code == 200 and text_chars > 0
     except (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException) as exc:
@@ -127,13 +137,24 @@ async def run_cloudflare_probe():
         "\n\nReturn ONLY valid JSON matching this schema:\n" +
         json.dumps(schema, ensure_ascii=False)
     )
+    compact = (
+        SYSTEM_PROMPT_CLASSIFY_SUBJECT + "\n\n[عينة النص]:\n" + sample +
+        '\n\nأجب بكائن JSON فقط، دون Markdown أو شرح، بالصيغة '
+        '{"subject":"math","suggested_types":[],"question_count":null,"content_subject":null}'
+    )
+    short = (
+        'المحتوى: س تربيع زائد ٣س. '
+        'أعد حرفياً JSON فقط: {"subject":"math"}'
+    )
     cases = [
-        ("messages_full_256_repeat", {"messages": [{"role": "user", "content": full}],
-                                     "max_tokens": 256, "stream": False}),
-        ("prompt_full_256", {"prompt": full, "max_tokens": 256, "stream": False}),
-        ("messages_full_1024", {"messages": [{"role": "user", "content": full}],
-                               "max_tokens": 1024, "stream": False}),
-        ("prompt_full_128", {"prompt": full, "max_tokens": 128, "stream": False}),
+        ("messages_mini_json_ar", {"messages": [{"role": "user", "content": short}],
+                                   "max_tokens": 96, "stream": False}),
+        ("prompt_mini_json_ar", {"prompt": short, "max_tokens": 96, "stream": False}),
+        ("messages_full_schema_512", {"messages": [{"role": "user", "content": full}],
+                                      "max_tokens": 512, "stream": False}),
+        ("messages_full_compact_256", {"messages": [{"role": "user", "content": compact}],
+                                       "max_tokens": 256, "stream": False}),
+        ("prompt_full_compact_256", {"prompt": compact, "max_tokens": 256, "stream": False}),
     ]
     logger.info("CF_PROBE_BEGIN cases=%d timeout_per_case_s=%d", len(cases), MAX_SECONDS_PER_CASE)
     started = time.monotonic()
