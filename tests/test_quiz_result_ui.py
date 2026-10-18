@@ -10,6 +10,7 @@ from services.quiz_result_ui import (
     build_wrong_answer_review, review_page_text, review_inline_button,
     review_question_rich_html, review_explanation_rich_html,
     review_question_fallback_text, review_explanation_fallback_text,
+    review_expanded_fallback_text,
 )
 
 
@@ -72,9 +73,16 @@ class ErrorReviewPresentationTests(unittest.TestCase):
         self.assertIn("أ:", text_when_missing_image)
         self.assertIn("ب:", text_when_missing_image)
         self.assertIn("ج:", text_when_missing_image)
-        explain = review_explanation_rich_html(entry, 0, 1, "abcdef1234567890")
+        explain = review_explanation_rich_html(entry, 0, 1, "abcdef1234567890",
+                                                entry["image_url"])
+        self.assertIn('<img src="https://example.org/math-review.png"/>', explain)
+        self.assertIn("🔴 <b>إجابتك:</b> أ", explain)
+        self.assertIn("🟢 <b>الإجابة الصحيحة:</b> ج", explain)
         self.assertIn("<blockquote>نستخدم قاعدة الفرق بين مربعين.</blockquote>", explain)
         self.assertIn("qrevback:abcdef1234567890:0", explain)
+        self.assertNotIn("qrevexp:abcdef1234567890:0", explain)
+        self.assertLess(explain.index("🟢 <b>الإجابة الصحيحة:"), explain.index("<blockquote>"))
+        self.assertLess(explain.index("<blockquote>"), explain.index("qrevback:"))
 
     def test_missing_explanation_is_disclosed(self):
         entry = build_wrong_answer_review(self.questions[:1], {"0": 0})[0]
@@ -197,6 +205,10 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         edited = self.bot.edit_message_text.await_args.kwargs["rich_message"].html
         self.assertIn("qrevback:abcdef1234567890:0", edited)
         self.assertIn("لا يوجد شرح محفوظ", edited)
+        self.assertIn("❓ <b>السؤال 2:</b>", edited)
+        self.assertIn("🔴 <b>إجابتك:</b> bad", edited)
+        self.assertIn("🟢 <b>الإجابة الصحيحة:</b> good", edited)
+        self.assertLess(edited.index("🟢 <b>الإجابة الصحيحة:"), edited.index("<blockquote>"))
 
         # Back to question reuses the exact same message_id.
         await env["_review_show"](call, "abcdef1234567890", 0)
@@ -204,6 +216,8 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.edit_message_text.await_args.kwargs["message_id"], 101)
         returned = self.bot.edit_message_text.await_args.kwargs["rich_message"].html
         self.assertIn("qrevexp:abcdef1234567890:0", returned)
+        self.assertIn("❓ <b>السؤال 2:</b>", returned)
+        self.assertNotIn("<blockquote>", returned)
         self.redis.get.assert_awaited_with("quiz:error_review:42:abcdef1234567890")
 
     async def test_math_review_uses_own_original_image_in_rich_message(self):
@@ -236,6 +250,23 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("🔴 <b>إجابتك:</b> أ", rich)
         self.assertIn("🟢 <b>الإجابة الصحيحة:</b> ب", rich)
 
+        # Clicking explain keeps the math image and the question visible.
+        await env["_review_show"](call, "abcdef1234567890", 0, explanation=True)
+        expanded = self.bot.edit_message_text.await_args.kwargs["rich_message"].html
+        self.assertIn('<img src="https://example.com/math.png"/>', expanded)
+        self.assertIn("❓ <b>السؤال 1:</b>", expanded)
+        self.assertIn("🔴 <b>إجابتك:</b> أ", expanded)
+        self.assertIn("🟢 <b>الإجابة الصحيحة:</b> ب", expanded)
+        self.assertIn("<blockquote>نختار ب.</blockquote>", expanded)
+        self.assertIn("qrevback:abcdef1234567890:0", expanded)
+        self.assertNotIn("qrevexp:abcdef1234567890:0", expanded)
+
+        await env["_review_show"](call, "abcdef1234567890", 0)
+        collapsed = self.bot.edit_message_text.await_args.kwargs["rich_message"].html
+        self.assertIn('<img src="https://example.com/math.png"/>', collapsed)
+        self.assertIn("❓ <b>السؤال 1:</b>", collapsed)
+        self.assertNotIn("<blockquote>", collapsed)
+
     async def test_photo_fallback_keeps_explanation_and_back_in_place(self):
         env = load_functions("handlers/quiz_runner.py",
             {"_review_pager", "_review_fallback"},
@@ -245,11 +276,20 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         call = SimpleNamespace(message=message)
         fallback = env["_review_pager"](
             "abcdef1234567890", 0, 1, explanation=True, fallback_controls=True)
+        entry = {"is_math": True, "number": 4, "question": "Math",
+                 "chosen": "$1$", "correct": "$2$", "chosen_index": 0,
+                 "correct_index": 1, "math_question": {
+                     "question": "أوجد الناتج", "options": ["$1$", "$2$"]
+                 }, "explanation": "الحل هو 2"}
+        expanded = review_expanded_fallback_text(entry, 0, 1)
         await env["_review_fallback"](
-            call, "💡 <b>الشرح</b>", fallback, None, False)
+            call, expanded, fallback, None, False)
         message.edit_caption.assert_awaited_once()
-        self.assertEqual(message.edit_caption.await_args.kwargs["caption"],
-                         "💡 الشرح")
+        caption = message.edit_caption.await_args.kwargs["caption"]
+        self.assertIn("السؤال 4", caption)
+        self.assertIn("إجابتك:", caption)
+        self.assertIn("الإجابة الصحيحة:", caption)
+        self.assertIn("الحل هو 2", caption)
         action = fallback.inline_keyboard[0][0].callback_data
         self.assertEqual(action, "qrevback:abcdef1234567890:0")
         message.edit_text.assert_not_awaited()
