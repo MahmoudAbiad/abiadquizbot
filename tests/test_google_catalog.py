@@ -13,7 +13,9 @@ import httpx
 
 from services.ai.google_catalog import (
     CatalogError, ProbeResult, _synthetic_equation_image,
-    list_google_models, probe_google_model, classification_config, PROBE_TIMEOUT,
+    list_google_models, list_working_google_models, probe_google_model,
+    classification_config, PROBE_TIMEOUT, _choose_current_classifiers,
+    _PREFLIGHT_RESULTS, _probe_catalog_candidate,
 )
 
 
@@ -70,6 +72,68 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("429", str(raised.exception))
             self.assertNotIn("SECRET-KEY", str(raised.exception))
 
+    async def test_catalog_filters_obsolete_media_and_old_flash_generations(self):
+        self.client_patch.stop()
+        original = httpx.AsyncClient
+        listed = [
+            "gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.8-flash",
+            "gemini-3.8-flash-tts", "gemini-3.8-live",
+            "gemini-3.1-flash-lite", "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-image", "gemini-nano-banana-2.1",
+            "gemini-3-pro-image", "gemini-3.1-pro-preview", "gemini-4-argon",
+            "gemma-3-27b-it", "gemma-4-31b-it", "gemma-4-26b-a4b-it",
+            "gemini-embedding-001", "veo-3.1-generate-preview",
+            "gemini-3.8-flash-preview",
+        ]
+        def factory(**kwargs):
+            return original(transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, json={"models": [
+                    {"name": "models/" + name,
+                     "supportedGenerationMethods": ["generateContent"]}
+                    for name in listed]})), **kwargs)
+        with patch("services.ai.google_catalog.httpx.AsyncClient", side_effect=factory):
+            models = await list_google_models("KEY")
+        self.assertEqual([r["name"] for r in models], [
+            "gemini-3.5-flash-lite", "gemini-3.8-flash",
+            "gemma-4-26b-a4b-it", "gemma-4-31b-it"])
+        self.assertTrue(all("image" not in r["name"] for r in models))
+        self.assertTrue(all("tts" not in r["name"] for r in models))
+
+    async def test_scan_only_shows_verified_working_models_and_caches(self):
+        _PREFLIGHT_RESULTS.clear()
+        self.addCleanup(_PREFLIGHT_RESULTS.clear)
+        candidate_rows = [
+            {"name": "gemini-3.5-flash-lite"},
+            {"name": "gemini-3.8-flash"},
+            {"name": "gemma-4-31b-it"},
+        ]
+        async def healthy(key, model):
+            return (True, "working") if model == "gemini-3.8-flash" else (
+                False, "http_429" if model == "gemma-4-31b-it" else "timeout")
+        with (patch("services.ai.google_catalog.list_google_models", AsyncMock(return_value=candidate_rows)),
+              patch("services.ai.google_catalog._probe_catalog_candidate", side_effect=healthy) as verify):
+            models, stats = await list_working_google_models("SECRET-A")
+            second, second_stats = await list_working_google_models("SECRET-A")
+            await list_working_google_models("SECRET-B")
+        self.assertEqual(models, [{"name": "gemini-3.8-flash"}])
+        self.assertEqual(models, second)
+        self.assertEqual(stats, {
+            "candidates": 3, "available": 1, "quota": 1, "timeout": 1, "other": 0})
+        self.assertEqual(second_stats, stats)
+        self.assertEqual(verify.call_count, 6)  # Two keys, not three scans.
+        self.assertNotIn("SECRET-A", str(_PREFLIGHT_RESULTS))
+
+    async def test_scan_when_no_model_is_available_returns_empty_valid_catalog(self):
+        _PREFLIGHT_RESULTS.clear()
+        self.addCleanup(_PREFLIGHT_RESULTS.clear)
+        with (patch("services.ai.google_catalog.list_google_models",
+                    AsyncMock(return_value=[{"name": "gemini-3.8-flash"}])),
+              patch("services.ai.google_catalog._probe_catalog_candidate",
+                    AsyncMock(return_value=(False, "http_404")))):
+            rows, stats = await list_working_google_models("KEY")
+        self.assertEqual(rows, [])
+        self.assertEqual(stats["other"], 1)
+
     def test_probe_image_is_genuine_small_png(self):
         from PIL import Image
         from io import BytesIO
@@ -94,6 +158,22 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.schema_mock = patch.dict(sys.modules, {"services.subject_classifier": module})
         self.schema_mock.start()
         self.addCleanup(self.schema_mock.stop)
+
+    async def test_catalog_preflight_uses_real_image_and_json_without_user_data(self):
+        fake = Mock()
+        fake.close = Mock()
+        fake.aio.aclose = AsyncMock()
+        fake.aio.models.generate_content = AsyncMock(
+            return_value=types.SimpleNamespace(text='{"subject":"math"}'))
+        with patch("google.genai.Client", return_value=fake):
+            result = await _probe_catalog_candidate("KEY", "gemini-3.8-flash")
+        self.assertEqual(result, (True, "working"))
+        self.assertEqual(fake.aio.models.generate_content.await_count, 1)
+        kwargs = fake.aio.models.generate_content.await_args.kwargs
+        self.assertIsInstance(kwargs["contents"], list)
+        self.assertEqual(kwargs["contents"][1].inline_data.mime_type, "image/png")
+        self.assertEqual(kwargs["config"].response_mime_type, "application/json")
+        fake.aio.aclose.assert_awaited_once()
 
     async def test_passes_arabic_text_and_image_using_real_classifier_schema(self):
         fake = Mock()

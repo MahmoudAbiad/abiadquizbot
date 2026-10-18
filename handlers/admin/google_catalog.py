@@ -11,7 +11,7 @@ from helpers.ai_models_helper import (
     SLOT_DETECTION, add_model, get_all_models, remove_model, toggle_model, update_model,
 )
 from helpers.ai_providers_helper import get_providers
-from services.ai.google_catalog import CatalogError, list_google_models, probe_google_model
+from services.ai.google_catalog import CatalogError, list_working_google_models, probe_google_model
 from services.ai.runtime import credentials_for
 from .admin_utils import safe_edit_text
 from .dashboard import IsAdminFilter
@@ -39,7 +39,7 @@ def _google_providers(providers):
 
 async def _get_current_catalog(state):
     data = await state.get_data()
-    if not data.get("gmc_models") or time.time() - data.get("gmc_timestamp", 0) > CATALOG_TTL_SECONDS:
+    if not isinstance(data.get("gmc_models"), list) or time.time() - data.get("gmc_timestamp", 0) > CATALOG_TTL_SECONDS:
         return None
     provider_id = data.get("gmc_provider")
     provider = (await get_providers()).get(provider_id)
@@ -61,6 +61,7 @@ async def _render_page(message, state, page=0):
         return
     data, _, _ = current
     models = data["gmc_models"]
+    stats = data.get("gmc_stats") or {}
     count_pages = max(1, math.ceil(len(models) / PAGE_SIZE))
     page = max(0, min(page, count_pages - 1))
     rows = []
@@ -77,14 +78,21 @@ async def _render_page(message, state, page=0):
     rows.append([("🔄 تحديث من Google", "gmc:start")])
     rows.append([("🔙 سلسلة فحص المحتوى", "admin_ai_slot_detection")])
     text = (
-        "🔎 <b>كتالوج نماذج Google المباشر</b>\n"
+        "🔎 <b>نماذج Google المناسبة لفحص المحتوى</b>\n"
         f"المزوّد: <code>{escape(data['gmc_provider'])}</code>\n"
-        f"نماذج تدعم generateContent: <b>{len(models)}</b> — صفحة {page + 1}/{count_pages}\n\n"
-        "اضغط على نموذج لتجربته بنص عربي وصورة تجريبية وJSON.\n"
-        "✅ يظهر زر التفعيل فقط بعد نجاح الاختبارين.\n\n"
-        "⚠️ <b>مهم:</b> وجود النموذج بالكتالوج لا يعني أنه مجاني أو يدعم الصور؛ "
-        "الاختبارات نفسها قد تستهلك حصة مدفوعة حسب حسابك. "
-        "لا تُستخدم بيانات الطلاب في الفحص."
+        f"✅ نجحت بفحص الصورة + JSON: <b>{len(models)}</b> "
+        f"من {stats.get('candidates', 0)} مرشّح حديث\n"
+        f"⏳ تعذّر التحقق بسبب المهلة: {stats.get('timeout', 0)} "
+        f"| الحصة (429): {stats.get('quota', 0)} "
+        f"| أسباب أخرى: {stats.get('other', 0)}\n"
+        f"صفحة {page + 1}/{count_pages}\n\n"
+        + ("" if models else
+           "لم يثبت عمل أي نموذج ضمن الحصة المتاحة حالياً. "
+           "جرّب التحديث لاحقاً؛ 429 والمهلة لا يعنيان أن النموذج متقاعد.\n\n")
+        + "القائمة لا تعرض نماذج توليد الصور/الصوت أو النسخ القديمة. "
+        "اضغط على نموذج لإجراء اختبار النص والصورة الكامل قبل تفعيله.\n\n"
+        "⚠️ النجاح لا يضمن المجانية أو بقاء الحصة. "
+        "الفحص المباشر قد يستهلك توكنات مدفوعة حسب مشروع Google."
     )
     await safe_edit_text(message, text, reply_markup=_kb(rows))
 
@@ -102,9 +110,13 @@ async def _load_provider(call, state, provider_id):
             call.message, "متغير مفتاح Google غير موجود في Render.",
             reply_markup=_kb([[("رجوع", "admin_ai_menu")]]))
         return
-    await safe_edit_text(call.message, "🔄 أجلب قائمة النماذج من Google باستخدام المفتاح الأول...")
+    await safe_edit_text(
+        call.message,
+        "🔎 أجلب النماذج الحديثة المناسبة، ثم أتحقق من كل مرشح "
+        "بصورة حسابية اصطناعية وتصنيف JSON. قد يستغرق الفحص دقيقة ونصف "
+        "عند بطء Google، ويستهلك طلباً واحداً لكل مرشح لم يُختبر حديثاً.")
     try:
-        models = await list_google_models(keys[0])
+        models, stats = await list_working_google_models(keys[0])
     except CatalogError as exc:
         await safe_edit_text(call.message, escape(str(exc)),
                              reply_markup=_kb([[("إعادة المحاولة", "gmc:start")],
@@ -113,6 +125,7 @@ async def _load_provider(call, state, provider_id):
     await state.update_data(
         gmc_provider=provider_id,
         gmc_models=[m["name"] for m in models],
+        gmc_stats=stats,
         gmc_timestamp=time.time(),
         gmc_verified=None,
     )
@@ -121,6 +134,23 @@ async def _load_provider(call, state, provider_id):
 
 @router.callback_query(F.data == "gmc:start")
 async def open_google_catalog(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    await state.clear()
+    await safe_edit_text(
+        call.message,
+        "🔎 <b>كتالوج نماذج Google لفحص المحتوى</b>\n\n"
+        "رح يتم استبعاد النماذج القديمة ونماذج توليد الصور والصوت والنسخ غير المناسبة. "
+        "بعدها نختبر المرشحين بطلب API حقيقي بصورة صغيرة وJSON، "
+        "ولا نعرض إلا ما نجح الآن.\n\n"
+        "⚠️ الاختبارات قد تستهلك حصة API، وربما تكون مدفوعة بحسب مشروعك. "
+        "انتهاء الحصة (429) أو التأخر لا يعني توقف النموذج نهائياً.\n\n"
+        "هل تريد بدء التحقق؟",
+        reply_markup=_kb([[("✅ تحقق واعرض النماذج العاملة", "gmc:scan")],
+                          [("رجوع", "admin_ai_menu")]]))
+
+
+@router.callback_query(F.data == "gmc:scan")
+async def scan_google_catalog(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     await state.clear()
     providers = _google_providers(await get_providers(force_refresh=True))
