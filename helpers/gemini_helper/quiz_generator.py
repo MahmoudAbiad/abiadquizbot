@@ -176,13 +176,22 @@ async def generate_quiz_smart(
                 _resolve_question_type_instruction(question_type, custom_question_type_text),
             )
 
-        # The previously generated questions constraint applies ONLY to creation.
+        # Student-authored preferences and prior question texts belong to user data.
+        context_parts = []
+        if not is_extraction and custom_question_type_text and custom_question_type_text.strip():
+            context_parts.append("[تفضيل الطالب لنوع الأسئلة]:\n" + custom_question_type_text.strip()[:1000])
         if previous_questions and not is_extraction:
-            old_q_texts = "\n".join([f"- {q['question']}" for q in previous_questions if 'question' in q])
-            if is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH:
-                base_prompt_template += "\n[منع التكرار]: حافظ على الأنماط المطلوبة لكن استخدم مسائل بمعطيات جديدة مختلفة عن هذه المسائل السابقة:\n" + old_q_texts
-            else:
-                base_prompt_template += MSG_PREVIOUS_QUESTIONS_INSTRUCTION.format(previous_questions=old_q_texts)
+            old_q_texts = "\n".join(
+                f"- {str(question['question'])[:350]}"
+                for question in previous_questions if question.get("question")
+            )[:14000]
+            if old_q_texts:
+                context_parts.append("[أسئلة سابقة لا تكررها]:\n" + old_q_texts)
+                if is_math_mode and question_type == QUESTION_TYPE_SIMILAR_MATH:
+                    base_prompt_template += "\n[منع التكرار]: حافظ على الأنماط المطلوبة لكن استخدم مسائل بمعطيات جديدة مختلفة عن الأسئلة السابقة الموجودة في بيانات الطلب."
+                else:
+                    base_prompt_template += "\n[منع التكرار]: تجنب الأسئلة السابقة الواردة في بيانات الطلب."
+        user_context = "\n\n".join(context_parts) or None
 
         prompt = base_prompt_template.replace("{count}", str(count))
 
@@ -202,8 +211,8 @@ async def generate_quiz_smart(
             # فعلي - راجعهما لتفاصيل الإصلاح الكامل (لم يعد الاعتماد كافياً على response.parsed
             # الجاهز من الـ SDK وحده).
             if is_math_mode:
-                return _finalize(await _generate_text_quiz_with_gemini(pure_text, prompt))
-            questions = await _generate_text_quiz(pure_text, prompt, english_mode=english_mode)
+                return _finalize(await _generate_text_quiz_with_gemini(pure_text, prompt, user_context=user_context))
+            questions = await _generate_text_quiz(pure_text, prompt, english_mode=english_mode, user_context=user_context)
             if not questions:
                 questions = await _generate_text_quiz_with_gemini(pure_text, prompt)
             return _finalize(questions)
@@ -243,6 +252,7 @@ async def generate_quiz_smart(
                 file_paths[0], count, base_prompt_template,
                 part_count=3, ready_exam=is_ready_exam,
                 progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+                user_context=user_context,
             )
         elif is_single_pdf and (
             pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
@@ -251,14 +261,16 @@ async def generate_quiz_smart(
                 file_paths[0], count, base_prompt_template,
                 part_count=2, ready_exam=is_ready_exam,
                 progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+                user_context=user_context,
             )
         elif is_super_images:
             generated = await _generate_super_images(
                 file_paths, count, base_prompt_template,
                 progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+                user_context=user_context,
             )
         else:
-            generated = await _generate_regular(file_paths, prompt)
+            generated = await _generate_regular(file_paths, prompt, user_context=user_context)
         if not generated:
             return _finalize(None)
 
