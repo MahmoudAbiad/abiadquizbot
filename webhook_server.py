@@ -223,6 +223,12 @@ async def lifespan(app: FastAPI):
         spawn(payment_watchdog_loop())
         print("💳 تم جدولة watchdog الشحن الذاتي كل 60 ثانية.")
 
+        # TEMPORARY one-shot Cloudflare diagnostic on the isolated test branch.
+        # No public endpoint or student data; runs in the background only.
+        from scripts.cloudflare_probe import run_cloudflare_probe
+        spawn(run_cloudflare_probe(), name="cloudflare-test-probe")
+
+
     except Exception as e:
         print(f"❌ فشل تفعيل الـ Webhook أو المهام الدورية أثناء تشغيل السيرفر: {e}")
         logger.critical(f"Failed to set webhook or tasks on startup: {e}", exc_info=True)
