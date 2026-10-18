@@ -71,21 +71,64 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('التكلفة قبل التأكيد', ui.HELP_TEXT)
 
     async def test_help_create_and_home_do_not_touch_active_state(self):
-        env = load_functions('handlers/start.py', {'student_navigation'},
-            bot=types.SimpleNamespace(get_me=AsyncMock(return_value=types.SimpleNamespace(username='bot'))),
-            get_main_menu_keyboard=AsyncMock(return_value='main-menu'), _student_info_keyboard=lambda: 'info-menu',
-            HOME_TEXT=ui.HOME_TEXT, HELP_TEXT=ui.HELP_TEXT, UPLOAD_TEXT=ui.UPLOAD_TEXT)
+        class BadRequest(Exception):
+            pass
+
+        env = load_functions('handlers/start.py',
+            {'student_navigation', '_show_student_navigation_screen'},
+            bot=types.SimpleNamespace(get_me=AsyncMock(return_value=types.SimpleNamespace(username='bot')),
+                                      send_message=AsyncMock()),
+            get_main_menu_keyboard=AsyncMock(return_value='main-menu'),
+            _student_info_keyboard=lambda: 'info-menu',
+            HOME_TEXT=ui.HOME_TEXT, HELP_TEXT=ui.HELP_TEXT, UPLOAD_TEXT=ui.UPLOAD_TEXT,
+            TelegramBadRequest=BadRequest, logger=Mock())
         for action in ('student_create_quiz', 'student_help', 'student_home'):
+            message = types.SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock())
             call = types.SimpleNamespace(data=action, from_user=types.SimpleNamespace(id=42),
-                answer=AsyncMock(), message=types.SimpleNamespace(answer=AsyncMock()))
+                answer=AsyncMock(), message=message)
             await env['student_navigation'](call)
             call.answer.assert_awaited_once()
-            call.message.answer.assert_awaited_once()
-        # The old home button must also preserve a newer quiz and its export data.
+            expected_text = (ui.HOME_TEXT if action == 'student_home' else
+                             ui.UPLOAD_TEXT if action == 'student_create_quiz' else ui.HELP_TEXT)
+            expected_menu = 'main-menu' if action == 'student_home' else 'info-menu'
+            message.edit_text.assert_awaited_once_with(
+                expected_text, parse_mode='HTML', reply_markup=expected_menu)
+            message.answer.assert_not_awaited()
+
+        # Navigating back from the guide must not erase quiz progress.
         state = types.SimpleNamespace(clear=AsyncMock())
-        env = load_functions('handlers/quiz_runner.py', {'quiz_home'}, send_main_menu=AsyncMock())
-        await env['quiz_home'](call, state)
+        env_quiz = load_functions('handlers/quiz_runner.py', {'quiz_home'},
+            send_main_menu=AsyncMock())
+        await env_quiz['quiz_home'](call, state)
         state.clear.assert_not_awaited()
+
+    async def test_student_navigation_falls_back_only_if_edit_fails(self):
+        class BadRequest(Exception):
+            pass
+
+        bot = types.SimpleNamespace(send_message=AsyncMock())
+        env = load_functions('handlers/start.py', {'_show_student_navigation_screen'},
+            TelegramBadRequest=BadRequest, logger=Mock(), bot=bot)
+        message = types.SimpleNamespace(
+            edit_text=AsyncMock(side_effect=BadRequest('message to edit not found')),
+            answer=AsyncMock())
+        call = types.SimpleNamespace(message=message, from_user=types.SimpleNamespace(id=42))
+        await env['_show_student_navigation_screen'](call, ui.HELP_TEXT, 'info-menu')
+        message.answer.assert_awaited_once_with(
+            ui.HELP_TEXT, parse_mode='HTML', reply_markup='info-menu')
+
+        # Telegram may report a no-op if the same screen is already visible.
+        message.answer.reset_mock()
+        message.edit_text.side_effect = BadRequest('Bad Request: message is not modified')
+        await env['_show_student_navigation_screen'](call, ui.HELP_TEXT, 'info-menu')
+        message.answer.assert_not_awaited()
+        bot.send_message.assert_not_awaited()
+
+        # Inaccessible old callback messages may have no editing or replying API.
+        call.message = types.SimpleNamespace()
+        await env['_show_student_navigation_screen'](call, ui.HELP_TEXT, 'info-menu')
+        bot.send_message.assert_awaited_once_with(
+            42, ui.HELP_TEXT, parse_mode='HTML', reply_markup='info-menu')
 
     async def test_back_to_difficulty_restores_selected_count(self):
         state = types.SimpleNamespace(get_data=AsyncMock(return_value={
