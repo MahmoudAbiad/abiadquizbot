@@ -149,7 +149,7 @@ class GameHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.repo.claim_notifications.await_count, 1)
 
     async def test_disabled_but_in_flight_attack_continues(self):
-        loop = self.setup_loop([False, False], True)
+        loop = self.setup_loop([False, False, False], True)
         with self.assertRaises(asyncio.CancelledError):
             await loop(None)
         self.assertEqual(self.repo.due_attacks.await_count, 3)
