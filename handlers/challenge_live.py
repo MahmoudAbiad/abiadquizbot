@@ -393,16 +393,23 @@ async def live_beat(bot):
 
 
 async def challenge_live_loop(bot):
-    """Spawned beside challenge_heartbeat_loop in BOTH polling (main.py) and webhook (webhook_server.py) mode.
-    Idle (no search/match anywhere) costs one indexed query per 2 s; works before the 0010 migration exists
-    (errors are swallowed and retried slowly), and keeps running for in-flight matches even if flags are turned off."""
+    """Slow idle polling when disabled; always finish durable in-flight matches.
+    Wake events still interrupt the longer disabled/idle interval.
+    """
     while True:
         delay = 2
         try:
-            # `_seen` non-empty = a match was active on the last beat: one more beat renders its final screen
-            # even though its queue rows are already 'done' (otherwise has_live_work() would hide the result).
-            if _seen or await live.has_live_work():
+            # `_seen` guarantees the final result is rendered after the queue goes idle.
+            if _seen:
                 delay = await live_beat(bot)
+            else:
+                enabled = await live_open()
+                # A match/search may have survived a restart even after the flag was
+                # disabled, so consult PostgreSQL once before entering a long sleep.
+                if await live.has_live_work():
+                    delay = await live_beat(bot)
+                elif not enabled:
+                    delay = 60
         except asyncio.CancelledError:
             raise
         except Exception as exc:
