@@ -40,7 +40,7 @@ def review_page_text(entries, index):
     return (
         f"📚 <b>مراجعة الأخطاء · {index + 1} من {number}</b>\n\n"
         f"❓ <b>السؤال {item['number']}:</b>\n{escape(item['question'])}\n\n"
-        f"🔴 <b>إجابتك:</b> {escape(item['chosen'])}\n"
+        f"🔴 <b>إجابتك:</b> {escape(item['chosen'])}\n\n"
         f"🟢 <b>الإجابة الصحيحة:</b> {escape(item['correct'])}\n\n"
         "يمكنك العودة إلى النتيجة الأصلية في المحادثة."
     )
