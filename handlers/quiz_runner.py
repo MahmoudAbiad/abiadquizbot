@@ -251,15 +251,29 @@ async def _send_quiz_completion(chat_id: int, result_text: str, keyboard, review
     """Prefer a rich in-message review CTA; normal keyboard stays as a fallback."""
     if review_token:
         button = review_inline_button(review_token, wrong_count)
-        rich_html = "".join(f"<p>{line}</p>" for line in result_text.split("\n") if line.strip())
-        rich_html += f"<p>{button}</p>"
+        # Keep the error count and its action together, directly under the grade.
+        paragraphs = []
+        inserted = False
+        for line in result_text.split("\n"):
+            if not line.strip():
+                continue
+            paragraphs.append(f"<p>{line}</p>")
+            if not inserted and "📊 النسبة المئوية:" in line:
+                paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}  {button}</p>")
+                inserted = True
+        if not inserted:
+            paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}  {button}</p>")
+        rich_html = "".join(paragraphs)
+        logger.info("QUIZ_RESULT_RICH_ATTEMPT review_errors=%s", wrong_count)
         try:
-            return await bot.send_rich_message(
+            sent = await bot.send_rich_message(
                 chat_id=chat_id, rich_message=types.InputRichMessage(html=rich_html, is_rtl=True),
                 reply_markup=keyboard,
             )
+            logger.info("QUIZ_RESULT_RICH_SENT review_errors=%s", wrong_count)
+            return sent
         except Exception as exc:
-            log_warning(logger, f"Rich result is unavailable; using legacy result keyboard: {exc}")
+            log_warning(logger, f"QUIZ_RESULT_RICH_FAILED reason={type(exc).__name__}: {exc}; using legacy review button")
         fallback = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(
                 text=f"❌ مراجعة الأخطاء ({wrong_count})", callback_data=f"qrev:{review_token}:0")],
