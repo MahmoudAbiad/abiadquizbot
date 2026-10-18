@@ -49,7 +49,11 @@ from helpers.supabase_helper import (
     _is_valid_uuid
 )
 from services.quiz_engine import send_quiz_poll
-from services.quiz_result_ui import build_wrong_answer_review, review_page_text, review_inline_button
+from services.quiz_result_ui import (
+    build_wrong_answer_review, review_page_text, review_inline_button,
+    review_question_rich_html, review_explanation_rich_html,
+    review_question_fallback_text, review_explanation_fallback_text,
+)
 
 logger = get_logger(__name__)
 router = Router()
@@ -380,47 +384,154 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
     await state.set_state(None)
 
 
-@router.callback_query(F.data.regexp(r"^qrev:[a-f0-9]{16}:[0-9]{1,4}$"))
-async def show_quiz_error_review(call: types.CallbackQuery):
-    """Review wrong choices from a private Redis snapshot, not live FSM state."""
-    try:
-        _, token, page_raw = call.data.split(":")
-        page = int(page_raw)
-        raw = await redis_client.get(_quiz_review_key(call.from_user.id, token))
-        if not raw:
-            await call.answer("انتهت صلاحية مراجعة الأخطاء. يمكنك إعادة المحاولة.", show_alert=True)
-            return
-        items = json.loads(raw)
-        if not isinstance(items, list) or not 0 <= page < len(items):
-            await call.answer("صفحة مراجعة غير متاحة.", show_alert=True)
-            return
+async def _review_resolve_image(user_id: int, token: str, page: int, items: list):
+    """Reuse the question's existing image. Regenerate only when no URL survived."""
+    entry = items[page]
+    if not entry.get("is_math"):
+        return None
+    image_url = entry.get("image_url") or ""
+    if image_url.startswith(("https://", "http://")):
+        return image_url
 
-        buttons = []
-        navigation = []
+    from services.image_quiz_renderer import render_question_image_async, looks_arabic
+    from helpers.supabase_helper import upload_quiz_question_image
+
+    question = entry.get("math_question") or {}
+    raw = await render_question_image_async(
+        question, int(entry.get("index", entry["number"] - 1)), len(items),
+        looks_arabic(str(question.get("question") or "")),
+    )
+    # The original upload path may have failed during the quiz, so try again
+    # rather than losing tables, matrices, and LaTeX formatting on review.
+    try:
+        new_url = await upload_quiz_question_image(raw, f"tmp/review-{token}-{page}.png")
+        if new_url and str(new_url).startswith(("https://", "http://")):
+            entry["image_url"] = str(new_url)
+            key = _quiz_review_key(user_id, token)
+            ttl = await redis_client.ttl(key)
+            if ttl > 0:
+                await redis_client.set(key, json.dumps(items, ensure_ascii=False), ex=ttl)
+            return str(new_url)
+    except Exception as exc:
+        log_warning(logger, f"Could not cache math review image: {exc}")
+    return types.BufferedInputFile(raw, filename="math-review.png")
+
+
+def _review_pager(token: str, page: int, count: int, *, explanation: bool = False):
+    navigation = []
+    if not explanation:
         if page > 0:
             navigation.append(types.InlineKeyboardButton(
-                text="⬅️ السابق", callback_data=f"qrev:{token}:{page - 1}"))
-        if page + 1 < len(items):
+                text="⬅️ السابق", callback_data=f"qrevpage:{token}:{page - 1}"))
+        if page + 1 < count:
             navigation.append(types.InlineKeyboardButton(
-                text="التالي ➡️", callback_data=f"qrev:{token}:{page + 1}"))
-        if navigation:
-            buttons.append(navigation)
-        buttons.append([types.InlineKeyboardButton(
-            text="✖️ إغلاق المراجعة", callback_data=f"qrev_close:{token}")])
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
-        body = review_page_text(items, page)
-        if (getattr(call.message, "text", None) or "").startswith("📚 مراجعة الأخطاء"):
-            await call.message.edit_text(body, parse_mode="HTML", reply_markup=keyboard)
+                text="التالي ➡️", callback_data=f"qrevpage:{token}:{page + 1}"))
+    rows = [navigation] if navigation else []
+    rows.append([types.InlineKeyboardButton(
+        text="✖️ إغلاق المراجعة", callback_data=f"qrev_close:{token}")])
+    if explanation:
+        # The normal-keyboard fallback needs a back button too.
+        rows.insert(0, [types.InlineKeyboardButton(
+            text="↩️ العودة للسؤال", callback_data=f"qrevback:{token}:{page}")])
+    else:
+        rows.insert(0, [types.InlineKeyboardButton(
+            text="💡 عرض الشرح", callback_data=f"qrevexp:{token}:{page}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
+                       explanation: bool = False, new_message: bool = False):
+    """Rich image/text and in-message explanation toggle; never touch quiz FSM."""
+    key = _quiz_review_key(call.from_user.id, token)
+    raw = await redis_client.get(key)
+    if not raw:
+        await call.answer("انتهت صلاحية مراجعة الأخطاء. يمكنك إعادة المحاولة.", show_alert=True)
+        return
+    items = json.loads(raw)
+    if not isinstance(items, list) or not 0 <= page < len(items):
+        await call.answer("صفحة مراجعة غير متاحة.", show_alert=True)
+        return
+
+    entry = items[page]
+    media = None
+    if not explanation and entry.get("is_math"):
+        try:
+            media = await _review_resolve_image(call.from_user.id, token, page, items)
+        except Exception as exc:
+            log_warning(logger, f"Could not render math review image: {exc}")
+
+    image_url = media if isinstance(media, str) else ""
+    if explanation:
+        rich_html = review_explanation_rich_html(entry, page, len(items), token)
+        plain = review_explanation_fallback_text(entry)
+    else:
+        rich_html = review_question_rich_html(entry, page, len(items), token, image_url)
+        plain = review_question_fallback_text(entry, page, len(items))
+    keyboard = _review_pager(token, page, len(items), explanation=explanation)
+    rich = types.InputRichMessage(html=rich_html, is_rtl=True)
+
+    # New review starts below the original result. All subsequent navigation
+    # and explanation/back taps edit only the new review message.
+    try:
+        if new_message:
+            await bot.send_rich_message(
+                chat_id=call.message.chat.id, rich_message=rich, reply_markup=keyboard)
+        elif getattr(call.message, "photo", None):
+            # A previous rich send failed and this review is a photo fallback.
+            await call.message.edit_caption(
+                caption=plain[:1000], parse_mode="HTML", reply_markup=keyboard)
         else:
-            # Leave the original grade/result message visible in chat.
-            await call.message.answer(body, parse_mode="HTML", reply_markup=keyboard)
-        await call.answer()
+            await bot.edit_message_text(
+                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                rich_message=rich, reply_markup=keyboard)
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc).lower():
             await call.answer()
+            return
+        log_warning(logger, f"Rich review unavailable, using fallback: {exc}")
+        await _review_fallback(call, plain, keyboard, media, new_message)
+    except (AttributeError, TypeError) as exc:
+        log_warning(logger, f"Rich review unsupported, using fallback: {exc}")
+        await _review_fallback(call, plain, keyboard, media, new_message)
+    await call.answer()
+
+
+async def _review_fallback(call, body, keyboard, media, new_message):
+    """On legacy clients, keep the math image and caption editable in place."""
+    message = call.message
+    if new_message:
+        if media:
+            await message.answer_photo(
+                photo=media, caption=body[:1000], parse_mode="HTML", reply_markup=keyboard)
         else:
-            log_warning(logger, f"Could not show error review: {exc}")
-            await call.answer("تعذر عرض المراجعة حالياً.", show_alert=True)
+            await message.answer(body, parse_mode="HTML", reply_markup=keyboard)
+    elif getattr(message, "photo", None):
+        await message.edit_caption(
+            caption=body[:1000], parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await message.edit_text(body, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.regexp(r"^qrevstart:[a-f0-9]{16}$"))
+async def start_quiz_error_review(call: types.CallbackQuery):
+    try:
+        await _review_show(call, call.data.split(":")[1], 0, new_message=True)
+    except Exception as exc:
+        log_warning(logger, f"Error opening error review: {exc}")
+        await call.answer("تعذر فتح المراجعة حالياً.", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^(qrev|qrevpage|qrevexp|qrevback):[a-f0-9]{16}:[0-9]{1,4}$"))
+async def show_quiz_error_review(call: types.CallbackQuery):
+    try:
+        action, token, page_raw = call.data.split(":")
+        # Older result messages used qrev:<token>:0; retain their navigation.
+        legacy_new = action == "qrev" and not (
+            (getattr(call.message, "text", "") or "").startswith("📚 مراجعة الأخطاء"))
+        await _review_show(
+            call, token, int(page_raw),
+            explanation=(action == "qrevexp"),
+            new_message=legacy_new)
     except Exception as exc:
         log_warning(logger, f"Error reviewing wrong quiz answers: {exc}")
         await call.answer("تعذر فتح المراجعة حالياً.", show_alert=True)
