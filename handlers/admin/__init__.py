@@ -8,6 +8,7 @@ from .feedbacks import router as feedbacks_router
 from .settings import router as settings_router
 from .ai_control import router as ai_control_router
 from .ai_providers import router as ai_providers_router
+from .google_catalog import router as google_catalog_router
 from .feature_flags import router as feature_flags_router
 from .group_quiz_stats import router as group_quiz_stats_router
 from .join_sources import router as join_sources_router
@@ -24,6 +25,7 @@ router.include_routers(
     settings_router,
     ai_control_router,
     ai_providers_router,
+    google_catalog_router,
     feature_flags_router,
     group_quiz_stats_router,
     join_sources_router,

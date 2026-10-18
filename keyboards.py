@@ -826,6 +826,7 @@ def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboa
     (راجع get_admin_settings_general_keyboard) لأنها مالها علاقة بموديلات الذكاء الاصطناعي."""
     kb = [
         [types.InlineKeyboardButton(text="🔌 إدارة المزوّدين", callback_data="aip:list")],
+        [types.InlineKeyboardButton(text="🔎 كتالوج نماذج Google (اختبار وتفعيل)", callback_data="gmc:start")],
         [types.InlineKeyboardButton(text="🧠 سلسلة توليد الأسئلة (Cascade)", callback_data="admin_ai_slot_cascade")],
         [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
         [types.InlineKeyboardButton(text="⚡ المسار النصي السريع", callback_data="admin_ai_slot_groq_fast")],
@@ -862,6 +863,9 @@ def get_ai_slot_keyboard(slot: str, models: list) -> types.InlineKeyboardMarkup:
         nav_row.append(types.InlineKeyboardButton(text="🗑 حذف", callback_data=f"admin_ai_delete_{model['id']}_{slot}"))
         kb.append(nav_row)
     kb.append([types.InlineKeyboardButton(text="➕ إضافة موديل جديد", callback_data=f"admin_ai_add_{slot}")])
+    if slot == "detection":
+        kb.append([types.InlineKeyboardButton(
+            text="🔎 اكتشف نماذج Google واختبرها", callback_data="gmc:start")])
     kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data="admin_ai_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 

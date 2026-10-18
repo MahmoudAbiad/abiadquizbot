@@ -1,0 +1,146 @@
+"""Deterministic Google-model catalog tests: no outbound API calls or charges."""
+import asyncio
+import contextlib
+import json
+import types
+import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+import httpx
+
+from services.ai.google_catalog import (
+    CatalogError, ProbeResult, _synthetic_equation_image,
+    list_google_models, probe_google_model,
+)
+
+
+class CatalogTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.calls = []
+        original = httpx.AsyncClient
+        def factory(**kwargs):
+            def handler(request):
+                self.calls.append(request)
+                if request.url.params.get("pageToken"):
+                    return httpx.Response(200, json={"models": [
+                        {"name": "models/gemma-4-26b-a4b-it",
+                         "supportedGenerationMethods": ["generateContent"]}]})
+                return httpx.Response(200, json={"models": [
+                    {"name": "models/gemini-3.5-flash-lite",
+                     "displayName": "Gemini Flash Lite",
+                     "inputTokenLimit": 1000000,
+                     "supportedGenerationMethods": ["generateContent", "countTokens"]},
+                    {"name": "models/embedding-only", "supportedGenerationMethods": ["embedContent"]},
+                    {"name": "models/fake name\ninjection",
+                     "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "noncanonical", "supportedGenerationMethods": ["generateContent"]},
+                ], "nextPageToken": "next"})
+            return original(transport=httpx.MockTransport(handler), **kwargs)
+        self.client_patch = patch("services.ai.google_catalog.httpx.AsyncClient",
+                                  side_effect=factory)
+        self.client_patch.start()
+        self.addCleanup(self.client_patch.stop)
+
+    async def test_pagination_filters_only_generatecontent_and_never_exposes_key(self):
+        models = await list_google_models("SECRET-KEY")
+        self.assertEqual([m["name"] for m in models], [
+            "gemini-3.5-flash-lite", "gemma-4-26b-a4b-it"])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.calls[0].headers["x-goog-api-key"], "SECRET-KEY")
+        self.assertNotIn("SECRET-KEY", str(self.calls[0].url))
+        self.assertEqual(self.calls[1].url.params["pageToken"], "next")
+        self.assertEqual(models[0]["input_token_limit"], 1000000)
+
+    async def test_empty_credentials_and_status_are_sanitized(self):
+        with self.assertRaises(CatalogError):
+            await list_google_models("")
+        self.assertEqual(len(self.calls), 0)
+        self.client_patch.stop()
+        original = httpx.AsyncClient
+        def factory(**kwargs):
+            def handler(request):
+                return httpx.Response(429, json={"error": "SECRET-KEY private"})
+            return original(transport=httpx.MockTransport(handler), **kwargs)
+        with patch("services.ai.google_catalog.httpx.AsyncClient", side_effect=factory):
+            with self.assertRaises(CatalogError) as raised:
+                await list_google_models("SECRET-KEY")
+            self.assertIn("429", str(raised.exception))
+            self.assertNotIn("SECRET-KEY", str(raised.exception))
+
+    def test_probe_image_is_genuine_small_png(self):
+        from PIL import Image
+        from io import BytesIO
+        source = _synthetic_equation_image()
+        self.assertLess(len(source), 35000)
+        with Image.open(BytesIO(source)) as image:
+            self.assertEqual(image.size, (384, 176))
+            self.assertEqual(image.format, "PNG")
+
+
+class ProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_passes_arabic_text_and_image_using_real_classifier_schema(self):
+        fake = Mock()
+        fake.close = Mock()
+        fake.aio.aclose = AsyncMock()
+        fake.aio.models.generate_content = AsyncMock(return_value=types.SimpleNamespace(
+            text=json.dumps({"subject": "math", "suggested_types": []})))
+        with patch("google.genai.Client", return_value=fake):
+            result = await probe_google_model("SECRET-KEY", "gemini-test")
+        self.assertTrue(result.ready)
+        self.assertTrue(result.text_ok)
+        self.assertTrue(result.image_ok)
+        self.assertEqual(fake.aio.models.generate_content.await_count, 2)
+        first = fake.aio.models.generate_content.await_args_list[0].kwargs
+        second = fake.aio.models.generate_content.await_args_list[1].kwargs
+        self.assertIsInstance(first["contents"], str)
+        self.assertIsInstance(second["contents"], list)
+        self.assertEqual(first["config"].response_mime_type, "application/json")
+        self.assertEqual(second["config"].response_mime_type, "application/json")
+        fake.aio.aclose.assert_awaited_once()
+        fake.close.assert_called_once()
+
+    async def test_failed_image_cannot_qualify_for_activation(self):
+        fake = Mock()
+        fake.close = Mock()
+        fake.aio.aclose = AsyncMock()
+        fake.aio.models.generate_content = AsyncMock(side_effect=[
+            types.SimpleNamespace(text='{"subject":"math"}'),
+            types.SimpleNamespace(text='{"subject":"other"}')])
+        with patch("google.genai.Client", return_value=fake):
+            result = await probe_google_model("KEY", "model")
+        self.assertTrue(result.text_ok)
+        self.assertFalse(result.image_ok)
+        self.assertFalse(result.ready)
+
+    async def test_invalid_json_and_timeout_return_failure_without_leaks(self):
+        fake = Mock()
+        fake.close = Mock()
+        fake.aio.aclose = AsyncMock()
+        async def call(**kwargs):
+            if isinstance(kwargs["contents"], str):
+                return types.SimpleNamespace(text="not JSON SECRET-KEY")
+            await asyncio.sleep(0.2)
+        fake.aio.models.generate_content = AsyncMock(side_effect=call)
+        with patch("google.genai.Client", return_value=fake):
+            result = await probe_google_model("SECRET-KEY", "model", timeout_s=0.01)
+        self.assertFalse(result.ready)
+        self.assertEqual(result.text_reason, "JSON غير صالح")
+        self.assertEqual(result.image_reason, "انتهت مهلة الاختبار")
+        self.assertNotIn("SECRET-KEY", str(result))
+        fake.aio.aclose.assert_awaited_once()
+
+    async def test_http_error_is_safe_and_limited_to_status(self):
+        fake = Mock()
+        fake.close = Mock()
+        fake.aio.aclose = AsyncMock()
+        failure = RuntimeError("SECRET-KEY request body")
+        failure.code = 429
+        fake.aio.models.generate_content = AsyncMock(side_effect=failure)
+        with patch("google.genai.Client", return_value=fake):
+            result = await probe_google_model("SECRET-KEY", "model")
+        self.assertEqual(result.text_reason, "رفض API: HTTP 429")
+        self.assertNotIn("SECRET-KEY", str(result))
+
+
+if __name__ == "__main__":
+    unittest.main()
