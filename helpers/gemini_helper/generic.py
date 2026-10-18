@@ -22,8 +22,10 @@ def _normalize_contents(contents):
 
 
 async def generate_structured_with_cascade(contents, response_schema, prompt_instruction=None):
-    parts = ([prompt_instruction] if prompt_instruction else []) + list(contents)
-    result = await _execute_cascade(AIRequest(_normalize_contents(parts), response_schema))
+    result = await _execute_cascade(
+        AIRequest(_normalize_contents(contents), response_schema,
+                  system_instruction=prompt_instruction)
+    )
     return (result.parsed, result.total_tokens) if result else None
 
 
@@ -32,8 +34,9 @@ async def generate_text_with_cascade(contents, prompt_instruction=None):
     _last_token_usage_var.set(None)
     _last_generation_metadata_var.set(None)
     started_at = time.monotonic()
-    parts = ([prompt_instruction] if prompt_instruction else []) + list(contents)
-    result = await _execute_cascade(AIRequest(_normalize_contents(parts)))
+    result = await _execute_cascade(
+        AIRequest(_normalize_contents(contents), system_instruction=prompt_instruction)
+    )
     if result:
         metadata = dict(_last_model_used_var.get() or {})
         metadata.update(_last_token_usage_var.get() or {})
