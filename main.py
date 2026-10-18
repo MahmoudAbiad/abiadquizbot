@@ -41,6 +41,7 @@ from handlers import (
 )
 from handlers.session_navigation import router as session_navigation_router
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware
+from services.mistake_practice import PracticeCallbackGuard
 
 # تهيئة Sentry للتتبع
 SENTRY_DSN = os.getenv("SENTRY_DSN")
@@ -78,6 +79,7 @@ def main():
     # 1. تفعيل الحماية من التكرار (Rate Limiting)
     dp.message.middleware(ThrottlingMiddleware(limit=1.2))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
+    dp.callback_query.middleware(PracticeCallbackGuard())
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
     dp.include_routers(
