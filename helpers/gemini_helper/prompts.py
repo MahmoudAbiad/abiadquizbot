@@ -25,7 +25,7 @@ def _resolve_question_type_instruction(question_type: Optional[str], custom_ques
     - نوع ثابت من القوائم الجاهزة أو من اقتراحات AI: يُستخدم النص الجاهز المطابق إن وجد.
     - غير محدد أو 'general': تعليمة محايدة (تغطية متوازنة لكل الأنواع)."""
     if custom_question_type_text and custom_question_type_text.strip():
-        return f"ركّز حصراً على نوع الأسئلة التالي كما حدده الطالب بالضبط: {custom_question_type_text.strip()}"
+        return "طبّق نوع الأسئلة الذي طلبه الطالب في بيانات الطلب ما دام متوافقاً مع المادة والقواعد الأكاديمية."
     if question_type and question_type in QUESTION_TYPE_PROMPT_INSTRUCTIONS:
         return QUESTION_TYPE_PROMPT_INSTRUCTIONS[question_type]
     return QUESTION_TYPE_INSTRUCTION_GENERAL
