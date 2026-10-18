@@ -7,6 +7,7 @@ Admin Operations: إضافة نقاط يدوياً، إحصائيات عامة،
 from typing import Optional, Dict
 
 from ._client import supabase, logger
+from .gifts import enrich_balances, gift_balances
 
 # ==================== Admin Operations ====================
 async def admin_add_points(target_id: int, amount: int, balance_type: str = "paid") -> Optional[int]:
@@ -25,7 +26,8 @@ async def admin_add_points(target_id: int, amount: int, balance_type: str = "pai
         }).execute()
         if rpc_response.data:
             row = rpc_response.data[0] if isinstance(rpc_response.data, list) else rpc_response.data
-            return int(row["total_points"])
+            gifts = await gift_balances([target_id])
+            return float(row["total_points"]) + gifts.get(target_id, 0)
         return None
     except Exception as e:
         logger.error(f"Error in admin_add_points: {e}")
@@ -49,7 +51,7 @@ async def admin_search_user(query: str) -> Optional[list]:
         else:
             clean_username = query.lstrip('@')
             res = await supabase.table("users").select("*").ilike("username", f"%{clean_username}%").execute()
-        return res.data
+        return await enrich_balances(res.data or [])
     except Exception as e:
         return None
 
@@ -77,4 +79,5 @@ async def admin_get_users_page(page: int = 1, query: str = "", page_size: int = 
     pages = max(1, (total + page_size - 1) // page_size)
     if page > pages:
         return await admin_get_users_page(pages, query, page_size)
-    return response.data or [], total, page, pages
+    return await enrich_balances(response.data or []), total, page, pages
+

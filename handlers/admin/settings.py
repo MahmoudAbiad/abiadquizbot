@@ -2,6 +2,7 @@
 """لوحة إدارة إعدادات النقاط: تعديل نقاط الترحيب/التجديد اليومي/مكافأة الإحالة مباشرة
 من تيليجرام دون الحاجة لتعديل الكود أو إعادة نشر البوت (تُخزَّن في جدول app_settings)."""
 
+import math
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
@@ -40,15 +41,17 @@ router.callback_query.filter(F.message.chat.type == "private")
 
 @router.callback_query(F.data == "admin_settings_general")
 async def open_settings_general_menu(call: types.CallbackQuery, state: FSMContext):
-    """قسم الإعدادات العامة: نقاط النظام + مفاتيح التحكم (منفصل عن قسم الذكاء
-    الاصطناعي)."""
+    """قسم الإعدادات العامة: نقطة الدخول الموحدة لكل إعدادات النظام والإدارة التقنية."""
     if state:
         await state.clear()
     text = (
         "⚙️ <b>الإعدادات العامة</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "🎯 <b>إعدادات النقاط:</b> نقاط الترحيب/التجديد/الإحالة\n"
-        "🧩 <b>مفاتيح التحكم:</b> تشغيل/إيقاف ميزات محددة"
+        "🧩 <b>مفاتيح التحكم:</b> تشغيل/إيقاف ميزات محددة\n"
+        "🤖 <b>الذكاء الاصطناعي:</b> الموديلات وسجل التوليد\n"
+        "🏆 <b>إدارة التحديات:</b> المحتوى والفروع والاختبارات\n"
+        "🏰 <b>إعدادات هجوم الأرض:</b> المهل، الإشعارات والحد اليومي"
     )
     await safe_edit_text(call.message, text, reply_markup=get_admin_settings_general_keyboard())
     try:
@@ -71,7 +74,7 @@ async def _render_settings_menu(event, state: FSMContext = None):
     text = (
         "⚙️ <b>إعدادات النقاط</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "اضغط على أي إعداد لتعديل قيمته. القيمة الجديدة تُطبَّق فوراً على كل الطلاب.\n\n"
+        "اضغط على أي إعداد لتعديل قيمته. القيم الجديدة تُستخدم في عمليات المنح التالية. صلاحية الهدايا السابقة لا تتغير.\n\n"
         f"🎁 نقاط الترحيب: <code>{format_setting_value(settings.get('welcome_points'))}</code>\n"
         f"🔄 التجديد اليومي: <code>{format_setting_value(settings.get('daily_renewal_points'))}</code>\n"
         f"🤝 مكافأة الإحالة: <code>{format_setting_value(settings.get('referral_bonus_points'))}</code>"
@@ -138,6 +141,10 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
         await msg.answer("❌ يرجى إرسال رقم صحيح (مثال: 50 أو 25.5).", reply_markup=get_cancel_keyboard())
         return
 
+    if not math.isfinite(new_value) or (setting_key.endswith("_gift_days") and not new_value.is_integer()):
+        await msg.answer("❌ أدخل قيمة صالحة؛ مدة الهدية يجب أن تكون عدد أيام صحيحًا.")
+        return
+
     min_value = SETTING_MIN_VALUES.get(setting_key, 0)
     if new_value < min_value:
         await msg.answer(f"❌ القيمة أقل من الحد الأدنى المسموح ({format_setting_value(min_value)}).", reply_markup=get_cancel_keyboard())
@@ -158,7 +165,7 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
     label = SETTING_LABELS[setting_key]
     await msg.answer(
         f"✅ <b>تم التحديث بنجاح!</b>\n\n{label}: <code>{format_setting_value(updated_value)}</code>\n\n"
-        "القيمة الجديدة سارية المفعول فوراً لكل الطلاب.",
+        "تم حفظ الإعداد. إعدادات الهدايا تسري على الهدايا الجديدة فقط.",
         parse_mode="HTML"
     )
 
@@ -174,3 +181,4 @@ async def process_setting_edit(msg: types.Message, state: FSMContext):
         await render_feature_detail(msg, feature_key)
     else:
         await _render_settings_menu(msg)
+

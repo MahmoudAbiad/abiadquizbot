@@ -45,14 +45,18 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
         referral_bonus_points = await get_setting("referral_bonus_points")
         kb = [
-            [types.InlineKeyboardButton(text="💰 شحن الرصيد (نقاط إضافية)", callback_data="recharge_info")],
-            [types.InlineKeyboardButton(text="⭐ قائمتي المفضلة المنظمة", callback_data="favorites_menu")],
+            [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
+            [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu")],
+            [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
-            [types.InlineKeyboardButton(text=f"🔗 شارك واربح {referral_bonus_points:.0f} نقاط مجانية", switch_inline_query=f"\nاشترك في بوت الكويزات الرهيب عبر رابطي واربح نقاطاً: {ref_link}")]
+            [types.InlineKeyboardButton(text=f"🎁 دعوة صديق · {referral_bonus_points:g} نقاط", switch_inline_query=f"\nحوّل محتواك الدراسي إلى كويز عبر البوت: {ref_link}")]
         ]
+        from helpers.supabase_helper.feature_flags import is_feature_enabled
+        if await is_feature_enabled("challenge_system_enabled", default=False):
+            kb.append([types.InlineKeyboardButton(text="🏕️ أرضي والتحديات", callback_data="cg:home:0")])
         # 🆕 زر رفع محاضرة صوتية كبيرة (حتى 250MB) عبر Mini App - يُخفى تلقائياً لو
         # WEBAPP_PUBLIC_BASE_URL فاضي (مثلاً بوضع polling محلي بدون WEBHOOK_URL)
         # حتى ما نعرض زر مكسور بيفتح رابط فاضي.
@@ -60,10 +64,10 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         # (صوت/ملف/صور) الاختيار يصير داخل الصفحة نفسها بلمسة وحدة، بدل تشتيت قائمة
         # البوت بـ 3 أزرار WebApp منفصلة. يُخفى تلقائياً لو WEBAPP_PUBLIC_BASE_URL فاضي.
         if WEBAPP_PUBLIC_BASE_URL:
-            kb.append([
+            kb.insert(2, [
                 types.InlineKeyboardButton(
-                    text="📤 رفع صوت / ملف / صور كبيرة",
-                    web_app=types.WebAppInfo(url=f"{WEBAPP_PUBLIC_BASE_URL}/webapp/upload_hub.html"),
+                    text="📤 ملفات كبيرة ومحاضرات صوتية",
+                    callback_data="upload_open:all",
                 )
             ])
         return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -76,16 +80,15 @@ def get_web_upload_redirect_keyboard(upload_type: str = "document") -> types.Inl
     """
     🆕 لوحة برفقة رسالة MSG_REDIRECT_TO_WEB_UPLOAD - تُعرض لما يفشل استقبال ملف/صوت
     مباشرة عبر تيليجرام بسبب تجاوز حد Bot API (20MB)، كبديل فوري بدل رفض جاف بلا حل.
-    upload_type: "audio"/"document"/"images" - رابط مباشر (Deep Link) لصفحة الرفع
+    upload_type: "audio"/"document"/"images" - فحص الجلسة أولاً ثم زر صفحة الرفع
     الموحّدة webapp/upload_hub.html؟type=... يتخطى شاشة الاختيار مباشرة (النوع معروف
     مسبقاً بهالحالة، فلا داعي يختار الطالب من جديد). تُرجع لوحة فاضية لو
     WEBAPP_PUBLIC_BASE_URL غير مُهيّأ (بدل زر مكسور برابط فاضي).
     """
     if not WEBAPP_PUBLIC_BASE_URL:
         return types.InlineKeyboardMarkup(inline_keyboard=[])
-    url = f"{WEBAPP_PUBLIC_BASE_URL}/webapp/upload_hub.html?type={upload_type}"
     return types.InlineKeyboardMarkup(inline_keyboard=[[
-        types.InlineKeyboardButton(text=BTN_OPEN_UPLOAD_PAGE, web_app=types.WebAppInfo(url=url)),
+        types.InlineKeyboardButton(text=BTN_OPEN_UPLOAD_PAGE, callback_data=f"upload_open:{upload_type}"),
     ]])
 
 def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMarkup:
@@ -96,23 +99,25 @@ def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMark
         [types.InlineKeyboardButton(text=f"⚪ {STYLE_LABELS_AR[name]}", callback_data=f"{prefix}{code}{suffix}")]
         for code, name in STYLE_CODE_TO_NAME.items()
     ]
+    kb.append([types.InlineKeyboardButton(text="🔙 تفاصيل الكويز" if favorite_id else "إغلاق خيارات التحميل",
+        callback_data=f"fav_details_{favorite_id}" if favorite_id else "export_close")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
     """لوحة اختيار صيغة تحميل الكويز (Word أو PDF)، مع الحفاظ على الستايل المختار،
     تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
-    if favorite_id:
-        docx_cb = f"fav_export_docx_{style_code}_{favorite_id}"
-        pdf_cb = f"fav_export_pdf_{style_code}_{favorite_id}"
-    else:
-        docx_cb, pdf_cb = f"export_docx_{style_code}", f"export_pdf_{style_code}"
-    kb = [
-        [
-            types.InlineKeyboardButton(text="📄 Word (docx)", callback_data=docx_cb),
-            types.InlineKeyboardButton(text="📕 PDF", callback_data=pdf_cb)
-        ]
-    ]
+    prefix = "fav_export_" if favorite_id else "export_"
+    suffix = f"_{favorite_id}" if favorite_id else ""
+    kb = []
+    for variant, label in (("s", "نسخة الطالب"), ("t", "نسخة الأستاذ")):
+        kb.append([
+            types.InlineKeyboardButton(text=f"📕 PDF — {label}", callback_data=f"{prefix}pdf{variant}_{style_code}{suffix}"),
+            types.InlineKeyboardButton(text=f"📄 Word — {label}", callback_data=f"{prefix}docx{variant}_{style_code}{suffix}"),
+        ])
+    kb.append([types.InlineKeyboardButton(text="🔙 تغيير التنسيق",
+        callback_data=f"fav_export_back_{favorite_id}" if favorite_id else "export_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
     # 🆕 إعادة تنظيم بصري: تجميع الإجراءات المترابطة بصف واحد (2 بجنب بعض)
@@ -124,7 +129,7 @@ def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=Non
         ],
         [
             types.InlineKeyboardButton(text="⭐ حفظ بالمفضلة", callback_data="quiz_favorite"),
-            types.InlineKeyboardButton(text="📁pdf تحميل الكويز", callback_data="export_menu"),
+            types.InlineKeyboardButton(text="📄 تحميل الكويز", callback_data="export_menu"),
         ],
     ]
 
@@ -136,7 +141,8 @@ def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=Non
     # 🆕 زر "حذف الكويز نهائياً" - يظهر فقط للأدمن أو لمالك الكويز الفعلي.
     kb.extend(get_delete_quiz_button_row(quiz_id, viewer_id, creator_id))
 
-    kb.append([types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="quiz_home")])
+    kb.append([types.InlineKeyboardButton(text="📝 كويز جديد", callback_data="student_create_quiz"),
+               types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="student_home")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_leaderboard_keyboard(quiz_id: str, is_public: bool = None) -> types.InlineKeyboardMarkup:
@@ -235,7 +241,8 @@ def get_question_count_keyboard(
         kb.append(row)
 
     kb.append([types.InlineKeyboardButton(text="✏️ عدد مخصص (اكتبه مباشرة)", callback_data="qcount_custom")])
-    kb.append([types.InlineKeyboardButton(text="🚀 ابدأ التوليد", callback_data="qcount_start")])
+    kb.append([types.InlineKeyboardButton(text=f"🚀 توليد {selected_count} أسئلة", callback_data="qcount_start")])
+    kb.append([types.InlineKeyboardButton(text="🔙 تعديل الصعوبة", callback_data="qback_to_difficulty")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -507,17 +514,17 @@ def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None, viewer_id=None, 
     فتصير 6 صفوف إجمالاً بدل 9 - أخف بصرياً وأسهل مسحاً بالعين."""
     base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id, viewer_id=viewer_id, creator_id=creator_id)
     kb = list(base_kb.inline_keyboard)
-    kb.insert(0, [
-        types.InlineKeyboardButton(text="👍 عجبتني الأسئلة", callback_data=f"rate_like_{file_quiz_id}"),
-        types.InlineKeyboardButton(text="👎 فيها خلل", callback_data=f"rate_dislike_{file_quiz_id}")
-    ])
-    kb.insert(1, [types.InlineKeyboardButton(text="✍️ ملاحظة أو شكوى", callback_data=f"rate_feedback_{file_quiz_id}")])
+    kb.insert(-1, [types.InlineKeyboardButton(
+        text="💬 عندك ملاحظات؟", callback_data=f"quiz_feedback_{file_quiz_id}"
+    )])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 # ==================== لوحات إدارة المفضلة والأقسام ====================
 
 def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_size: int = 5, sort_mode: str = "latest", search_query: str = "") -> types.InlineKeyboardMarkup:
     kb = []
+    if not favorites and not search_query:
+        kb.append([types.InlineKeyboardButton(text="📝 إنشاء أول كويز", callback_data="student_create_quiz")])
     
     sort_latest_label = "✅ الأحدث" if sort_mode == "latest" else "⬇️ حسب الأحدث"
     sort_section_label = "✅ حسب القسم" if sort_mode == "section" else "📁 حسب القسم"
@@ -544,6 +551,8 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
         favorite_id = item.get("id") or item.get("favorite_id") or item.get("created_at")
         section_title = item.get("section_title") or "عام"
         
+        title = title if len(title) <= 34 else title[:33] + "…"
+        section_title = section_title if len(section_title) <= 18 else section_title[:17] + "…"
         label = f"📚 {title}"
         if section_title and sort_mode != "section":
             label = f"📚 {title} • {section_title}"
@@ -558,7 +567,7 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
     if pagination_row:
         kb.append(pagination_row)
 
-    kb.append([types.InlineKeyboardButton(text="🏠 العودة للقائمة الرئيسية", callback_data="favorites_back")])
+    kb.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="favorites_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_favorite_details_keyboard(favorite_id: str, section_id: str = None, quiz_id=None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
@@ -615,7 +624,7 @@ def get_quiz_question_keyboard(options: list, show_hint: bool = True) -> types.I
         types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
     ]
     kb.append(control_buttons)
-    kb.append([types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")])
+    kb.append([types.InlineKeyboardButton(text="➡️ السؤال التالي", callback_data="next_question")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_answered_keyboard(options: list, correct_opt: int, selected_opt: int) -> types.InlineKeyboardMarkup:
@@ -657,17 +666,16 @@ def get_pagination_keyboard(current_page: int, total_pages: int, query: str) -> 
 # ==================== Admin Keyboards ====================
 
 def get_admin_dashboard_keyboard() -> types.InlineKeyboardMarkup:
-    """لوحة الإدارة الرئيسية: 6 أقسام مجمّعة حسب نوع العملية بدل أزرار متفرقة.
-    كل قسم يفتح قائمة فرعية خاصة به (راجع get_admin_communication_keyboard،
-    get_admin_users_menu_keyboard، get_admin_settings_general_keyboard)."""
+    """لوحة الإدارة الرئيسية للأقسام التشغيلية. الإعدادات التقنية والإدارية
+    (الذكاء الاصطناعي والتحديات وهجوم الأرض) مجمعة تحت "الإعدادات العامة"."""
     kb = [
         [types.InlineKeyboardButton(text="💬 التواصل مع الطلاب", callback_data="admin_communication_menu")],
         [types.InlineKeyboardButton(text="👥 إدارة المستخدمين", callback_data="admin_users_menu")],
         [types.InlineKeyboardButton(text="📊 التحليلات والإحصائيات", callback_data="admin_stats")],
         [types.InlineKeyboardButton(text="👥 إحصائيات الكويز الجماعي", callback_data="admin_group_quiz_stats")],
         [types.InlineKeyboardButton(text="📋 تصفح ملاحظات الكويزات", callback_data="admin_view_feedbacks")],
-        [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
         [types.InlineKeyboardButton(text="⚙️ الإعدادات العامة", callback_data="admin_settings_general")],
+        [types.InlineKeyboardButton(text="🛠 وضع الصيانة", callback_data="admin_maintenance")],
         [types.InlineKeyboardButton(text="❌ إغلاق لوحة الإدارة", callback_data="admin_cancel")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -786,11 +794,14 @@ def get_admin_users_menu_keyboard() -> types.InlineKeyboardMarkup:
 
 
 def get_admin_settings_general_keyboard() -> types.InlineKeyboardMarkup:
-    """قسم الإعدادات العامة: نقاط النظام + مفاتيح التحكم (منفصل تماماً عن قسم الذكاء
-    الاصطناعي، لأنه ما إله علاقة بموديلات التوليد)."""
+    """قسم الإعدادات العامة: كل إعدادات النظام والإدارة التقنية بمكان واحد."""
     kb = [
         [types.InlineKeyboardButton(text="🎯 إعدادات النقاط", callback_data="admin_settings_menu")],
         [types.InlineKeyboardButton(text="🧩 مفاتيح التحكم", callback_data="admin_flags_menu")],
+        [types.InlineKeyboardButton(text="🤖 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")],
+        [types.InlineKeyboardButton(text="🎟 أكواد الهدايا", callback_data="ag:home:0")],
+        [types.InlineKeyboardButton(text="🏆 إدارة التحديات", callback_data="admin_challenges")],
+        [types.InlineKeyboardButton(text="🏰 إعدادات هجوم الأرض", callback_data="admin_challenge_cooldown")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -803,6 +814,7 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
     بميزة معيّنة - راجع settings_helper.SETTING_TO_FEATURE_FLAG)."""
     from helpers.settings_helper import format_setting_value
     kb = []
+    kb.append([types.InlineKeyboardButton(text="🎟 أكواد الهدايا", callback_data="ag:home:0")])
     for key, label in labels.items():
         value_text = format_setting_value(settings.get(key))
         kb.append([types.InlineKeyboardButton(
@@ -821,9 +833,11 @@ def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboa
     ملاحظة: إعدادات النقاط ما عادت هون - انتقلت لقسم "الإعدادات العامة" المستقل
     (راجع get_admin_settings_general_keyboard) لأنها مالها علاقة بموديلات الذكاء الاصطناعي."""
     kb = [
+        [types.InlineKeyboardButton(text="🔌 إدارة المزوّدين", callback_data="aip:list")],
+        [types.InlineKeyboardButton(text="🔎 كتالوج نماذج Google (اختبار وتفعيل)", callback_data="gmc:start")],
         [types.InlineKeyboardButton(text="🧠 سلسلة توليد الأسئلة (Cascade)", callback_data="admin_ai_slot_cascade")],
         [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
-        [types.InlineKeyboardButton(text="⚡ موديل Groq السريع", callback_data="admin_ai_slot_groq_fast")],
+        [types.InlineKeyboardButton(text="⚡ المسار النصي السريع", callback_data="admin_ai_slot_groq_fast")],
         [types.InlineKeyboardButton(text="📊 سجل توليد الكويزات (الوقت + الموديل)", callback_data="admin_quiz_gen_log")],
     ]
     if request_timeout is not None:
@@ -832,7 +846,7 @@ def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboa
             text=f"⏱ مهلة طلب الذكاء الاصطناعي: {format_setting_value(request_timeout)} ث",
             callback_data="admin_setting_edit_ai_request_timeout",
         )])
-    kb.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
+    kb.append([types.InlineKeyboardButton(text="🔙 الإعدادات العامة", callback_data="admin_settings_general")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -853,27 +867,23 @@ def get_ai_slot_keyboard(slot: str, models: list) -> types.InlineKeyboardMarkup:
             nav_row.append(types.InlineKeyboardButton(text="⬇️", callback_data=f"admin_ai_move_down_{model['id']}_{slot}"))
         toggle_text = "🚫 تعطيل" if model.get("is_enabled") else "✅ تفعيل"
         nav_row.append(types.InlineKeyboardButton(text=toggle_text, callback_data=f"admin_ai_toggle_{model['id']}_{slot}"))
+        nav_row.append(types.InlineKeyboardButton(text="✏️ تعديل", callback_data=f"aim:edit:{slot}:{model['id']}"))
         nav_row.append(types.InlineKeyboardButton(text="🗑 حذف", callback_data=f"admin_ai_delete_{model['id']}_{slot}"))
         kb.append(nav_row)
     kb.append([types.InlineKeyboardButton(text="➕ إضافة موديل جديد", callback_data=f"admin_ai_add_{slot}")])
+    if slot == "detection":
+        kb.append([types.InlineKeyboardButton(
+            text="🔎 اكتشف نماذج Google واختبرها", callback_data="gmc:start")])
     kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data="admin_ai_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_ai_provider_choice_keyboard(slot: str) -> types.InlineKeyboardMarkup:
-    """اختيار الشركة (Provider) عند إضافة موديل جديد لسلسلة معيّنة."""
-    kb = [
-        [types.InlineKeyboardButton(text="🟦 Gemini (Google)", callback_data=f"admin_ai_provider_gemini_{slot}")],
-        [types.InlineKeyboardButton(text="🟪 Vertex AI (Google Cloud)", callback_data=f"admin_ai_provider_vertex_{slot}")],
-        [types.InlineKeyboardButton(text="🟩 Groq", callback_data=f"admin_ai_provider_groq_{slot}")],
-        [types.InlineKeyboardButton(text="⚪ OpenAI", callback_data=f"admin_ai_provider_openai_{slot}")],
-        [types.InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"admin_ai_slot_{slot}")],
-    ]
-    if slot == "detection":
-        kb = [row for row in kb if row[0].callback_data in {
-            f"admin_ai_provider_gemini_{slot}", f"admin_ai_provider_groq_{slot}",
-            f"admin_ai_slot_{slot}"}]
-    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+def get_ai_provider_choice_keyboard(slot: str, providers: dict) -> types.InlineKeyboardMarkup:
+    rows = [[types.InlineKeyboardButton(text=p["label"], callback_data=f"admin_ai_provider_{p['id']}_{slot}")]
+            for p in providers.values() if p["is_enabled"]]
+    rows.append([types.InlineKeyboardButton(text="إدارة المزوّدين", callback_data="aip:list")])
+    rows.append([types.InlineKeyboardButton(text="إلغاء", callback_data=f"admin_ai_slot_{slot}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_ai_cancel_keyboard(slot: str) -> types.InlineKeyboardMarkup:
@@ -896,6 +906,7 @@ def build_contact_button(user_id: int, username: Optional[str] = None, text: str
 
 def get_admin_user_actions_keyboard(user_id: int, username: Optional[str] = None) -> types.InlineKeyboardMarkup:
     kb = [
+        [types.InlineKeyboardButton(text="🎁 هدايا الطالب وصلاحيتها", callback_data=f"ag:gifts:{user_id}:0")],
         [types.InlineKeyboardButton(text="💰 شحن رصيد الطالب", callback_data=f"admin_charge_menu_{user_id}")],
         [
             types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}"),

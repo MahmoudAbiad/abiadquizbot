@@ -33,6 +33,7 @@ from keyboards import (
     get_analytics_keyboard,
 )
 from logger import get_logger
+from helpers.supabase_helper.gifts import enrich_balances
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 
 logger = get_logger(__name__)
@@ -50,7 +51,7 @@ router.callback_query.filter(F.message.chat.type == "private")
 
 def user_total_points(user: dict) -> float:
     """حساب إجمالي رصيد الطالب من الخانتين المجانية والمدفوعة."""
-    return float(user.get("free_points") or 0) + float(user.get("paid_points") or 0)
+    return float(user.get("free_points") or 0) + float(user.get("paid_points") or 0) + float(user.get("gift_points") or 0)
 
 
 async def fetch_users_async():
@@ -65,6 +66,7 @@ async def fetch_users_async():
         batch = response.data or []
         if not batch:
             return users
+        await enrich_balances(batch)
         users.extend(batch)
         last_id = batch[-1]["user_id"]
 
@@ -119,7 +121,8 @@ async def render_users_page(event, page: int = 1):
             f"┣ 👤 اليوزر: {username_str}\n"
             f"┣ 📝 الاسم: <b>{html.escape(str(u.get('first_name') or '')[:100])} {html.escape(str(u.get('last_name') or '')[:100])}</b>\n"
             f"┣ 🕒 انضم: <code>{joined_time}</code>\n"
-            f"┣ 🎁 المجاني: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
+            f"┣ 🔄 المجاني: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
+            f"┣ 🎁 الهدايا: <code>{float(u.get('gift_points') or 0):.2f}</code>\n"
             f"┣ 💳 المدفوع: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
             f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
             f"┗ 📊 الأسئلة: <code>{u.get('total_questions', 0)}</code>\n"
@@ -284,6 +287,7 @@ async def _present_direct_message_target(answer, state: FSMContext, user: dict):
     ).strip() or "بدون اسم"
     free_points = float(user.get("free_points") or 0)
     paid_points = float(user.get("paid_points") or 0)
+    gift_points = float(user.get("gift_points") or 0)
     await state.update_data(
         direct_message_target_id=target_id,
         direct_message_balance_before=user_total_points(user),
@@ -299,8 +303,9 @@ async def _present_direct_message_target(answer, state: FSMContext, user: dict):
         f"┣ الاسم: <b>{html.escape(full_name)}</b>\n"
         f"┣ اليوزر: <code>{html.escape(username)}</code>\n"
         f"┣ الآيدي: <code>{target_id}</code>\n"
-        f"┣ إجمالي النقاط: <code>{free_points + paid_points:.2f}</code>\n"
+        f"┣ إجمالي النقاط: <code>{free_points + paid_points + gift_points:.2f}</code>\n"
         f"┣ النقاط المجانية: <code>{free_points:.2f}</code>\n"
+        f"┣ نقاط الهدايا: <code>{gift_points:.2f}</code>\n"
         f"┗ النقاط المدفوعة: <code>{paid_points:.2f}</code>\n\n"
         "اختر نوع العملية:",
         reply_markup=get_admin_direct_message_mode_keyboard(),
@@ -631,7 +636,8 @@ def _format_user_profile_report(u: dict) -> str:
         f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
         f"┣ 👤 اليوزر: {username_str}\n"
         f"┣ 📝 الاسم: <b>{html.escape(str(u.get('first_name') or '')[:100])} {html.escape(str(u.get('last_name') or '')[:100])}</b>\n"
-        f"┣ 🎁 النقاط المجانية: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
+        f"┣ 🔄 النقاط المجانية: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
+        f"┣ 🎁 الهدايا: <code>{float(u.get('gift_points') or 0):.2f}</code>\n"
         f"┣ 💳 النقاط المدفوعة: <code>{float(u.get('paid_points') or 0):.2f}</code>\n"
         f"┣ 💰 الإجمالي: <code>{user_total_points(u):.2f}</code>\n"
         f"┗ 📊 إجمالي الأسئلة المُولدة: <code>{u.get('total_questions', 0)}</code>"
@@ -846,7 +852,7 @@ async def export_all_users(call: types.CallbackQuery):
         
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Paid Points", "Total Points", "Total Questions", "Joined At"])
+        writer.writerow(["User ID", "Username", "First Name", "Last Name", "Free Points", "Gift Points", "Paid Points", "Total Points", "Total Questions", "Joined At"])
         
         for u in users:
             joined_time_syria = _short_syria_time(u.get('joined_at'))
@@ -856,6 +862,7 @@ async def export_all_users(call: types.CallbackQuery):
                 sanitize_csv_value(u.get('first_name', 'Unknown')),
                 sanitize_csv_value(u.get('last_name', 'Unknown')),
                 sanitize_csv_value(u.get('free_points', 0)),
+                sanitize_csv_value(u.get('gift_points', 0)),
                 sanitize_csv_value(u.get('paid_points', 0)),
                 sanitize_csv_value(user_total_points(u)),
                 sanitize_csv_value(u.get('total_questions', 0)),

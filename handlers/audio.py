@@ -1,3 +1,5 @@
+from helpers.supabase_helper.gifts import refund as refund_wallet
+from handlers.session_navigation import offer_transition, message_action
 # handlers/audio.py
 """
 معالج المحاضرات الصوتية: يستقبل رسائل صوتية (voice/audio)، يفرّغها نصياً عبر
@@ -60,6 +62,7 @@ from services.audio_service import summarize_lecture_text, transcribe_audio_lect
 from services.flow_state import build_state_for_chat
 from handlers.files import ask_question_count
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
+from services import offload
 from helpers.supabase_helper import (
     log_usage_event, refund_user_points_split, update_user_stats,
 )
@@ -133,8 +136,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     voice التي يقيس تيليجرام مدتها بنفسه وقت التسجيل). التسعير يُحتسب دائماً من القيمة
     الأكبر بين المُعلنة والفعلية تفادياً لأي دفع أقل من التكلفة الحقيقية."""
     current_state = await state.get_state()
-    if current_state == QuizState.answering_quiz:
-        await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه عبر الضغط على (⏹️ إيقاف) أولاً قبل رفع محاضرة صوتية جديدة.")
+    if await offer_transition(state, message.from_user.id, message.chat.id, message_action(message, "audio")):
         return
     if current_state == QuizState.processing_audio:
         await message.answer("⏳ لديك محاضرة صوتية أخرى قيد التحميل/التفريغ حالياً؛ يرجى انتظار انتهائها قبل إرسال مقطع جديد.")
@@ -283,6 +285,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         return
 
     charged = False
+    debit_id = None
     debited_free = 0.0
     debited_paid = 0.0
     try:
@@ -317,6 +320,8 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         # 🆕 [طبقة 2] نحفظ التقسيم الفعلي (كم اتخصم من free_points وكم من paid_points)
         # عشان أي ريفوند لاحق بهالدالة (كامل أو جزئي أو عند استثناء) يرجع كل جزء
         # لمصدره الصحيح بدل ما يرجعه كله لـpaid_points.
+        debit_id = deduction["debit_id"]
+        debited_gift = deduction["debited_gift"]
         debited_free = deduction["debited_free"]
         debited_paid = deduction["debited_paid"]
 
@@ -345,7 +350,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         pure_text, truncated = transcription_result if transcription_result else (None, False)
 
         if not pure_text or not pure_text.strip():
-            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
+            await refund_wallet(call.from_user.id, debit_id)
             charged = False
             await state.set_state(None)
             await call.message.edit_text(
@@ -365,8 +370,9 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             # cost الإجمالي ويرجع كله لـpaid_points - هيك التوزيع النسبي بين الرصيدين
             # يضل صحيح بعد الريفوند الجزئي.
             free_refund, paid_refund, partial_refund_amount = compute_partial_refund(debited_free, debited_paid)
+            partial_refund_amount += round(debited_gift * 0.5, 2)
             if partial_refund_amount > 0:
-                await refund_user_points_split(call.from_user.id, free_refund, paid_refund)
+                await refund_wallet(call.from_user.id, debit_id, 0.5)
                 debited_free -= free_refund
                 debited_paid -= paid_refund
             spawn(log_usage_event(call.from_user.id, "audio_transcription_truncated", {
@@ -412,7 +418,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
     except Exception as exc:
         log_error(logger, f"Audio confirm/transcription failed: {exc}", exception=exc)
         if charged:
-            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
+            await refund_wallet(call.from_user.id, debit_id)
         await state.set_state(None)
         error_text = "❌ حدث خطأ غير متوقع أثناء معالجة المحاضرة الصوتية." + (" تم إرجاع نقاطك." if charged else "")
         try:
@@ -421,7 +427,7 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             await call.message.answer(error_text)
     except asyncio.CancelledError:
         if charged:
-            await refund_user_points_split(call.from_user.id, debited_free, debited_paid)
+            await refund_wallet(call.from_user.id, debit_id)
         await state.set_state(None)
         raise
     finally:
@@ -589,10 +595,12 @@ async def handle_audio_export_format(call: types.CallbackQuery, state: FSMContex
         is_docx = call.data == "audio_export_docx"
         ext = "docx" if is_docx else "pdf"
 
-        if is_docx:
-            file_bytes = await asyncio.to_thread(build_document_docx, title, content)
-        else:
-            file_bytes = await asyncio.to_thread(build_document_pdf, title, content)
+        file_bytes = await offload.remote_build_document(ext, title, content)
+        if file_bytes is None:
+            if is_docx:
+                file_bytes = await asyncio.to_thread(build_document_docx, title, content)
+            else:
+                file_bytes = await asyncio.to_thread(build_document_pdf, title, content)
 
         if not file_bytes:
             await call.message.answer("❌ تعذر إنشاء الملف، حاول مجدداً.")
@@ -622,17 +630,19 @@ async def handle_audio_to_quiz(call: types.CallbackQuery, state: FSMContext) -> 
             return
 
 
-        await state.update_data(
-            pure_text=pure_text,
-            source_title=data.get("source_title", "كويز من محاضرة صوتية"),
-            input_type="text",
-            items_count=1,
-            is_album=False,
+        # The transcript starts a new quiz input; no previous document hash,
+        # office text, quiz result or debit marker belongs to this request.
+        await state.set_data({
+            "pure_text": pure_text,
+            "source_title": data.get("source_title", "كويز من محاضرة صوتية"),
+            "input_type": "text",
+            "items_count": 1,
+            "is_album": False,
             # 🆕 مصدر/نوع المحتوى الصريح لسجل توليد الكويزات بلوحة الأدمن - راجع
             # handlers/files.py::handle_count_start حيث يُرحَّل هذا الحقل لحدث quiz_generated.
-            content_source="audio_transcript",
-            input_channel=data.get("input_channel"),
-        )
+            "content_source": "audio_transcript",
+            "input_channel": data.get("input_channel"),
+        })
         await ask_question_count(
             call.message,
             state,
@@ -680,9 +690,8 @@ async def process_web_uploaded_audio(
         await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
         await delete_audio_temp(object_path)
         return
-    if current_state == QuizState.answering_quiz:
-        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع محاضرة صوتية جديدة.")
-        await delete_audio_temp(object_path)
+    if await offer_transition(state, user_id, chat_id, {"kind": "web_audio",
+            "user_id": user_id, "chat_id": chat_id, "object_path": object_path, "declared_file_name": declared_file_name}):
         return
     if current_state == QuizState.processing_audio:
         await bot.send_message(chat_id, "⏳ لديك محاضرة صوتية أخرى قيد المعالجة حالياً؛ يرجى انتظار انتهائها.")
@@ -839,3 +848,5 @@ async def process_web_uploaded_audio(
 
 
 audio_router = router
+
+

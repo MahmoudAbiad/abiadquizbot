@@ -577,7 +577,7 @@ async def _notify_user_credited(user_id: int, points: int, total: int) -> None:
             "🎉 <b>أخبار سارة! تم تحديث رصيدك</b>\n\n"
             f"عزيزي الطالب، تم إضافة <code>{points}</code> نقاط جديدة إلى حسابك بنجاح. ✨\n\n"
             f"🟢 <b>الكمية المضافة:</b> <code>+{points}</code>\n"
-            f"💰 <b>رصيدك الحالي أصبح:</b> <code>{total}</code> نقطة\n\n"
+            "💰 راجع «رصيدي وهداياي» لمعرفة رصيدك المتاح وصلاحيات الهدايا.\n\n"
             "نتمنى لك رحلة تعليمية ممتعة ومليئة بالتوفيق والنجاح! 🚀",
             parse_mode="HTML",
         )
@@ -745,3 +745,4 @@ async def payment_watchdog_loop() -> None:
             logger.error(f"payment watchdog iteration failed: {exc}", exc_info=True)
         tick += 1
         await asyncio.sleep(60)
+

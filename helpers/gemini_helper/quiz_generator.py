@@ -9,6 +9,9 @@ import time
 
 from constants import (
     MAX_LIMIT_PAGES,
+    MAX_STANDARD_PAGES,
+    MAX_STANDARD_QUESTIONS,
+    DIFFICULTY_PROGRESSIVE,
     SUPER_IMAGE_BATCH_THRESHOLD,
     OPTION_COUNT,
     SYSTEM_PROMPT_GENERATE_QUESTIONS,
@@ -32,7 +35,7 @@ from helpers.gemini_helper.loading import _loading_animation
 from helpers.gemini_helper.generation import (
     _generate_regular,
     _generate_super_images,
-    _generate_super_pdf,
+    _generate_pdf_with_context,
 )
 from helpers.gemini_helper.text_generation import (
     _generate_text_quiz,
@@ -212,14 +215,34 @@ async def generate_quiz_smart(
         #    Images لألبومات الصور الكبيرة (أكبر من SUPER_IMAGE_BATCH_THRESHOLD -
         #    مصدرها حصراً رفع الويب حالياً؛ الألبوم العادي عبر تيليجرام محدود أصلاً
         #    بـ MAX_ALBUM_IMAGES من منصة تيليجرام نفسها، أقل من هذا السقف).
-        is_super_pdf = (
-            len(file_paths) == 1
-            and file_paths[0].lower().endswith(".pdf")
-            and await asyncio.to_thread(get_pdf_page_count_sync, file_paths[0]) > MAX_LIMIT_PAGES
+        is_single_pdf = (
+            len(file_paths) == 1 and file_paths[0].lower().endswith(".pdf")
         )
+        pdf_page_count = (
+            await asyncio.to_thread(get_pdf_page_count_sync, file_paths[0])
+            if is_single_pdf else 0
+        )
+        is_super_pdf = is_single_pdf and pdf_page_count > MAX_LIMIT_PAGES
         is_super_images = len(file_paths) > SUPER_IMAGE_BATCH_THRESHOLD
+        # All extended/super PDF generation now uses context overlap.
+        # For ready-made exams the prompt extracts only original questions
+        # starting on owned pages; all other subjects generate questions from
+        # the owned content, using boundary pages for context only.
+        is_ready_exam = bool(quiz_extraction_instruction)
         if is_super_pdf:
-            generated = await _generate_super_pdf(file_paths[0], count, base_prompt_template)
+            generated = await _generate_pdf_with_context(
+                file_paths[0], count, base_prompt_template,
+                part_count=3, ready_exam=is_ready_exam,
+                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+            )
+        elif is_single_pdf and (
+            pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
+        ):
+            generated = await _generate_pdf_with_context(
+                file_paths[0], count, base_prompt_template,
+                part_count=2, ready_exam=is_ready_exam,
+                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+            )
         elif is_super_images:
             generated = await _generate_super_images(file_paths, count, base_prompt_template)
         else:

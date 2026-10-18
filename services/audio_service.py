@@ -1,45 +1,16 @@
 # services/audio_service.py
-"""
-==============================================================================
-MODULE: AI Audio Lecture Service (Transcription & Summarization)
-==============================================================================
-الوصف:
-خدمة مسؤولة عن تحويل محاضرات صوتية (Lecture Recordings) إلى نص مُفرَّغ منسّق
-بصيغة Markdown، وتلخيص أي نص محاضرة (سواء مُفرَّغ عبر هذه الخدمة أو مُدخَل يدوياً)
-إلى ملاحظات دراسية عالية القيمة (High-Yield Study Notes).
+"""Audio transcription and summarization through the shared AI runtime.
 
-القرارات الهندسية الرئيسية:
-1. إعادة استخدام محرك السلسلة التنازلية الموجود بـ helpers/gemini_helper.py
-   (generate_text_with_cascade) بدل بناء منطق Retry/Fallback جديد من الصفر -
-   نفس سلوك (نماذج × مفاتيح) المُستخدم بتوليد الكويزات يُطبَّق هون تلقائياً.
-2. Inline Data vs. Files API: بنفس عتبة INLINE_DATA_SIZE_THRESHOLD (15MB) المُعرَّفة
-   بـ gemini_helper.py - ملفات الصوت الصغيرة تُرسَل مباشرة كـ types.Part.from_bytes
-   (بدون أي Round-trip شبكة إضافي)، بينما الملفات الأكبر تُرفع أولاً عبر Files API.
-   AI-NOTE (قيد معماري معروف): رفعة Files API مرتبطة بمفتاح/عميل واحد بالذات (نفس
-   الملاحظة الموثّقة بـ gemini_helper.py:_build_contents_for_paths) - لذلك هون تُرفع
-   الملفات الضخمة عبر أول مفتاح متاح بالسلسلة فقط قبل تمريرها لـ
-   generate_text_with_cascade. لو فشل ذاك المفتاح تحديداً أثناء التوليد نفسه (حصة
-   منتهية مثلاً)، ستحاول السلسلة مفاتيح أخرى لكن مرجع الملف المرفوع قد لا يكون
-   متاحاً لها بحسب إعدادات المشروع على Google AI Studio. للملفات الصغيرة (الحالة
-   الأغلبية لمحاضرات صوتية تُرفع عبر بوت تيليغرام) هذا القيد غير وارد إطلاقاً لأنها
-   تُرسَل Inline دون رفع أي ملف بالأساس.
-3. فصل التفريغ (Transcription) عن التلخيص (Summarization) كدالتين مستقلتين تماماً -
-   حتى يمكن استدعاء التلخيص وحده لاحقاً على نص مُفرَّغ مُعدَّل يدوياً من الطالب، أو
-   على أي نص محاضرة آخر بغض النظر عن مصدره.
-==============================================================================
+Local audio references reach the selected adapter directly. Each attempt owns
+its upload and cleanup; file references are never shared across credentials.
 """
 
 import asyncio
-from task_utils import spawn
 import os
 from typing import Any, List, Optional, Tuple
 
-from google.genai import types
 
 from helpers.gemini_helper import (
-    API_KEYS,
-    INLINE_DATA_SIZE_THRESHOLD,
-    _GEMINI_CLIENTS,
     generate_text_with_cascade,
     get_safe_mime_type,
 )
@@ -103,46 +74,6 @@ SUMMARIZATION_SYSTEM_PROMPT = """
 # ==============================================================================
 # HELPERS
 # ==============================================================================
-def _read_file_bytes_sync(path: str) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
-
-
-async def _safe_delete_uploaded_file(client, file_name: str) -> None:
-    """حذف آمن (Best-effort) لملف مرفوع مؤقتاً عبر Files API - أي فشل هون يُسجَّل
-    فقط كتحذير ولا يُوقف أي مسار آخر، لأن الملف سينتهي تلقائياً بعد مدة على أي حال."""
-    try:
-        await asyncio.to_thread(client.files.delete, name=file_name)
-    except Exception as exc:
-        log_warning(logger, f"Failed to delete temporary uploaded audio file {file_name}: {exc}")
-
-
-async def _build_audio_contents(file_path: str, mime_type: str) -> Tuple[List[Any], Optional[Tuple[Any, str]]]:
-    """يبني قائمة محتوى الصوت المُرسَلة لـ Gemini: Inline (types.Part.from_bytes) إذا كان
-    حجم الملف ضمن العتبة الآمنة، أو رفعة عبر Files API (بأول مفتاح متاح بالسلسلة) إذا
-    تجاوز الحجم العتبة - راجع AI-NOTE بأعلى الملف بخصوص محدودية هذا الخيار الثاني.
-
-    يُرجع (قائمة المحتوى, (client, file_name) للتنظيف اللاحق أو None إذا كان Inline)."""
-    try:
-        file_size = os.path.getsize(file_path)
-    except OSError:
-        file_size = INLINE_DATA_SIZE_THRESHOLD + 1
-
-    safe_mime = mime_type or get_safe_mime_type(file_path)
-
-    if file_size <= INLINE_DATA_SIZE_THRESHOLD:
-        file_bytes = await asyncio.to_thread(_read_file_bytes_sync, file_path)
-        return [types.Part.from_bytes(data=file_bytes, mime_type=safe_mime)], None
-
-    if not API_KEYS:
-        log_error(logger, "GEMINI_API_KEYS is not configured; cannot upload large audio file")
-        raise ValueError("GEMINI_API_KEYS is not configured")
-
-    client = _GEMINI_CLIENTS[0]
-    uploaded_file = await asyncio.to_thread(client.files.upload, file=file_path)
-    return [uploaded_file], (client, uploaded_file.name)
-
-
 # ==============================================================================
 # PUBLIC API
 # ==============================================================================
@@ -159,22 +90,11 @@ async def transcribe_audio_lecture(file_path: str, mime_type: str) -> Optional[T
         log_error(logger, f"Audio file not found for transcription: {file_path}")
         return None
 
-    cleanup_ref: Optional[Tuple[Any, str]] = None
-    try:
-        contents, cleanup_ref = await _build_audio_contents(file_path, mime_type)
-    except Exception as exc:
-        log_error(logger, f"Failed to prepare audio contents for transcription: {exc}", exception=exc)
-        return None
-
-    try:
-        result = await generate_text_with_cascade(
-            contents=contents,
-            prompt_instruction=TRANSCRIPTION_SYSTEM_PROMPT,
-        )
-    finally:
-        if cleanup_ref:
-            client, file_name = cleanup_ref
-            spawn(_safe_delete_uploaded_file(client, file_name))
+    from services.ai.contracts import Attachment
+    result = await generate_text_with_cascade(
+        contents=[Attachment(mime_type=mime_type or get_safe_mime_type(file_path), path=file_path)],
+        prompt_instruction=TRANSCRIPTION_SYSTEM_PROMPT,
+    )
 
     if not result:
         log_error(logger, f"Audio transcription cascade exhausted for file: {file_path}")

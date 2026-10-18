@@ -6,7 +6,7 @@ import random
 from typing import Any, Dict, Tuple, Optional, List
 
 from constants import (
-    MAX_ALBUM_IMAGES, MAX_LIMIT_PAGES, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS,
+    MAX_ALBUM_IMAGES, MAX_LIMIT_PAGES, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS, OPTION_COUNT,
     SUBJECT_MATH, SUBJECT_OTHER, SUBJECT_ENGLISH, SUBJECT_FRENCH, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
     QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM, QUESTION_TYPE_OPTIONS,
     QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH,
@@ -35,7 +35,7 @@ logger = get_logger(__name__)
 # تحويل صفحة PDF لصورة (PyMuPDF)، واستدعاءات Gemini الثقيلة. بدون سقف تزامن، عدة طلبات
 # ملفات كبيرة بنفس اللحظة ممكن تستهلك الذاكرة/CPU بشكل تراكمي وتُبطئ كل الطلبات المتزامنة.
 # Semaphore(2) يحصر معالجة الملفات الثقيلة بحد أقصى عمليتين متزامنتين فقط.
-_HEAVY_PROCESSING_SEMAPHORE = asyncio.Semaphore(2)
+from services.processing_limits import HEAVY_PROCESSING_SEMAPHORE as _HEAVY_PROCESSING_SEMAPHORE
 
 # 🆕 (تحسين تجربة الكويز الرياضي): بدل رسم/رفع صورة كل سؤال رياضي بشكل "كسول" لحظة
 # وصول دوره فعلياً (services/quiz_engine._send_math_image_question - الطالب ينتظر
@@ -129,19 +129,49 @@ def build_transparency_text(
     """رسالة الشفافية المالية لعرض تفاصيل الخصم.
     🆕 difficulty/question_type_label اختياريان (لعرض تفاصيل الاختيار عند تفعيل شاشة
     نوع/صعوبة الأسئلة لاحقاً) - لا يؤثران على الاستدعاءات الحالية التي لا تمررهما."""
-    mode_label = MODE_LABELS_AR.get(mode, mode)
+    from html import escape
     lines = [
-        "📋 <b>تفاصيل التنفيذ والشفافية المالية</b>\n",
-        f"• العناصر/الصفحات: <code>{items}</code>",
-        f"• الأسئلة المطلوبة: <code>{questions}</code>",
+        "📋 <b>ملخص الكويز</b>\n",
+        f"• حجم المحتوى: <code>{items}</code> صفحة / عنصر",
+        f"• عدد الأسئلة: <b>{questions}</b>",
     ]
     if question_type_label:
-        lines.append(f"• نوع الأسئلة: <code>{question_type_label}</code>")
+        lines.append(f"• نوع الأسئلة: {escape(question_type_label)}")
     if difficulty:
-        lines.append(f"• الصعوبة: <code>{DIFFICULTY_LABELS_AR.get(difficulty, difficulty)}</code>")
-    lines.append(f"• وضع المعالجة: <code>{mode_label}</code>")
-    lines.append(f"• تكلفة العملية: <b>{cost:.2f} نقطة</b>")
+        lines.append(f"• الصعوبة: {escape(DIFFICULTY_LABELS_AR.get(difficulty, difficulty))}")
+    lines.append(f"\n💰 <b>التكلفة: {cost:.2f} نقطة</b>")
     return "\n".join(lines)
+
+def normalize_quiz_option_count(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Enforce exactly four options while preserving the model's marked correct answer.
+
+    A ready-made exam can contain five choices. Keep the correct choice and the
+    first OPTION_COUNT - 1 incorrect choices (i.e. discard the last incorrect
+    choice), preserving their original order. The normal shuffle happens later
+    and updates correct_option_id again.
+
+    Fail closed if there are too few choices or the answer index is invalid:
+    guessing a correct answer or inventing a distractor would be misleading.
+    """
+    for question_number, question in enumerate(quiz_data, start=1):
+        options = question.get("options")
+        correct_index = question.get("correct_option_id")
+        if not isinstance(options, list) or len(options) < OPTION_COUNT:
+            raise ValueError(f"Question {question_number}: expected at least {OPTION_COUNT} options")
+        if type(correct_index) is not int or not 0 <= correct_index < len(options):
+            raise ValueError(f"Question {question_number}: invalid correct option index")
+        if any(not isinstance(option, str) or not option.strip() for option in options):
+            raise ValueError(f"Question {question_number}: empty or invalid option")
+
+        if len(options) > OPTION_COUNT:
+            kept = [i for i in range(len(options)) if i != correct_index][:OPTION_COUNT - 1]
+            kept.append(correct_index)
+            kept.sort()
+            question["options"] = [options[i] for i in kept]
+            question["correct_option_id"] = kept.index(correct_index)
+
+    return quiz_data
+
 
 def _shuffle_question_options(question: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -173,18 +203,12 @@ def shuffle_quiz_options(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 async def refund_user_on_failure(user_id: int, data: Dict[str, Any]) -> None:
-    """إعادة النقاط تلقائياً في حال فشل التوليد.
-
-    🆕 [طبقة 3] بترجع كل جزء لمصدره الصحيح (debited_free → free_points،
-    debited_paid → paid_points) بدل ما ترجع كل شي لـpaid_points - هاد كان عم
-    "يُرقّي" نقاط مجانية مؤقتة (بتنصفر يومياً) لنقاط مدفوعة دائمة بكل عملية
-    فشل/ريفوند. debited_free/debited_paid متوفرين بالـstate من update_user_stats
-    وقت الخصم (راجع handlers/files.py).
-
-    fallback: لو الحالة (state) قديمة وما فيها التقسيم لأي سبب (مثلاً لسا معلّقة
-    من قبل هالإصلاح)، نرجع لسلوك الطبقة القديمة (كل شي لـpaid_points) بدل ما
-    نخسر الريفوند كلياً.
-    """
+    """Refund a new receipt idempotently, or a pre-migration split for old FSMs."""
+    if data.get("debit_id"):
+        from helpers.supabase_helper.gifts import refund
+        if not await refund(user_id, data["debit_id"]):
+            raise RuntimeError("Wallet refund failed")
+        return
     debited_free = data.get("debited_free")
     debited_paid = data.get("debited_paid")
     if debited_free is not None or debited_paid is not None:
@@ -421,6 +445,17 @@ async def execute_quiz_generation_workflow(
         if not quiz_data:
             return None, None, "ai_failed", None
 
+        # Five-choice fallback applies ONLY when extracting an existing exam
+        # (quiz_solved / quiz_unsolved). Other generated quiz types retain their
+        # existing validation and are never modified by this extraction-specific
+        # safeguard. Run before shuffle, persistence, image rendering and polls.
+        if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+            try:
+                quiz_data = normalize_quiz_option_count(quiz_data)
+            except ValueError as exc:
+                log_warning(logger, f"[quiz_service] Refusing malformed ready-made exam options: {exc}")
+                return None, None, "ai_failed", get_last_generation_metadata()
+
         # 3.1 🆕 بيانات آخر توليد ناجح (موديل/مزوّد/توكنز) - تُقرأ فوراً بعد عودة
         # generate_quiz_smart وبنفس الـ Task (راجع ContextVar بـ gemini_helper.py). كانت
         # total_tokens تُحفظ صفراً دائماً بالأسفل لأن generate_quiz_smart لا يُرجع التوكنز
@@ -486,3 +521,4 @@ async def execute_quiz_generation_workflow(
             spawn(_prefetch_math_quiz_images(new_quiz_id, quiz_data))
 
         return quiz_data, new_quiz_id, "", get_last_generation_metadata()
+

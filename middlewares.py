@@ -92,6 +92,56 @@ class ErrorTrackingMiddleware(BaseMiddleware):
         finally:
             reset_error_context(token)
 
+class MaintenanceMiddleware(BaseMiddleware):
+    """Gate updates before handlers, spending points or generating work."""
+
+    def __init__(self):
+        self._notices = TTLCache(maxsize=10000, ttl=10)
+
+    async def __call__(self, handler, event, data):
+        from services.maintenance import maintenance_notice
+        from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+        tg_event = event.event
+        user = getattr(tg_event, "from_user", None) or getattr(tg_event, "user", None)
+        # Keep Telegram membership/service notifications operational.
+        if event.event_type in {"my_chat_member", "chat_member", "poll"}:
+            return await handler(event, data)
+        notice = await maintenance_notice(user.id if user else None)
+        if notice is None:
+            return await handler(event, data)
+        try:
+            key = ("user", user.id) if user else ("chat", getattr(getattr(tg_event, "chat", None), "id", None))
+            if key in self._notices:
+                # Acknowledge buttons without another chat message or alert.
+                # Protocol queries still need their negative/empty answer.
+                if isinstance(tg_event, CallbackQuery):
+                    await tg_event.answer()
+                elif event.event_type == "inline_query":
+                    await tg_event.answer([], cache_time=0, is_personal=True)
+                elif event.event_type in {"pre_checkout_query", "shipping_query"}:
+                    await tg_event.answer(ok=False, error_message=notice[:200])
+                return None
+            # Reserve before the first await so simultaneous updates share the limit.
+            self._notices[key] = True
+            if isinstance(tg_event, Message):
+                await tg_event.answer(notice, parse_mode=None)
+            elif isinstance(tg_event, CallbackQuery):
+                await tg_event.answer()
+                if isinstance(tg_event.message, Message):
+                    await tg_event.message.answer(notice, parse_mode=None)
+                else:
+                    await data["bot"].send_message(tg_event.from_user.id, notice, parse_mode=None)
+            elif event.event_type == "inline_query":
+                await tg_event.answer([], cache_time=0, is_personal=True)
+            elif event.event_type in {"pre_checkout_query", "shipping_query"}:
+                await tg_event.answer(ok=False, error_message=notice[:200])
+            elif user:
+                await data["bot"].send_message(user.id, notice, parse_mode=None)
+        except (TelegramForbiddenError, TelegramBadRequest):
+            logger.warning("Could not deliver maintenance notice to Telegram user")
+        return None
+
+
 class ThrottlingMiddleware(BaseMiddleware):
     """
     ميدل وير يمنع المستخدمين من إرسال طلبات متتالية سريعة جداً.

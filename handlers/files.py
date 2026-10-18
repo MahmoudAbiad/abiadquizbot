@@ -1,4 +1,5 @@
 # Handlers/files.py
+from handlers.session_navigation import offer_transition, message_action
 import asyncio
 from task_utils import spawn
 import json
@@ -65,6 +66,7 @@ from services.quiz_service import (
     combo_quiz_count, build_question_type_label, estimate_pages_from_text,
 )
 from services.flow_state import build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لرفع الصوت عبر الويب
+from services.wallet_errors import WalletDebitError, WALLET_DEBIT_ERROR_TEXT
 from handlers.quiz_runner import start_loaded_quiz
 
 logger = get_logger(__name__)
@@ -72,7 +74,7 @@ router = Router()
 DOWNLOADS_DIR = "downloads"
 
 
-_QUIZ_CHARGE_STATE_KEYS = ("debited_cost", "debited_free", "debited_paid")
+_QUIZ_CHARGE_STATE_KEYS = ("debited_cost", "debited_free", "debited_paid", "debited_gift", "debit_id")
 
 async def _clear_quiz_charge_markers(state: FSMContext) -> None:
     """يمسح فقط بيانات عملية الخصم الحالية من FSM بدون حذف بيانات الكويز/النتيجة الأخرى."""
@@ -171,6 +173,11 @@ async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> 
 
 async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any], required: float, action: str = "unknown") -> None:
     balance = float(user_info.get("points") or 0)
+    if balance >= required:
+        # A failed debit or a stale balance snapshot must not prompt a funded
+        # student to recharge, nor count as an insufficient-balance event.
+        await message.answer(WALLET_DEBIT_ERROR_TEXT)
+        return
     deficit = max(0.0, required - balance)
 
     # 🆕 تتبع تحليلي: تسجيل كل مرة يُعترَض فيها إجراء الطالب بسبب رصيد غير كافٍ،
@@ -193,7 +200,8 @@ async def _insufficient_balance(message: types.Message, user_info: Dict[str, Any
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text="💳 شحن الرصيد الآن", url=f"https://t.me/{contact}")]])
     await message.answer(
         "❌ <b>رصيدك الحالي لا يكفي لإتمام هذه العملية.</b>\n\n"
-        f"🎁 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
+        f"🔄 المجاني: <code>{float(user_info.get('free_points') or 0):.2f}</code>\n"
+        f"🎁 الهدايا: <code>{float(user_info.get('gift_points') or 0):.2f}</code>\n"
         f"💳 المدفوع: <code>{float(user_info.get('paid_points') or 0):.2f}</code>\n"
         f"💰 الإجمالي الحالي: <code>{balance:.2f}</code> / المطلوب: <code>{required:.2f}</code>\n"
         f"⚠️ العجز المطلوب شحنه: <b>{deficit:.2f} نقطة</b>\n\n"
@@ -290,7 +298,10 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         extraction_mode=data.get("quiz_extraction_mode"),
     )
 
-    text = f"{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
+    ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
+    heading = "✅ مراجعة العدد والتكلفة" if ready_exam else "3 من 3 · مراجعة وتوليد"
+    text = f"<b>{heading}</b>\n\n{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
+    text += "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك."
     if mode in ("Super-PDF", "Super-Images"):
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
@@ -347,7 +358,8 @@ async def show_question_count_screen(reply_target: types.Message, state: FSMCont
             count_prompt_text=f"{notice}\n\n{count_text}" if notice else count_text,
         )
     else:
-        await state.update_data(selected_question_count=DEFAULT_COUNT_SUGGESTIONS[1], count_screen_message_id=None)
+        await state.update_data(selected_question_count=data.get("review_count_to_restore") or DEFAULT_COUNT_SUGGESTIONS[1],
+                                review_count_to_restore=None, count_screen_message_id=None)
     await state.set_state(QuizState.waiting_for_count)
     if edit:
         await _render_question_count_screen(reply_target.bot, reply_target.chat.id, reply_target.message_id, state, target_for_send=reply_target)
@@ -437,7 +449,9 @@ async def ask_question_count(
     data = await state.get_data()
     is_media = data.get("input_type") == "media"
     file_paths = data.get("file_paths", []) or []
-    pure_text = data.get("pure_text")
+    # Completed quizzes retain their state for review/replay. Only the current
+    # input type may supply text; an uploaded PDF/image must never classify it.
+    pure_text = data.get("pure_text") if not is_media else None
 
     # 🆕 رسالة حالة "جار التعرف على المحتوى" قبل استدعاء classify_subject (فحص فعلي عبر
     # Gemini قد يستغرق بضع ثوانٍ خصوصاً للملفات الكبيرة/الألبومات)، حتى لا يظن الطالب أن
@@ -688,6 +702,10 @@ async def _finalize_media_processing(
             "content_source": content_source,
             "input_channel": input_channel,
         }
+        # This is a new, validated input, not an update to the completed quiz.
+        # Drop old text, extracted office text, result controls and charge IDs
+        # before either the cache-choice or classification path can read them.
+        await state.set_data(common_state)
         
         if cached_quizzes:
             # 🩹 إصلاح خلل حقيقي: التصنيف لسا ما صار بهالمرحلة (يصير فقط بعد ضغط "توليد
@@ -700,14 +718,13 @@ async def _finalize_media_processing(
             # كل كويز ياخد سعره الحقيقي حسب عدد أسئلته، محسوب مباشرة بـ
             # get_multiple_quizzes_keyboard وبـ handle_multi_cache_selection.
             await state.update_data(
-                **common_state, available_quizzes=cached_quizzes,
+                available_quizzes=cached_quizzes,
                 cache_filter_type="all", cache_filter_difficulty="all",
             )
             await state.set_state(QuizState.waiting_for_cache_decision)
             await _render_cache_decision_screen(message, state, edit=False, viewer_id=resolved_user_id)
             return
 
-        await state.update_data(**common_state)
         await ask_question_count(message, state, SUCCESS_MEDIA_RECEIVED)
     except Exception as exc:
         for path in file_paths: safe_file_cleanup(path)
@@ -723,15 +740,9 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
     transferred = False
     try:
         current_state = await state.get_state()
-        if current_state == QuizState.answering_quiz:
-            data = await state.get_data()
-            if data.get("attempt_id"):
-                spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
-            await _discard_pending_upload(state)
-            await state.clear()
-            await message.answer("ℹ️ <b>تم إيقاف اختبارك السابق تلقائياً وجاري معالجة المحتوى الجديد...</b>", parse_mode="HTML")
-
-        elif current_state == QuizState.processing_file_quiz:
+        if await offer_transition(state, message.from_user.id, message.chat.id, message_action(message, "media")):
+            return
+        if current_state == QuizState.processing_file_quiz:
             # 🩹 طلب توليد فعلي قيد التنفيذ عند Gemini حالياً (بعد ضغط "ابدأ التوليد") - لازم
             # نرفض أي ملف جديد بدل حذف/استبدال الطلب الحالي، وإلا بنحذف الملف يلي عم يُرفع
             # فعلياً لـ Gemini بهالّحظة ونفشّل التوليد بالكامل (راجع handle_count_start).
@@ -808,17 +819,9 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 @user_locked()
 async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
     text = message.text.strip()
-    if await state.get_state() == QuizState.answering_quiz:
-        if len(text) >= 30:
-            data = await state.get_data()
-            if data.get("attempt_id"):
-                spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
-            await _discard_pending_upload(state)
-            await state.clear()
-            await message.answer("ℹ️ <b>تم إيقاف الاختبار السابق تلقائياً لبدء الكويز النصي الجديد...</b>", parse_mode="HTML")
-        else:
-            await message.answer("⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه عبر الضغط على (⏹️ إيقاف) أولاً.")
-            return
+    action = message_action(message, "text") if len(text) >= 30 else {"kind": "stop"}
+    if await offer_transition(state, message.from_user.id, message.chat.id, action):
+        return
 
     if len(text) < 30:
         await message.answer("⚠️ النص قصير جداً؛ أرسل 30 حرفاً على الأقل لضمان دقة الأسئلة.")
@@ -832,10 +835,13 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         "content_type": "text", "text_length": len(text)
     }))
 
-    await state.update_data(
-        pure_text=text, source_title=text[:20] + "...", input_type="text", items_count=1, is_album=False,
-        content_source="telegram_text", input_channel="telegram",
-    )
+    # Text has no file identity. Retaining a previous file_hash would read or
+    # overwrite the shared classification/quiz cache for an unrelated file.
+    await state.set_data({
+        "pure_text": text, "source_title": text[:20] + "...", "input_type": "text",
+        "items_count": 1, "is_album": False,
+        "content_source": "telegram_text", "input_channel": "telegram",
+    })
     await ask_question_count(
         message, state,
         "✅ تم استقبال النص بنجاح. كم سؤالاً تريد توليده من هذا المحتوى؟\nاختر من الأزرار أدناه، أو أرسل رقماً مخصصاً مباشرة."
@@ -978,7 +984,11 @@ async def handle_multi_cache_selection(call: types.CallbackQuery, state: FSMCont
             await _insufficient_balance(call.message, user_info, cost, action="cached_quiz_use")
             return
             
-        remaining = await update_user_stats(call.from_user.id, cost, len(selected_quiz["quiz_data"]))
+        try:
+            remaining = await update_user_stats(call.from_user.id, cost, len(selected_quiz["quiz_data"]))
+        except WalletDebitError:
+            await call.message.answer(WALLET_DEBIT_ERROR_TEXT)
+            return
         if remaining is None:
             await _insufficient_balance(call.message, await _current_user(call.message, call.from_user), cost, action="cached_quiz_use")
             return
@@ -1042,6 +1052,7 @@ async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContex
         await call.message.edit_text(
             "✏️ اكتب الآن عدد الأسئلة المطلوب (رقم فقط):",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="🔙 الرجوع للملخص", callback_data="qcount_review")],
                 [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
             ]),
         )
@@ -1049,6 +1060,13 @@ async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContex
         log_error(logger, f"Custom count prompt failed: {exc}", exception=exc)
     finally:
         await call.answer()
+
+
+@router.callback_query(QuizState.waiting_for_count, F.data == "qcount_review")
+async def back_to_count_review(call: types.CallbackQuery, state: FSMContext):
+    await _render_question_count_screen(call.bot, call.message.chat.id,
+        call.message.message_id, state, target_for_send=call.message)
+    await call.answer()
 
 
 @router.message(QuizState.waiting_for_count, F.text.isdigit())
@@ -1186,14 +1204,21 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
 
         deduction = None
         if float(user_info["points"]) >= cost:
-            deduction = await update_user_stats(call.from_user.id, cost, count)
+            try:
+                deduction = await update_user_stats(call.from_user.id, cost, count)
+            except WalletDebitError:
+                await state.set_state(QuizState.waiting_for_count)
+                preserve_upload = True
+                await call.message.answer(WALLET_DEBIT_ERROR_TEXT)
+                return
         if deduction is None:
             # 🩹 لسا ما بدأنا الخصم/التوليد فعلياً - نرجّع الحالة لـ waiting_for_count
             # (بدل ما تضل عالقة بـ processing_file_quiz بلا أي توليد شغال فعلياً) حتى
             # يقدر الطالب يلغي الطلب أو يستبدله بملف جديد عادي.
             await state.set_state(QuizState.waiting_for_count)
             preserve_upload = True  # الطالب سيشحن/ينتظر التجديد ثم يعيد الضغط على نفس الملف
-            await _insufficient_balance(call.message, user_info, cost, action="quiz_generation")
+            fresh_balance = await _current_user(call.message, call.from_user)
+            await _insufficient_balance(call.message, fresh_balance, cost, action="quiz_generation")
             return
 
         # من هذه اللحظة فقط يحق لهذا التنفيذ أن يعمل refund. هذا يمنع أي بيانات
@@ -1212,11 +1237,14 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # نحدّث النسخة المحلية أولاً قبل أي await على Redis. لو انقطع Redis مباشرةً
         # بعد نجاح الخصم، يبقى لدينا سجل الخصم الحالي محلياً ونستطيع عمل refund صحيح.
         data["debited_cost"] = cost
+        data["debit_id"] = deduction["debit_id"]
+        data["debited_gift"] = deduction["debited_gift"]
         data["debited_free"] = deduction["debited_free"]
         data["debited_paid"] = deduction["debited_paid"]
         await state.update_data(
             debited_cost=cost, calculated_cost=cost, requested_count=count, execution_mode=mode,
             debited_free=deduction["debited_free"], debited_paid=deduction["debited_paid"],
+            debit_id=deduction["debit_id"], debited_gift=deduction["debited_gift"],
         )
         try:
             await call.message.delete()
@@ -1324,7 +1352,8 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         charged_this_attempt = False
         await _clear_quiz_charge_markers(state)
 
-        await start_loaded_quiz(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
+        # Generation already owns UserLock; do not try to acquire it twice.
+        await start_loaded_quiz.__wrapped__(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)
         await status_msg.delete()
 
     except (FileNotFoundError, InvalidUploadError) as exc:
@@ -1520,9 +1549,8 @@ async def process_web_uploaded_file(
     state = build_state_for_chat(chat_id, user_id)
 
     current_state = await state.get_state()
-    if current_state == QuizState.answering_quiz:
-        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع ملف جديد.")
-        await delete_file_temp(object_path)
+    if await offer_transition(state, user_id, chat_id, {"kind": "web_file",
+            "user_id": user_id, "chat_id": chat_id, "object_path": object_path, "declared_file_name": declared_file_name}):
         return
     if current_state == QuizState.processing_web_file:
         await bot.send_message(chat_id, "⏳ لديك ملف آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
@@ -1611,9 +1639,8 @@ async def process_web_uploaded_images(
     state = build_state_for_chat(chat_id, user_id)
 
     current_state = await state.get_state()
-    if current_state == QuizState.answering_quiz:
-        await bot.send_message(chat_id, "⚠️ لديك اختبار قائم حالياً؛ أتممه أو أوقفه أولاً قبل رفع ألبوم صور جديد.")
-        await delete_file_temp_batch(object_paths)
+    if await offer_transition(state, user_id, chat_id, {"kind": "web_images",
+            "user_id": user_id, "chat_id": chat_id, "object_paths": object_paths}):
         return
     if current_state == QuizState.processing_web_file:
         await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
@@ -1690,4 +1717,5 @@ async def process_web_uploaded_images(
 
 
 files_router = router
+
 

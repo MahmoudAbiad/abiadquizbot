@@ -123,6 +123,99 @@ async def split_pdf_without_orphans(file_path):
             raise
 
 
+
+def split_pdf_with_context_sync(file_path: str, part_count: int) -> List[dict]:
+    """Split a PDF into owned page ranges with one adjacent context page.
+
+    The returned local (1-based) page indices distinguish original pages
+    owned by the chunk from pages included for context only, for both
+    extraction and new-question generation.
+    """
+    import shutil
+    from services.upload_validation import MAX_PDF_PARTS_BYTES, MIN_FREE_DISK_BYTES
+
+    if part_count not in (2, 3):
+        raise ValueError("PDF context splitting requires 2 or 3 parts")
+    get_pdf_page_count_sync(file_path)
+    base = Path(file_path)
+    if shutil.disk_usage(base.parent).free < MAX_PDF_PARTS_BYTES + MIN_FREE_DISK_BYTES:
+        raise ValueError("لا توجد مساحة مؤقتة كافية لمعالجة ملف PDF الكبير، حاول لاحقاً.")
+
+    chunks: List[dict] = []
+    with fitz.open(file_path) as source:
+        page_count = len(source)
+        if page_count < part_count:
+            return []
+        try:
+            for index in range(part_count):
+                owned_start = (page_count * index) // part_count
+                owned_end = (page_count * (index + 1)) // part_count
+                # Half-open original PDF offsets. One page on either side is
+                # context only, never owned by two extraction requests.
+                context_start = max(0, owned_start - 1)
+                context_end = min(page_count, owned_end + 1)
+                leading_context = owned_start - context_start
+                trailing_context = context_end - owned_end
+                chunk_path = str(base.with_name(
+                    f"{base.stem}_{uuid.uuid4().hex}_context{index + 1}.pdf"
+                ))
+                chunk_info = {
+                    "path": chunk_path,
+                    "owned_first": leading_context + 1,
+                    "owned_last": leading_context + (owned_end - owned_start),
+                    "leading_context": leading_context,
+                    "trailing_context": trailing_context,
+                    "page_count": context_end - context_start,
+                    "original_start": owned_start + 1,
+                    "original_end": owned_end,
+                }
+                chunks.append(chunk_info)  # Track before saving partial bytes.
+                with fitz.open() as chunk:
+                    chunk.insert_pdf(source, from_page=context_start, to_page=context_end - 1)
+                    already_written = sum(os.path.getsize(c["path"]) for c in chunks[:-1])
+                    remaining = MAX_PDF_PARTS_BYTES - already_written
+                    with open(chunk_path, "wb") as output:
+                        class BoundedOutput:
+                            def write(self, data):
+                                if output.tell() + len(data) > remaining:
+                                    raise ValueError("PDF temporary parts exceed the disk budget")
+                                return output.write(data)
+                            def seek(self, *args):
+                                return output.seek(*args)
+                            def tell(self):
+                                return output.tell()
+                            def flush(self):
+                                return output.flush()
+                        chunk.save(BoundedOutput(), garbage=3, deflate=True)
+            return chunks
+        except BaseException:
+            for item in chunks:
+                try:
+                    os.remove(item["path"])
+                except FileNotFoundError:
+                    pass
+            raise
+
+
+async def split_pdf_with_context_without_orphans(file_path: str, part_count: int) -> List[dict]:
+    """Wait for the thread on cancellation and delete every temporary chunk."""
+    task = asyncio.create_task(
+        asyncio.to_thread(split_pdf_with_context_sync, file_path, part_count)
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            chunks = await task
+            for item in chunks:
+                try:
+                    os.remove(item["path"])
+                except FileNotFoundError:
+                    pass
+        finally:
+            raise
+
+
 async def _safe_delete_gemini_file(client: genai.Client, file_name: str) -> None:
     """حذف الملفات التابعة لـ Files API من خوادم جوجل بعد انتهاء التوليد لحفظ الخصوصية والنظافة."""
     try:

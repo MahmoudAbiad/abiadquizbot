@@ -1,6 +1,6 @@
 # handlers/admin/ai_control.py
 """🆕 لوحة تحكم الأدمن بالذكاء الاصطناعي: إدارة سلسلة موديلات توليد الأسئلة (cascade)،
-موديل الفحص السريع (detection)، وموديل Groq السريع (groq_fast) - كلها مباشرة من تيليجرام
+موديل الفحص السريع (detection)، والمسار النصي السريع (groq_fast) - كلها مباشرة من تيليجرام
 دون أي تعديل كود أو إعادة نشر (تُخزَّن بجدول ai_model_slots بسوبا بيس). إعدادات النقاط
 (settings.py) قسم مستقل تحت "الإعدادات العامة" - مش هون، لأنها ما إلها علاقة بالموديلات."""
 
@@ -23,11 +23,10 @@ from helpers.ai_models_helper import (
     toggle_model,
     move_model,
     VALID_SLOTS,
-    VALID_PROVIDERS,
     SLOT_LABELS,
-    PROVIDER_LABELS,
     SLOT_DETECTION,
 )
+from helpers.ai_providers_helper import get_providers
 from helpers.supabase_helper import admin_get_quiz_generation_log, get_ai_model_pricing
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
@@ -61,7 +60,8 @@ async def _render_ai_menu(event, state: FSMContext = None):
         "من هون بتقدر تتحكم بكل الموديلات المستخدَمة بالبوت مباشرة، بدون أي تعديل كود:\n\n"
         "🧠 <b>سلسلة توليد الأسئلة:</b> ترتيب الموديلات، تفعيل/تعطيل، إضافة أو حذف موديل\n"
         "🔍 <b>فحص المحتوى السريع:</b> الموديل المستخدم لفحص الرياضيات وتصنيف المادة\n"
-        "⚡ <b>موديل Groq السريع:</b> المسار السريع لتوليد الأسئلة من نص صريح\n"
+        "⚡ <b>المسار النصي السريع:</b> سلسلة مستقلة لتوليد الأسئلة من نص صريح\n"
+        "🔎 <b>نماذج Google:</b> تحديث الكتالوج واختبار نموذج قبل تفعيله\n"
         "📊 <b>سجل توليد الكويزات:</b> وقت كل عملية توليد + الموديل المستخدم فيها\n"
         "⏱ <b>مهلة الطلب:</b> أقصى انتظار لكل محاولة (مفتاح × موديل) قبل الانتقال للتالي"
     )
@@ -97,10 +97,7 @@ async def _render_slot_screen(event, slot: str, state: FSMContext = None):
 
     extra_note = ""
     if slot == SLOT_DETECTION:
-        extra_note = (
-            "\n\n⚠️ ملاحظة: هذا الفحص يحتاج قراءة صور/ملفات مباشرة، لذلك مقيّد حالياً "
-            "بموديلات <b>Gemini</b> أو <b>Groq Vision</b>. عند فشل Gemini ينتقل إلى Groq تلقائياً."
-        )
+        extra_note = "\nيُختار أول نموذج مفعّل يدعم المحتوى. اضبط قدرات الصور وPDF من زر تعديل."
 
     text = f"{slot_label}\n━━━━━━━━━━━━━━━━━━\n\n{body}{extra_note}"
     reply_markup = get_ai_slot_keyboard(slot, models)
@@ -185,7 +182,9 @@ async def delete(call: types.CallbackQuery):
         )
         return
 
-    await remove_model(int(model_id_str), slot)
+    if not await remove_model(int(model_id_str), slot):
+        await call.answer("تعذّر الحذف، حاول مجددًا.", show_alert=True)
+        return
     await call.answer("🗑 تم الحذف.")
     await _render_slot_screen(call, slot)
 
@@ -201,9 +200,7 @@ async def prompt_add_model(call: types.CallbackQuery, state: FSMContext):
 
     await state.clear()
     text = f"➕ <b>إضافة موديل جديد لـ {SLOT_LABELS.get(slot, slot)}</b>\n\nاختر الشركة المزوّدة:"
-    if slot == SLOT_DETECTION:
-        text += "\n\n⚠️ هذا الفحص يقرأ صور/ملفات مباشرة، لذا اختر Gemini أو Groq بنموذج يدعم الصور (qwen/qwen3.8-27b)."
-    await safe_edit_text(call.message, text, reply_markup=get_ai_provider_choice_keyboard(slot))
+    await safe_edit_text(call.message, text, reply_markup=get_ai_provider_choice_keyboard(slot, await get_providers()))
     try:
         await call.answer()
     except TelegramBadRequest:
@@ -215,42 +212,18 @@ async def choose_provider(call: types.CallbackQuery, state: FSMContext):
     remainder = call.data.removeprefix("admin_ai_provider_")
     provider, slot = remainder.split("_", 1)
 
-    if provider not in VALID_PROVIDERS or slot not in VALID_SLOTS:
+    providers = await get_providers()
+    if provider not in providers or not providers[provider]["is_enabled"] or slot not in VALID_SLOTS:
         await call.answer("❌ قيمة غير معروفة.", show_alert=True)
-        return
-
-    # فحص المحتوى يدعم Gemini وGroq Vision فقط.
-    if slot == SLOT_DETECTION and provider not in ("gemini", "groq"):
-        await call.answer(
-            "❌ فحص المحتوى السريع يدعم Gemini أو Groq بنموذج يدعم الصور فقط.",
-            show_alert=True,
-        )
         return
 
     await state.update_data(new_model_slot=slot, new_model_provider=provider)
     await state.set_state(AdminState.waiting_for_new_model_name)
 
-    warning = ""
-    if provider == "vertex" and slot == "cascade":
-        warning = (
-            "\n\n💡 ملاحظة: تأكد من ضبط متغيرات بيئة Vertex الثلاثة على السيرفر "
-            "(GOOGLE_VERTEX_PROJECT / GOOGLE_VERTEX_LOCATION / GOOGLE_VERTEX_SA_KEY_JSON)، "
-            "وإلا سيُتخطى هذا الصف بصمت وقت التوليد (باقي السلسلة تستمر بالعمل طبيعياً). "
-            "اكتب اسم الموديل بالضبط كما يظهر في Vertex AI Model Garden - قد يختلف عن اسمه "
-            "في AI Studio (مثال: قد يحتاج لاحقة -001)."
-        )
-    elif provider not in ("gemini", "vertex") and slot == "cascade":
-        warning = (
-            "\n\n⚠️ ملاحظة: التنفيذ الفعلي لتوليد الأسئلة من الملفات (PDF/صور) عبر "
-            f"{PROVIDER_LABELS.get(provider, provider)} غير مفعّل بعد بالكود (يحتاج دمج SDK "
-            "مخصص لهذه الشركة). سيُضاف الموديل للسلسلة كبيانات، لكن سيُتخطى تلقائياً وقت "
-            "التوليد الفعلي حتى يُضاف هذا التكامل - Gemini/Vertex يبقيان يغطيان كل الطلبات "
-            "بهذه الأثناء."
-        )
-
+    warning = "\nيمكن تعديل قدرات النموذج بعد إضافته من زر تعديل."
     await safe_edit_text(
         call.message,
-        f"✍️ <b>اسم الموديل ({PROVIDER_LABELS.get(provider, provider)})</b>\n\n"
+        f"✍️ <b>اسم الموديل ({html_escape(providers[provider]['label'])})</b>\n\n"
         "أرسل الاسم بالضبط كما يظهر بتوثيق الشركة (مثال: gemini-3.6-flash):"
         f"{warning}",
         reply_markup=get_ai_cancel_keyboard(slot),
@@ -282,16 +255,16 @@ async def process_new_model_name(msg: types.Message, state: FSMContext):
         return
 
     result = await add_model(slot, provider, model_name)
-    await state.clear()
 
     if result is None:
         await msg.answer(
             "❌ تعذّرت الإضافة - إما الاسم يحتوي رموز غير مسموحة (يُسمح فقط بحروف/أرقام/نقطة/"
-            "شرطة/سلاش)، أو مضاف مسبقاً بنفس الاسم والشركة. حاول مجدداً:",
+            "شرطة/سلاش/نقطتين/@)، أو مضاف مسبقاً بنفس الاسم والشركة. حاول مجدداً:",
             reply_markup=get_ai_cancel_keyboard(slot),
         )
         return
 
+    await state.clear()
     await msg.answer(f"✅ تمت إضافة <code>{html_escape(model_name)}</code> بنجاح.", parse_mode="HTML")
     await _render_slot_screen(msg, slot)
 

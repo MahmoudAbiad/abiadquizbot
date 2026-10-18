@@ -16,6 +16,8 @@ from logger import get_logger, log_info
 from handlers.quiz_runner import start_loaded_quiz
 from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 from utils import safe_title
+from helpers.student_ui import UPLOAD_TEXT, HELP_TEXT, HOME_TEXT, welcome_text as build_welcome_text
+from helpers.supabase_helper.gifts import gift_balances
 
 logger = get_logger(__name__)
 router = Router()
@@ -97,25 +99,6 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         
         # حماية التدفق: التحقق من وجود كويز معلق قادم من رابط عميق
         if command.args and (command.args.startswith("share_") or command.args.startswith("quiz_")):
-            current_state = await state.get_state()
-            
-            # إذا كان المستخدم يحل اختباراً حالياً، نمنع دهس البيانات ونطلب تأكيده بوضوح
-            if current_state == QuizState.answering_quiz:
-                await state.update_data(interrupted_deep_link=command.args)
-                overwrite_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                    [types.InlineKeyboardButton(text="⚠️ نعم، ألغِ الحالي وافتح الجديد", callback_data="deep_link_overwrite_confirm")],
-                    [types.InlineKeyboardButton(text="🔄 لا، أريد إكمال اختباري الحالي", callback_data="deep_link_overwrite_cancel")]
-                ])
-                await msg.answer(
-                    "⚠️ <b>تنبيه حرج!</b>\n\n"
-                    "أنت تقوم بحل اختبار نشط حالياً. الضغط على الرابط سيؤدي إلى خسارة تقدمك الحالي وإلغاء الكويز.\n"
-                    "هل أنت متأكد من رغبتك في إنهاء الاختبار الحالي وفتح الرابط الجديد؟",
-                    reply_markup=overwrite_kb,
-                    parse_mode="HTML"
-                )
-                return
-            
-            # إذا كانت حالته نظيفة، يتم تشغيل الكويز مباشرة
             await launch_deep_linked_quiz(msg, state, command.args)
             return
 
@@ -138,6 +121,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         points = user_info["points"]
         free_points = user_info.get("free_points", 0)
         paid_points = user_info.get("paid_points", 0)
+        gift_points = user_info.get("gift_points", 0)
         status = user_info["status"]
 
         # 🆕 تسجيل حدث بدء تشغيل البوت لتتبع نمط عودة/تجدد الطلاب
@@ -160,35 +144,21 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         # المحذوف الآن بالكامل - راجع docs/HISTORY_LOG.md لتفاصيل الإزالة).
         if status == "new":
             intro_text = (
-                "👋 <b>أهلاً بك في بوت الكويزات الذكي!</b>\n"
-                f"🎁 أضفنا لحسابك <b>{points} نقطة مجانية</b> — استخدمها الآن لتوليد أول اختبار لك 🚀"
+                "👋 <b>أهلاً بك في أبيض منشئ الكويزات</b>\n\n"
+                "حوّل ملفاتك وصورك ونصوصك إلى أسئلة تفاعلية للمراجعة.\n"
+                f"🎁 رصيد هديتك: <b>{gift_points:g} نقطة</b>.\n\n"
+                "ابدأ بإرسال محتواك، وراجع التكلفة قبل تأكيد التوليد."
             )
             start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="🚀 أرسل أول ملف الآن", callback_data="new_user_send_now")]
+                [types.InlineKeyboardButton(text="📝 إنشاء أول كويز", callback_data="new_user_send_now")],
+                [types.InlineKeyboardButton(text="🎁 صلاحية هديتي", callback_data="gift:list:0")]
             ])
 
             await msg.answer(intro_text, parse_mode="HTML", reply_markup=start_kb)
             log_info(logger, f"User {msg.from_user.id} started bot. Status: new, Points: {points}")
             return
 
-        if status == "renewed":
-            welcome_text = (
-                "☀️ <b>يا أهلاً، يومك سعيد!</b>\n\n"
-                f"دائماً معك في رحلتك الدراسية.. تم تجديد رصيدك اليومي وإضافة <b>{free_points:.0f} نقطة مجانية جديدة</b> لحسابك. 🔄\n"
-            )
-        else:
-            welcome_text = "👋 <b>يا مرحباً بك مجدداً!</b>\n جاهز لاختبار جديد اليوم؟ ✍️\n"
-        
-        # 📌 نسخة مختصرة وقابلة للمسح البصري (Scannable): سطر واحد للبدء + صندوق مضغوط
-        # للتكلفة والرصيد. الشرح التفصيلي لخطوات الاستخدام انتقل بالكامل إلى الدليل
-        # التفاعلي (/help أو زر «كيف يعمل البوت؟») لتفادي إغراق المستخدم بجدار نصوص.
-        welcome_text += (
-            f"\n📥 <b>ابدأ الآن:</b> أرسل ملف (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشراً — وحدد عدد الأسئلة. ذلك كل شيء! 🔥\n\n"
-            f"💰 <code>1</code> نقطة تقريباً لكل صفحة/سؤال، وخصم <code>90%</code> عند إعادة استخدام كويز جاهز.\n"
-            f"📊 رصيدك: <code>{points:.2f}</code> نقطة (🎁 {free_points:.2f} · 💳 {paid_points:.2f})\n\n"
-            f"🎯 شارك رابط دعوتك مع زملائك واكسب نقاطاً إضافية مع كل مشترك جديد! 🎁\n"
-           #f"❓ محتاج شرح أوضح بالخطوات؟ اضغط 🎬 «كيف يعمل البوت؟» بالأسفل، أو أرسل /help بأي وقت."
-        )
+        welcome_text = build_welcome_text(points, free_points, gift_points, paid_points, status == "renewed")
         
         await msg.answer(
             welcome_text,
@@ -209,24 +179,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
 
 @router.callback_query(F.data == "deep_link_overwrite_confirm")
 async def handle_deep_link_overwrite_confirm(call: types.CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-        payload = data.get("interrupted_deep_link")
-        
-        # إصلاح التتبع: إغلاق محاولة الكويز القائم قبل مسح الحالة كي لا تبقى معلقة بالداتابيز
-        if data.get("attempt_id"):
-            spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
-
-        await state.clear()
-        if payload:
-            await call.message.delete()
-            await launch_deep_linked_quiz(call.message, state, payload)
-        else:
-            await call.answer("❌ عذراً، انتهت صلاحية هذا الطلب.", show_alert=True)
-    except Exception as e:
-        logger.error(f"Error in deep_link_overwrite_confirm: {e}")
-    finally:
-        await call.answer()
+    await call.answer("هذا زر قديم. افتح رابط الاختبار مجددًا لاختيار الانتقال بأمان.", show_alert=True)
 
 @router.callback_query(F.data == "deep_link_overwrite_cancel")
 async def handle_deep_link_overwrite_cancel(call: types.CallbackQuery, state: FSMContext):
@@ -249,7 +202,7 @@ async def ack_new_user_start(call: types.CallbackQuery):
     أزرار/خيارات إضافية قبل أن يجرّب صلب المنتج فعلياً ويحصل على أول نتيجة ملموسة."""
     try:
         await call.message.edit_text(
-            "📥 تمام! أرسل الآن ملفك (PDF/Word/PPT/TXT)، صورة، أو نصاً مباشرة في هذه المحادثة 🔥",
+            UPLOAD_TEXT,
             parse_mode="HTML",
         )
         spawn(log_usage_event(call.from_user.id, "start_cta_acknowledged"))
@@ -257,6 +210,73 @@ async def ack_new_user_start(call: types.CallbackQuery):
         logger.error(f"Error in ack_new_user_start: {e}")
     finally:
         await call.answer()
+
+
+def _student_info_keyboard():
+    from constants import WEBAPP_PUBLIC_BASE_URL
+    rows = []
+    if WEBAPP_PUBLIC_BASE_URL:
+        rows.append([types.InlineKeyboardButton(text="📤 رفع ملف كبير أو محاضرة", callback_data="upload_open:all")])
+    rows.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="student_home"),
+                 types.InlineKeyboardButton(text="💬 الدعم", url=SUPPORT_BOT_URL)])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _student_home_text(user_id: int) -> str:
+    """Rebuild the home copy with the current wallet without modifying user/FSM state."""
+    try:
+        result = await supabase.table("users").select("free_points,paid_points").eq("user_id", user_id).limit(1).execute()
+        if not result.data:
+            return HOME_TEXT
+        wallet = result.data[0]
+        gifts = await gift_balances([user_id])
+        free = float(wallet.get("free_points") or 0)
+        paid = float(wallet.get("paid_points") or 0)
+        gift = float(gifts.get(user_id, 0))
+        return build_welcome_text(free + paid + gift, free, gift, paid)
+    except Exception as exc:
+        logger.warning(f"Could not refresh student home balance: {exc}")
+        return HOME_TEXT
+
+
+async def _show_student_navigation_screen(call: types.CallbackQuery, text: str, reply_markup):
+    """Navigate within one Telegram message; fall back only if editing is unavailable."""
+    try:
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        return
+    except TelegramBadRequest as exc:
+        # Repeated taps on an already-open screen must not create extra messages.
+        if "message is not modified" in str(exc).lower():
+            return
+        logger.warning(f"Could not edit student navigation message: {exc}")
+    except (AttributeError, TypeError) as exc:
+        # Old/inaccessible callback messages may not support edit_text.
+        logger.warning(f"Student navigation message is not editable: {exc}")
+
+    # Fallback for messages that Telegram no longer allows us to edit.
+    send = getattr(call.message, "answer", None)
+    if callable(send):
+        await send(text, parse_mode="HTML", reply_markup=reply_markup)
+    else:
+        await bot.send_message(call.from_user.id, text, parse_mode="HTML", reply_markup=reply_markup)
+
+
+@router.callback_query(F.data.in_({"student_create_quiz", "student_help", "student_home"}), F.message.chat.type == "private")
+async def student_navigation(call: types.CallbackQuery):
+    # Informational screens never clear FSM or replace an ongoing quiz/upload.
+    await call.answer()
+    if call.data == "student_home":
+        info = await bot.get_me()
+        menu = await get_main_menu_keyboard(info.username, call.from_user.id)
+        await _show_student_navigation_screen(call, await _student_home_text(call.from_user.id), menu)
+    else:
+        content = UPLOAD_TEXT if call.data == "student_create_quiz" else HELP_TEXT
+        await _show_student_navigation_screen(call, content, _student_info_keyboard())
+
+
+@router.message(Command("help"))
+async def student_help(msg: types.Message):
+    await msg.answer(HELP_TEXT, parse_mode="HTML", reply_markup=_student_info_keyboard())
 
 
 @router.callback_query(F.data == "recharge_info")
@@ -341,6 +361,7 @@ async def set_bot_commands(bot):
     # ملاحظة: هذه نسخة مستقلة تُستخدم فقط في وضع Polling المحلي (main.py)؛
     # النسخة الفعلية المستخدمة على Railway/الويبهوك هي config.py::set_bot_commands
     commands = [
+        types.BotCommand(command="wallet", description="رصيدي وهداياي وصلاحيتها"),
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
         types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
     ]
@@ -383,3 +404,4 @@ async def cmd_channel(message: types.Message):
     
     # تسجيل حدث فتح القناة
     spawn(log_usage_event(message.from_user.id, "channel_opened"))
+

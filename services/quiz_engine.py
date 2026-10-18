@@ -110,9 +110,10 @@ async def _send_math_image_question(
         image_bytes = await render_question_image_async(q, idx, total, is_ar)
         object_path = _question_image_object_path(quiz_id, idx, q)
         image_url = await upload_quiz_question_image(image_bytes, object_path)
-        if image_url and quiz_id and _is_valid_uuid(quiz_id):
-            q["image_url"] = image_url  # يبقى بالذاكرة طوال الجلسة الحالية أيضاً
-            spawn(save_question_image_url(quiz_id, idx, image_url))
+        if image_url:
+            q["image_url"] = image_url  # Cache in ephemeral practice sessions too.
+            if quiz_id and _is_valid_uuid(quiz_id):
+                spawn(save_question_image_url(quiz_id, idx, image_url))
 
     caption = f"السؤال {idx + 1} من {total} 📝"
     try:

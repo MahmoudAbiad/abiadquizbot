@@ -1,0 +1,2 @@
+# Isolated test dependency; not needed by the bot.
+fakeredis[lua]==2.39.0

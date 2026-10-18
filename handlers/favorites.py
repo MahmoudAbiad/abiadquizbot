@@ -1,4 +1,5 @@
 import asyncio
+from html import escape
 from task_utils import spawn
 from aiogram import Router, types, F
 from aiogram.filters import Command
@@ -35,15 +36,15 @@ router.message.filter(F.chat.type == "private")
 
 def _build_favorites_text(favorites: list, sort_mode: str, search_query: str) -> str:
     """تنسيق بVisual Breadcrumbs مريح لعين الطالب أثناء التصفح"""
-    lines = ["⭐ <b>قائمتي المفضلة المنظمة</b>\n"]
+    lines = ["⭐ <b>اختباراتي المحفوظة</b>\n"]
     lines.append(f"📌 الفرز الحالي: {'حسب القسم' if sort_mode == 'section' else 'الأحدث'}")
     
     if search_query:
-        lines.append(f"🔎 تصفية البحث: {search_query}")
+        lines.append(f"🔎 البحث: {escape(search_query)}")
     lines.append("")
 
     if not favorites:
-        lines.append(MSG_FAVORITES_SEARCH_EMPTY if search_query else "لا توجد كويزات محفوظة بعد في حسابك.")
+        lines.append(MSG_FAVORITES_SEARCH_EMPTY if search_query else "لم تحفظ أي كويز بعد.\nأنشئ أول كويز، ثم اضغط «حفظ بالمفضلة» من شاشة النتيجة لتجده هنا.")
     else:
         lines.append("اختر الاختبار المطلوب من القائمة أدناه لعرض تفاصيله أو بدئه:")
         
@@ -61,7 +62,7 @@ def _build_sections_text(sections: list, quiz_counts: dict[str, int]) -> str:
         title = section.get("title") or DEFAULT_FAVORITE_SECTION_TITLE
         section_id = section.get("section_id")
         quiz_count = quiz_counts.get(section_id, 0)
-        lines.append(f"🔹 {title} — يحتوي على ({quiz_count}) كويز")
+        lines.append(f"🔹 {escape(title)} — {quiz_count} كويز")
         
     lines.append("\nاضغط على اسم القسم لاستعراض وحل اختباراته:")
     return "\n".join(lines)
@@ -238,8 +239,8 @@ async def show_favorite_details(call: types.CallbackQuery, state: FSMContext):
         
         details_text = (
             f"📑 <b>تفاصيل الكويز المحفوظ:</b>\n\n"
-            f"📌 <b>العنوان:</b> {title}\n"
-            f"📁 <b>القسم الأكاديمي:</b> {section_title}\n"
+            f"📌 <b>العنوان:</b> {escape(title)}\n"
+            f"📁 <b>القسم:</b> {escape(section_title)}\n"
             f"🔢 <b>إجمالي الأسئلة:</b> {questions_count} أسئلة تفاعلية\n\n"
             f"ماذا تريد أن تفعل بهذا الكويز حالياً؟"
         )

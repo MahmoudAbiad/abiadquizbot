@@ -1,9 +1,9 @@
 name: Deterministic reliability tests
 on:
   push:
-    branches: [master]
+    branches: [master, test]
   pull_request:
-    branches: [master]
+    branches: [master, test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -11,6 +11,15 @@ jobs:
   regressions:
     runs-on: ubuntu-latest
     services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: gift_admin_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gift_admin_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
       redis:
         image: redis:7-alpine
         ports: ['6379:6379']
@@ -23,10 +32,24 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install test dependencies only
-        run: python -m pip install pymupdf pillow python-docx python-pptx redis aiogram==3.29.1
+        run: python -m pip install pymupdf pillow python-docx python-pptx redis cachetools==5.3.3 aiogram==3.31.0 httpx==0.28.1 google-genai==2.10.0 matplotlib==3.9.2 'reportlab>=4.0.0' arabic-reshaper python-bidi fastapi==0.115.12
       - name: Compile repository
         run: python -m compileall -q .
       - name: Run regression tests against local Redis
         env:
           TEST_REDIS_URL: redis://localhost:6379/15
         run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify provider SQL in isolated PostgreSQL
+        run: |
+          npm ci --prefix tests/sql --ignore-scripts
+          node tests/sql/ai_providers_test.mjs
+      - name: Verify gift wallet admin and concurrent transactions
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/gift_admin_test
+        run: |
+          node tests/sql/gift_wallet_test.mjs
+          node tests/sql/gift_admin_test.mjs

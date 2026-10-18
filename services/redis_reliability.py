@@ -85,7 +85,7 @@ def user_locked(*, web_kind=None, delay=0, wait_seconds=0):
                 await asyncio.sleep(delay)
             from config import redis_client, bot
             bound = signature.bind(*args, **kwargs).arguments
-            event = bound.get('call') or bound.get('message')
+            event = bound.get('call') or bound.get('message') or bound.get('msg_or_call')
             user_id = bound.get('user_id') or event.from_user.id
             lock = UserLock(redis_client, user_id)
             try:
@@ -99,7 +99,7 @@ def user_locked(*, web_kind=None, delay=0, wait_seconds=0):
             if not acquired:
                 text = '⏳ طلبك قيد المعالجة بالفعل، الرجاء الانتظار حتى ينتهي قبل الضغط مجدداً.'
                 if event:
-                    if bound.get('call'):
+                    if bound.get('call') or getattr(event, 'data', None):
                         await event.answer(text, show_alert=True)
                     else:
                         await event.answer(text)

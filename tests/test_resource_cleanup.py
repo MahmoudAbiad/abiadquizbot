@@ -29,7 +29,7 @@ class ResourcesTests(unittest.IsolatedAsyncioTestCase):
                 downloaded.append(max_size_bytes)
                 if max_size_bytes < 15:return False
                 Path(dest).write_bytes(b'x'*15);return True
-            env=load_functions('handlers/files.py',{'process_web_uploaded_images'},
+            env=load_functions('handlers/files.py',{'process_web_uploaded_images'}, offer_transition=AsyncMock(return_value=False),
                 asyncio=asyncio,os=os,uuid=uuid,build_state_for_chat=lambda *a:state,
                 QuizState=types.SimpleNamespace(answering_quiz='answering',processing_web_file='web',processing_file_quiz='quiz'),
                 PENDING_REQUEST_STATES=[],bot=types.SimpleNamespace(send_message=AsyncMock(return_value=types.SimpleNamespace(delete=AsyncMock()))),
@@ -98,8 +98,9 @@ class ResourcesTests(unittest.IsolatedAsyncioTestCase):
         query=Mock();query.insert.return_value=query;query.select.return_value=query;query.eq.return_value=query
         query.execute=AsyncMock(side_effect=[UniqueError(),types.SimpleNamespace(data=[row])])
         env=load_functions('helpers/supabase_helper/users.py',{'_add_new_user','_balance_payload'},
-            supabase=types.SimpleNamespace(table=lambda *a:query),get_setting=AsyncMock(return_value=2),
+            supabase=types.SimpleNamespace(table=lambda *a:query,rpc=lambda *a:query),get_setting=AsyncMock(return_value=2),
             _check_daily_renewal=AsyncMock(return_value={'points':7}),logger=Mock(),log_error=Mock())
         result=await env['_add_new_user'](1,'name','first','last',None,'2026-10-02')
         self.assertEqual(result,{'points':7})
         env['_check_daily_renewal'].assert_awaited_once_with(1,row,'2026-10-02')
+

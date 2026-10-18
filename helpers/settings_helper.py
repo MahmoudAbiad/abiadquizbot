@@ -25,6 +25,8 @@ SETTINGS_CACHE_TTL_SECONDS = 30
 # القيم الافتراضية (خط أمان أخير) لو تعذّر الوصول لجدول app_settings لأي سبب.
 _DEFAULTS: Dict[str, float] = {
     "welcome_points": float(WELCOME_POINTS),
+    "welcome_gift_days": 30,
+    "referral_gift_days": 0,
     "daily_renewal_points": float(DAILY_RENEWAL_POINTS),
     "referral_bonus_points": float(REFERRAL_BONUS_POINTS),
     # 🩹 كانت ثابتاً وحيداً بـ constants.py بلا أي ربط فعلي بعتبة vote_on_classification
@@ -45,6 +47,8 @@ _DEFAULTS: Dict[str, float] = {
 
 # تسميات عرض للوحة الإدارة (تُستخدم في الرسائل والأزرار).
 SETTING_LABELS: Dict[str, str] = {
+    "welcome_gift_days": "⏳ صلاحية هدية الترحيب بالأيام (0 = بلا انتهاء)",
+    "referral_gift_days": "⏳ صلاحية هدية الإحالة بالأيام (0 = بلا انتهاء)",
     "welcome_points": "🎁 نقاط الترحيب (عند أول تسجيل)",
     "daily_renewal_points": "🔄 نقاط التجديد اليومي المجاني",
     "referral_bonus_points": "🤝 مكافأة الإحالة (لكل صديق)",
@@ -70,6 +74,8 @@ SETTING_MIN_VALUES: Dict[str, float] = {
 # 🆕 حدود قصوى مخصصة (الحد العام لكل الإعدادات 100000 بـ handlers/admin/settings.py - غير
 # منطقي لمهلة شبكة: 600 ثانية = 10 دقائق سقف معقول لطلب واحد).
 SETTING_MAX_VALUES: Dict[str, float] = {
+    "welcome_gift_days": 3650,
+    "referral_gift_days": 3650,
     "ai_request_timeout": 600,
 }
 
@@ -186,3 +192,4 @@ async def get_ai_request_timeout() -> float:
     low = SETTING_MIN_VALUES["ai_request_timeout"]
     high = SETTING_MAX_VALUES["ai_request_timeout"]
     return max(low, min(high, float(value)))
+

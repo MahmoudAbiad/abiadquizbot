@@ -22,6 +22,7 @@ from docx.shared import Cm, Pt, RGBColor
 from logger import get_logger, log_error
 from services.image_quiz_renderer import render_question_image
 from services.latex_text import latex_to_plain
+from services.print_quiz_renderer import iter_print_blocks
 
 logger = get_logger(__name__)
 
@@ -320,11 +321,13 @@ def _add_table_cell_text(cell, text: str, font_name: str, size_pt: float, is_ar:
     _style_run(run, font_name, size_pt, bold=bold, color=color, rtl=is_ar, cs_font=cs_font)
 
 
-def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE) -> bytes:
+def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE, include_answers: bool = True) -> bytes:
     """يبني ملف Word جميل التنسيق للكويز، مع اتجاه تلقائي حسب اللغة وستايل شكلي قابل للاختيار
     (simple / modern / academic)."""
     if not questions:
         raise ExportError("لا توجد أسئلة لتصديرها.")
+    if len(questions) > 200 or sum(len(str(q)) for q in questions) > 500000:
+        raise ExportError("هذا الكويز كبير للتصدير دفعة واحدة؛ قسّمه إلى اختبارات أصغر (حتى ٢٠٠ سؤال).")
 
     style = normalize_style(style)
     cfg = _DOCX_STYLES[style]
@@ -380,7 +383,10 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
         _set_paragraph_border_bottom(info_p, "333333", size=10)
         info_p.paragraph_format.space_after = Pt(14)
     else:
-        doc.add_paragraph()
+        info = doc.add_paragraph("الاسم: ______________  الشعبة: ______  التاريخ: __________" if is_ar
+                                 else "Name: ______________  Class: ______  Date: __________")
+        if is_ar:
+            _set_paragraph_rtl(info)
 
     # ==================== الأسئلة ====================
     total_questions = len(questions)
@@ -394,18 +400,16 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
         # هيك تُصدَّر المسألة كاملة (نص + معادلات + جدول لو وُجد) في وحدة واحدة
         # غير قابلة للتقسيم أو التشويه، تماماً كما تظهر للطالب أثناء حل الكويز.
         if _is_math_question(q):
-            img_bytes = _render_math_question_image_bytes(q, idx - 1, total_questions, is_ar)
-            if img_bytes:
-                img_p = doc.add_paragraph()
-                img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                img_run = img_p.add_run()
-                img_run.add_picture(io.BytesIO(img_bytes), width=Cm(min(usable_width_cm, 15)))
-                img_p.paragraph_format.space_after = Pt(12)
-                continue
-            # فشل الرسم لسبب ما - نكمل للمسار النصي العادي أدناه كخط أمان أخير
-            # (نظّف علامات $ ورموز LaTeX الخام أولاً بدل عرضها كما هي)
-            q_text = latex_to_plain(q_text)
-            options = [latex_to_plain(str(o)) for o in options]
+            try:
+                for img_bytes in iter_print_blocks(q, is_ar, label):
+                    img_p = doc.add_paragraph()
+                    img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    img_p.add_run().add_picture(io.BytesIO(img_bytes), width=Cm(usable_width_cm))
+                    img_p.paragraph_format.space_after = Pt(6)
+                    del img_bytes
+            except Exception as exc:
+                raise ExportError(f"تعذّر تنسيق السؤال {idx} للطباعة؛ راجع صيغة المعادلات أو حجم الجدول.") from exc
+            continue
 
         if cfg["question_box"]:
             tbl = doc.add_table(rows=1, cols=1)
@@ -472,53 +476,35 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
                 _set_paragraph_border_bottom(spacer, "AAAAAA", size=6)
             spacer.paragraph_format.space_after = Pt(10)
 
-    # ==================== جدول الإجابات الصحيحة ====================
-    doc.add_page_break()
-    head_p = doc.add_paragraph()
-    head_text = "🗝️ جدول الإجابات الصحيحة" if is_ar else "🗝️ Answer Key"
-    head_run = head_p.add_run(head_text)
-    _style_run(head_run, body_font, 16, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
-    if is_ar:
-        _set_paragraph_rtl(head_p, align_right=True)
-    head_p.paragraph_format.space_after = Pt(10)
-
-    table = doc.add_table(rows=1, cols=3)
-    table.style = "Table Grid"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    if is_ar:
-        _set_table_rtl(table)
-
-    headers = ["#", "الإجابة الصحيحة", "الشرح"] if is_ar else ["#", "Correct Answer", "Explanation"]
-    widths = [1.5, 5.0, 9.5]
-    hdr_cells = table.rows[0].cells
-    for cell, htext, w in zip(hdr_cells, headers, widths):
-        _add_table_cell_text(cell, htext, body_font, 11.5, is_ar, bold=True, color=cfg["table_header_fg"], cs_font=cs_font)
-        _shade_cell(cell, cfg["table_header_bg"])
-        _set_cell_width(cell, w)
-
-    for idx, q in enumerate(questions, 1):
-        options = q.get("options") or []
-        correct_idx = q.get("correct_option_id")
-        try:
-            correct_idx = int(correct_idx)
-        except (TypeError, ValueError):
-            correct_idx = -1
-        correct_letter = letters[correct_idx] if 0 <= correct_idx < len(letters) else "-"
-        correct_text = latex_to_plain(str(options[correct_idx])) if 0 <= correct_idx < len(options) else "-"
-        explanation = latex_to_plain(str(q.get("explanation") or "").strip()) or ("لا يوجد شرح" if is_ar else "No explanation")
-
-        row_cells = table.add_row().cells
-        values = [str(idx), f"{correct_letter}) {correct_text}", explanation]
-        for cell, val, w in zip(row_cells, values, widths):
-            _add_table_cell_text(cell, val, body_font, 10.5, is_ar, cs_font=cs_font)
-            _set_cell_width(cell, w)
-        if cfg["table_zebra"] and idx % 2 == 0:
-            for cell in row_cells:
-                _shade_cell(cell, cfg["table_zebra"])
-
+    if include_answers:
+        doc.add_page_break()
+        doc.add_heading("الإجابات والحلول" if is_ar else "Answers and solutions", level=1)
+        for idx, q in enumerate(questions, 1):
+            answer = _answer_print_question(q, is_ar)
+            try:
+                for img_bytes in iter_print_blocks(answer, is_ar, f"{idx}"):
+                    p = doc.add_paragraph()
+                    p.add_run().add_picture(io.BytesIO(img_bytes), width=Cm(usable_width_cm))
+                    del img_bytes
+            except Exception as exc:
+                raise ExportError(f"تعذّر تنسيق إجابة السؤال {idx}؛ راجع المعادلات.") from exc
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
+
+
+def _answer_print_question(q, is_ar):
+    options = q.get("options") or []
+    try:
+        correct = int(q.get("correct_option_id"))
+    except (ValueError, TypeError):
+        correct = -1
+    letters = _letters_for(is_ar)
+    label = letters[correct] if 0 <= correct < len(letters) else "-"
+    answer = str(options[correct]) if 0 <= correct < len(options) else "-"
+    prefix = "الإجابة الصحيحة" if is_ar else "Correct answer"
+    explanation = str(q.get("explanation") or "").strip()
+    return {"question": f"{prefix}: {label}) {answer}\n{explanation}", "options": []}
 
 
 def build_document_docx(title: str, text: str, style: str = DEFAULT_STYLE) -> bytes:
@@ -759,9 +745,10 @@ _PDF_STYLES = {
 
 
 class _QuizPDFRenderer:
-    def __init__(self, title: str, questions: List[Dict[str, Any]], is_ar: bool, style: str = DEFAULT_STYLE):
+    def __init__(self, title: str, questions: List[Dict[str, Any]], is_ar: bool, style: str = DEFAULT_STYLE, include_answers: bool = True):
         self.title = title or ("كويز" if is_ar else "Quiz")
         self.questions = questions
+        self.include_answers = include_answers
         self.is_ar = is_ar
         self.letters = _letters_for(is_ar)
         self.style = normalize_style(style)
@@ -868,29 +855,29 @@ class _QuizPDFRenderer:
             self.c.setLineWidth(1)
             self.c.line(self.margin, self.y + 8, self.page_w - self.margin, self.y + 8)
             self.y -= 12
+        else:
+            info = "الاسم: ______________  الشعبة: ______  التاريخ: __________" if self.is_ar else "Name: ______________  Class: ______  Date: __________"
+            self._draw_paragraph(info, 10, gap_after=10)
+
+    def _draw_print_question(self, q, heading):
+        for img_bytes in iter_print_blocks(q, self.is_ar, heading):
+            reader = ImageReader(io.BytesIO(img_bytes))
+            w, h = reader.getSize()
+            display_w = self.page_w - 2 * self.margin
+            display_h = display_w * h / w
+            self._ensure_space(display_h + 10)
+            self.c.drawImage(reader, self.margin, self.y - display_h,
+                             width=display_w, height=display_h)
+            self.y -= display_h + 10
+            del reader, img_bytes
 
     def _draw_math_question_image(self, q: Dict[str, Any], idx0: int) -> bool:
-        """يرسم صورة السؤال الرياضي (نفس محرك الرسم الفعلي) داخل صفحة الـ PDF بدل
-        كتابة رموز LaTeX خام كنص - يرجع True لو نجح الرسم فعلياً، أو False لو تعذّر
-        (فيسقط المستدعي تلقائياً للمسار النصي العادي كخط أمان أخير)."""
-        img_bytes = _render_math_question_image_bytes(q, idx0, len(self.questions), self.is_ar)
-        if not img_bytes:
-            return False
         try:
-            reader = ImageReader(io.BytesIO(img_bytes))
-            img_w_px, img_h_px = reader.getSize()
-            max_w = self.page_w - 2 * self.margin
-            display_w = min(max_w, max_w * 0.92)
-            display_h = display_w * (img_h_px / img_w_px)
-            self._ensure_space(display_h + 14)
-            x = self.margin + (max_w - display_w) / 2
-            self.c.drawImage(reader, x, self.y - display_h, width=display_w, height=display_h,
-                              preserveAspectRatio=True, mask="auto")
-            self.y -= (display_h + 14)
+            heading = f"السؤال {idx0 + 1}" if self.is_ar else f"Question {idx0 + 1}"
+            self._draw_print_question(q, heading)
             return True
-        except Exception as e:
-            log_error(logger, f"Failed drawing math question image in PDF (idx={idx0}): {e}", exception=e)
-            return False
+        except Exception as exc:
+            raise ExportError(f"تعذّر تنسيق السؤال {idx0 + 1} للطباعة؛ راجع صيغة المعادلات أو حجم الجدول.") from exc
 
     def _render_questions(self):
         cfg = self.cfg
@@ -957,106 +944,35 @@ class _QuizPDFRenderer:
             self.y = top_y - content_h - 12
 
     def _render_answer_table(self):
-        cfg = self.cfg
         self._new_page()
-        title = "🗝️ جدول الإجابات الصحيحة" if self.is_ar else "🗝️ Answer Key"
-        self._draw_paragraph(title, 15, bold=True, color=cfg["accent"], gap_after=12)
-
-        total_w = self.page_w - 2 * self.margin
-        col_ratios = [0.09, 0.31, 0.60]
-        col_widths = [total_w * r for r in col_ratios]
-        headers = ["#", "الإجابة الصحيحة", "الشرح"] if self.is_ar else ["#", "Correct Answer", "Explanation"]
-
-        # للعربي: أول عمود منطقي يكون في أقصى اليمين
-        if self.is_ar:
-            col_x_right = [self.page_w - self.margin]
-            for w in col_widths[:-1]:
-                col_x_right.append(col_x_right[-1] - w)
-            col_x_left = [x - w for x, w in zip(col_x_right, col_widths)]
-        else:
-            col_x_left = [self.margin]
-            for w in col_widths[:-1]:
-                col_x_left.append(col_x_left[-1] + w)
-            col_x_right = [x + w for x, w in zip(col_x_left, col_widths)]
-
-        row_font_size = 9.5
-        pad = 5
-        font_en = self.font_en_regular
-        font_ar = self.font_ar_regular or font_en
-        font_en_b = self.font_en_bold
-        font_ar_b = self.font_ar_bold or font_en_b
-
-        def draw_row(values, is_header=False, zebra=False):
-            fen, far = (font_en_b, font_ar_b) if is_header else (font_en, font_ar)
-            # التفاف كل خلية أولاً لتحديد ارتفاع الصف
-            wrapped_cols = []
-            for val, w in zip(values, col_widths):
-                wrapped_cols.append(_wrap_line(str(val), self.is_ar, fen, far, row_font_size, w - 2 * pad))
-            n_lines = max(len(w) for w in wrapped_cols)
-            row_h = n_lines * (row_font_size + 4) + 2 * pad
-            self._ensure_space(row_h)
-
-            top_y = self.y
-            if is_header:
-                self.c.setFillColor(HexColor(cfg["table_header_bg"]))
-                self.c.rect(self.margin, top_y - row_h, total_w, row_h, fill=1, stroke=0)
-            elif zebra and cfg["table_zebra"]:
-                self.c.setFillColor(HexColor(cfg["table_zebra"]))
-                self.c.rect(self.margin, top_y - row_h, total_w, row_h, fill=1, stroke=0)
-
-            self.c.setStrokeColor(HexColor("#BBBBBB"))
-            self.c.rect(self.margin, top_y - row_h, total_w, row_h, fill=0, stroke=1)
-            for x_left in col_x_left[1:]:
-                self.c.line(x_left, top_y, x_left, top_y - row_h)
-
-            text_color = cfg["table_header_fg"] if is_header else "#111111"
-            for lines, x_left, x_right in zip(wrapped_cols, col_x_left, col_x_right):
-                line_y = top_y - pad - row_font_size
-                for line in lines:
-                    shaped = _shape(line, self.is_ar)
-                    runs = _split_script_runs(shaped)
-                    run_w = sum(pdfmetrics.stringWidth(seg, far if a else fen, row_font_size)
-                                for seg, a in runs)
-                    cx = (x_right - pad - run_w) if self.is_ar else (x_left + pad)
-                    self.c.setFillColor(HexColor(text_color))
-                    for seg, seg_is_ar in runs:
-                        f = far if seg_is_ar else fen
-                        self.c.setFont(f, row_font_size)
-                        self.c.drawString(cx, line_y, seg)
-                        cx += pdfmetrics.stringWidth(seg, f, row_font_size)
-                    line_y -= (row_font_size + 4)
-            self.y = top_y - row_h
-
-        draw_row(headers, is_header=True)
+        self._draw_paragraph("الإجابات والحلول" if self.is_ar else "Answers and solutions",
+                             15, bold=True, gap_after=12)
         for idx, q in enumerate(self.questions, 1):
-            options = q.get("options") or []
-            correct_idx = q.get("correct_option_id")
             try:
-                correct_idx = int(correct_idx)
-            except (TypeError, ValueError):
-                correct_idx = -1
-            correct_letter = self.letters[correct_idx] if 0 <= correct_idx < len(self.letters) else "-"
-            correct_text = latex_to_plain(str(options[correct_idx])) if 0 <= correct_idx < len(options) else "-"
-            explanation = latex_to_plain(str(q.get("explanation") or "").strip()) or ("لا يوجد شرح" if self.is_ar else "No explanation")
-            draw_row([str(idx), f"{correct_letter}) {correct_text}", explanation], zebra=(idx % 2 == 0))
+                self._draw_print_question(_answer_print_question(q, self.is_ar), str(idx))
+            except Exception as exc:
+                raise ExportError(f"تعذّر تنسيق إجابة السؤال {idx}؛ راجع المعادلات.") from exc
 
     def render(self) -> bytes:
         self._render_header()
         self._render_questions()
-        self._render_answer_table()
+        if self.include_answers:
+            self._render_answer_table()
         self._draw_footer()
         self.c.save()
         self.buf.seek(0)
         return self.buf.getvalue()
 
 
-def build_quiz_pdf(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE) -> bytes:
+def build_quiz_pdf(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE, include_answers: bool = True) -> bytes:
     """يبني ملف PDF جميل التنسيق للكويز، مع اتجاه تلقائي حسب اللغة وستايل شكلي قابل للاختيار
     (يتطلب خطوط assets/fonts للعربي)."""
     if not questions:
         raise ExportError("لا توجد أسئلة لتصديرها.")
+    if len(questions) > 200 or sum(len(str(q)) for q in questions) > 500000:
+        raise ExportError("هذا الكويز كبير للتصدير دفعة واحدة؛ قسّمه إلى اختبارات أصغر (حتى ٢٠٠ سؤال).")
     is_ar = detect_language(questions) == "ar"
-    renderer = _QuizPDFRenderer(title, questions, is_ar, style=style)
+    renderer = _QuizPDFRenderer(title, questions, is_ar, style=style, include_answers=include_answers)
     return renderer.render()
 
 
@@ -1209,3 +1125,4 @@ def build_document_pdf(title: str, text: str, style: str = DEFAULT_STYLE) -> byt
     is_ar = detect_text_language(text) == "ar"
     renderer = _DocumentPDFRenderer(title, text, is_ar, style=style)
     return renderer.render()
+

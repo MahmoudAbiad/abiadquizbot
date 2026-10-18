@@ -1,40 +1,5 @@
 # helpers/ai_models_helper.py
-"""
-==============================================================================
-MODULE: Dynamic AI Model Configuration (لوحة التحكم بموديلات الذكاء الاصطناعي)
-==============================================================================
-الوصف:
-يستبدل هذا الموديول القوائم الثابتة اللي كانت مكتوبة مباشرة بالكود:
-- MODELS_CASCADE (كانت بـ helpers/gemini_helper.py): سلسلة موديلات Gemini المستخدَمة
-  لتوليد الأسئلة بالترتيب (Waterfall) - slot="cascade".
-- MATH_DETECTION_MODEL (كانت بـ constants.py): الموديل المستخدَم لفحص الرياضيات/تصنيف
-  المادة السريع - slot="detection".
-- الموديل الثابت "openai/gpt-oss-120b" (كان بـ _generate_text_quiz): المسار السريع
-  عبر Groq لتوليد الكويز من نص صريح - slot="groq_fast".
-
-كل هذه القيم صارت مخزَّنة بجدول ai_model_slots بسوبا بيس، وقابلة للتعديل مباشرة من
-لوحة تحكم الأدمن (handlers/admin/ai_control.py) دون أي حاجة لتعديل الكود أو إعادة
-نشر البوت - بنفس فلسفة settings_helper.py (نقاط الترحيب/التجديد/الإحالة) بالضبط.
-
-كاش محلي قصير (TTL) لتقليل عدد الاستعلامات على المسار الساخن (كل عملية توليد كويز
-تقرأ سلسلة الـ cascade)، يُصفَّر فوراً عند أي تعديل يقوم به الأدمن.
-
-⚠️ ملاحظة معمارية مهمة: التنفيذ الفعلي لسلسلة "cascade" مربوط حالياً بمزوّدين اثنين -
-Gemini (AI Studio، عبر مجموعة مفاتيح API_KEYS بالتناوب) وVertex AI (Google Cloud، عبر
-عميل Service Account واحد - راجع _VERTEX_CLIENT بـ helpers/gemini_helper.py) - كلاهما
-يستخدمان google-genai SDK نفسه (وضعان مختلفان لنفس المكتبة). فحص المحتوى الموحّد يدعم
-Gemini وGroq Vision، مع انتقال تلقائي إلى Groq عند فشل Gemini. الفحوصات القديمة
-yes/no تبقى على Gemini (services/detection_common.py). حقل "provider" بالجدول عام ويقبل
-"gemini"/"vertex"/"groq"/"openai" لإتاحة إضافة مزوّدين جدد مستقبلاً من نفس اللوحة، لكن
-أي صف بمزوّد غير "gemini"/"vertex" ضمن slot="cascade"، أو غير "gemini"/"groq" ضمن
-slot="detection"، سيُتخطى تلقائياً وقت التنفيذ الفعلي (مع تسجيل تحذير بالـ logs) لحين
-إضافة تكامل SDK مخصص لذلك المزوّد - راجع _get_models_cascade بـ helpers/gemini_helper.py.
-أما slot="groq_fast" فمربوط فعلياً بعميل Groq الموجود أصلاً (AsyncGroq) ويمكن تغيير اسم
-الموديل منه بأمان تام. ملاحظة على Vertex تحديداً: صف provider="vertex" بـ slot="cascade"
-يُتخطى بصمت (بدون خطأ للطالب) لو متغيرات بيئة Vertex الثلاثة غير مضبوطة على السيرفر -
-باقي السلسلة (Gemini) تستمر بالعمل بشكل طبيعي تماماً في هذه الحالة.
-==============================================================================
-"""
+"""Dynamic model slots, independent of provider transports."""
 
 import re
 import time
@@ -47,7 +12,7 @@ logger = get_logger(__name__)
 # 🔒 صيغة اسم موديل مسموحة: حروف/أرقام/نقطة/شرطة/شرطة سفلية/سلاش فقط (يطابق صيغة كل
 # أسماء الموديلات الحقيقية بكل الشركات المدعومة) - يمنع أي أسطر جديدة أو رموز تحكّم قد
 # تُفسد سطور الـ logs أو تُرسل كباراميتر مشوّه لطلبات Gemini/Groq/OpenAI الفعلية.
-_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
+_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9@._/:-]{1,100}$")
 
 CACHE_TTL_SECONDS = 30
 
@@ -56,39 +21,10 @@ SLOT_DETECTION = "detection"
 SLOT_GROQ_FAST = "groq_fast"
 
 VALID_SLOTS = {SLOT_CASCADE, SLOT_DETECTION, SLOT_GROQ_FAST}
-VALID_PROVIDERS = {"gemini", "groq", "openai", "vertex"}
-
-PROVIDER_LABELS: Dict[str, str] = {
-    "gemini": "🟦 Gemini (Google)",
-    "groq": "🟩 Groq",
-    "openai": "⚪ OpenAI",
-    # 🆕 Vertex AI (Google Cloud) - مزوّد ثانٍ فعلياً مربوط بتنفيذ SDK حقيقي (راجع
-    # helpers/gemini_helper.py::_execute_cascade) لاستهلاك كريدت GCP المجاني (Free
-    # Trial/Developer Program) جنباً إلى جنب مع مفاتيح Gemini AI Studio العادية بنفس
-    # سلسلة الـ cascade - أولويته تتحدد بمكانه بالترتيب (⬆️⬇️) بالضبط مثل أي موديل آخر.
-    "vertex": "🟪 Vertex AI (Google Cloud)",
-}
-
 SLOT_LABELS: Dict[str, str] = {
     SLOT_CASCADE: "🧠 سلسلة توليد الأسئلة (Cascade)",
     SLOT_DETECTION: "🔍 فحص المحتوى السريع (رياضيات/تصنيف المادة)",
-    SLOT_GROQ_FAST: "⚡ المسار السريع (Groq - نص صريح)",
-}
-
-# خط أمان أخير لو تعذّر الوصول لقاعدة البيانات بالكامل (نفس القيم المزروعة بالـ migration).
-_FALLBACK_DEFAULTS: Dict[str, List[Dict]] = {
-    SLOT_CASCADE: [
-        {"id": None, "provider": "gemini", "model_name": "gemini-3.6-flash", "display_order": 1, "is_enabled": True},
-        {"id": None, "provider": "gemini", "model_name": "gemini-3.7-flash", "display_order": 2, "is_enabled": True},
-        {"id": None, "provider": "gemini", "model_name": "gemini-3.5-flash", "display_order": 3, "is_enabled": True},
-        {"id": None, "provider": "gemini", "model_name": "gemini-3.5-flash-lite", "display_order": 4, "is_enabled": True},
-    ],
-    SLOT_DETECTION: [
-        {"id": None, "provider": "gemini", "model_name": "gemini-3.5-flash-lite", "display_order": 1, "is_enabled": True},
-    ],
-    SLOT_GROQ_FAST: [
-        {"id": None, "provider": "groq", "model_name": "openai/gpt-oss-120b", "display_order": 1, "is_enabled": True},
-    ],
+    SLOT_GROQ_FAST: "⚡ المسار النصي السريع",
 }
 
 # كاش لكل slot على حدة: {slot: (timestamp, [rows...])}
@@ -106,7 +42,7 @@ def invalidate_cache(slot: Optional[str] = None) -> None:
 
 async def get_all_models(slot: str, force_refresh: bool = False) -> List[Dict]:
     """يرجع كل صفوف slot معيّن (مفعّلة وغير مفعّلة) مرتّبة حسب display_order - تُستخدم
-    من لوحة الأدمن لعرض القائمة الكاملة. عند فشل الاتصال يرجع آخر كاش معروف أو fallback."""
+    من لوحة الأدمن لعرض القائمة الكاملة. عند فشل الاتصال يرجع آخر كاش معروف أو قائمة فارغة."""
     now = time.monotonic()
     cached = _cache.get(slot)
     if not force_refresh and cached and (now - cached[0]) < CACHE_TTL_SECONDS:
@@ -117,7 +53,7 @@ async def get_all_models(slot: str, force_refresh: bool = False) -> List[Dict]:
     try:
         response = await (
             supabase.table("ai_model_slots")
-            .select("id, provider, model_name, display_order, is_enabled")
+            .select("id, provider, model_name, display_order, is_enabled, capabilities")
             .eq("slot", slot)
             .order("display_order")
             .execute()
@@ -129,7 +65,7 @@ async def get_all_models(slot: str, force_refresh: bool = False) -> List[Dict]:
         log_error(logger, f"Error fetching ai_model_slots for slot='{slot}': {e}", exception=e)
         if cached:
             return cached[1]
-        return _FALLBACK_DEFAULTS.get(slot, [])
+        return []
 
 
 async def get_enabled_models(slot: str, force_refresh: bool = False) -> List[Dict]:
@@ -137,7 +73,7 @@ async def get_enabled_models(slot: str, force_refresh: bool = False) -> List[Dic
     وقت التنفيذ (توليد الكويز/فحص المحتوى)."""
     rows = await get_all_models(slot, force_refresh=force_refresh)
     enabled = [row for row in rows if row.get("is_enabled")]
-    return enabled or _FALLBACK_DEFAULTS.get(slot, [])
+    return enabled
 
 
 async def get_cascade_models(force_refresh: bool = False) -> List[Dict]:
@@ -147,11 +83,11 @@ async def get_cascade_models(force_refresh: bool = False) -> List[Dict]:
 
 async def get_detection_model(force_refresh: bool = False) -> Dict:
     """أول موديل مفعّل بسلسلة الفحص السريع - بديل MATH_DETECTION_MODEL السابقة.
-    يرجع دائماً صفاً واحداً (Fallback الافتراضي لو الجدول فاضي لأي سبب)."""
+    يرجع قاموسًا فارغًا لو لم يوجد موديل مفعّل."""
     rows = await get_enabled_models(SLOT_DETECTION, force_refresh=force_refresh)
     if rows:
         return rows[0]
-    return _FALLBACK_DEFAULTS[SLOT_DETECTION][0]
+    return {}
 
 
 async def get_groq_fast_model(force_refresh: bool = False) -> Dict:
@@ -159,16 +95,19 @@ async def get_groq_fast_model(force_refresh: bool = False) -> Dict:
     rows = await get_enabled_models(SLOT_GROQ_FAST, force_refresh=force_refresh)
     if rows:
         return rows[0]
-    return _FALLBACK_DEFAULTS[SLOT_GROQ_FAST][0]
+    return {}
 
 
 async def add_model(slot: str, provider: str, model_name: str) -> Optional[Dict]:
     """إضافة موديل جديد لسلسلة (slot) - عبر RPC ai_model_add (ترتيب تلقائي بآخر القائمة).
     🔒 يرفض أي اسم لا يطابق _MODEL_NAME_PATTERN (يمنع أسطر جديدة/رموز تحكّم/نص فارغ)."""
     model_name = (model_name or "").strip()
-    if slot not in VALID_SLOTS or provider not in VALID_PROVIDERS or not _MODEL_NAME_PATTERN.match(model_name):
+    if slot not in VALID_SLOTS or not _MODEL_NAME_PATTERN.match(model_name):
         return None
 
+    from helpers.ai_providers_helper import get_providers
+    if provider not in await get_providers():
+        return None
     from helpers.supabase_helper import supabase
 
     try:
@@ -226,3 +165,20 @@ async def move_model(model_id: int, slot: str, direction: str) -> bool:
         log_error(logger, f"Error moving ai_model_slots id={model_id} direction={direction}: {e}", exception=e)
         return False
 
+
+
+async def update_model(model_id, slot, model_name, capabilities):
+    from helpers.ai_providers_helper import CAPABILITIES
+    if not _MODEL_NAME_PATTERN.fullmatch(model_name or ""):
+        raise ValueError("اسم الموديل غير صالح")
+    if (not isinstance(capabilities, list) or not capabilities or
+            any(not isinstance(cap, str) for cap in capabilities) or
+            not set(capabilities) <= CAPABILITIES or "text" not in capabilities):
+        raise ValueError("capabilities: اختر text وإضافيًا image أو pdf أو audio")
+    from helpers.supabase_helper import supabase
+    response = await supabase.rpc("ai_model_update", {"p_id": model_id,
+        "p_model_name": model_name, "p_capabilities": capabilities}).execute()
+    invalidate_cache(slot)
+    if not response.data:
+        raise ValueError("الموديل غير موجود")
+    return response.data[0]

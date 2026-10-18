@@ -5,6 +5,11 @@ Supports both Webhook (Railway/Srv) and Polling modes.
 
 import sys
 import os
+
+# Run the stateless renderer without importing bot credentials or database clients.
+if __name__ == "__main__" and (os.getenv("APP_ROLE") or "").strip().lower() == "render_worker":
+    os.execv(sys.executable, [sys.executable, "-m", "render_worker"])
+
 import asyncio
 from task_utils import spawn
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +22,8 @@ from logger import get_logger
 from config import bot, dp
 # 🚀 تم تحديث الاستيراد لجلب quiz_runner_router بدلاً من execution_router القديم
 from handlers import (
+    challenge_game_router,
+    challenge_live_router,
     start_router, 
     admin_router, 
     files_router, 
@@ -30,8 +37,11 @@ from handlers import (
     quiz_delete_router,
     group_quiz_router,
     payments_router,
+    gifts_router,
 )
-from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware
+from handlers.session_navigation import router as session_navigation_router
+from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware
+from services.mistake_practice import PracticeCallbackGuard
 
 # تهيئة Sentry للتتبع
 SENTRY_DSN = os.getenv("SENTRY_DSN")
@@ -64,17 +74,23 @@ def main():
     # (أول شيء يشتغل وآخر شيء يلف حوله) ليغطي أي استثناء يحدث بأي مرحلة لاحقة، بما فيها
     # ThrottlingMiddleware نفسها.
     dp.update.outer_middleware(ErrorTrackingMiddleware())
+    dp.update.outer_middleware(MaintenanceMiddleware())
 
     # 1. تفعيل الحماية من التكرار (Rate Limiting)
     dp.message.middleware(ThrottlingMiddleware(limit=1.2))
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
+    dp.callback_query.middleware(PracticeCallbackGuard())
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
     dp.include_routers(
+        session_navigation_router,
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
         # (معالج poll_answer العام هناك بيوقف الانتشار) - راجع handlers/group_quiz.py
+        challenge_game_router,
+        challenge_live_router,  # ⚔️ المواجهات المباشرة (lv:*) - مستقل عن cg:*
         group_quiz_router,
         payments_router,  # 💳 أزرار الشحن الذاتي (pay:*) - راجع handlers/payments.py
+        gifts_router,
         start_router,
         admin_router,
         sharing_router,
@@ -120,6 +136,12 @@ def main():
                 # لأي نسخة تشتغل محلياً/بـ polling.
                 from handlers.group_quiz import group_quiz_heartbeat_loop
                 spawn(group_quiz_heartbeat_loop())
+                from handlers.challenge_game import challenge_heartbeat_loop
+                spawn(challenge_heartbeat_loop(bot))
+                from handlers.challenge_live import challenge_live_loop
+                spawn(challenge_live_loop(bot))
+                from handlers.challenge_spectator import challenge_spectator_loop
+                spawn(challenge_spectator_loop(bot))
 
                 # 🧹 تنظيف دوري لبيانات الكويز الجماعي القديمة (جلسات منتهية/ملغاة
                 # أقدم من GROUP_SESSION_RETENTION_DAYS) - نفس سبب استقلاليتها عن
@@ -128,6 +150,10 @@ def main():
                 from services.group_quiz_store import group_quiz_cleanup_loop
                 spawn(group_quiz_cleanup_loop())
 
+                from handlers.session_navigation import pending_cleanup_loop
+                spawn(pending_cleanup_loop())
+                from services.gift_campaigns import gift_campaign_loop
+                spawn(gift_campaign_loop())
                 await dp.start_polling(bot)
                 
             except Exception as e:
@@ -141,3 +167,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

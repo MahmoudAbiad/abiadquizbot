@@ -1,0 +1,199 @@
+{
+  "rls": true,
+  "flags": [
+    {
+      "key": "challenge_system_enabled",
+      "enabled": true,
+      "updated_at": "2026-10-06T01:54:26.69552+00:00"
+    },
+    {
+      "key": "async_attacks_enabled",
+      "enabled": true,
+      "updated_at": "2026-10-06T01:54:39.168826+00:00"
+    },
+    {
+      "key": "spectator_mode_enabled",
+      "enabled": true,
+      "updated_at": "2026-10-06T01:54:30.689181+00:00"
+    },
+    {
+      "key": "live_matches_enabled",
+      "enabled": true,
+      "updated_at": "2026-10-06T01:54:35.790649+00:00"
+    }
+  ],
+  "settings": [
+    {
+      "key": "challenge_cooldown_reset_epoch",
+      "label": "وقت آخر تصفير عالمي لمهل إعادة الهجوم (Unix epoch)",
+      "value": 1791278808,
+      "updated_at": "2026-10-06T09:26:48.596101+00:00"
+    },
+    {
+      "key": "challenge_target_cooldown_seconds",
+      "label": "مهلة إعادة مهاجمة نفس الأرض (ثانية)",
+      "value": 0,
+      "updated_at": "2026-10-06T09:29:07.968212+00:00"
+    },
+    {
+      "key": "challenge_daily_attack_limit",
+      "label": "عدد هجمات الأرض اليومية لكل طالب",
+      "value": 20,
+      "updated_at": "2026-10-06T09:34:22.839225+00:00"
+    },
+    {
+      "key": "challenge_attack_notification_cooldown_seconds",
+      "label": "مهلة تكرار إشعار تعرض الأرض للهجوم (ثانية)",
+      "value": 600,
+      "updated_at": "2026-10-06T09:41:36.427324+00:00"
+    },
+    {
+      "key": "challenge_completion_notification_cooldown_seconds",
+      "label": "مهلة تكرار إشعار نتيجة الدفاع (ثانية)",
+      "value": 600,
+      "updated_at": "2026-10-06T09:47:00.404171+00:00"
+    }
+  ],
+  "functions": [
+    {
+      "hash": "ff8443f7b3621d2e1239b437df557f1a",
+      "identity": "challenge_advance_attack(uuid,bigint,text,integer,integer,text)"
+    },
+    {
+      "hash": "dba45d0667d52e53454a94ac83363c2e",
+      "identity": "challenge_attack_state(uuid,bigint)"
+    },
+    {
+      "hash": "02e9039a0549568d8ec1aced45c54431",
+      "identity": "challenge_block_async_while_live()"
+    },
+    {
+      "hash": "a38ba7d76eabb14a83fbad64ee781268",
+      "identity": "challenge_claim_notifications(integer)"
+    },
+    {
+      "hash": "3800fefa56ade3e8a7de9181568b050b",
+      "identity": "challenge_find_land(bigint,integer,bigint,integer)"
+    },
+    {
+      "hash": "7ce92554c126fc67f540eb62f48599aa",
+      "identity": "challenge_finish_attack(uuid,text)"
+    },
+    {
+      "hash": "a911db452d18fba408f03eba9546ca08",
+      "identity": "challenge_import_test(uuid,text,text,text,text,bigint,jsonb,jsonb)"
+    },
+    {
+      "hash": "712a79f79cbce70aff04126851549d42",
+      "identity": "challenge_live_answer(uuid,bigint,integer,integer,text)"
+    },
+    {
+      "hash": "7116404f156e5b19faf6a23898f47957",
+      "identity": "challenge_live_apply(uuid,bigint,uuid,uuid,integer,integer,integer,bigint,integer,boolean,boolean,integer,integer)"
+    },
+    {
+      "hash": "1dc7cd5168c618d5d097f976ccdc446a",
+      "identity": "challenge_live_attach_message(uuid,bigint,bigint)"
+    },
+    {
+      "hash": "da53d9b3b6589c6ba5d4e4ae4ad3a7c7",
+      "identity": "challenge_live_cancel(bigint,text)"
+    },
+    {
+      "hash": "4ab8b3ba21243488bc9250cdd91794c7",
+      "identity": "challenge_live_due(integer)"
+    },
+    {
+      "hash": "6dd551ac3ad4431da5bcc07be0162f10",
+      "identity": "challenge_live_expire_queue(integer)"
+    },
+    {
+      "hash": "0d69d06d3d41e02d55c27a0599093673",
+      "identity": "challenge_live_finish(uuid,text,bigint)"
+    },
+    {
+      "hash": "7570cf30effac78b08c0c190d439bef5",
+      "identity": "challenge_live_join(bigint,uuid,text,jsonb)"
+    },
+    {
+      "hash": "ed34900194c3f4700e37188ba992563d",
+      "identity": "challenge_live_leave(uuid,bigint)"
+    },
+    {
+      "hash": "31d6249a6406072dbef123a479a73e4b",
+      "identity": "challenge_live_progress(uuid,timestamp with time zone)"
+    },
+    {
+      "hash": "d3f5bc38d4b26c20d92a27b8bf2799e3",
+      "identity": "challenge_live_queue_state(bigint)"
+    },
+    {
+      "hash": "b5afe3d8e1fd2f1ddc1fe2925d1ebaca",
+      "identity": "challenge_live_range(numeric,jsonb)"
+    },
+    {
+      "hash": "24d2d83ec23faf4e7d9cdcd3c2e801b4",
+      "identity": "challenge_live_state(uuid,bigint)"
+    },
+    {
+      "hash": "26e41ebbf6587b6bd6c00fee9e5d0011",
+      "identity": "challenge_live_tick(uuid)"
+    },
+    {
+      "hash": "8bf71cde623df3f916d9b15479d16c10",
+      "identity": "challenge_live_try_match(bigint,jsonb)"
+    },
+    {
+      "hash": "41e501bc35e936041ca2f2ca16945e34",
+      "identity": "challenge_question_score(boolean,numeric,jsonb)"
+    },
+    {
+      "hash": "3014424ef793790c9c58c8a3a8b7c3a5",
+      "identity": "challenge_spectator_incoming(bigint,integer)"
+    },
+    {
+      "hash": "9fbb4651a7185ba4ff93dd35c4768c5a",
+      "identity": "challenge_spectator_state(uuid,bigint)"
+    },
+    {
+      "hash": "5e0b26b7d9cffaf73f762a847026f09a",
+      "identity": "challenge_start_attack(bigint,bigint,uuid,uuid,text,jsonb)"
+    },
+    {
+      "hash": "258ce10d17047ec6333d704c83f6af4f",
+      "identity": "challenge_touch_profile(bigint,text,uuid)"
+    }
+  ],
+  "migrations": [
+    {
+      "name": "challenge_spectator_0015",
+      "version": "20261007131503"
+    },
+    {
+      "name": "challenge_spectator_0015_atomic_rollback_reapply_check",
+      "version": "20261007131656"
+    }
+  ],
+  "rpc_grants": [
+    {
+      "anon": false,
+      "name": "challenge_spectator_incoming",
+      "stable": true,
+      "invoker": true,
+      "service_role": true,
+      "authenticated": false
+    },
+    {
+      "anon": false,
+      "name": "challenge_spectator_state",
+      "stable": true,
+      "invoker": true,
+      "service_role": true,
+      "authenticated": false
+    }
+  ],
+  "fixture_profiles": 0,
+  "existing_functions_unchanged": true,
+  "flags_unchanged": true,
+  "settings_unchanged": true
+}

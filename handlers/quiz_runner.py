@@ -3,11 +3,14 @@ import asyncio
 from task_utils import spawn
 import html
 import json
+import re
+import secrets
 from typing import Union, Optional, List, Dict, Any, Tuple
 
 from aiogram import Router, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
+from aiogram.exceptions import TelegramBadRequest
 
 from config import bot, QuizState, redis_client
 from constants import (
@@ -27,6 +30,7 @@ from keyboards import (
 from logger import get_logger, log_error, log_warning
 from services.latex_text import latex_to_plain
 from services.quiz_permissions import can_edit_quiz
+from services.redis_reliability import user_locked
 from services.flow_state import build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لاستئناف الكويز من خلفية (محرر أسئلة الرياضيات عبر الويب)
 from helpers.supabase_helper import (
     list_favorite_quizzes,
@@ -45,6 +49,12 @@ from helpers.supabase_helper import (
     _is_valid_uuid
 )
 from services.quiz_engine import send_quiz_poll
+from services.quiz_result_ui import (
+    build_wrong_answer_review, review_page_text, review_inline_button,
+    review_question_rich_html, review_explanation_rich_html,
+    review_question_fallback_text, review_explanation_fallback_text,
+    review_expanded_fallback_text,
+)
 
 logger = get_logger(__name__)
 router = Router()
@@ -101,11 +111,12 @@ SAVE_WIZARD_STATES = ACTIVE_QUIZ_STATES + (None,)
 async def send_main_menu(call_or_message: Union[types.Message, types.CallbackQuery], user_id: int) -> None:
     bot_info = await bot.get_me()
     menu = await get_main_menu_keyboard(bot_info.username, user_id)
-    text = "🏠 القائمة الرئيسية"
+    from helpers.student_ui import HOME_TEXT
+    text = HOME_TEXT
     if isinstance(call_or_message, types.CallbackQuery):
-        await call_or_message.message.answer(text, reply_markup=menu)
+        await call_or_message.message.answer(text, reply_markup=menu, parse_mode="HTML")
     else:
-        await call_or_message.answer(text, reply_markup=menu)
+        await call_or_message.answer(text, reply_markup=menu, parse_mode="HTML")
 
 @router.callback_query(F.data == "show_menu_after_first_quiz")
 async def show_menu_after_first_quiz(call: types.CallbackQuery) -> None:
@@ -123,19 +134,26 @@ async def show_menu_after_first_quiz(call: types.CallbackQuery) -> None:
     finally:
         await call.answer()
 
+@user_locked()
 async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: Optional[str] = "") -> None:
     user_id = msg_or_call.from_user.id
+    from handlers.session_navigation import offer_transition
+    chat_id = msg_or_call.message.chat.id if isinstance(msg_or_call, types.CallbackQuery) else msg_or_call.chat.id
+    if await offer_transition(state, user_id, chat_id, {"kind": "loaded", "kwargs": {
+            "quiz_data": quiz_data, "source_title": source_title, "origin": origin, "quiz_id": quiz_id}}):
+        return
     attempt_id = start_quiz_attempt(user_id, quiz_id or None, origin, len(quiz_data))
     spawn(log_usage_event(user_id, "quiz_started", {
         "origin": origin, "quiz_id": quiz_id, "questions": len(quiz_data),
     }))
 
     await state.update_data(
-        questions=quiz_data, current_index=0, score=0,
+        questions=quiz_data, current_index=0, score=0, answered_questions={}, navigation_session_id=None,
         total_count=len(quiz_data), source_title=source_title,
         quiz_origin=origin, quiz_completed=False, quiz_id=quiz_id,
         is_saved_in_session=False, is_switching_question=False,
-        attempt_id=attempt_id, stopped_early=False,
+        attempt_id=attempt_id, stopped_early=False, is_mistake_practice=False,
+        practice_round=0, practice_skipped_before=0, practice_result_token=None,
         share_id=None
     )
     await state.set_state(QuizState.answering_quiz)
@@ -160,6 +178,8 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
     save_question_edit_from_web أدناه وwebhook_server.py). send_question نفسها
     صارت غلاف رقيق فوقها لتفادي تكرار أي منطق.
     """
+    idx = 0
+    control_token = secrets.token_hex(8)
     try:
         data = await state.get_data()
         questions = data['questions']
@@ -175,17 +195,23 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
         q = _prepare_question_for_send(questions[idx])
         questions[idx] = q
         await state.update_data(questions=questions)
+        await state.update_data(question_control_token=control_token)
         control_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data="get_hint")],
+            [types.InlineKeyboardButton(text="💡 طلب تلميح", callback_data=f"qctl:{control_token}:hint")],
             [
-                types.InlineKeyboardButton(text="⏹ إنهاء", callback_data="quiz_stop"),
-                types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
-                types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
+                types.InlineKeyboardButton(text="⏹ إنهاء", callback_data=f"qctl:{control_token}:stop"),
+                *([
+                    types.InlineKeyboardButton(text="🔗 مشاركة", callback_data="quiz_share"),
+                    types.InlineKeyboardButton(text="💾 حفظ", callback_data="save_quiz")
+                ] if not data.get("is_mistake_practice") else []),
             ],
-            [types.InlineKeyboardButton(text="التالي ➡️", callback_data="next_question")]
+            [types.InlineKeyboardButton(text="🏁 عرض النتيجة" if idx + 1 == len(questions) else "➡️ التالي", callback_data=f"qctl:{control_token}:next")]
         ])
 
-        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb, quiz_id=data.get('quiz_id'))
+        from handlers.session_navigation import session_id
+        identity = await session_id(state)
+        await send_quiz_poll(chat_id, user_id, q, idx, len(questions), control_kb,
+                             quiz_id=data.get('quiz_id'), poll_meta={"session_id": identity})
         # 🆕 send_quiz_poll (لسؤال رياضي) قد يملأ q["image_url"] بعد الرسم/الرفع الفعلي -
         # q هو نفس الكائن المرجعي questions[idx] أعلاه، فنعيد كتابة questions لـ state هنا
         # لضمان تخزين الرابط الجديد فعلياً (وليس فقط بالذاكرة المحلية لهذه الدالة)، حتى
@@ -201,13 +227,92 @@ async def send_question_by_ids(chat_id: int, user_id: int, state: FSMContext) ->
                 chat_id=chat_id,
                 text=f"⚠️ **نعتذر منك، واجه النظام مشكلة تقنية في عرض السؤال رقم ({idx + 1}).**\n\n⏩ يمكنك تخطيه والانتقال للتالي.",
                 reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                    [types.InlineKeyboardButton(text="تخطي هذا السؤال والانتقال للتالي ➡️", callback_data="next_question")]
+                    [types.InlineKeyboardButton(text="تخطي هذا السؤال والانتقال للتالي ➡️", callback_data=f"qctl:{control_token}:next")]
                 ])
             )
         except Exception:
             pass
 
+_REVIEW_TTL_SECONDS = 7 * 24 * 3600
+
+
+def _quiz_review_key(user_id: int, token: str) -> str:
+    return f"quiz:error_review:{user_id}:{token}"
+
+
+async def _store_quiz_error_review(user_id: int, data: dict):
+    """Keep a user-scoped snapshot independent of later FSM sessions."""
+    entries = build_wrong_answer_review(data.get("questions"), data.get("answered_questions"))
+    answers = data.get("answered_questions") or {}
+    logger.info("QUIZ_REVIEW_SNAPSHOT questions=%s recorded_answers=%s errors=%s",
+                len(data.get("questions") or []), len(answers), len(entries))
+    if not entries:
+        return None, 0
+    token = secrets.token_hex(8)
+    try:
+        await redis_client.set(
+            _quiz_review_key(user_id, token),
+            json.dumps(entries, ensure_ascii=False),
+            ex=_REVIEW_TTL_SECONDS,
+        )
+    except Exception as exc:
+        log_warning(logger, f"Could not save error review for {user_id}: {exc}")
+        return None, len(entries)
+    return token, len(entries)
+
+
+async def _send_quiz_completion(chat_id: int, result_text: str, keyboard, review_token, wrong_count: int,
+                                practice_token=None):
+    """Prefer a rich in-message review CTA; normal keyboard stays as a fallback."""
+    if review_token:
+        button = review_inline_button(review_token, wrong_count)
+        if practice_token:
+            from services.quiz_result_ui import review_rich_button
+            button += review_rich_button(
+                f"qpractice:{practice_token}", f"🎯 تدرب على أخطائك ({wrong_count})")
+        # Keep the error count close to the grade, but place the actual
+        # interactive button after the whole result body for a cleaner layout.
+        paragraphs = []
+        inserted = False
+        for line in result_text.split("\n"):
+            if not line.strip():
+                continue
+            paragraphs.append(f"<p>{line}</p>")
+            if not inserted and "📊 النسبة المئوية:" in line:
+                paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}</p>")
+                inserted = True
+        if not inserted:
+            paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}</p>")
+        paragraphs.append(button)
+        rich_html = "".join(paragraphs)
+        logger.info("QUIZ_RESULT_RICH_ATTEMPT review_errors=%s", wrong_count)
+        try:
+            sent = await bot.send_rich_message(
+                chat_id=chat_id, rich_message=types.InputRichMessage(html=rich_html, is_rtl=True),
+                reply_markup=keyboard,
+            )
+            logger.info("QUIZ_RESULT_RICH_SENT review_errors=%s", wrong_count)
+            return sent
+        except Exception as exc:
+            log_warning(logger, f"QUIZ_RESULT_RICH_FAILED reason={type(exc).__name__}: {exc}; using legacy review button")
+        fallback = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(
+                text=f"📚 مراجعة الأخطاء ({wrong_count})", callback_data=f"qrev:{review_token}:0")],
+            *([[types.InlineKeyboardButton(
+                text=f"🎯 تدرب على أخطائك ({wrong_count})", callback_data=f"qpractice:{practice_token}")]]
+              if practice_token else []),
+            *keyboard.inline_keyboard,
+        ])
+        return await bot.send_message(chat_id, result_text, reply_markup=fallback, parse_mode="HTML")
+    return await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
+
+
 async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext, data: dict):
+    if data.get("quiz_completed"):
+        return
+    if data.get("is_mistake_practice"):
+        await _handle_practice_completion(chat_id, user_id, state, data)
+        return
     score, total = data['score'], data['total_count']
     quiz_id = data.get('quiz_id')
     # ⚠️ current_index يكون دائماً >= total هنا (send_question لا تستدعي هذه الدالة
@@ -258,11 +363,17 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
         quiz_row = await admin_get_quiz_by_id(quiz_id)
         creator_id = quiz_row.get("creator_id") if quiz_row else None
         keyboard = get_rating_keyboard(quiz_id, quiz_id=quiz_id, viewer_id=user_id, creator_id=creator_id)
-        result_text += "\n\n⭐ <b>كيف تقيم هذا الكويز؟</b> تقييمك المباشر يساعد الدفعة على فرز الكويزات الممتازة وتصفية الرديئة تلقائياً!"
+        result_text += "\n\nاحفظ الكويز للمراجعة أو حمّله من الأزرار أدناه.\n💬 عندك ملاحظات عن الأسئلة؟ شاركنا رأيك من الزر أدناه."
     else:
         keyboard = get_quiz_result_keyboard(quiz_id=quiz_id)
 
-    await bot.send_message(chat_id, result_text, reply_markup=keyboard, parse_mode="HTML")
+    review_token, wrong_count = await _store_quiz_error_review(user_id, data)
+    practice_token = await _store_mistake_practice(user_id, state, data, review_token)
+    if wrong_count and not review_token:
+        result_text += "\n⚠️ تعذر حفظ بيانات المراجعة والتدريب حالياً. أعد فتح الاختبار للمحاولة مجدداً."
+    elif wrong_count and not practice_token:
+        result_text += "\n⚠️ تعذر تجهيز التدريب حالياً؛ مراجعة الأخطاء ما زالت متاحة."
+    await _send_quiz_completion(chat_id, result_text, keyboard, review_token, wrong_count, practice_token)
 
     # 🆕 أول اختبار كامل لمستخدم جديد: نعرض رسالة تهنئة قصيرة بعد النتيجة مباشرة، لكن
     # بزر واحد فقط "📋 عرض القائمة" بدل إرفاق القائمة الرئيسية كاملة مباشرة - تخفيفاً
@@ -273,8 +384,8 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
             await bot.send_message(
                 chat_id,
                 "🎉 <b>أحسنت في أول اختبار لك!</b>\n\n"
-                "💡 تقدر تولّد كويزات جديدة في أي وقت تحب بنفس الطريقة اللي سويتها قبل شوي.\n"
-                "🔄 ونقاطك تتجدد يومياً، فما تحتاج تقلق إذا خلصتها.",
+                "تقدر ترجع للكويز من المفضلة إذا حفظته، أو تبدأ كويزاً جديداً بإرسال محتواك.\n"
+                "رصيدك وخيارات المساعدة موجودة في القائمة الرئيسية.",
                 reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                     [types.InlineKeyboardButton(text="📋 عرض القائمة", callback_data="show_menu_after_first_quiz")]
                 ]),
@@ -297,7 +408,335 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
     await state.update_data(quiz_completed=True, is_switching_question=False)
     await state.set_state(None)
 
+
+def _quiz_practice_key(user_id: int, token: str) -> str:
+    return f"quiz:mistake_practice:{user_id}:{token}"
+
+
+async def _store_mistake_practice(user_id, state, data, token):
+    from handlers.session_navigation import session_id
+    from services.mistake_practice import practice_snapshot
+    await state.update_data(practice_result_token=None)
+    if not token:
+        return None
+    try:
+        snapshot = practice_snapshot(data, await session_id(state))
+        if not snapshot:
+            return None
+        await redis_client.set(_quiz_practice_key(user_id, token),
+                               json.dumps(snapshot, ensure_ascii=False), ex=_REVIEW_TTL_SECONDS)
+        await state.update_data(practice_result_token=token)
+        return token
+    except Exception as exc:
+        log_warning(logger, f"Could not save mistake practice for {user_id}: {exc}")
+        return None
+
+
+@router.callback_query(F.data.regexp(r"^qpractice:[a-f0-9]{16}$"))
+@user_locked()
+async def start_mistake_practice(call: types.CallbackQuery, state: FSMContext):
+    from handlers.session_navigation import session_id
+    from services.mistake_practice import practice_session
+    if call.message.chat.type != "private":
+        return await call.answer("التدريب متاح في محادثتك الخاصة مع البوت.", show_alert=True)
+    token = call.data.split(":")[1]
+    try:
+        raw = await redis_client.get(_quiz_practice_key(call.from_user.id, token))
+        if not raw:
+            return await call.answer("انتهت صلاحية بيانات التدريب أو لم يعد الاختبار متاحاً. أعد فتح الاختبار وحلّه.", show_alert=True)
+        snapshot = json.loads(raw)
+        data = await state.get_data()
+        if (not data.get("quiz_completed") or data.get("practice_result_token") != token
+                or snapshot.get("session") != await session_id(state)
+                or await state.get_state() is not None):
+            return await call.answer("هذا الزر يخص محاولة سابقة أو لديك جلسة أحدث. استخدم نتيجة آخر محاولة مكتملة.", show_alert=True)
+        if not snapshot.get("questions"):
+            return await call.answer("لا توجد أخطاء متاحة للتدريب.", show_alert=True)
+        await state.set_data(practice_session(snapshot, secrets.token_hex(16)))
+        await state.set_state(QuizState.answering_quiz)
+    except Exception as exc:
+        log_warning(logger, f"Could not start mistake practice: {exc}")
+        return await call.answer("تعذر تحميل التدريب حالياً. حاول مجدداً بعد قليل.", show_alert=True)
+    await call.answer()
+    await bot.send_message(call.message.chat.id,
+        f"🎯 تدريب على أخطائك · المحاولة {snapshot['round']}\n"
+        f"عدد الأسئلة: {len(snapshot['questions'])}. نتيجتك الأصلية محفوظة.")
+    await send_question(call, state)
+
+
+async def _handle_practice_completion(chat_id, user_id, state, data):
+    from services.mistake_practice import practice_skipped_count
+    score, total = data["score"], data["total_count"]
+    stopped = data.get("stopped_early")
+    skipped = practice_skipped_count(data)
+    wrong = build_wrong_answer_review(data.get("questions"), data.get("answered_questions"))
+    text = (f"{'⏹ توقف التدريب' if stopped else '🎯 اكتملت محاولة التدريب'} · {data['practice_round']}\n\n"
+            f"🎯 نتيجة التدريب: <b>{score}</b> من <b>{total}</b>\n"
+            f"📊 النسبة المئوية: <b>{score / total * 100 if total else 0:.1f}%</b>\n"
+            f"❌ الأخطاء المتبقية في هذه المحاولة: <b>{len(wrong)}</b>\n")
+    if not stopped and score == total and total and not skipped:
+        text += "\n🎉 أحسنت! أتممت التدريب على جميع أخطائك وأجبت عنها بشكل صحيح."
+    elif skipped:
+        text += f"\nتُرك {skipped} سؤالاً دون إجابة خلال هذه السلسلة؛ لم تُحسب أخطاء ولم يُؤكَّد إتقانها."
+    text += "\nنتيجتك الأصلية ولوحة الشرف لم تتغيرا."
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="student_home"),
+        types.InlineKeyboardButton(text="📝 كويز جديد", callback_data="student_create_quiz"),
+    ]])
+    review_token, count = await _store_quiz_error_review(user_id, data)
+    practice_token = await _store_mistake_practice(user_id, state, data, review_token)
+    if wrong and not practice_token:
+        text += "\n⚠️ تعذر حفظ بيانات التدريب التالية حالياً."
+    await _send_quiz_completion(chat_id, text, keyboard, review_token, count, practice_token)
+    await state.update_data(quiz_completed=True, is_switching_question=False)
+    await state.set_state(None)
+
+
+async def _review_resolve_image(user_id: int, token: str, page: int, items: list):
+    """Reuse the question's existing image. Regenerate only when no URL survived."""
+    entry = items[page]
+    if not entry.get("is_math"):
+        return None
+    image_url = entry.get("image_url") or ""
+    if image_url.startswith(("https://", "http://")):
+        return image_url
+
+    from services.image_quiz_renderer import render_question_image_async, looks_arabic
+    from helpers.supabase_helper import upload_quiz_question_image
+
+    question = entry.get("math_question") or {}
+    raw = await render_question_image_async(
+        question, int(entry.get("index", entry["number"] - 1)),
+        int(entry.get("total_questions", len(items))),
+        looks_arabic(str(question.get("question") or "")),
+    )
+    # The original upload path may have failed during the quiz, so try again
+    # rather than losing tables, matrices, and LaTeX formatting on review.
+    try:
+        new_url = await upload_quiz_question_image(raw, f"tmp/review-{token}-{page}.png")
+        if new_url and str(new_url).startswith(("https://", "http://")):
+            entry["image_url"] = str(new_url)
+            key = _quiz_review_key(user_id, token)
+            ttl = await redis_client.ttl(key)
+            if ttl > 0:
+                await redis_client.set(key, json.dumps(items, ensure_ascii=False), ex=ttl)
+            return str(new_url)
+    except Exception as exc:
+        log_warning(logger, f"Could not cache math review image: {exc}")
+    return types.BufferedInputFile(raw, filename="math-review.png")
+
+
+def _review_pager(token: str, page: int, count: int, *, explanation: bool = False,
+                  fallback_controls: bool = False):
+    navigation = []
+    if not explanation:
+        if page > 0:
+            navigation.append(types.InlineKeyboardButton(
+                text="⬅️ السابق", callback_data=f"qrevpage:{token}:{page - 1}"))
+        if page + 1 < count:
+            navigation.append(types.InlineKeyboardButton(
+                text="التالي ➡️", callback_data=f"qrevpage:{token}:{page + 1}"))
+    rows = [navigation] if navigation else []
+    rows.append([types.InlineKeyboardButton(
+        text="✖️ إغلاق المراجعة", callback_data=f"qrev_close:{token}")])
+    if fallback_controls:
+        if explanation:
+            rows.insert(0, [types.InlineKeyboardButton(
+                text="↩️ العودة للسؤال", callback_data=f"qrevback:{token}:{page}")])
+        else:
+            rows.insert(0, [types.InlineKeyboardButton(
+                text="💡 عرض الشرح", callback_data=f"qrevexp:{token}:{page}")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _review_show(call: types.CallbackQuery, token: str, page: int, *,
+                       explanation: bool = False, new_message: bool = False):
+    """Rich image/text and in-message explanation toggle; never touch quiz FSM."""
+    key = _quiz_review_key(call.from_user.id, token)
+    raw = await redis_client.get(key)
+    if not raw:
+        await call.answer("انتهت صلاحية مراجعة الأخطاء. يمكنك إعادة المحاولة.", show_alert=True)
+        return
+    items = json.loads(raw)
+    if not isinstance(items, list) or not 0 <= page < len(items):
+        await call.answer("صفحة مراجعة غير متاحة.", show_alert=True)
+        return
+
+    entry = items[page]
+    media = None
+    # Explanation expands below the same original math image, so it must be
+    # present on both views (also after changing review pages).
+    if entry.get("is_math"):
+        try:
+            media = await _review_resolve_image(call.from_user.id, token, page, items)
+        except Exception as exc:
+            log_warning(logger, f"Could not render math review image: {exc}")
+
+    image_url = media if isinstance(media, str) else ""
+    plain = (review_expanded_fallback_text(entry, page, len(items))
+             if explanation else review_question_fallback_text(entry, page, len(items)))
+    if entry.get("is_math") and media is not None and not image_url:
+        # A local rendered image cannot be embedded via an HTTP URL in a rich
+        # message; keep the question image and expandable caption instead.
+        await _review_fallback(
+            call, plain,
+            _review_pager(token, page, len(items),
+                          explanation=explanation, fallback_controls=True),
+            media, new_message)
+        await call.answer()
+        return
+    rich_html = review_question_rich_html(
+        entry, page, len(items), token, image_url, show_explanation=explanation)
+    keyboard = _review_pager(token, page, len(items), explanation=explanation)
+    rich = types.InputRichMessage(html=rich_html, is_rtl=True)
+
+    # New review starts below the original result. All subsequent navigation
+    # and explanation/back taps edit only the new review message.
+    try:
+        if new_message:
+            await bot.send_rich_message(
+                chat_id=call.message.chat.id, rich_message=rich, reply_markup=keyboard)
+        elif getattr(call.message, "photo", None) and not getattr(call.message, "rich_message", None):
+            # Photo captions cannot contain rich buttons, so use the fallback
+            # keyboard with the appropriate explanation/back control.
+            await _review_fallback(
+                call, plain, _review_pager(token, page, len(items),
+                    explanation=explanation, fallback_controls=True), media, False)
+        else:
+            await bot.edit_message_text(
+                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                rich_message=rich, reply_markup=keyboard)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            await call.answer()
+            return
+        log_warning(logger, f"Rich review unavailable, using fallback: {exc}")
+        await _review_fallback(
+            call, plain, _review_pager(token, page, len(items),
+                explanation=explanation, fallback_controls=True), media, new_message)
+    except Exception as exc:
+        log_warning(logger, f"Rich review unsupported, using fallback: {exc}")
+        await _review_fallback(
+            call, plain, _review_pager(token, page, len(items),
+                explanation=explanation, fallback_controls=True), media, new_message)
+    await call.answer()
+
+
+async def _review_fallback(call, body, keyboard, media, new_message):
+    """Keep fallback media/editing safe even with long or HTML-rich explanations."""
+    message = call.message
+    # Telegram photo captions have a lower length limit than messages.
+    plain_caption = html.unescape(re.sub(r"<[^>]*>", "", body))[:950]
+    if new_message:
+        if media:
+            await message.answer_photo(
+                photo=media, caption=plain_caption, reply_markup=keyboard)
+        else:
+            await message.answer(body, parse_mode="HTML", reply_markup=keyboard)
+    elif getattr(message, "photo", None) and not getattr(message, "rich_message", None):
+        await message.edit_caption(caption=plain_caption, reply_markup=keyboard)
+    else:
+        await message.edit_text(body, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.regexp(r"^qrevstart:[a-f0-9]{16}$"))
+async def start_quiz_error_review(call: types.CallbackQuery):
+    try:
+        await _review_show(call, call.data.split(":")[1], 0, new_message=True)
+    except Exception as exc:
+        log_warning(logger, f"Error opening error review: {exc}")
+        await call.answer("تعذر فتح المراجعة حالياً.", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^(qrev|qrevpage|qrevexp|qrevback):[a-f0-9]{16}:[0-9]{1,4}$"))
+async def show_quiz_error_review(call: types.CallbackQuery):
+    try:
+        action, token, page_raw = call.data.split(":")
+        # Older result messages used qrev:<token>:0; retain their navigation.
+        legacy_new = action == "qrev" and not (
+            (getattr(call.message, "text", "") or "").startswith("📚 مراجعة الأخطاء"))
+        await _review_show(
+            call, token, int(page_raw),
+            explanation=(action == "qrevexp"),
+            new_message=legacy_new)
+    except Exception as exc:
+        log_warning(logger, f"Error reviewing wrong quiz answers: {exc}")
+        await call.answer("تعذر فتح المراجعة حالياً.", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^qrev_close:[a-f0-9]{16}$"))
+async def close_quiz_error_review(call: types.CallbackQuery):
+    token = call.data.split(":")[-1]
+    if not await redis_client.get(_quiz_review_key(call.from_user.id, token)):
+        await call.answer("انتهت صلاحية المراجعة.", show_alert=True)
+        return
+    try:
+        await call.message.delete()
+    except TelegramBadRequest:
+        await call.message.edit_text("✅ تم إغلاق مراجعة الأخطاء.")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("quiz_feedback_"))
+async def open_quiz_feedback_panel(call: types.CallbackQuery):
+    """Keep leaderboard visible on the result; place ratings behind one CTA."""
+    quiz_id = call.data.removeprefix("quiz_feedback_")
+    if not _is_valid_uuid(quiz_id):
+        await call.answer("هذا الاختبار غير متاح للتقييم.", show_alert=True)
+        return
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="👍 عجبتني الأسئلة", callback_data=f"rate_like_{quiz_id}"),
+            types.InlineKeyboardButton(text="👎 فيها خلل", callback_data=f"rate_dislike_{quiz_id}"),
+        ],
+        [types.InlineKeyboardButton(text="✍️ كتابة ملاحظة", callback_data=f"rate_feedback_{quiz_id}")],
+        [types.InlineKeyboardButton(text="✖️ إغلاق", callback_data="feedback_hub_close")],
+    ])
+    await call.message.answer(
+        "💬 <b>عندك ملاحظات؟</b>\n\n"
+        "شاركنا تقييمك لجودة الأسئلة، أو اكتب ملاحظة تفصيلية لتحسين الكويز.",
+        parse_mode="HTML", reply_markup=kb)
+    await call.answer()
+
+
+@router.callback_query(F.data == "feedback_hub_close")
+async def close_quiz_feedback_panel(call: types.CallbackQuery):
+    try:
+        await call.message.delete()
+    except TelegramBadRequest:
+        await call.message.edit_text("✅ أُغلقت خيارات التقييم.")
+    await call.answer()
+
+
 # ==================== معالجات حركة الكويز والتحكم ====================
+
+async def _check_quiz_control(call, state):
+    from handlers.session_navigation import active_quiz
+    data = await state.get_data()
+    token = data.get("question_control_token")
+    parts = call.data.split(":")
+    if token:
+        matches = len(parts) == 3 and parts[0] == "qctl" and parts[1] == token
+    else:
+        matches = not call.data.startswith("qctl:")
+    if not matches or not await active_quiz(state):
+        await call.answer("انتهت صلاحية هذا الزر. استخدم أزرار السؤال الحالي.", show_alert=True)
+        return False
+    return True
+
+
+@router.callback_query(F.data.regexp(r"^qctl:[a-f0-9]{16}:(next|hint|stop|confirm|resume)$"))
+@user_locked()
+async def handle_question_control(call: types.CallbackQuery, state: FSMContext):
+    if not await _check_quiz_control(call, state):
+        return
+    action = call.data.split(":")[2]
+    if action == "resume":
+        return await resume_quiz_flow(call)
+    handler = {"next": handle_next, "hint": handle_hint, "stop": request_stop_confirmation,
+               "confirm": stop_quiz_confirmed}[action]
+    await getattr(handler, "__wrapped__", handler)(call, state)
+
 
 @router.poll_answer()
 async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
@@ -313,12 +752,33 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
         if poll_answer.user.id != quiz_info["user_id"]:
             return
         
-        selected_opt = int(poll_answer.option_ids[0])
-        if selected_opt == correct_opt:
+        from handlers.session_navigation import active_quiz, session_id
+        from services.redis_reliability import UserLock
+        lock = UserLock(redis_client, poll_answer.user.id)
+        if not await lock.acquire():
+            raise RuntimeError("Quiz session busy; retry poll answer")
+        try:
+            if not await active_quiz(state):
+                return
             current_data = await state.get_data()
-            await state.update_data(score=current_data.get('score', 0) + 1)
+            identity = await session_id(state)
+            if quiz_info.get("session_id") != identity:
+                return
+            index = quiz_info.get("question_index")
+            if index != current_data.get("current_index"):
+                return
+            answered = dict(current_data.get("answered_questions") or {})
+            if str(index) in answered:
+                return
+            selected_opt = int(poll_answer.option_ids[0])
+            answered[str(index)] = selected_opt
+            await state.update_data(answered_questions=answered,
+                score=current_data.get('score', 0) + int(selected_opt == correct_opt))
+        finally:
+            await lock.release()
     except Exception as e:
         log_error(logger, f"Error in handle_poll_answer: {e}", exception=e)
+        raise
 
 
 @router.message(QuizState.answering_quiz, F.text == ".")
@@ -333,6 +793,9 @@ async def request_question_edit(msg: types.Message, state: FSMContext):
             return
         poll_info = json.loads(poll_data)
         data = await state.get_data()
+        if data.get("is_mistake_practice"):
+            await msg.answer("يمكن تعديل السؤال من الاختبار الأصلي؛ هذه نسخة مخصصة للتدريب فقط.")
+            return
         question_index = int(poll_info.get("question_index", -1))
         if (poll_info.get("user_id") != msg.from_user.id or
                 question_index != data.get("current_index")):
@@ -693,7 +1156,10 @@ async def save_answer_text_edit(msg: types.Message, state: FSMContext):
     await _save_edited_question(msg, state, question_index, question, "answer_text", option_index)
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "next_question")
+@user_locked()
 async def handle_next(call: types.CallbackQuery, state: FSMContext):
+    if not await _check_quiz_control(call, state):
+        return
     try:
         data = await state.get_data()
         if data.get("is_switching_question"):
@@ -714,10 +1180,12 @@ async def handle_next(call: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "get_hint")
 async def handle_hint(call: types.CallbackQuery, state: FSMContext):
+    if not await _check_quiz_control(call, state):
+        return
     try:
         data = await state.get_data()
         q = data['questions'][data['current_index']]
-        hint_text = q['hint']
+        hint_text = q.get('hint') or "لا يوجد تلميح محفوظ لهذا السؤال."
         if q.get("is_math"):
             # التلميح يُعرض داخل تنبيه Telegram عادي لا يدعم LaTeX إطلاقاً، لذا
             # نحوّل أي صيغة LaTeX (حتى لو تسرّبت رغم تعليمات البرومبت) لنص عادي
@@ -732,6 +1200,9 @@ async def handle_hint(call: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(QuizState.answering_quiz, F.data == "start_first_question")
 async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if data.get("is_mistake_practice") or data.get("question_control_token"):
+        return await call.answer("استخدم أزرار السؤال الحالي.", show_alert=True)
     try:
         await call.message.delete()
         await send_question(call, state)
@@ -742,8 +1213,16 @@ async def start_quiz_after_warning(call: types.CallbackQuery, state: FSMContext)
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "quiz_stop")
 async def request_stop_confirmation(call: types.CallbackQuery, state: FSMContext):
+    if not await _check_quiz_control(call, state):
+        return
     try:
         confirm_kb = get_quiz_exit_confirmation_keyboard()
+        token = (await state.get_data()).get("question_control_token")
+        if token:
+            confirm_kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+                types.InlineKeyboardButton(text="🏁 نعم، إنهاء وعرض النتيجة", callback_data=f"qctl:{token}:confirm"),
+                types.InlineKeyboardButton(text="🔄 لا، إكمال الحل", callback_data=f"qctl:{token}:resume"),
+            ]])
         await call.message.answer(
             "🏁 <b>تأكيد إنهاء الاختبار</b>\n\n"
             "هل أنت متأكد من رغبتك في إنهاء الكويز الآن؟ سيتم احتساب نتيجتك الحالية بناءً على الأسئلة التي أجبت عليها حتى هذه اللحظة.",
@@ -756,7 +1235,10 @@ async def request_stop_confirmation(call: types.CallbackQuery, state: FSMContext
         await call.answer()
 
 @router.callback_query(StateFilter(*ACTIVE_QUIZ_STATES), F.data == "quiz_stop_confirmed")
+@user_locked()
 async def stop_quiz_confirmed(call: types.CallbackQuery, state: FSMContext):
+    if not await _check_quiz_control(call, state):
+        return
     try:
         data = await state.get_data()
         questions = data.get("questions", [])
@@ -786,14 +1268,22 @@ async def resume_quiz_flow(call: types.CallbackQuery):
         await call.answer()
 
 @router.callback_query(F.data == "quiz_replay")
+@user_locked()
 async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
+        if data.get("is_mistake_practice"):
+            return await call.answer("للتدريب استخدم زر «تدرب على أخطائك» في آخر نتيجة. افتح الاختبار الأصلي لإعادته كاملاً.", show_alert=True)
         questions = data.get("questions", [])
         if not questions:
             await call.answer("❌ لا يوجد كويز محفوظ لإعادة تشغيله", show_alert=True)
             return
         
+        from handlers.session_navigation import offer_transition
+        if await offer_transition(state, call.from_user.id, call.message.chat.id, {"kind": "loaded", "kwargs": {
+                "quiz_data": questions, "source_title": data.get("source_title", "كويز"),
+                "origin": data.get("quiz_origin", "shared"), "quiz_id": data.get("quiz_id") or ""}}):
+            return
         await state.set_state(QuizState.answering_quiz)
         # 🩹 إعادة التشغيل يجب أن تُسجَّل كمحاولة جديدة تماماً في قاعدة البيانات، وإلا
         # فإن complete_quiz_attempt اللاحقة ستستخدم نفس attempt_id القديم وتكتب فوق
@@ -804,8 +1294,9 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
             "origin": data.get("quiz_origin", "shared"), "quiz_id": data.get("quiz_id"), "questions": len(questions),
         }))
         await state.update_data(
-            current_index=0, score=0, quiz_completed=False, is_switching_question=False,
-            stopped_early=False, attempt_id=new_attempt_id
+            current_index=0, score=0, answered_questions={}, navigation_session_id=None, quiz_completed=False, is_switching_question=False,
+            stopped_early=False, attempt_id=new_attempt_id, practice_round=0,
+            practice_skipped_before=0, practice_result_token=None
         )
         try:
             await call.message.delete()
@@ -821,7 +1312,7 @@ async def replay_quiz(call: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "quiz_home")
 async def quiz_home(call: types.CallbackQuery, state: FSMContext):
     try:
-        await state.clear()
+        # Old result messages can be tapped during a newer quiz. Navigation is read-only.
         await send_main_menu(call, call.from_user.id)
     finally:
         await call.answer()
@@ -901,6 +1392,8 @@ async def process_quiz_feedback(msg: types.Message, state: FSMContext):
 async def handle_save_quiz_start(call: types.CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
+        if data.get("is_mistake_practice"):
+            return await call.answer("يمكنك حفظ الاختبار كاملاً من نتيجته الأصلية.", show_alert=True)
         if data.get("is_saved_in_session"):
             await call.answer("✅ هذا الكويز محفوظ بالفعل في قائمتك المفضلة!", show_alert=True)
             return
@@ -1064,21 +1557,11 @@ async def process_new_section_title_and_save(msg: types.Message, state: FSMConte
         await state.set_state(QuizState.answering_quiz)
 
 @router.callback_query(F.data == "force_stop_previous_quiz")
+@user_locked()
 async def force_stop_previous_quiz_handler(call: types.CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-        if data.get("attempt_id"):
-            spawn(mark_quiz_attempt_stopped(data["attempt_id"]))
-        await state.clear()
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
-        await call.message.answer("✅ <b>تم إيقاف الاختبار السابق بنجاح!</b>\n\nيمكنك الآن إرسال محتوى جديد فوراً. 🚀", parse_mode="HTML")
-    except Exception as e:
-        log_error(logger, f"Error in force_stop_previous_quiz: {e}")
-    finally:
-        await call.answer()
+    from handlers.session_navigation import offer_transition
+    await call.answer()
+    await offer_transition(state, call.from_user.id, call.message.chat.id, {"kind": "stop"})
 
 @router.callback_query(F.data == "delete_warning_msg")
 async def delete_warning_msg_handler(call: types.CallbackQuery):

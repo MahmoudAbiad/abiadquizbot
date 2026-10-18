@@ -50,6 +50,7 @@ from matplotlib.mathtext import MathTextParser
 from matplotlib.patches import Rectangle, Arc
 
 from logger import get_logger, log_warning
+from services import offload
 
 logger = get_logger(__name__)
 
@@ -63,7 +64,7 @@ matplotlib.rcParams["mathtext.fontset"] = "cm"
 # (canvas RGBA + قياسات mathtext) طوال مدة رسمها؛ بدون هذا السقف، عدد غير محدود
 # من الطلاب يفتحون سؤالًا رياضيًا بنفس اللحظة (أو عدة تصديرات كويز متزامنة) يعني
 # ذروة ذاكرة غير متوقعة. عدّل الرقم حسب نتائج اختبار الحمل الفعلي على حاوية 512MB.
-RENDER_SEMAPHORE = asyncio.Semaphore(3)
+RENDER_SEMAPHORE = asyncio.Semaphore(offload.BASE_LOCAL_RENDER_LIMIT)
 
 # 🩹 FIX (correctness + memory-leak): اكتُشف بالاختبار الفعلي تحت تزامن حقيقي (threads
 # نظامية منفصلة، وليس asyncio فقط) أن _MATH_PARSER (المبني على pyparsing) يرمي
@@ -647,6 +648,27 @@ def _line_ink_metrics(line: str, font_prop: fm.FontProperties, renderer, lp_h: f
         return OPTION_LINE_HEIGHT_PX * 0.7, OPTION_LINE_HEIGHT_PX * 0.5, OPTION_LINE_HEIGHT_PX * 0.2
 
 
+def _short_option_columns(blocks, font_prop, max_width_px):
+    """Use two columns only when every rendered option fits one short line.
+
+    Measure final shaped/math text, keeping the existing font size. Reserve a
+    central gutter for both badges and whitespace; malformed math stays stacked.
+    """
+    if len(blocks) < 2:
+        return 1
+    cell_width = (max_width_px - 80) / 2
+    try:
+        for block in blocks:
+            if len(block) != 1:
+                return 1
+            metrics = _MATH_PARSER.parse(block[0], dpi=DPI, prop=font_prop)
+            if metrics.width > cell_width * 0.90 or metrics.height > OPTION_LINE_HEIGHT_PX * 1.5:
+                return 1
+    except Exception:
+        return 1
+    return 2
+
+
 def render_question_image(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
     """غلاف رقيق يُسلسل كل استدعاء عبر _RENDER_LOCK (راجع تعليق _RENDER_LOCK أعلاه) -
     ضروري لأن هذه الدالة تُستدعى من asyncio.to_thread على خيوط OS منفصلة فعليًا،
@@ -681,7 +703,8 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
     option_wrap_width = max_width_px * 0.96
     option_blocks: List[List[str]] = []
     for letter, opt in zip(letters, options):
-        combined = f"({letter} {opt}" if is_ar else f"{letter}) {opt}"
+        # Supply logical reading order; _shape_line handles Arabic bidi/mirroring.
+        combined = f"{letter}) {opt}"
         option_blocks.append(_wrap_and_shape(combined, is_ar, option_wrap_width, opt_font_prop))
 
     # نقيس ارتفاع كل سطر فعلياً (بدل الاعتماد على ثابت واحد لكل الأسطر) - ضروري
@@ -726,6 +749,10 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         option_render_blocks.append(rendered)
         option_block_heights.append(heights)
 
+    option_columns = _short_option_columns(option_render_blocks, opt_font_prop, max_width_px)
+    option_row_heights = [max(sum(h) for h in option_block_heights[i:i+option_columns])
+                          for i in range(0, len(option_block_heights), option_columns)]
+
     # 🛠️ FIX: كانت الفجوة الأولى قبل أول خيار (`y -= OPTION_GAP_PX` بالسطر ~683، قبل
     # حلقة الرسم) غير محسوبة هون إطلاقاً - فقط الفجوات *بين/بعد* الخيارات (وحدة لكل
     # option_block) كانت مُدرجة. هذا كان يسبب نقصاً ثابتاً بقيمة OPTION_GAP_PX تقريباً
@@ -739,8 +766,8 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         + sum(q_line_heights)
         + table_extra_h
         + matrices_extra_h
-        + sum(sum(heights) for heights in option_block_heights)
-        + len(option_blocks) * OPTION_GAP_PX
+        + sum(option_row_heights)
+        + len(option_row_heights) * OPTION_GAP_PX
         + (OPTION_GAP_PX - 6 if option_blocks else 0)
     )
     height_px = max(height_px, 380)
@@ -791,13 +818,23 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
     _renderer = canvas.get_renderer()
     _, _lp_h, _lp_d = _renderer.get_text_width_height_descent("lp", opt_font_prop, False)
     max_shift = 0.0
+    row_top = y
     for i, (block, heights) in enumerate(zip(option_render_blocks, option_block_heights)):
-        if i > 0:
+        column = i % option_columns
+        if column == 0:
+            row_top = y
+        else:
+            y = row_top
+        row_height = option_row_heights[i // option_columns]
+        column_step = (max_width_px + 80) / 2 if option_columns == 2 else 0
+        x = (FIG_WIDTH_PX - MARGIN_PX - column * column_step if is_ar
+             else MARGIN_PX + column * column_step)
+        if i > 0 and column == 0:
             sep_y = y + OPTION_GAP_PX / 2
             ax.plot([MARGIN_PX, FIG_WIDTH_PX - MARGIN_PX], [sep_y, sep_y], color="#e8e8e8", linewidth=1.2)
         color = BADGE_COLORS[i % len(BADGE_COLORS)]
         # نقطة ملوّنة صغيرة بجانب كل خيار لتمييزه بصرياً (بدون تكرار الحرف - موجود أصلاً بالنص)
-        badge_x = MARGIN_PX - 20 if not is_ar else FIG_WIDTH_PX - MARGIN_PX + 20
+        badge_x = x + 20 if is_ar else x - 20
         # 🛠️ FIX (محاذاة): النقطة كانت تُرسم عند y+10 (أي فوق بداية السطر)، فتظهر أعلى
         # من الخيار. نحسب الارتفاع الفعلي (بدون هامش الأمان) لأول سطر بالخيار ونضع
         # النقطة عند منتصفه العمودي تماماً، فتبقى بنص الخيار حتى مع الكسور/الجذور.
@@ -815,7 +852,7 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         # الفرق بين المسافة فوقها وتحتها، فتصير المسافتان متساويتين. المعادلات ذات الكسور
         # الطويلة تحتل مساحة أكبر فتنزل أقل، والخيارات القصيرة تنزل أكثر - كلها بنفس القاعدة.
         cell_top = y + OPTION_GAP_PX / 2
-        cell_bottom = y - sum(heights) - OPTION_GAP_PX / 2
+        cell_bottom = y - row_height - OPTION_GAP_PX / 2
         base_off_0, above_0, _ = _line_ink_metrics(block[0], opt_font_prop, _renderer, _lp_h, _lp_d)
         ink_top = (y - base_off_0) + above_0
         last_top = y - sum(heights[:-1])
@@ -830,7 +867,7 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
                     fontsize=OPTION_FONT_SIZE, color="#2c2c2c",
                     fontproperties=_font_prop(is_ar))
             y -= line_h
-        y -= OPTION_GAP_PX
+        y = row_top - row_height - OPTION_GAP_PX
 
     # شبكة أمان أخيرة: لو رغم القياس المسبق (بهامش 20%) في حالة متطرفة نادرة خلت
     # آخر سطر يوصل لتحت حدود الصورة (y سالب)، نمدّد الصورة فعلياً لتحت بدل ما نقص
@@ -869,6 +906,9 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
 # من أي مكان بالمشروع (services/quiz_engine.py و services/export_service.py عبر
 # handlers/export.py).
 async def render_question_image_async(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
+    remote = await offload.remote_render_image(question, idx, total, is_ar)
+    if remote is not None:
+        return remote
     async with RENDER_SEMAPHORE:
         result = await asyncio.to_thread(render_question_image, question, idx, total, is_ar)
     from mem_utils import release_memory_to_os

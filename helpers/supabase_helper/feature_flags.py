@@ -23,6 +23,7 @@ from ._client import supabase, logger, log_error
 
 _FEATURE_FLAG_REDIS_PREFIX = "feature_flag:"
 FEATURE_FLAG_CACHE_TTL_SECONDS = 30
+_GAME_FLAGS = {"challenge_system_enabled", "async_attacks_enabled", "spectator_mode_enabled", "live_matches_enabled"}
 
 
 def _flag_redis_key(key: str) -> str:
@@ -39,6 +40,8 @@ async def is_feature_enabled(key: str, default: bool = True) -> bool:
     """يرجع حالة تفعيل مفتاح معيّن. أي مفتاح غير موجود بالجدول أصلاً (لم يلمسه الأدمن
     بعد) أو فشل بالاتصال (بـ Supabase أو Redis) يُعامل كـ"مفعّل" افتراضياً (fail-safe -
     لا تعطيل غير مقصود لميزة قائمة بمجرد مشكلة اتصال عابرة)."""
+    if key in _GAME_FLAGS:
+        default = False
     try:
         cached = await redis_client.get(_flag_redis_key(key))
         if cached is not None:
@@ -82,7 +85,7 @@ async def get_all_feature_flags(registry: Dict[str, str], default: bool = True) 
     ثم يُخزَّن بـ Redis لتوفير الاستعلامات القادمة. أي مفتاح غير موجود بالجدول بعد يُعتبر
     مفعّلاً افتراضياً (نفس منطق is_feature_enabled)."""
     keys = list(registry.keys())
-    result = {k: default for k in keys}
+    result = {k: False if k in _GAME_FLAGS else default for k in keys}
     if not keys:
         return result
 

@@ -11,15 +11,19 @@ from typing import Optional, Dict, Any
 
 from ._client import supabase, logger, log_error, log_warning, log_info
 from .analytics import log_usage_event
+from .gifts import gift_balances, debit
+from services.wallet_errors import WalletDebitError
+from zoneinfo import ZoneInfo
 from validators import validate_user_id
 from helpers.settings_helper import get_setting
 
 
-def _balance_payload(free_points: Any = 0, paid_points: Any = 0, **extra: Any) -> Dict[str, Any]:
+def _balance_payload(free_points: Any = 0, paid_points: Any = 0, gift_points: Any = 0, **extra: Any) -> Dict[str, Any]:
     """Expose split balances while retaining ``points`` for older callers."""
     free = float(free_points or 0)
     paid = float(paid_points or 0)
-    return {"free_points": free, "paid_points": paid, "points": free + paid, **extra}
+    gift = float(gift_points or 0)
+    return {"free_points": free, "paid_points": paid, "gift_points": gift, "points": free + paid + gift, **extra}
 
 # ==================== User Management ====================
 async def check_or_add_user(user_id: int, username: str, first_name: str, last_name: str, referrer_id: Optional[int] = None,
@@ -29,7 +33,7 @@ async def check_or_add_user(user_id: int, username: str, first_name: str, last_n
         if not is_valid:
             return _balance_payload(status="error", referrer=None)
         
-        today = datetime.date.today().isoformat()
+        today = datetime.datetime.now(ZoneInfo("Asia/Damascus")).date().isoformat()
         response = await supabase.table("users").select("*").eq("user_id", user_id).execute()
         
         if not response.data:
@@ -53,10 +57,6 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
                 referrer_row = ref_check.data[0]
                 referrer_name = f"{referrer_row.get('first_name', '')} {referrer_row.get('last_name', '')}".strip() or referrer_row.get("username") or "غير معروف"
 
-        # 🆕 نقاط الترحيب تُقرأ الآن من app_settings (قابلة للتعديل من لوحة الإدارة)
-        # بدل الاعتماد على القيمة الثابتة في constants.py مباشرة.
-        welcome_points = await get_setting("welcome_points")
-
         # 🆕 طريقة الانضمام (لوحة الأدمن > التحليلات > طرق الانضمام). الإحالة تُحسم هنا لا في
         # المستدعي: لو الـ referrer غير موجود بالقاعدة (actual_referrer=None) فالمستخدم ليس إحالة فعلية.
         if actual_referrer:
@@ -67,19 +67,22 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
         else:
             resolved_source, resolved_quiz = "bot", None
 
-        await supabase.table("users").insert({
+        registration = await supabase.rpc("register_user_with_gift", {"p_user": {
             "join_source": resolved_source,
             "join_quiz_id": resolved_quiz,
             "user_id": user_id,
             "username": username,
             "first_name": first_name,
             "last_name": last_name or "Unknown",
-            "free_points": float(welcome_points),
+            "free_points": 0.0,
             "paid_points": 0.0,
             "total_questions": 0,
             "referred_by": actual_referrer,
             "last_renewal": today
-        }).execute()
+        }}).execute()
+        if not registration.data:
+            existing = await supabase.table("users").select("*").eq("user_id", user_id).single().execute()
+            return await _check_daily_renewal(user_id, existing.data, today)
 
         # 🆕 تسجيل نشاط "انضم عبر رابط دعوة بواسطة فلان" — حدث تحليلات عادي (usage_events)
         # يظهر بلوحة الأدمن ويُستخدم أيضاً كسجل زمني دقيق لكل إحالة جديدة من الآن فصاعداً
@@ -89,7 +92,8 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
                 "referrer_name": referrer_name,
             }))
 
-        return _balance_payload(welcome_points, 0, status="new", referrer=actual_referrer)
+        gifts = await gift_balances([user_id])
+        return _balance_payload(0, 0, gifts.get(user_id, 0), status="new", referrer=actual_referrer)
     except Exception as e:
         # A simultaneous first request may have inserted this user already.
         # Re-read only on a unique-constraint conflict; never overwrite balances.
@@ -106,66 +110,17 @@ async def _add_new_user(user_id: int, username: str, first_name: str, last_name:
 async def reward_referrer_if_eligible(user_id: int) -> bool:
     """منح مكافأة الإحالة بعد أول توليد كويز ناجح فقط وبشكل غير مكرر."""
     try:
-        user_response = await supabase.table("users").select(
-            "referred_by, referral_reward_awarded"
-        ).eq("user_id", user_id).limit(1).execute()
-        if not user_response.data:
+        result = await supabase.rpc("reward_referral_gift", {"p_user_id": user_id}).execute()
+        if not result.data:
             return False
-
-        user = user_response.data[0]
-        referrer_id = user.get("referred_by")
-        if not referrer_id or user.get("referral_reward_awarded"):
-            return False
-
-        # quiz_generated is written only after the generation workflow succeeds.
-        # 🆕 نتحقق من "على الأقل مرة واحدة" وليس "بالضبط مرة واحدة": منع الصرف المكرر
-        # مضمون فعلياً عبر شرط referral_reward_awarded = FALSE في claim_response أدناه
-        # (تحديث ذري)، فلا حاجة لتحقق count == 1 هنا. لو اعتمدنا == 1 وفشل استدعاء هذه
-        # الدالة لأي سبب (تعطل، انقطاع) بعد أول كويز ناجح، سيصبح العدّاد 2 عند ثاني
-        # كويز حقيقي ويُحرم المُحيل من مكافأته للأبد رغم أن الشرط الفعلي (صديق أنجز
-        # كويزاً حقيقياً) قد تحقق فعلاً.
-        activity_response = await supabase.table("usage_events").select("id").eq(
-            "user_id", user_id
-        ).eq("event_type", "quiz_generated").limit(1).execute()
-        if not activity_response.data:
-            return False
-
-        referrer_response = await supabase.table("users").select("user_id").eq(
-            "user_id", referrer_id
-        ).limit(1).execute()
-        if not referrer_response.data:
-            return False
-
-        # Claim first so concurrent requests cannot award the same referral twice.
-        claim_response = await supabase.table("users").update(
-            {"referral_reward_awarded": True}
-        ).eq("user_id", user_id).eq("referral_reward_awarded", False).select("user_id").execute()
-        if not claim_response.data:
-            return False
-
-        # 🆕 يُنفَّذ عبر RPC ذري (UPDATE ... SET paid_points = paid_points + amount) بدل
-        # قراءة الرصيد ثم كتابته من بايثون - القراءة-ثم-الكتابة كانت عرضة لفقدان
-        # تحديثات (lost update) لو أكمل أكثر من صديق واحد لنفس المُحيل أول كويز له
-        # بشكل شبه متزامن؛ الآن كل عملية زيادة مقفولة على مستوى الصف في قاعدة البيانات.
-        # 🆕 مكافأة الإحالة تُقرأ من app_settings (قابلة للتعديل من لوحة الإدارة)
-        referral_bonus = await get_setting("referral_bonus_points")
-
-        try:
-            await supabase.rpc("award_referral_bonus_atomic", {
-                "referrer_user_id": referrer_id,
-                "bonus_amount": referral_bonus,
-            }).execute()
-        except Exception:
-            await supabase.table("users").update({
-                "referral_reward_awarded": False
-            }).eq("user_id", user_id).eq("referral_reward_awarded", True).execute()
-            raise
+        referrer_id = result.data["referrer_id"]
+        referral_bonus = result.data["points"]
 
         try:
             from config import bot
             await bot.send_message(
                 referrer_id,
-                f"🎉 قام صديقك بإجراء أول اختبار له، وتمت إضافة {int(referral_bonus)} نقطة مكافأة إلى رصيدك!",
+                f"🎉 قام صديقك بإجراء أول اختبار له، وتمت إضافة {int(referral_bonus)} نقطة إلى رصيد الهدايا! راجع «هداياي» لمعرفة صلاحيتها.",
             )
         except Exception as notification_error:
             log_warning(logger, f"Could not notify referrer {referrer_id}: {notification_error}")
@@ -188,60 +143,43 @@ async def _check_daily_renewal(user_id: int, user_data: Dict, today: str) -> Dic
             "renewal_amount": daily_renewal_points
         }).execute()
         
+        gifts = await gift_balances([user_id])
         if rpc_response.data:
             result = rpc_response.data[0] if isinstance(rpc_response.data, list) else rpc_response.data
             return {
-                **_balance_payload(result.get("free_points"), result.get("paid_points")),
+                **_balance_payload(result.get("free_points"), result.get("paid_points"), gifts.get(user_id, 0)),
                 "status": result["renewal_status"], 
                 "referrer": None
             }
         
-        return _balance_payload(user_data.get('free_points'), user_data.get('paid_points'), status="normal", referrer=None)
+        return _balance_payload(user_data.get('free_points'), user_data.get('paid_points'), gift_points=gifts.get(user_id, 0), status="normal", referrer=None)
     except Exception as e:
         log_error(logger, f"Error checking daily renewal via RPC: {e}", exception=e)
         return _balance_payload(user_data.get('free_points'), user_data.get('paid_points'), status="error", referrer=None)
     
 async def update_user_stats(user_id: int, points_to_deduct: float, questions_generated: Optional[int] = None) -> Optional[Dict[str, float]]:
-    """
-    🆕 [طبقة 2] الدالة كانت ترجع رقم واحد (الرصيد المتبقي) وترمي معلومة التقسيم
-    اللي أصلاً محسوبة داخل deduct_user_points_atomic (كم اتخصم من free_points
-    وكم من paid_points). هلق بترجع التقسيم كامل، لأنه هاي المعلومة لازم تُحفظ
-    بالـ state لحظة الخصم (debited_free/debited_paid) عشان أي ريفوند لاحق يرجع
-    كل جزء لمصدره الصحيح بدل ما يرجع الكل لـpaid_points (كان عم "يُرقّي" نقاط
-    مجانية مؤقتة لنقاط مدفوعة دائمة عند كل فشل).
-
-    ⚠️ Breaking change: القيمة المرجعة صارت dict {remaining_points, debited_free,
-    debited_paid} بدل float. كل الأماكن اللي بتنادي هاي الدالة (services/quiz_service.py،
-    handlers/files.py، handlers/audio.py) لازم تتحدّث بنفس الوقت لتقرأ الشكل الجديد
-    وتخزّن debited_free/debited_paid بدل debited_cost بس - غير هيك رح تنكسر.
-    """
+    """Return a receipt or a confirmed rejection; raise on an unconfirmed RPC."""
     try:
         is_valid, error = validate_user_id(user_id)
-        if not is_valid: return None
+        if not is_valid:
+            raise ValueError("Invalid wallet user")
 
         if questions_generated is None:
             questions_generated = int(points_to_deduct)
         
-        rpc_response = await supabase.rpc("deduct_user_points_atomic", {
-            "target_user_id": user_id,
-            "points_to_deduct": points_to_deduct,
-            "questions_generated": questions_generated
-        }).execute()
-
-        if not rpc_response.data:
-            # المستخدم غير موجود، أو رصيده الإجمالي أقل من points_to_deduct
-            # (الدالة الذرية بترجع نتيجة فاضية بالحالتين - RETURN بلا QUERY)
+        row = await debit(user_id, points_to_deduct, questions_generated)
+        if row is None:
             return None
-
-        row = rpc_response.data[0] if isinstance(rpc_response.data, list) else rpc_response.data
         return {
             "remaining_points": float(row["remaining_points"]),
             "debited_free": float(row["debited_free"]),
             "debited_paid": float(row["debited_paid"]),
+            "debited_gift": float(row["debited_gift"]),
+            "debit_id": row["debit_id"],
         }
     except Exception as e:
         log_error(logger, f"Error updating user stats via RPC: {e}", exception=e)
-        return None
+        raise WalletDebitError("Wallet debit could not be confirmed") from e
 
 async def refund_user_points_split(user_id: int, free_amount: float, paid_amount: float) -> bool:
     """
@@ -313,4 +251,5 @@ async def refund_user_points(user_id: int, points_to_refund: float) -> bool:
     except Exception as e:
         log_error(logger, f"Error refunding points for user {user_id}: {e}", exception=e)
         return False
+
 
