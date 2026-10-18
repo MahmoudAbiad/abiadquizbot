@@ -262,10 +262,12 @@ async def _send_quiz_completion(chat_id: int, result_text: str, keyboard, review
                 continue
             paragraphs.append(f"<p>{line}</p>")
             if not inserted and "📊 النسبة المئوية:" in line:
-                paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}  {button}</p>")
+                paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}</p>")
+                paragraphs.append(button)
                 inserted = True
         if not inserted:
-            paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}  {button}</p>")
+            paragraphs.append(f"<p>❌ الإجابات الخاطئة: {wrong_count}</p>")
+            paragraphs.append(button)
         rich_html = "".join(paragraphs)
         logger.info("QUIZ_RESULT_RICH_ATTEMPT review_errors=%s", wrong_count)
         try:
