@@ -45,9 +45,18 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(data[1], 'favorites_menu')
                 self.assertIn('student_help', data)
                 self.assertEqual('upload_open:all' in data, bool(web))
+                self.assertNotIn('recharge_info', data)
                 self.assertNotIn('cg:home:0', data)
             flag.return_value = True
             self.assertIn('cg:home:0', callbacks(await env['get_main_menu_keyboard']('bot', 42)))
+
+    def test_welcome_text_shows_total_only(self):
+        text = ui.welcome_text(35.5, 10, 5.5, 20)
+        self.assertIn('رصيدك المتاح: 35.50', text)
+        self.assertNotIn('يومي 10.00', text)
+        self.assertNotIn('هدايا 5.50', text)
+        self.assertNotIn('مدفوع 20.00', text)
+        self.assertIn('رصيدي وهداياي', text)
 
     async def test_help_create_and_home_do_not_touch_active_state(self):
         env = load_functions('handlers/start.py', {'student_navigation'},

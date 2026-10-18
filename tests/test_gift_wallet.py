@@ -3,6 +3,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 from datetime import datetime, timedelta, timezone
+from aiogram import types as tg
 from reliability_support import load_functions
 from services.gift_presentation import expiry_text, parse_expiry, gift_text
 
@@ -21,6 +22,25 @@ class Presentation(unittest.TestCase):
         gift.update(revoked_at=None,expires_at=None,remaining_amount=0)
         self.assertIn('مستهلكة',gift_text(gift))
 
+    def test_gift_text_includes_start_end_and_estimated_duration(self):
+        gift = dict(
+            title='هدية',
+            remaining_amount=5,
+            original_amount=10,
+            granted_at='2026-10-01T00:00:00Z',
+            expires_at='2026-10-11T00:00:00Z',
+        )
+        text = gift_text(gift)
+        self.assertIn('بداية الهدية:', text)
+        self.assertIn('انتهاء الهدية:', text)
+        self.assertIn('المدة التقديرية: 10 يوم', text)
+
+    def test_gift_text_handles_missing_dates_safely(self):
+        gift = dict(title='هدية', remaining_amount=3, original_amount=10, expires_at=None)
+        text = gift_text(gift)
+        self.assertIn('انتهاء الهدية: بدون انتهاء', text)
+        self.assertIn('المدة التقديرية: غير محددة (بدون انتهاء)', text)
+
     def test_balances_include_gift_without_changing_legacy_total(self):
         env=load_functions('helpers/supabase_helper/users.py',{'_balance_payload'})
         self.assertEqual(env['_balance_payload'](5,20,30)['points'],55)
@@ -36,6 +56,11 @@ class Presentation(unittest.TestCase):
 
 
 class WalletFlow(unittest.IsolatedAsyncioTestCase):
+    def test_wallet_buttons_include_recharge_action(self):
+        wallet_buttons = load_functions('handlers/gifts.py', {'wallet_buttons'}, types=tg)['wallet_buttons']
+        callbacks = [b.callback_data for row in wallet_buttons().inline_keyboard for b in row if b.callback_data]
+        self.assertIn('recharge_info', callbacks)
+
     async def test_gift_only_generation_refunds_by_receipt(self):
         fn=load_functions('services/quiz_service.py',{'refund_user_on_failure'})['refund_user_on_failure']
         refund=AsyncMock(return_value=True)

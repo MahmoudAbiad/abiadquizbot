@@ -48,8 +48,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
             [types.InlineKeyboardButton(text="📝 إنشاء كويز جديد", callback_data="student_create_quiz")],
             [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu")],
             [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
-            [types.InlineKeyboardButton(text="💳 شحن الرصيد", callback_data="recharge_info"),
-             types.InlineKeyboardButton(text="🎟 استخدام كود هدية", callback_data="gift:redeem")],
+            [types.InlineKeyboardButton(text="🎟 استخدام كود هدية", callback_data="gift:redeem")],
             [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
@@ -1185,6 +1184,5 @@ def get_group_channel_picker_keyboard(
         rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
     rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 
