@@ -14,6 +14,7 @@ from aiogram.types import BufferedInputFile
 from keyboards import get_export_format_keyboard, get_export_style_keyboard
 from logger import get_logger, log_error
 from mem_utils import release_memory_to_os
+from services import offload
 # 🩹 FIX (memory-leak): بناء ملف الكويز الكامل يرسم صورة matplotlib لكل سؤال رياضي
 # ضمن نفس نداء to_thread - نلف النداء بـ RENDER_SEMAPHORE (نفس السقف المستخدم أثناء
 # حل الكويز المباشر) لمنع عدة تصديرات متزامنة من مضاعفة ذروة الذاكرة معًا.
@@ -92,11 +93,15 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
         status = await call.message.answer("⏳ تم تسجيل طلبك في طابور التصدير؛ يبدأ التجهيز عند توفر الدور.")
         style = STYLE_CODE_TO_NAME.get(style_code, "simple")
         async with EXPORT_SLOT:
-            async with HEAVY_PROCESSING_SEMAPHORE:
+            if offload.ENABLED:
                 await status.edit_text(MSG_GENERATING)
-                async with RENDER_SEMAPHORE:
-                    builder = build_quiz_docx if fmt == "docx" else build_quiz_pdf
-                    file_bytes = await _build_export(builder, title, questions, style, include_answers)
+            file_bytes = await offload.remote_build_quiz(fmt, title, questions, style, include_answers)
+            if file_bytes is None:
+                async with HEAVY_PROCESSING_SEMAPHORE:
+                    await status.edit_text(MSG_GENERATING)
+                    async with RENDER_SEMAPHORE:
+                        builder = build_quiz_docx if fmt == "docx" else build_quiz_pdf
+                        file_bytes = await _build_export(builder, title, questions, style, include_answers)
             # Keep the export slot through upload: only one completed file in RAM.
             version = "الأستاذ" if include_answers else "الطالب"
             filename = build_export_filename(f"{title}_{version}", fmt)

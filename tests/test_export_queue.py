@@ -15,7 +15,7 @@ def load_functions():
         node.returns = None
         for arg in node.args.args:
             arg.annotation = None
-    ns = dict(asyncio=asyncio, _PENDING_EXPORT_USERS=set(), EXPORT_SLOT=asyncio.Lock(),
+    ns = dict(offload=SimpleNamespace(ENABLED=False, remote_build_quiz=AsyncMock(return_value=None)), asyncio=asyncio, _PENDING_EXPORT_USERS=set(), EXPORT_SLOT=asyncio.Lock(),
               HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(2), RENDER_SEMAPHORE=asyncio.Semaphore(3),
               MAX_PENDING_EXPORTS=8, _safe_answer=AsyncMock(), STYLE_CODE_TO_NAME={'s': 'simple'},
               MSG_NO_QUESTIONS='empty', MSG_GENERATING='generating', MSG_FAILED='failed',
@@ -34,6 +34,23 @@ def call(user):
 
 
 class QueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remote_export_preserves_student_variant_without_local_work(self):
+        ns = load_functions()
+        ns['offload'].ENABLED = True
+        ns['offload'].remote_build_quiz.return_value = b'remote-docx'
+        heavy = ns['HEAVY_PROCESSING_SEMAPHORE']
+        await heavy.acquire(); await heavy.acquire()
+        a = call(1)
+        try:
+            await asyncio.wait_for(ns['_generate_and_send'](
+                a, [{'question': 'sample'}], 'title', 'docx', 's', include_answers=False), 2)
+        finally:
+            heavy.release(); heavy.release()
+        ns['offload'].remote_build_quiz.assert_awaited_once_with(
+            'docx', 'title', [{'question': 'sample'}], 'simple', False)
+        self.assertEqual(a.message.answer_document.call_args.kwargs['document'], b'remote-docx')
+        self.assertFalse(ns['_PENDING_EXPORT_USERS'])
+
     async def test_buttons_roundtrip_and_legacy(self):
         import re
         from aiogram import types

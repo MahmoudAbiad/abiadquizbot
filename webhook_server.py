@@ -85,7 +85,8 @@ logger = get_logger(__name__)
 # يُنتج عددًا غير محدود من الـ tasks المتزامنة، كل واحدة قد تستدعي رسم صور، توليد
 # PDF/Word، أو طلب Gemini - وكلها عمليات تستهلك ذاكرة فعلية أثناء التنفيذ. هذا
 # السقف يحوّل الذروة من "غير محدودة" إلى رقم صريح مضبوط حسب اختبار الحمل الفعلي.
-UPDATE_CONCURRENCY_LIMIT = 15
+from services import offload
+UPDATE_CONCURRENCY_LIMIT = offload.UPDATE_CONCURRENCY_LIMIT
 _update_semaphore = asyncio.Semaphore(UPDATE_CONCURRENCY_LIMIT)
 webhook_queue = WebhookQueue(redis_client)
 

@@ -1,5 +1,16 @@
 # سجل تطوير بوت الكويزات - abiadquizbot (الحالة الحالية)
 
+## Optional Render rendering/export offload (2026-10-18)
+
+- Preserve the current test branch and local behavior with OFFLOAD_ENABLED=0.
+- Separate stateless HTTP service on the same branch; two spawned render processes,
+  bounded admission, child-side cleanup and recovery. Rendering/export only; AI,
+  audio processing, database and Telegram remain on the bot.
+- Preserve student/teacher exports, shared export queue, local fallback limits and
+  cancellation handling. Circuit checks happen after connection admission; strict
+  no-local-fallback mode is honored for all active-offload failure paths.
+- Deployment/configuration and verification details: docs/offload.md.
+
 **هذا الملف خفيف ومخصص للقراءة الروتينية قبل أي تعديل جديد** - القرارات المعمارية،
 حالة الاختبار، والمعلومات التقنية الضرورية فقط. للسجل التاريخي الكامل (كل الإصلاحات
 والميزات بالتفصيل وبالترتيب الزمني) راجع **[`HISTORY_LOG.md`](HISTORY_LOG.md)** -

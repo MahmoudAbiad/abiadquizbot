@@ -5,6 +5,11 @@ Supports both Webhook (Railway/Srv) and Polling modes.
 
 import sys
 import os
+
+# Run the stateless renderer without importing bot credentials or database clients.
+if __name__ == "__main__" and (os.getenv("APP_ROLE") or "").strip().lower() == "render_worker":
+    os.execv(sys.executable, [sys.executable, "-m", "render_worker"])
+
 import asyncio
 from task_utils import spawn
 from concurrent.futures import ThreadPoolExecutor

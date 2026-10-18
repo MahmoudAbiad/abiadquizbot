@@ -62,6 +62,7 @@ from services.audio_service import summarize_lecture_text, transcribe_audio_lect
 from services.flow_state import build_state_for_chat
 from handlers.files import ask_question_count
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
+from services import offload
 from helpers.supabase_helper import (
     log_usage_event, refund_user_points_split, update_user_stats,
 )
@@ -594,10 +595,12 @@ async def handle_audio_export_format(call: types.CallbackQuery, state: FSMContex
         is_docx = call.data == "audio_export_docx"
         ext = "docx" if is_docx else "pdf"
 
-        if is_docx:
-            file_bytes = await asyncio.to_thread(build_document_docx, title, content)
-        else:
-            file_bytes = await asyncio.to_thread(build_document_pdf, title, content)
+        file_bytes = await offload.remote_build_document(ext, title, content)
+        if file_bytes is None:
+            if is_docx:
+                file_bytes = await asyncio.to_thread(build_document_docx, title, content)
+            else:
+                file_bytes = await asyncio.to_thread(build_document_pdf, title, content)
 
         if not file_bytes:
             await call.message.answer("❌ تعذر إنشاء الملف، حاول مجدداً.")

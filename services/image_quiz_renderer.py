@@ -50,6 +50,7 @@ from matplotlib.mathtext import MathTextParser
 from matplotlib.patches import Rectangle, Arc
 
 from logger import get_logger, log_warning
+from services import offload
 
 logger = get_logger(__name__)
 
@@ -63,7 +64,7 @@ matplotlib.rcParams["mathtext.fontset"] = "cm"
 # (canvas RGBA + قياسات mathtext) طوال مدة رسمها؛ بدون هذا السقف، عدد غير محدود
 # من الطلاب يفتحون سؤالًا رياضيًا بنفس اللحظة (أو عدة تصديرات كويز متزامنة) يعني
 # ذروة ذاكرة غير متوقعة. عدّل الرقم حسب نتائج اختبار الحمل الفعلي على حاوية 512MB.
-RENDER_SEMAPHORE = asyncio.Semaphore(3)
+RENDER_SEMAPHORE = asyncio.Semaphore(offload.BASE_LOCAL_RENDER_LIMIT)
 
 # 🩹 FIX (correctness + memory-leak): اكتُشف بالاختبار الفعلي تحت تزامن حقيقي (threads
 # نظامية منفصلة، وليس asyncio فقط) أن _MATH_PARSER (المبني على pyparsing) يرمي
@@ -905,6 +906,9 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
 # من أي مكان بالمشروع (services/quiz_engine.py و services/export_service.py عبر
 # handlers/export.py).
 async def render_question_image_async(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
+    remote = await offload.remote_render_image(question, idx, total, is_ar)
+    if remote is not None:
+        return remote
     async with RENDER_SEMAPHORE:
         result = await asyncio.to_thread(render_question_image, question, idx, total, is_ar)
     from mem_utils import release_memory_to_os
