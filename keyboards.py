@@ -515,7 +515,7 @@ def get_rating_keyboard(file_quiz_id: str, quiz_id: str = None, viewer_id=None, 
     فتصير 6 صفوف إجمالاً بدل 9 - أخف بصرياً وأسهل مسحاً بالعين."""
     base_kb = get_quiz_result_keyboard(quiz_id=quiz_id if quiz_id is not None else file_quiz_id, viewer_id=viewer_id, creator_id=creator_id)
     kb = list(base_kb.inline_keyboard)
-    kb.insert(2, [types.InlineKeyboardButton(
+    kb.insert(-1, [types.InlineKeyboardButton(
         text="💬 عندك ملاحظات؟", callback_data=f"quiz_feedback_{file_quiz_id}"
     )])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
