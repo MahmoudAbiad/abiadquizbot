@@ -66,7 +66,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         if WEBAPP_PUBLIC_BASE_URL:
             kb.insert(2, [
                 types.InlineKeyboardButton(
-                    text="📤 ملفات كبيرة ومحاضرات صوتية",
+                    text="📚 ملفك أو محاضرتك حجمها كبير؟ اضغط هون",
                     callback_data="upload_open:all",
                 )
             ])
