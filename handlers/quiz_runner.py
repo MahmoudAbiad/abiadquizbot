@@ -360,6 +360,97 @@ async def _handle_quiz_completion(chat_id: int, user_id: int, state: FSMContext,
     await state.update_data(quiz_completed=True, is_switching_question=False)
     await state.set_state(None)
 
+
+@router.callback_query(F.data.regexp(r"^qrev:[a-f0-9]{16}:[0-9]{1,4}$"))
+async def show_quiz_error_review(call: types.CallbackQuery):
+    """Review wrong choices from a private Redis snapshot, not live FSM state."""
+    try:
+        _, token, page_raw = call.data.split(":")
+        page = int(page_raw)
+        raw = await redis_client.get(_quiz_review_key(call.from_user.id, token))
+        if not raw:
+            await call.answer("انتهت صلاحية مراجعة الأخطاء. يمكنك إعادة المحاولة.", show_alert=True)
+            return
+        items = json.loads(raw)
+        if not isinstance(items, list) or not 0 <= page < len(items):
+            await call.answer("صفحة مراجعة غير متاحة.", show_alert=True)
+            return
+
+        buttons = []
+        navigation = []
+        if page > 0:
+            navigation.append(types.InlineKeyboardButton(
+                text="⬅️ السابق", callback_data=f"qrev:{token}:{page - 1}"))
+        if page + 1 < len(items):
+            navigation.append(types.InlineKeyboardButton(
+                text="التالي ➡️", callback_data=f"qrev:{token}:{page + 1}"))
+        if navigation:
+            buttons.append(navigation)
+        buttons.append([types.InlineKeyboardButton(
+            text="✖️ إغلاق المراجعة", callback_data=f"qrev_close:{token}")])
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+        body = review_page_text(items, page)
+        if (getattr(call.message, "text", None) or "").startswith("📚 مراجعة الأخطاء"):
+            await call.message.edit_text(body, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            # Leave the original grade/result message visible in chat.
+            await call.message.answer(body, parse_mode="HTML", reply_markup=keyboard)
+        await call.answer()
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            await call.answer()
+        else:
+            log_warning(logger, f"Could not show error review: {exc}")
+            await call.answer("تعذر عرض المراجعة حالياً.", show_alert=True)
+    except Exception as exc:
+        log_warning(logger, f"Error reviewing wrong quiz answers: {exc}")
+        await call.answer("تعذر فتح المراجعة حالياً.", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^qrev_close:[a-f0-9]{16}$"))
+async def close_quiz_error_review(call: types.CallbackQuery):
+    token = call.data.split(":")[-1]
+    if not await redis_client.get(_quiz_review_key(call.from_user.id, token)):
+        await call.answer("انتهت صلاحية المراجعة.", show_alert=True)
+        return
+    try:
+        await call.message.delete()
+    except TelegramBadRequest:
+        await call.message.edit_text("✅ تم إغلاق مراجعة الأخطاء.")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("quiz_feedback_"))
+async def open_quiz_feedback_panel(call: types.CallbackQuery):
+    """Keep leaderboard visible on the result; place ratings behind one CTA."""
+    quiz_id = call.data.removeprefix("quiz_feedback_")
+    if not _is_valid_uuid(quiz_id):
+        await call.answer("هذا الاختبار غير متاح للتقييم.", show_alert=True)
+        return
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="👍 عجبتني الأسئلة", callback_data=f"rate_like_{quiz_id}"),
+            types.InlineKeyboardButton(text="👎 فيها خلل", callback_data=f"rate_dislike_{quiz_id}"),
+        ],
+        [types.InlineKeyboardButton(text="✍️ كتابة ملاحظة", callback_data=f"rate_feedback_{quiz_id}")],
+        [types.InlineKeyboardButton(text="✖️ إغلاق", callback_data="feedback_hub_close")],
+    ])
+    await call.message.answer(
+        "💬 <b>عندك ملاحظات؟</b>\n\n"
+        "شاركنا تقييمك لجودة الأسئلة، أو اكتب ملاحظة تفصيلية لتحسين الكويز.",
+        parse_mode="HTML", reply_markup=kb)
+    await call.answer()
+
+
+@router.callback_query(F.data == "feedback_hub_close")
+async def close_quiz_feedback_panel(call: types.CallbackQuery):
+    try:
+        await call.message.delete()
+    except TelegramBadRequest:
+        await call.message.edit_text("✅ أُغلقت خيارات التقييم.")
+    await call.answer()
+
+
 # ==================== معالجات حركة الكويز والتحكم ====================
 
 @router.poll_answer()
