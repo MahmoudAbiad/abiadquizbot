@@ -338,7 +338,7 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
 
 
 async def _generate_super_images(
-    file_paths: List[str], count: int, prompt_template: str
+    file_paths: List[str], count: int, prompt_template: str, progressive: bool = False
 ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
     """🆕 معالجة متوازية لألبومات الصور الكبيرة (أكبر من SUPER_IMAGE_BATCH_THRESHOLD -
     مصدرها حصراً رفع الويب حالياً، راجع handlers/files.py::process_web_uploaded_images)،
@@ -357,13 +357,25 @@ async def _generate_super_images(
 
     base, remainder = divmod(count, len(chunks))
     question_counts = [base + (1 if index < remainder else 0) for index in range(len(chunks))]
+    active = [(chunk, amount) for chunk, amount in zip(chunks, question_counts) if amount > 0]
+    segments = (
+        ("هذه الدفعة الأولى: أسئلة سهلة تتصاعد قليلاً.",
+         "هذه الدفعة الوسطى: أسئلة متوسطة متصاعدة.",
+         "هذه الدفعة الأخيرة: أسئلة متقدمة تتصاعد نحو الأصعب.")
+        if len(active) == 3 else
+        ("الدفعة الأولى: أسئلة سهلة إلى متوسطة.",
+         "الدفعة الأخيرة: أسئلة متوسطة إلى متقدمة.")
+    ) if progressive else ()
     tasks = [
         _execute_cascade(
-            _build_super_chunk_attempt_fn(chunk, prompt_template.replace("{count}", str(question_count))),
+            _build_super_chunk_attempt_fn(
+                chunk, prompt_template.replace("{count}", str(question_count)) +
+                ("\n[موقع هذه الدفعة ضمن التدرج العام]: " + segments[index]
+                 if progressive else "")
+            ),
             exclude_vertex=True,
         )
-        for chunk, question_count in zip(chunks, question_counts)
-        if question_count > 0
+        for index, (chunk, question_count) in enumerate(active)
     ]
     if not tasks:
         return None
