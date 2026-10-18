@@ -22,6 +22,7 @@ def wallet_buttons():
         [types.InlineKeyboardButton(text='💳 شحن الرصيد', callback_data='recharge_info')],
         [types.InlineKeyboardButton(text='🎁 هداياي وصلاحيتها', callback_data='gift:list:0')],
         [types.InlineKeyboardButton(text='🎟 شحن كود هدية', callback_data='gift:redeem')],
+        [types.InlineKeyboardButton(text='🔙 رجوع للقائمة الرئيسية', callback_data='student_home')],
     ])
 
 
