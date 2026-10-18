@@ -178,6 +178,7 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
             review_explanation_rich_html=review_explanation_rich_html,
             review_question_fallback_text=review_question_fallback_text,
             review_explanation_fallback_text=review_explanation_fallback_text,
+            review_expanded_fallback_text=review_expanded_fallback_text,
             TelegramBadRequest=BadRequest, log_warning=Mock(), logger=self.log)
 
         # Pressing the button in the result sends a new review below it.
@@ -237,6 +238,7 @@ class ErrorReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
             review_explanation_rich_html=review_explanation_rich_html,
             review_question_fallback_text=review_question_fallback_text,
             review_explanation_fallback_text=review_explanation_fallback_text,
+            review_expanded_fallback_text=review_expanded_fallback_text,
             TelegramBadRequest=type("BadRequest", (Exception,), {}),
             log_warning=Mock(), logger=self.log)
         call = SimpleNamespace(from_user=SimpleNamespace(id=42),
