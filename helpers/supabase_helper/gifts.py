@@ -22,9 +22,11 @@ async def enrich_balances(users):
     return users
 
 
-async def list_gifts(user_id, page=0):
+async def list_gifts(user_id, page=0, page_size=5):
+    # Inclusive range: fetch one extra row to detect a following page. Keep the
+    # admin's existing five-row default; the student wallet requests three.
     result = await supabase.table('point_gifts').select('*').eq('user_id', user_id).order(
-        'granted_at', desc=True).order('id').range(page*5, page*5+5).execute()
+        'granted_at', desc=True).order('id').range(page*page_size, page*page_size+page_size).execute()
     return result.data or []
 
 

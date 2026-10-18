@@ -7,7 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from helpers.supabase_helper import check_or_add_user
 from helpers.supabase_helper.gifts import list_gifts, redeem
-from services.gift_presentation import gift_text, expiry_text
+from services.gift_presentation import gift_text, expiry_text, remaining_expiry_text
 
 router = Router()
 router.message.filter(F.chat.type == 'private')
@@ -43,37 +43,51 @@ async def wallet(event):
             f"💳 مدفوعة: {user['paid_points']:.2f}\n\n"
             'تُستهلك المجانية أولًا، ثم الهدايا الأقرب انتهاءً، ثم المدفوعة.\n'
             'الهدايا المنتهية أو الملغاة لا تدخل في الرصيد المتاح.')
-    await message.answer(text, parse_mode='HTML', reply_markup=wallet_buttons())
     if isinstance(event, types.CallbackQuery):
+        await _show_code_screen(event, text, wallet_buttons(), parse_mode='HTML')
         await event.answer()
+    else:
+        await message.answer(text, parse_mode='HTML', reply_markup=wallet_buttons())
 
 
 @router.callback_query(F.data.startswith('gift:list:'))
 async def show_gifts(call):
-    page = max(0, int(call.data.split(':')[-1]))
-    rows = await list_gifts(call.from_user.id, page)
-    text = '🎁 <b>هداياي وصلاحيتها</b>\n\n' + ('\n\n'.join(gift_text(g) for g in rows[:5]) or 'لا توجد هدايا في هذه الصفحة.')
+    raw_page = call.data.split(':')[-1]
+    if not re.fullmatch(r'[0-9]{1,8}', raw_page):
+        await call.answer('صفحة غير متاحة. أعد فتح قائمة الهدايا.', show_alert=True)
+        return
+    page = int(raw_page)
+    rows = await list_gifts(call.from_user.id, page, page_size=3)
+    if page and not rows:
+        # A gift may have been removed since this navigation button was sent.
+        page = 0
+        rows = await list_gifts(call.from_user.id, page, page_size=3)
+    text = f'🎁 <b>هداياي وصلاحيتها · صفحة {page + 1}</b>\n\n' + (
+        '\n\n'.join(gift_text(g, compact=True) for g in rows[:3]) or 'لا توجد هدايا في حسابك بعد.')
     buttons = []
     if page:
-        buttons.append(types.InlineKeyboardButton(text='السابق', callback_data=f'gift:list:{page-1}'))
-    if len(rows)>5:
-        buttons.append(types.InlineKeyboardButton(text='التالي', callback_data=f'gift:list:{page+1}'))
-    kb = ([buttons] if buttons else []) + [[types.InlineKeyboardButton(text='💰 رصيدي', callback_data='gift:wallet')]]
-    await call.message.edit_text(text, parse_mode='HTML', reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+        buttons.append(types.InlineKeyboardButton(text='⬅️ السابق', callback_data=f'gift:list:{page-1}'))
+    if len(rows)>3:
+        buttons.append(types.InlineKeyboardButton(text='التالي ➡️', callback_data=f'gift:list:{page+1}'))
+    kb = ([buttons] if buttons else []) + [[types.InlineKeyboardButton(text='🔙 رصيدي وهداياي', callback_data='gift:wallet')]]
+    await _show_code_screen(call, text, types.InlineKeyboardMarkup(inline_keyboard=kb), parse_mode='HTML')
     await call.answer()
 
 
-async def _show_code_screen(call, text, keyboard):
-    """Keep the code-entry and cancellation screens inside the same message."""
+async def _show_code_screen(call, text, keyboard, *, parse_mode=None):
+    """Keep gift navigation inside the same message, with a fallback for old ones."""
+    kwargs = {'reply_markup': keyboard}
+    if parse_mode:
+        kwargs['parse_mode'] = parse_mode
     try:
-        await call.message.edit_text(text, reply_markup=keyboard)
+        await call.message.edit_text(text, **kwargs)
     except TelegramBadRequest as exc:
         if 'message is not modified' in str(exc).lower():
             return
-        await call.message.answer(text, reply_markup=keyboard)
+        await call.message.answer(text, **kwargs)
     except (AttributeError, TypeError):
         # Older callbacks might not expose an editable message.
-        await call.message.answer(text, reply_markup=keyboard)
+        await call.message.answer(text, **kwargs)
 
 
 @router.callback_query(F.data == 'gift:redeem')
@@ -120,6 +134,11 @@ async def redeem_message(message, state: FSMContext):
         await message.answer('❌ '+errors.get(result['status'], 'تعذر الشحن. حاول مجددًا.'))
         return
     await state.set_state(None)
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text='📝 إنشاء كويز', callback_data='student_create_quiz')],
+        [types.InlineKeyboardButton(text='🔙 رصيدي وهداياي', callback_data='gift:wallet')],
+    ])
     await message.answer(f"✅ أُضيفت <b>{result['points']:g} نقطة هدية</b>.\n"
-                         f"⏳ الصلاحية: {expiry_text(result.get('expires_at'))}",
-                         parse_mode='HTML', reply_markup=wallet_buttons())
+                         f"⏳ {remaining_expiry_text(result.get('expires_at'))}\n"
+                         f"📅 انتهاء الهدية: {expiry_text(result.get('expires_at'))}",
+                         parse_mode='HTML', reply_markup=keyboard)
