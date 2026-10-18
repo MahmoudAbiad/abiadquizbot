@@ -151,8 +151,12 @@ class SimilarMathTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('يُمنع إضافة معلومات خارجية',prompt)
         await ns['generate_quiz_smart'](pure_text='x squared',count=4,is_math_mode=True,
             question_type='problems',quiz_extraction_instruction='EXTRACT_ORIGINAL_SENTINEL')
-        self.assertIn('EXTRACT_ORIGINAL_SENTINEL',generate.await_args.args[1])
-        self.assertIn('يُمنع إضافة معلومات خارجية',generate.await_args.args[1])
+        extraction_prompt = generate.await_args.args[1]
+        self.assertIn('EXTRACT_ORIGINAL_SENTINEL', extraction_prompt)
+        self.assertIn('مهمة استخراج اختبار جاهز', extraction_prompt)
+        self.assertNotIn('مهمتك تحويل النص/المستند', extraction_prompt)
+        self.assertNotIn('مستوى الصعوبة المطلوب', extraction_prompt)
+        self.assertNotIn('الأسئلة السابقة', extraction_prompt)
 
 
 if __name__ == '__main__':
