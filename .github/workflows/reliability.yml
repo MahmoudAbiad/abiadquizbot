@@ -35,6 +35,14 @@ jobs:
         run: python -m pip install pymupdf pillow python-docx python-pptx redis cachetools==5.3.3 aiogram==3.31.0 httpx==0.28.1 google-genai==2.10.0 matplotlib==3.9.2 'reportlab>=4.0.0' arabic-reshaper python-bidi fastapi==0.115.12
       - name: Compile repository
         run: python -m compileall -q .
+      - name: Targeted challenge resource and in-flight regressions
+        env:
+          TEST_REDIS_URL: redis://localhost:6379/15
+        run: |
+          python -m unittest discover -s tests -p 'test_challenge_game.py' -v
+          python -m unittest discover -s tests -p 'test_challenge_live_ui.py' -v
+          python -m unittest discover -s tests -p 'test_challenge_spectator.py' -v
+          python -m unittest discover -s tests -p 'test_challenge_resource_idle.py' -v
       - name: Run regression tests against local Redis
         env:
           TEST_REDIS_URL: redis://localhost:6379/15
