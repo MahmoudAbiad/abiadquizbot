@@ -1,4 +1,5 @@
 """Extended/super PDF batches: recovery, source reuse and bounded retries."""
+import asyncio
 import hashlib
 import json
 import math
@@ -82,16 +83,21 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.calls = []
         self.env = load_functions(
             'helpers/gemini_helper/batch_generation.py',
-            {'_question_key', '_valid_question', '_batch_prompt', '_Checkpoint',
-             'generate_pdf_in_batches'},
-            hashlib=hashlib, json=json, math=math, logger=Mock(),
+            {'_question_key', '_valid_question', '_batch_prompt', '_plain_batch_prompt',
+             '_Checkpoint', '_run_batch_chunks', 'generate_pdf_in_batches',
+             'generate_images_in_batches', 'generate_text_in_batches'},
+            hashlib=hashlib, json=json, math=math, asyncio=asyncio, logger=Mock(),
+            release_memory_to_os=Mock(),
             _last_model_used_var=self.models, _last_token_usage_var=self.usage,
             GeminiFileSession=Session, Attachment=Attachment, AIRequest=Request,
             QuizResponse=object, MAX_BATCH_QUESTIONS=20, CHECKPOINT_TTL_SECONDS=7200,
             _generated_pdf_chunk_targets=allocate,
             _generated_pdf_chunk_prompt=lambda base, n, chunk, difficulty=None:
             f'{base}:generate={n}:owned={chunk["owned_first"]}:{chunk["owned_last"]}',
-            split_pdf_with_context_without_orphans=None, safe_file_cleanup=Mock(),
+            split_pdf_with_context_without_orphans=None,
+            split_images_into_three_sync=lambda paths:
+            [paths[:len(paths)//3], paths[len(paths)//3:2*len(paths)//3], paths[2*len(paths)//3:]],
+            safe_file_cleanup=Mock(),
             _execute_cascade=None,
         )
         self.config_patch = patch.dict(
@@ -166,6 +172,72 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(generated[0]), 40)
         self.assertEqual([req.parts[0].path for req in self.calls],
                          ['first.pdf', 'second.pdf'])
+
+
+    async def test_medium_album_generates_more_than_thirty_questions(self):
+        async def cascade(req, **kw):
+            self.calls.append(req)
+            start = (len(self.calls) - 1) * 20 + 1
+            return result(start, start + 20)
+        self.env['_execute_cascade'] = cascade
+        paths = [f'photo_{i}.jpg' for i in range(8)]
+        generated = await self.env['generate_images_in_batches'](
+            paths, 45, 'prompt {count}', user_id=9, file_hash='album-hash')
+        self.assertEqual(len(generated[0]), 45)
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual([part.path for part in self.calls[0].parts], paths)
+        self.assertTrue(all(len(req.parts) == 8 for req in self.calls))
+        self.assertIn('Question 20', self.calls[1].instruction)
+
+    async def test_super_album_keeps_three_separate_groups(self):
+        async def cascade(req, **kw):
+            self.calls.append(req)
+            start = (len(self.calls) - 1) * 20 + 1
+            return result(start, start + 20)
+        self.env['_execute_cascade'] = cascade
+        paths = [f'photo_{i}.jpg' for i in range(14)]
+        generated = await self.env['generate_images_in_batches'](
+            paths, 60, 'prompt {count}', user_id=9, file_hash='large-album')
+        self.assertEqual(len(generated[0]), 60)
+        self.assertEqual(len(self.calls), 5)
+        self.assertEqual(len({req.parts[0].path for req in self.calls}), 3)
+        self.assertEqual(set(part.path for req in self.calls for part in req.parts),
+                         set(paths))
+
+    async def test_long_text_uses_same_unmodified_source_on_each_batch(self):
+        async def cascade(req, **kw):
+            self.calls.append(req)
+            start = (len(self.calls) - 1) * 20 + 1
+            return result(start, start + 20)
+        self.env['_execute_cascade'] = cascade
+        source = 'Long Office or lecture transcript with lots of useful source words'
+        generated = await self.env['generate_text_in_batches'](
+            source, 45, 'prompt {count}', user_id=9)
+        self.assertEqual(len(generated[0]), 45)
+        self.assertEqual(len(self.calls), 3)
+        self.assertTrue(all(req.parts == (source,) for req in self.calls))
+        self.assertFalse(self.redis.values)
+
+    async def test_text_resume_uses_only_remaining_questions(self):
+        async def cascade(req, **kw):
+            self.calls.append(req)
+            if len(self.calls) == 2:
+                return None
+            return result(1, 21)
+        self.env['_execute_cascade'] = cascade
+        generate = self.env['generate_text_in_batches']
+        self.assertIsNone(await generate('transcript', 40, 'prompt {count}', user_id=9))
+        self.assertEqual(len(self.redis.values), 1)
+        resumed = []
+        async def finish(req, **kw):
+            resumed.append(req)
+            return result(21, 41)
+        self.env['_execute_cascade'] = finish
+        finished = await generate('transcript', 40, 'prompt {count}', user_id=9)
+        self.assertEqual(len(finished[0]), 40)
+        self.assertEqual(len(resumed), 1)
+        self.assertEqual(self.redis.values, {})
+
 
 
 if __name__ == '__main__':
