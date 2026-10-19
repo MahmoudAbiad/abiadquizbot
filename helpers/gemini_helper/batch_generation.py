@@ -1,16 +1,18 @@
-"""Resume-safe, bounded PDF question batches for expanded/super generation only."""
+"""Shared resumable generation batches for expanded/super text, images and PDF."""
 
+import asyncio
 import hashlib
 import json
 import math
 from typing import Any, Dict, List, Optional
 
 from logger import get_logger
+from mem_utils import release_memory_to_os
 from utils import safe_file_cleanup
 from helpers.gemini_helper.generation import (
     _execute_cascade, _generated_pdf_chunk_prompt, _generated_pdf_chunk_targets,
 )
-from helpers.gemini_helper.media import split_pdf_with_context_without_orphans
+from helpers.gemini_helper.media import split_pdf_with_context_without_orphans, split_images_into_three_sync
 from helpers.gemini_helper.schemas import QuizResponse
 from helpers.gemini_helper.state import _last_model_used_var, _last_token_usage_var
 from services.ai.contracts import AIRequest, Attachment
@@ -51,15 +53,15 @@ def _batch_prompt(base_prompt: str, chunk: Dict[str, Any], target: int,
 
 
 class _Checkpoint:
-    def __init__(self, user_id, file_hash, prompt, context, count, part_count, progressive):
+    def __init__(self, user_id, file_hash, prompt, context, count, part_count, progressive, source_kind="pdf"):
         self.key = None
         if user_id is not None and file_hash:
             identity = json.dumps(
                 [str(user_id), str(file_hash), prompt, context, count, part_count, progressive,
-                 MAX_BATCH_QUESTIONS, "pdf-batches-v1"],
+                 MAX_BATCH_QUESTIONS, source_kind, "unified-batches-v2"],
                 ensure_ascii=False,
             )
-            self.key = "quiz:pdf-batch:v1:" + hashlib.sha256(identity.encode()).hexdigest()
+            self.key = "quiz:question-batches:v2:" + hashlib.sha256(identity.encode()).hexdigest()
 
     async def load(self, num_parts):
         if not self.key:
@@ -78,7 +80,7 @@ class _Checkpoint:
                 return None
             return data
         except Exception:
-            logger.warning("PDF_BATCH_CHECKPOINT_READ_FAILED")
+            logger.warning("QUIZ_BATCH_CHECKPOINT_READ_FAILED")
             return None
 
     async def save(self, parts, usage, details):
@@ -92,7 +94,7 @@ class _Checkpoint:
                            ensure_ascii=False, separators=(",", ":")),
             )
         except Exception:
-            logger.warning("PDF_BATCH_CHECKPOINT_WRITE_FAILED")
+            logger.warning("QUIZ_BATCH_CHECKPOINT_WRITE_FAILED")
 
     async def clear(self):
         if not self.key:
@@ -101,7 +103,143 @@ class _Checkpoint:
             from config import redis_client
             await redis_client.delete(self.key)
         except Exception:
-            logger.warning("PDF_BATCH_CHECKPOINT_CLEAR_FAILED")
+            logger.warning("QUIZ_BATCH_CHECKPOINT_CLEAR_FAILED")
+
+
+
+def _plain_batch_prompt(base_prompt: str, target: int, previous: List[Dict[str, Any]],
+                        progressive: bool, completed: int, total: int, source_kind: str) -> str:
+    """For text/images, never replace the source with a truncated summary."""
+    prompt = base_prompt.replace("{count}", str(target))
+    prompt += ("\n\n[تعليمات الدفعة الحالية]: "
+               f"أنشئ {target} سؤالاً جديداً فقط من المصادر المرفقة دون تكرار أسئلة الدفعات السابقة. "
+               "لا تختلق معلومات ليست في المحتوى.")
+    if progressive:
+        ratio = completed / max(total, 1)
+        stage = (
+            "هذه بداية الاختبار: الأسئلة سهلة ومتدرجة نحو المتوسط." if ratio < 0.34 else
+            "هذه وسط الاختبار: الأسئلة متوسطة ومتدرجة." if ratio < 0.67 else
+            "هذه نهاية الاختبار: الأسئلة متقدمة ومتدرجة إلى الأصعب."
+        )
+        prompt += "\n" + stage
+    if previous:
+        samples = ["- " + str(q["question"])[:200] for q in previous[-65:]]
+        prompt += "\n\n[أسئلة سبق إنشاؤها - لا تكررها أو تعيد صياغتها]:\n" + "\n".join(samples)[:14000]
+    return prompt
+
+
+async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_template: str,
+                            progressive: bool, user_context: Optional[str],
+                            user_id, source_hash, source_kind: str, mode: str,
+                            exclude_vertex: bool = False):
+    """One orchestrator: exact total, cross-batch de-dup, durable partial work.
+
+    Each chunk contains paths OR text plus its proportional weight.
+    Only PDFs use ownership-aware prompts; all other modalities read native
+    files/text directly without OCR or an extract-text prepass.
+    """
+    if not chunks or count < 1:
+        return None
+    shapes = [{"owned_first": 1, "owned_last": part["weight"]} for part in chunks]
+    targets = _generated_pdf_chunk_targets(count, shapes)
+    checkpoint = _Checkpoint(user_id, source_hash, prompt_template, user_context,
+                             count, len(chunks), progressive, source_kind=source_kind)
+    saved = await checkpoint.load(len(chunks))
+    parts = saved["parts"] if saved else [[] for _ in chunks]
+    usage = saved.get("usage", {}) if saved else {}
+    usage = {k: int(usage.get(k, 0) or 0) for k in
+             ("input_tokens", "output_tokens", "thoughts_tokens", "total_tokens")}
+    details = saved.get("details", []) if saved else []
+    if (not isinstance(details, list) or
+            any(not isinstance(item, dict) for item in details) or
+            any(len(part) > target for part, target in zip(parts, targets))):
+        parts, details = [[] for _ in chunks], []
+        usage = {k: 0 for k in usage}
+    existing = {_question_key(q) for part in parts for q in part}
+    file_session = GeminiFileSession()
+    try:
+        for part_index, (chunk, target) in enumerate(zip(chunks, targets)):
+            no_progress = 0
+            attempts = 0
+            max_attempts = math.ceil(target / MAX_BATCH_QUESTIONS) * 4 + 2
+            while len(parts[part_index]) < target:
+                if attempts >= max_attempts or no_progress >= 2:
+                    logger.warning("QUIZ_BATCH_FAILED modality=%s part=%d reason=insufficient_unique_questions",
+                                   source_kind, part_index + 1)
+                    return None
+                attempts += 1
+                missing = target - len(parts[part_index])
+                batch_size = min(MAX_BATCH_QUESTIONS, missing)
+                previous = [q for part in parts for q in part]
+                if chunk.get("pdf_chunk"):
+                    instruction = _batch_prompt(
+                        prompt_template, chunk["pdf_chunk"], batch_size, previous,
+                        progressive, len(previous), count,
+                    )
+                else:
+                    instruction = _plain_batch_prompt(
+                        prompt_template, batch_size, previous, progressive,
+                        len(previous), count, source_kind,
+                    )
+                source = ((chunk["text"],) if "text" in chunk else tuple(
+                    Attachment.from_path(path) for path in chunk["paths"]
+                ))
+                contents = ((user_context,) if user_context else ()) + source
+                request = AIRequest(
+                    contents, QuizResponse, system_instruction=instruction,
+                    file_session=file_session,
+                )
+                try:
+                    result = await _execute_cascade(request, exclude_vertex=exclude_vertex)
+                except Exception:
+                    logger.warning("QUIZ_BATCH_FAILED modality=%s part=%d reason=unexpected_cascade_error",
+                                   source_kind, part_index + 1)
+                    return None
+                if result is None:
+                    logger.warning("QUIZ_BATCH_FAILED modality=%s part=%d reason=cascade_exhausted",
+                                   source_kind, part_index + 1)
+                    return None
+                for name, value in zip(
+                    ("total_tokens", "input_tokens", "output_tokens", "thoughts_tokens"),
+                    (result[1], result[2], result[3], result[4]),
+                ):
+                    usage[name] += value
+                details.append({
+                    "provider": result[9], "model": result[5], "key_index": result[6],
+                    "cascade_rank": result[7], "cascade_total": result[8],
+                    "part": part_index + 1,
+                })
+                added = 0
+                for question in result[0]:
+                    key = _question_key(question)
+                    if not _valid_question(question) or key in existing:
+                        continue
+                    parts[part_index].append(question)
+                    existing.add(key)
+                    added += 1
+                    if len(parts[part_index]) == target:
+                        break
+                no_progress = 0 if added else no_progress + 1
+                await checkpoint.save(parts, usage, details)
+
+        questions = [q for part in parts for q in part]
+        if len(questions) != count:
+            return None
+        await checkpoint.clear()
+        providers = {d.get("provider") for d in details}
+        models = {d.get("model") for d in details}
+        _last_model_used_var.set({
+            "provider": next(iter(providers)) if len(providers) == 1 else "mixed",
+            "model": next(iter(models)) if len(models) == 1 else "mixed",
+            "key_index": None,
+            "mode": mode,
+            "chunk_details": details,
+            "cascade_rank": None, "cascade_total": None,
+        })
+        _last_token_usage_var.set(usage)
+        return questions, usage["total_tokens"]
+    finally:
+        await file_session.aclose()
 
 
 async def generate_pdf_in_batches(
@@ -109,102 +247,59 @@ async def generate_pdf_in_batches(
     part_count: int, progressive: bool = False, user_context: Optional[str] = None,
     user_id=None, file_hash=None,
 ):
-    """Generate one bounded batch at a time, rerouting only failures via cascade.
-
-    Short PDFs retain *all* source pages on each batch. Large PDFs keep the
-    established context-overlap ownership scheme, then batch within each part.
-    A validated checkpoint may resume a failed attempt without regenerating
-    earlier successful batches. The ordinary (<=15 pages, <=30 questions)
-    generation path never calls this function.
-    """
+    """Full short PDFs; overlapping page ownership for longer PDFs."""
     if part_count == 1:
-        chunks = [{"path": file_path, "owned_first": 1, "owned_last": page_count,
-                   "page_count": page_count}]
+        pdf_parts = [{"path": file_path, "owned_first": 1, "owned_last": page_count,
+                      "page_count": page_count}]
     else:
-        chunks = await split_pdf_with_context_without_orphans(file_path, part_count)
+        pdf_parts = await split_pdf_with_context_without_orphans(file_path, part_count)
+        await asyncio.to_thread(release_memory_to_os)
     try:
-        if len(chunks) != part_count or not chunks:
+        if len(pdf_parts) != part_count or not pdf_parts:
             return None
-        targets = _generated_pdf_chunk_targets(count, chunks)
-        checkpoint = _Checkpoint(user_id, file_hash, prompt_template, user_context,
-                                 count, part_count, progressive)
-        saved = await checkpoint.load(len(chunks))
-        parts = saved["parts"] if saved else [[] for _ in chunks]
-        usage = saved.get("usage", {}) if saved else {}
-        usage = {k: int(usage.get(k, 0) or 0) for k in
-                 ("input_tokens", "output_tokens", "thoughts_tokens", "total_tokens")}
-        details = saved.get("details", []) if saved else []
-        if not isinstance(details, list) or any(
-            not isinstance(item, dict) for item in details
-        ) or any(len(part) > target for part, target in zip(parts, targets)):
-            parts, details = [[] for _ in chunks], []
-            usage = {k: 0 for k in usage}
-        existing = {_question_key(q) for part in parts for q in part}
-        file_session = GeminiFileSession()
-        try:
-            for part_index, (chunk, target) in enumerate(zip(chunks, targets)):
-                no_progress = 0
-                attempts = 0
-                max_attempts = math.ceil(target / MAX_BATCH_QUESTIONS) * 4 + 2
-                while len(parts[part_index]) < target:
-                    if attempts >= max_attempts or no_progress >= 2:
-                        logger.warning("PDF_BATCH_FAILED part=%d reason=insufficient_unique_questions",
-                                       part_index + 1)
-                        return None
-                    attempts += 1
-                    missing = target - len(parts[part_index])
-                    batch_size = min(MAX_BATCH_QUESTIONS, missing)
-                    previous = [q for part in parts for q in part]
-                    instruction = _batch_prompt(prompt_template, chunk, batch_size,
-                                                previous, progressive, len(previous), count)
-                    contents = ((user_context,) if user_context else ()) + (
-                        Attachment.from_path(chunk["path"]),
-                    )
-                    request = AIRequest(contents, QuizResponse,
-                                        system_instruction=instruction, file_session=file_session)
-                    result = await _execute_cascade(request, exclude_vertex=(part_count == 3))
-                    if result is None:
-                        logger.warning("PDF_BATCH_FAILED part=%d reason=model_cascade_exhausted",
-                                       part_index + 1)
-                        return None
-                    for name, value in zip(
-                        ("total_tokens", "input_tokens", "output_tokens", "thoughts_tokens"),
-                        (result[1], result[2], result[3], result[4]),
-                    ):
-                        usage[name] += value
-                    details.append({"provider": result[9], "model": result[5],
-                                    "key_index": result[6], "cascade_rank": result[7],
-                                    "cascade_total": result[8]})
-                    added = 0
-                    for question in result[0]:
-                        qkey = _question_key(question)
-                        if not _valid_question(question) or qkey in existing:
-                            continue
-                        parts[part_index].append(question)
-                        existing.add(qkey)
-                        added += 1
-                        if len(parts[part_index]) >= target:
-                            break
-                    no_progress = 0 if added else no_progress + 1
-                    await checkpoint.save(parts, usage, details)
-            questions = [q for part in parts for q in part]
-            if len(questions) != count:
-                return None
-            await checkpoint.clear()
-            providers = {d.get("provider") for d in details}
-            models = {d.get("model") for d in details}
-            _last_model_used_var.set({
-                "provider": next(iter(providers)) if len(providers) == 1 else "mixed",
-                "model": next(iter(models)) if len(models) == 1 else "mixed",
-                "key_index": None, "mode": "batched_super_pdf" if part_count == 3 else "batched_over_limit_pdf",
-                "chunk_details": details, "cascade_rank": None, "cascade_total": None,
-            })
-            _last_token_usage_var.set(usage)
-            return questions, usage["total_tokens"]
-        finally:
-            await file_session.aclose()
+        chunks = [{
+            "paths": [part["path"]],
+            "pdf_chunk": part,
+            "weight": part["owned_last"] - part["owned_first"] + 1,
+        } for part in pdf_parts]
+        return await _run_batch_chunks(
+            chunks, count, prompt_template, progressive, user_context,
+            user_id, file_hash, "pdf",
+            "batched_super_pdf" if part_count == 3 else "batched_over_limit_pdf",
+            exclude_vertex=(part_count == 3),
+        )
     finally:
         if part_count != 1:
-            for chunk in chunks:
-                if chunk["path"] != file_path:
-                    safe_file_cleanup(chunk["path"])
+            for part in pdf_parts:
+                if part["path"] != file_path:
+                    safe_file_cleanup(part["path"])
+
+
+async def generate_images_in_batches(
+    paths: List[str], count: int, prompt_template: str, progressive: bool = False,
+    user_context: Optional[str] = None, user_id=None, file_hash=None,
+):
+    """One image/short albums remain intact; super albums use three image groups."""
+    groups = ([group for group in await asyncio.to_thread(split_images_into_three_sync, paths)
+               if group] if len(paths) > 10 else [paths])
+    chunks = [{"paths": group, "weight": len(group)} for group in groups]
+    return await _run_batch_chunks(
+        chunks, count, prompt_template, progressive, user_context,
+        user_id, file_hash, "images",
+        "batched_super_images" if len(paths) > 10 else "batched_over_limit_images",
+        exclude_vertex=(len(paths) > 10),
+    )
+
+
+async def generate_text_in_batches(
+    text: str, count: int, prompt_template: str, progressive: bool = False,
+    user_context: Optional[str] = None, user_id=None, file_hash=None,
+):
+    """A long text/Office/audio transcript is not sliced between questions."""
+    identity = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    source_hash = hashlib.sha256(((file_hash or "") + ":" + identity).encode()).hexdigest()
+    return await _run_batch_chunks(
+        [{"text": text, "weight": 1}], count, prompt_template,
+        progressive, user_context, user_id, source_hash, "text",
+        "batched_over_limit_text",
+    )
