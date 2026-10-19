@@ -190,7 +190,8 @@ class QuizInputIsolationTests(unittest.IsolatedAsyncioTestCase):
         deps = {**self.env, '_HEAVY_PROCESSING_SEMAPHORE': asyncio.Semaphore(1),
                 'generate_quiz_smart': AsyncMock(return_value=None),
                 'resolve_generation_question_type_text': Mock(return_value=None),
-                'resolve_quiz_extraction_instruction': Mock(return_value=None)}
+                'resolve_quiz_extraction_instruction': Mock(return_value=None),
+                'determine_execution_mode': lambda *args, **kw: 'Standard'}
         generation = load_functions('services/quiz_service.py', {'execute_quiz_generation_workflow'}, **deps)
         await generation['execute_quiz_generation_workflow'](101, state.data, 5, self.message)
         sent = deps['generate_quiz_smart'].await_args.kwargs
