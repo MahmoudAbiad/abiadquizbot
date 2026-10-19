@@ -300,7 +300,8 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
     """Every PDF subject shares the context splitter; non-PDF paths stay intact."""
 
     async def run_case(self, pages, count, is_math=False, english_mode=None,
-                       extraction=None, paths=None, difficulty=None):
+                       extraction=None, paths=None, difficulty=None,
+                       batch_enabled=False, pure_text=None):
         import time
         from unittest.mock import AsyncMock
         from types import SimpleNamespace
@@ -321,6 +322,9 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
         split = AsyncMock(return_value=([{'question': 'Q'}], 1))
         regular = AsyncMock(return_value=([{'question': 'Q'}], 1))
         images = AsyncMock(return_value=([{'question': 'Q'}], 1))
+        batch_pdf = AsyncMock(return_value=([{'question': 'Q'}], 1))
+        batch_images = AsyncMock(return_value=([{'question': 'Q'}], 1))
+        batch_text = AsyncMock(return_value=([{'question': 'Q'}], 1))
         state = SimpleNamespace(set=lambda *args: None, get=lambda: None)
         env = load_functions(
             'helpers/gemini_helper/quiz_generator.py', {'generate_quiz_smart'},
@@ -340,17 +344,23 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
             get_pdf_page_count_sync=lambda _: pages,
             _generate_pdf_with_context=split, _generate_regular=regular,
             _generate_super_images=images,
+            generate_pdf_in_batches=batch_pdf,
+            generate_images_in_batches=batch_images,
+            generate_text_in_batches=batch_text,
             _generate_text_quiz=AsyncMock(),
             _generate_text_quiz_with_gemini=AsyncMock(),
             **prompts,
         )
         result = await env['generate_quiz_smart'](
-            file_paths=paths if paths is not None else ['material.pdf'],
+            file_paths=(None if pure_text is not None else
+                        paths if paths is not None else ['material.pdf']),
+            pure_text=pure_text,
             count=count, is_math_mode=is_math, english_mode=english_mode,
             quiz_extraction_instruction=extraction, difficulty=difficulty,
+            batch_enabled=batch_enabled,
         )
         self.assertEqual(len(result), 1)
-        return split, regular, images
+        return split, regular, images, batch_pdf, batch_images, batch_text
 
     async def test_extended_math_english_general_and_ready_exam_all_split(self):
         for label, opts in (
@@ -360,40 +370,76 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
             ('ready-exam', {'extraction': 'Extract existing exam questions.'}),
         ):
             with self.subTest(label=label):
-                split, regular, _ = await self.run_case(18, 40, **opts)
-                split.assert_awaited_once()
-                args = split.call_args
-                self.assertEqual(args.kwargs['part_count'], 2)
-                self.assertEqual(
-                    args.kwargs['ready_exam'], label == 'ready-exam'
-                )
+                split, regular, _, batch_pdf, _, _ = await self.run_case(18, 40, **opts)
+                split.assert_not_awaited()
+                batch_pdf.assert_awaited_once()
+                self.assertEqual(batch_pdf.call_args.kwargs['part_count'], 2)
+                self.assertEqual(batch_pdf.call_args.kwargs['extraction'], label == 'ready-exam')
                 regular.assert_not_awaited()
 
     async def test_super_pdf_all_types_use_three_context_chunks(self):
         for extraction in (None, 'Extract exam'):
             with self.subTest(extraction=extraction):
-                split, regular, _ = await self.run_case(
+                split, regular, _, batch_pdf, _, _ = await self.run_case(
                     39, 45, extraction=extraction
                 )
-                self.assertEqual(split.call_args.kwargs['part_count'], 3)
-                self.assertEqual(split.call_args.kwargs['ready_exam'], bool(extraction))
+                split.assert_not_awaited()
+                batch_pdf.assert_awaited_once()
+                self.assertEqual(batch_pdf.call_args.kwargs['part_count'], 3)
+                self.assertEqual(batch_pdf.call_args.kwargs['extraction'], bool(extraction))
                 regular.assert_not_awaited()
 
     async def test_progressive_generation_flag_reaches_the_pdf_chunks(self):
-        split, _, _ = await self.run_case(
+        split, _, _, batch_pdf, _, _ = await self.run_case(
             18, 40, is_math=True, difficulty='progressive'
         )
-        self.assertTrue(split.call_args.kwargs['progressive'])
+        split.assert_not_awaited()
+        self.assertTrue(batch_pdf.call_args.kwargs['progressive'])
 
     async def test_small_pdf_still_uses_regular_generation(self):
-        split, regular, _ = await self.run_case(8, 15, is_math=True)
+        split, regular, _, batch_pdf, _, _ = await self.run_case(8, 15, is_math=True)
         split.assert_not_awaited()
+        batch_pdf.assert_not_awaited()
         regular.assert_awaited_once()
 
-    async def test_image_batches_still_use_existing_super_image_path(self):
-        split, regular, images = await self.run_case(
+    async def test_image_batches_use_shared_engine(self):
+        split, regular, images, _, batch_images, _ = await self.run_case(
             0, 40, paths=[f'{i}.png' for i in range(11)]
         )
         split.assert_not_awaited()
         regular.assert_not_awaited()
-        images.assert_awaited_once()
+        images.assert_not_awaited()
+        batch_images.assert_awaited_once()
+
+    async def test_existing_image_exam_uses_batched_ordered_extraction(self):
+        split, regular, images, _, batch_images, _ = await self.run_case(
+            0, 40, extraction='Extract exam',
+            paths=[f'{i}.png' for i in range(11)]
+        )
+        images.assert_not_awaited()
+        batch_images.assert_awaited_once()
+        self.assertTrue(batch_images.call_args.kwargs['extraction'])
+
+    async def test_short_exam_pdf_with_many_questions_keeps_full_pdf(self):
+        _, regular, _, batch_pdf, _, _ = await self.run_case(
+            2, 50, extraction='Extract exam',
+        )
+        regular.assert_not_awaited()
+        self.assertEqual(batch_pdf.call_args.kwargs['part_count'], 1)
+        self.assertTrue(batch_pdf.call_args.kwargs['extraction'])
+
+    async def test_ready_exam_long_text_enters_extraction_batches(self):
+        _, regular, _, _, _, batch_text = await self.run_case(
+            0, 60, extraction='Extract exam',
+            batch_enabled=True, pure_text='Source exam text',
+        )
+        regular.assert_not_awaited()
+        batch_text.assert_awaited_once()
+        self.assertTrue(batch_text.call_args.kwargs['extraction'])
+
+    async def test_normal_short_ready_exam_stays_original_one_call(self):
+        _, regular, _, batch_pdf, _, _ = await self.run_case(
+            3, 12, extraction='Extract exam',
+        )
+        batch_pdf.assert_not_awaited()
+        regular.assert_awaited_once()

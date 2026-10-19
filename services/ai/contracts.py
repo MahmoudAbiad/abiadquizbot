@@ -39,6 +39,8 @@ class AIRequest:
     allow_image_sampling: bool = False
     # Trusted task instructions; never place uploaded student content here.
     system_instruction: str | None = None
+    # Only populated by extended/super PDF batches; ordinary requests are unchanged.
+    file_session: Any | None = None
 
     @property
     def capabilities(self):

@@ -48,6 +48,15 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     request_start = time.monotonic()
     providers = await get_providers()
     models = await get_enabled_models(slot)
+    # Sticky model/key only within a multi-batch PDF session. Regular callers
+    # retain the configured order and round-robin rotation unchanged.
+    session = getattr(request, "file_session", None)
+    preferred = getattr(session, "preferred", None)
+    indexed_models = list(enumerate(models, start=1))
+    if preferred is not None:
+        indexed_models.sort(key=lambda item: 0 if (
+            item[1]["provider"], item[1]["model_name"]
+        ) == preferred[:2] else 1)
     failed_attempts = 0
     logger.info(
         "AI_REQUEST_START request_id=%s slot=%s mode=%s capabilities=%s models=%d timeout_s=%s",
@@ -63,7 +72,7 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     for key in list(_pointers):
         if key not in providers:
             _pointers.pop(key, None)
-    for rank, entry in enumerate(models, start=1):
+    for rank, entry in indexed_models:
         provider = providers.get(entry["provider"])
         if not provider or not provider["is_enabled"]:
             logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=provider_disabled_or_missing",
@@ -113,6 +122,9 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                 )
                 continue
         start = _pointers.get(provider["id"], 0) % len(credentials)
+        if (preferred is not None and (provider["id"], entry["model_name"]) == preferred[:2]
+                and isinstance(preferred[2], int) and 0 <= preferred[2] < len(credentials)):
+            start = preferred[2]
         _pointers[provider["id"]] = (start + 1) % len(credentials)
         for offset in range(len(credentials)):
             index = (start + offset) % len(credentials)
@@ -134,6 +146,8 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                     adapter.generate(provider, credentials[index], entry["model_name"], request),
                     timeout=timeout,
                 )
+                if session is not None:
+                    session.preferred = (provider["id"], entry["model_name"], index)
                 _last_model_used_var.set({"provider": provider["id"], "model": entry["model_name"],
                                           "key_index": index, "cascade_rank": rank,
                                           "cascade_total": len(models), "mode": mode})
@@ -171,10 +185,28 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                           "request_error")
                 retry_after_s = exc.retry_after_s if isinstance(exc, ProviderError) else None
                 reset_after_s = exc.reset_after_s if isinstance(exc, ProviderError) else None
+                # Batch-only Gemini SDK quota details can distinguish RPM from
+                # daily quota. Keep ordinary generation fallback behavior intact.
+                if (status == 429 and reason == "request_error"
+                        and getattr(request, "file_session", None) is not None
+                        and provider["transport"] == "gemini"):
+                    hint = str(exc).casefold()[:4096]  # inspect only; never log raw text
+                    if any(tag in hint for tag in (
+                            "perday", "per_day", "requests/day", "daily quota", "daily limit")):
+                        reason = "daily_quota"
+                    elif any(tag in hint for tag in (
+                            "perminute", "per_minute", "requests/min", "minute limit")):
+                        reason = "minute_rate_limit"
                 cooldown = decide_cooldown(
                     status, RateLimitInfo(reason, retry_after_s, reset_after_s),
                     is_openrouter_free=is_openrouter_free,
                 )
+                if (provider["transport"] == "gemini" and reason == "daily_quota"
+                        and getattr(request, "file_session", None) is not None
+                        and reset_after_s is None and retry_after_s is None):
+                    # Do not assume another vendor's UTC quota reset for Gemini.
+                    from services.ai.rate_limits import Cooldown
+                    cooldown = Cooldown(86400, "model_credential", "conservative_daily")
                 until = time.monotonic() + cooldown.seconds
                 if cooldown.scope == "openrouter_free_models" and pool_identity is not None:
                     _shared_blocked[pool_identity] = (until, reason)
