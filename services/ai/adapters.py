@@ -199,7 +199,8 @@ class GoogleAdapter:
                         file_uri=remote.uri, mime_type=remote.mime_type or part.mime_type,
                     ))
                 elif (part.path and total_size > 15 * 1024 * 1024
-                      and provider["transport"] != "vertex"):
+                      and provider["transport"] != "vertex"
+                      and not getattr(request, "inline_only", False)):
                     # Upload is asynchronous so cancellation cannot orphan a background
                     # upload thread; files belong to this credential and this attempt.
                     uploaded_file = await client.aio.files.upload(file=part.path)
