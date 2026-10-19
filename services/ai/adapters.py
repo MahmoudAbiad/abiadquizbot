@@ -5,6 +5,7 @@ import json
 import os
 
 import httpx
+from pydantic import ValidationError
 
 from services.ai.contracts import AIResult, Attachment
 from services.ai.provider_presets import chat_service
@@ -35,17 +36,60 @@ def _http_provider_error(response):
                          reset_after_s=info.reset_after_s)
 
 
+_SAFE_FINISH_REASONS = frozenset({
+    "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "LANGUAGE",
+    "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL",
+    "OTHER", "UNEXPECTED_TOOL_CALL", "NO_IMAGE", "IMAGE_SAFETY",
+})
+
+
+def safe_finish_reason(value):
+    """Allowlist finish codes; never log arbitrary provider-controlled text."""
+    if value is None:
+        return None
+    name = str(getattr(value, "name", value)).rsplit(".", 1)[-1].upper()
+    name = "MAX_TOKENS" if name == "LENGTH" else name
+    return name if name in _SAFE_FINISH_REASONS else "UNKNOWN"
+
+
+class AIResponseDiagnosticError(ValueError):
+    """Non-sensitive machine-readable failure stage for model responses."""
+
+    def __init__(self, detail, result=None):
+        self.detail = detail
+        self.finish_reason = safe_finish_reason(getattr(result, "finish_reason", None))
+        raw = getattr(result, "text", None)
+        self.response_chars = len(raw) if isinstance(raw, str) else None
+        self.output_tokens = getattr(result, "output_tokens", None)
+        self.thoughts_tokens = getattr(result, "thoughts_tokens", None)
+        super().__init__(f"AI response validation failed: {detail}")
+
+
 def parse_result(result, schema):
-    if not result.text.strip():
-        raise ValueError("Empty AI response")
+    raw = getattr(result, "text", None)
+    if not isinstance(raw, str):
+        raise AIResponseDiagnosticError("non_text_response", result)
+    raw = raw.strip()
+    if not raw:
+        detail = ("empty_after_thinking" if getattr(result, "thoughts_tokens", 0)
+                  and not getattr(result, "output_tokens", 0)
+                  else "empty_response")
+        raise AIResponseDiagnosticError(detail, result)
     if schema:
         from services.ai.parsing import _repair_json_backslashes
-        raw = result.text.strip()
         if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        result.parsed = schema.model_validate(json.loads(_repair_json_backslashes(raw)))
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            obj = json.loads(_repair_json_backslashes(raw))
+        except (ValueError, TypeError):
+            detail = "truncated_json" if result.truncated else "malformed_json"
+            raise AIResponseDiagnosticError(detail, result) from None
+        try:
+            result.parsed = schema.model_validate(obj)
+        except (ValidationError, ValueError, TypeError):
+            raise AIResponseDiagnosticError("schema_validation", result) from None
         if hasattr(result.parsed, "questions") and not result.parsed.questions:
-            raise ValueError("AI returned no questions")
+            raise AIResponseDiagnosticError("empty_questions", result)
     return result
 
 
