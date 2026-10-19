@@ -11,13 +11,14 @@ from mem_utils import release_memory_to_os
 from utils import safe_file_cleanup
 from helpers.gemini_helper.generation import (
     _execute_cascade, _generated_pdf_chunk_prompt, _generated_pdf_chunk_targets,
-    _ready_exam_chunk_prompt,
+    _ready_exam_chunk_prompt, _merge_pdf_chunk_questions,
 )
 from helpers.gemini_helper.media import split_pdf_with_context_without_orphans, split_images_into_three_sync
 from helpers.gemini_helper.schemas import QuizResponse
 from helpers.gemini_helper.state import _last_model_used_var, _last_token_usage_var
 from services.ai.contracts import AIRequest, Attachment
 from services.ai.file_session import GeminiFileSession
+from services.ai.runtime import choose_parallel_preference
 
 logger = get_logger(__name__)
 MAX_BATCH_QUESTIONS = 20
@@ -274,8 +275,6 @@ async def _run_expanded_pdf_parallel(chunks: List[Dict[str, Any]], count: int,
     partition are context-only, as specified by the existing PDF prompts.
     Unlike large/super PDF batches, this path never creates a Files API session.
     """
-    from services.ai.runtime import choose_parallel_preference
-
     if len(chunks) != 2 or count < 1:
         return None
     targets = _generated_pdf_chunk_targets(count, [c["pdf_chunk"] for c in chunks])
