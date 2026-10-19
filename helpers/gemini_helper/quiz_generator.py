@@ -33,6 +33,7 @@ from helpers.gemini_helper.state import (
     _last_token_usage_var,
 )
 from helpers.gemini_helper.media import get_pdf_page_count_sync
+from helpers.gemini_helper.batch_generation import generate_pdf_in_batches
 from helpers.gemini_helper.loading import _loading_animation
 from helpers.gemini_helper.generation import (
     _generate_regular,
@@ -67,6 +68,7 @@ async def generate_quiz_smart(
     question_type: Optional[str] = None,
     custom_question_type_text: Optional[str] = None,
     quiz_extraction_instruction: Optional[str] = None,
+    generation_user_id: Optional[int] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
@@ -247,22 +249,27 @@ async def generate_quiz_smart(
         # starting on owned pages; all other subjects generate questions from
         # the owned content, using boundary pages for context only.
         is_ready_exam = is_extraction
-        if is_super_pdf:
-            generated = await _generate_pdf_with_context(
-                file_paths[0], count, base_prompt_template,
-                part_count=3, ready_exam=is_ready_exam,
-                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
-                user_context=user_context,
-            )
-        elif is_single_pdf and (
+        if is_super_pdf or (is_single_pdf and (
             pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
-        ):
-            generated = await _generate_pdf_with_context(
-                file_paths[0], count, base_prompt_template,
-                part_count=2, ready_exam=is_ready_exam,
-                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
-                user_context=user_context,
-            )
+        )):
+            # Ready-made exam extraction must keep original source questions,
+            # not use generative batches that could create additional questions.
+            if is_ready_exam:
+                generated = await _generate_pdf_with_context(
+                    file_paths[0], count, base_prompt_template,
+                    part_count=3 if is_super_pdf else 2, ready_exam=True,
+                    progressive=False, user_context=user_context,
+                )
+            else:
+                # Preserve overlapping page ownership for large PDFs, but do not
+                # split a short source just because many questions were requested.
+                parts = 3 if is_super_pdf else 2 if pdf_page_count > MAX_STANDARD_PAGES else 1
+                generated = await generate_pdf_in_batches(
+                    file_paths[0], pdf_page_count, count, base_prompt_template,
+                    part_count=parts, progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+                    user_context=user_context, user_id=generation_user_id,
+                    file_hash=file_hash,
+                )
         elif is_super_images:
             generated = await _generate_super_images(
                 file_paths, count, base_prompt_template,
