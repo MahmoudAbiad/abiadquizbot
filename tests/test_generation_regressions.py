@@ -219,6 +219,7 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
             SUBJECT_MATH='math',SUBJECT_ENGLISH='english',SUBJECT_FRENCH='french',QUESTION_TYPE_GENERAL='general',DIFFICULTY_MEDIUM='medium',
             resolve_generation_question_type_text=lambda *a:None,resolve_quiz_extraction_instruction=lambda *a:None,
             generate_quiz_smart=AsyncMock(return_value=[{'question':'ok','options':['a','b','c','d','e'],'correct_option_id':4}]),get_last_generation_metadata=lambda:None,
+            determine_execution_mode=lambda *args, **kw: 'Standard',
             log_ai_generation=AsyncMock(),spawn=spawn,shuffle_quiz_options=lambda x:x,save_file_quiz_multiple=save,build_question_type_label=lambda *a,**k:'label')
         results=await asyncio.gather(*(env['execute_quiz_generation_workflow'](user,{'input_type':'text','file_hash':'same','pure_text':'text','subject_type':'solved'},5,None) for user in [1,2]))
         self.assertEqual([r[1] for r in results],['quiz-1','quiz-2'])
@@ -247,6 +248,7 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
                     resolve_generation_question_type_text=lambda *args: None,
                     resolve_quiz_extraction_instruction=lambda *args: None,
                     generate_quiz_smart=AsyncMock(return_value=generated),
+                    determine_execution_mode=lambda *args, **kw: 'Standard',
                     get_last_generation_metadata=lambda: None, spawn=spawn,
                     log_ai_generation=AsyncMock(), shuffle_quiz_options=lambda data: data,
                 )
