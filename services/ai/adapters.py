@@ -144,6 +144,7 @@ class ChatAdapter:
                           output_tokens=int(usage.get("completion_tokens") or 0),
                           total_tokens=int(usage.get("total_tokens") or 0),
                           truncated=output.get("finish_reason") == "length",
+                          finish_reason=safe_finish_reason(output.get("finish_reason")),
                           sampled=sum(isinstance(part, Attachment) and part.capability == "image"
                                       for part in request.contents) > 1)
         return parse_result(result, request.schema)
@@ -187,7 +188,10 @@ class ChatAdapter:
                                          headers={"Authorization": "Bearer " + credential}, json=body)
             if response.status_code >= 300:
                 raise _http_provider_error(response)
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                raise AIResponseDiagnosticError("upstream_json_decode") from None
         if payload.get("error") or payload.get("success") is False:
             error = payload.get("error")
             code = error.get("code") if isinstance(error, dict) else None
@@ -196,15 +200,20 @@ class ChatAdapter:
             raise ProviderError(status, reason=info.reason,
                                 retry_after_s=info.retry_after_s,
                                 reset_after_s=info.reset_after_s)
-        choice = payload["choices"][0]
+        try:
+            choice = payload["choices"][0]
+            content_text = choice["message"].get("content") or ""
+        except (KeyError, IndexError, TypeError):
+            raise AIResponseDiagnosticError("upstream_payload_shape") from None
         usage = payload.get("usage") or {}
         # Completion tokens already include reasoning tokens on this protocol.
         # Keep thoughts_tokens=0 to avoid double charging them in existing reports.
-        result = AIResult(text=choice["message"].get("content") or "",
+        result = AIResult(text=content_text,
                           input_tokens=int(usage.get("prompt_tokens") or 0),
                           output_tokens=int(usage.get("completion_tokens") or 0),
                           total_tokens=int(usage.get("total_tokens") or 0),
-                          truncated=choice.get("finish_reason") == "length")
+                          truncated=choice.get("finish_reason") == "length",
+                          finish_reason=safe_finish_reason(choice.get("finish_reason")))
         return parse_result(result, request.schema)
 
 
@@ -267,15 +276,27 @@ class GoogleAdapter:
                 config = classification_config(model, request.schema, types)
                 if request.system_instruction:
                     config.system_instruction = request.system_instruction
-            response = await client.aio.models.generate_content(model=model, contents=contents, config=config)
-            usage = response.usage_metadata
-            finish = response.candidates[0].finish_reason if response.candidates else None
-            result = AIResult(text=response.text or "",
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model, contents=contents, config=config,
+                )
+            except (ValueError, TypeError, KeyError, IndexError):
+                # SDK-side decode errors are distinct from invalid model JSON.
+                # Never record exception messages or upstream payloads.
+                raise AIResponseDiagnosticError("sdk_generation_error") from None
+            try:
+                usage = response.usage_metadata
+                finish = response.candidates[0].finish_reason if response.candidates else None
+                text = response.text or ""
+            except (ValueError, TypeError, KeyError, IndexError):
+                raise AIResponseDiagnosticError("sdk_response_access_error") from None
+            result = AIResult(text=text,
                               input_tokens=int(getattr(usage, "prompt_token_count", 0) or 0),
                               output_tokens=int(getattr(usage, "candidates_token_count", 0) or 0),
                               thoughts_tokens=int(getattr(usage, "thoughts_token_count", 0) or 0),
                               total_tokens=int(getattr(usage, "total_token_count", 0) or 0),
-                              truncated="MAX_TOKENS" in str(finish))
+                              truncated="MAX_TOKENS" in str(finish),
+                              finish_reason=safe_finish_reason(finish))
             return parse_result(result, request.schema)
         finally:
             for name in uploaded:
