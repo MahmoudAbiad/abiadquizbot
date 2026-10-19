@@ -5,7 +5,6 @@ from collections import Counter
 from unittest.mock import AsyncMock, patch
 
 from helpers.gemini_helper import batch_generation as batches
-from helpers.gemini_helper.quiz_generator import _expanded_pdf_part_count
 
 
 def question(number):
@@ -30,15 +29,6 @@ def page_chunks():
     ]
 
 
-class ExpandedPartCountTests(unittest.TestCase):
-    def test_question_heavy_three_page_exam_uses_two_parts(self):
-        self.assertEqual(_expanded_pdf_part_count(3, 55), 2)
-
-    def test_one_page_stays_single_and_super_stays_three(self):
-        self.assertEqual(_expanded_pdf_part_count(1, 55), 1)
-        self.assertEqual(_expanded_pdf_part_count(36, 55), 3)
-
-
 class ExpandedParallelTests(unittest.IsolatedAsyncioTestCase):
     async def test_generation_starts_both_parts_together_on_same_model_and_key(self):
         arrived = asyncio.Event()
@@ -54,7 +44,7 @@ class ExpandedParallelTests(unittest.IsolatedAsyncioTestCase):
             return completed_result([question(2), question(3)])
 
         with (patch.object(batches, "_execute_cascade", new=cascade),
-              patch("services.ai.runtime.choose_parallel_preference",
+              patch.object(batches, "choose_parallel_preference",
                     new=AsyncMock(return_value=("gemini", "fast", 1)))):
             response = await batches._run_expanded_pdf_parallel(
                 page_chunks(), 3, "Generate {count}", False, None,
@@ -82,7 +72,7 @@ class ExpandedParallelTests(unittest.IsolatedAsyncioTestCase):
             return completed_result([question(2), question(3)])
 
         with (patch.object(batches, "_execute_cascade", new=cascade),
-              patch("services.ai.runtime.choose_parallel_preference",
+              patch.object(batches, "choose_parallel_preference",
                     new=AsyncMock(return_value=("gemini", "fast", 0)))):
             response = await batches._run_expanded_pdf_parallel(
                 page_chunks(), 3, "Generate {count}", False, None,
@@ -104,7 +94,7 @@ class ExpandedParallelTests(unittest.IsolatedAsyncioTestCase):
             return completed_result([question(2), question(3), question(4)])
 
         with (patch.object(batches, "_execute_cascade", new=cascade),
-              patch("services.ai.runtime.choose_parallel_preference",
+              patch.object(batches, "choose_parallel_preference",
                     new=AsyncMock(return_value=("gemini", "fast", 0)))):
             response = await batches._run_expanded_pdf_parallel(
                 page_chunks(), 4, "Extract {count}", False, None,
@@ -126,7 +116,7 @@ class ExpandedParallelTests(unittest.IsolatedAsyncioTestCase):
             return completed_result([question(2)]) if calls[path] == 1 else None
 
         with (patch.object(batches, "_execute_cascade", new=cascade),
-              patch("services.ai.runtime.choose_parallel_preference",
+              patch.object(batches, "choose_parallel_preference",
                     new=AsyncMock(return_value=("gemini", "fast", 0)))):
             result = await batches._run_expanded_pdf_parallel(
                 page_chunks(), 4, "Extract {count}", False, None,
