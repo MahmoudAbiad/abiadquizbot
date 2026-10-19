@@ -6,9 +6,10 @@ import math
 import sys
 import types
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from reliability_support import load_functions
+from helpers.gemini_helper.generation import _merge_pdf_chunk_questions
 
 
 class FakeRedis:
@@ -44,10 +45,13 @@ class Attachment:
 
 
 class Request:
-    def __init__(self, parts, schema, system_instruction=None, file_session=None):
+    def __init__(self, parts, schema, system_instruction=None, file_session=None,
+                 preferred_attempt=None, inline_only=False):
         self.parts = parts
         self.instruction = system_instruction
         self.file_session = file_session
+        self.preferred_attempt = preferred_attempt
+        self.inline_only = inline_only
 
 
 class Session:
@@ -85,7 +89,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             'helpers/gemini_helper/batch_generation.py',
             {'_question_key', '_valid_question', '_valid_extracted_question',
              '_batch_prompt', '_plain_batch_prompt', '_extraction_batch_prompt',
-             '_Checkpoint', '_run_batch_chunks', '_extract_exam_chunks',
+             '_Checkpoint', '_run_batch_chunks', '_run_expanded_pdf_parallel', '_extract_exam_chunks',
              'extract_images_in_batches', 'generate_pdf_in_batches',
              'generate_images_in_batches', 'generate_text_in_batches'},
             hashlib=hashlib, json=json, math=math, asyncio=asyncio, logger=Mock(),
@@ -94,6 +98,9 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             GeminiFileSession=Session, Attachment=Attachment, AIRequest=Request,
             QuizResponse=object, MAX_BATCH_QUESTIONS=20, CHECKPOINT_TTL_SECONDS=7200,
             _generated_pdf_chunk_targets=allocate,
+            _merge_pdf_chunk_questions=_merge_pdf_chunk_questions,
+            choose_parallel_preference=AsyncMock(return_value=('gemini', 'test-model', 0)),
+
             _generated_pdf_chunk_prompt=lambda base, n, chunk, difficulty=None:
             f'{base}:generate={n}:owned={chunk["owned_first"]}:{chunk["owned_last"]}',
             _ready_exam_chunk_prompt=lambda base, n, chunk:
@@ -119,7 +126,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             'source.pdf', 4, 60, 'prompt', 1, user_id=9, file_hash='hash')
         self.assertEqual(len(generated[0]), 60)
         self.assertEqual([req.parts[0].path for req in self.calls], ['source.pdf'] * 3)
-        self.assertEqual(len({id(req.file_session) for req in self.calls}), 1)
+        self.assertTrue(all(req.file_session is None and req.inline_only for req in self.calls))
         self.assertEqual(self.redis.values, {})
         self.assertEqual(self.usage.value['total_tokens'], 360)
 
