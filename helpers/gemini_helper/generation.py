@@ -13,6 +13,7 @@ from helpers.gemini_helper.media import (
 from helpers.gemini_helper.schemas import QuizResponse
 from services.ai.contracts import AIRequest, Attachment
 from services.ai.runtime import execute as _execute_request
+from services.ai.vertex_parallel_policy import should_exclude_vertex_for_parallel
 
 logger = get_logger(__name__)
 
@@ -206,6 +207,7 @@ async def _generate_pdf_with_context(
             return (_build_super_chunk_attempt_fn(paths, instruction, user_context)
                     if user_context else _build_super_chunk_attempt_fn(paths, instruction))
 
+        exclude_vertex_for_chunks = await should_exclude_vertex_for_parallel(part_count)
         attempts = [
             _execute_cascade(
                 make_request(
@@ -219,8 +221,8 @@ async def _generate_pdf_with_context(
                         )
                     ),
                 ),
-                # Retain the current three-part Super-PDF provider policy.
-                exclude_vertex=(part_count == 3),
+                # Honor the admin Vertex switch in three-part processing.
+                exclude_vertex=exclude_vertex_for_chunks,
             )
             for index, (chunk, target) in enumerate(active)
         ]
@@ -292,12 +294,14 @@ async def _generate_super_pdf(file_path: str, count: int, prompt_template: str) 
 
         base, remainder = divmod(count, 3)
         question_counts = [base + (1 if index < remainder else 0) for index in range(3)]
+        exclude_vertex_for_chunks = await should_exclude_vertex_for_parallel(3)
+        exclude_vertex_for_chunks = await should_exclude_vertex_for_parallel(3)
         tasks = [
             _execute_cascade(
                 _build_super_chunk_attempt_fn(
                     [chunk_path], prompt_template.replace("{count}", str(question_count))
                 ),
-                exclude_vertex=True,
+                exclude_vertex=exclude_vertex_for_chunks,
             )
             for chunk_path, question_count in zip(chunk_paths, question_counts)
             if question_count > 0
