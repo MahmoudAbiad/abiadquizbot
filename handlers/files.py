@@ -289,7 +289,7 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟",
     )
 
-    mode = determine_execution_mode(items, selected_count, is_album=is_album)
+    mode = determine_execution_mode(items, selected_count, is_album=is_album, content_source=data.get("content_source"))
     cost = await calculate_quiz_points_cost(items, selected_count, is_album)
     difficulty = data.get("difficulty", DIFFICULTY_MEDIUM)
     question_type_label = build_question_type_label(
@@ -302,7 +302,7 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     heading = "✅ مراجعة العدد والتكلفة" if ready_exam else "3 من 3 · مراجعة وتوليد"
     text = f"<b>{heading}</b>\n\n{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
     text += "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك."
-    if mode in ("Super-PDF", "Super-Images"):
+    if mode in ("Super-PDF", "Super-Images", "Super-Text"):
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
     # 🆕 اختبار جاهز (محلول/غير محلول): لا معنى لأزرار عدد جاهزة عشوائية (5/10/15/20) هنا -
@@ -1199,7 +1199,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
                 return
 
         cost = await calculate_quiz_points_cost(items, count, is_album)
-        mode = determine_execution_mode(items, count, is_album=is_album)
+        mode = determine_execution_mode(items, count, is_album=is_album, content_source=data.get("content_source"))
         user_info = await _current_user(call.message, call.from_user)
 
         deduction = None
