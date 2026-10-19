@@ -33,7 +33,9 @@ from helpers.gemini_helper.state import (
     _last_token_usage_var,
 )
 from helpers.gemini_helper.media import get_pdf_page_count_sync
-from helpers.gemini_helper.batch_generation import generate_pdf_in_batches
+from helpers.gemini_helper.batch_generation import (
+    generate_pdf_in_batches, generate_images_in_batches, generate_text_in_batches,
+)
 from helpers.gemini_helper.loading import _loading_animation
 from helpers.gemini_helper.generation import (
     _generate_regular,
@@ -69,6 +71,7 @@ async def generate_quiz_smart(
     custom_question_type_text: Optional[str] = None,
     quiz_extraction_instruction: Optional[str] = None,
     generation_user_id: Optional[int] = None,
+    batch_enabled: bool = False,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     الدالة الرئيسية المستدعاة من قبل البوت لتوليد الاختبار الذكي.
@@ -199,6 +202,14 @@ async def generate_quiz_smart(
 
         # 1. مسار النصوص الصريحة
         if pure_text:
+            if batch_enabled and not is_extraction:
+                generated = await generate_text_in_batches(
+                    pure_text, count, base_prompt_template,
+                    progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+                    user_context=user_context, user_id=generation_user_id,
+                    file_hash=file_hash,
+                )
+                return _finalize(generated[0] if generated else None)
             # 🛠️ FIX: نمط الكويز المصوّر الرياضي (is_math_mode) يُوجَّه مباشرة لمسار Gemini
             # (generate_structured_with_cascade + response_schema) ولا يمر إطلاقاً بمسار
             # Groq السريع (_generate_text_quiz)، لأن Groq أقل موثوقية عموماً بمهام LaTeX
@@ -270,7 +281,15 @@ async def generate_quiz_smart(
                     user_context=user_context, user_id=generation_user_id,
                     file_hash=file_hash,
                 )
+        elif (batch_enabled or is_super_images) and not is_ready_exam:
+            generated = await generate_images_in_batches(
+                file_paths, count, base_prompt_template,
+                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+                user_context=user_context, user_id=generation_user_id,
+                file_hash=file_hash,
+            )
         elif is_super_images:
+            # Do not change literal extraction behavior for uploaded exams.
             generated = await _generate_super_images(
                 file_paths, count, base_prompt_template,
                 progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
