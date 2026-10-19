@@ -53,7 +53,7 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     allow_vertex_for_parts = False
     if exclude_vertex:
         try:
-            from helpers.supabase_helper.feature_flags import is_feature_enabled
+            from helpers.supabase_helper import is_feature_enabled
             allow_vertex_for_parts = await is_feature_enabled(
                 "vertex_parallel_enabled", default=False,
             )
