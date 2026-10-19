@@ -27,8 +27,10 @@ from helpers.ai_models_helper import (
     SLOT_DETECTION,
 )
 from helpers.ai_providers_helper import get_providers
-from helpers.supabase_helper import admin_get_quiz_generation_log, get_ai_model_pricing
-from helpers.supabase_helper.feature_flags import is_feature_enabled, set_feature_flag
+from helpers.supabase_helper import (
+    admin_get_quiz_generation_log, get_ai_model_pricing,
+    is_feature_enabled, set_feature_flag,
+)
 from logger import get_logger
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 
