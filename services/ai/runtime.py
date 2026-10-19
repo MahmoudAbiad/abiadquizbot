@@ -40,9 +40,30 @@ def _free_pool_identity(provider, credentials):
     return provider["id"], fingerprint
 
 
+async def _effective_vertex_exclusion(exclude_vertex: bool) -> bool:
+    """Allow Vertex in previously excluded multi-part flows only by explicit admin opt-in.
+
+    Missing settings or storage failures preserve the historical exclusion.
+    The feature-flags helper caches reads for 30 seconds and invalidates them
+    after an admin write, so ordinary AI requests incur no extra lookup.
+    """
+    if not exclude_vertex:
+        return False
+    try:
+        from helpers.supabase_helper.feature_flags import is_feature_enabled
+        enabled = await is_feature_enabled("vertex_parallel_enabled", default=False)
+        return not enabled
+    except Exception:
+        logger.warning("VERTEX_PARALLEL_FLAG_READ_FAILED preserving_exclusion=true")
+        return True
+
+
 async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regular", timeout=None):
     from helpers.settings_helper import get_ai_request_timeout
     from services.ai.state import _last_model_used_var, _last_token_usage_var
+    # Batch/super callers that historically excluded Vertex may opt in from
+    # the admin AI menu. Requests without exclusion retain their old behavior.
+    exclude_vertex = await _effective_vertex_exclusion(exclude_vertex)
     timeout = timeout if timeout is not None else await get_ai_request_timeout()
     request_id = uuid.uuid4().hex[:12]
     request_start = time.monotonic()
