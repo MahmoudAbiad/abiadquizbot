@@ -341,3 +341,184 @@ async def generate_text_in_batches(
     )
 
 
+
+
+def _extraction_batch_prompt(prompt_template: str, chunk: Dict[str, Any],
+                             limit: int, previous: List[Dict[str, Any]]) -> str:
+    """Continue original questions in document order, with no fill-to-target."""
+    if chunk.get("pdf_chunk"):
+        prompt = _ready_exam_chunk_prompt(prompt_template, limit, chunk["pdf_chunk"])
+    else:
+        prompt = prompt_template.replace("{count}", str(limit))
+    if chunk.get("image_ownership"):
+        first, last, total = chunk["image_ownership"]
+        prompt += (
+            "\n\n[ملكية صور الاختبار]: الصور في ترتيب المصدر. "
+            f"لا تستخرج إلا الأسئلة التي تبدأ في الصور {first} إلى {last} من أصل {total} "
+            "صورة مرقمة داخل هذه الدفعة. الصور خارج المجال سياق فقط؛ "
+            "إذا امتد السؤال من صورة مملوكة إلى صورة سياق فاقرأه كاملاً."
+        )
+    prompt += (
+        "\n\n[استخراج تتابعي إلزامي]: "
+        f"استخرج حتى {limit} أسئلة موجودة أصلاً في هذا المصدر مرتبة بحسب ظهورها. "
+        "لا تختلق سؤالاً لاستكمال العدد، ولا تغير أرقام الأسئلة أو المعطيات الأصلية. "
+        "التزم بنمط استخدام الإجابات الأصلية أو حلها آلياً المحدد في تعليمات الاختبار. "
+        "إذا لم يتبق أي سؤال أصلي بعد آخر سؤال مستخرج فأعد JSON صحيحاً يحتوي "
+        "questions: [] وليس أسئلة مكررة. إذا تبقى أقل من الحد فأعد الموجود فقط."
+    )
+    if previous:
+        last = str(previous[-1]["question"])[:600]
+        prompt += (
+            "\n\n[موضع الاستكمال]: آخر سؤال مُستخرج من هذا الجزء كان:\n"
+            + last + "\nابدأ بالسؤال الذي يليه مباشرةً في المصدر، لا تعِد هذا السؤال."
+        )
+        # Supply more anchors for short/ambiguous question titles without
+        # flooding the context with all previous questions.
+        anchors = ["- " + str(q["question"])[:160] for q in previous[-15:]]
+        prompt += "\n[أسئلة سبق استخراجها من الجزء، ممنوع تكرارها]:\n" + "\n".join(anchors)
+    else:
+        prompt += "\n[هذه أول دفعة من الجزء، ابدأ بأول سؤال أصلي تابع له.]"
+    return prompt
+
+
+async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
+                               prompt_template: str, user_context: Optional[str],
+                               user_id, source_hash, source_kind: str, mode: str,
+                               exclude_vertex: bool = False):
+    """Conservative, resumable extraction with original question ordering.
+
+    Actual question counts vary by source chunk; do not divide the estimated
+    count proportionally as done when *generating* new questions. A successful
+    empty structured response is EOF. Provider failures are not EOF.
+    """
+    if count < 1 or not chunks:
+        return None
+    checkpoint = _Checkpoint(user_id, source_hash, prompt_template, user_context,
+                             count, len(chunks), False, source_kind="exam:" + source_kind)
+    saved = await checkpoint.load(len(chunks), extraction=True)
+    parts = saved["parts"] if saved else [[] for _ in chunks]
+    completed = saved["completed_parts"] if saved else [False] * len(chunks)
+    usage = saved.get("usage", {}) if saved else {}
+    usage = {k: int(usage.get(k, 0) or 0) for k in
+             ("input_tokens", "output_tokens", "thoughts_tokens", "total_tokens")}
+    details = saved.get("details", []) if saved else []
+    if (not isinstance(details, list) or
+            any(not isinstance(v, dict) for v in details) or
+            sum(len(part) for part in parts) > count):
+        parts, completed, details = [[] for _ in chunks], [False] * len(chunks), []
+        usage = {k: 0 for k in usage}
+    seen = {_question_key(q) for part in parts for q in part}
+    session = GeminiFileSession()
+    try:
+        for index, chunk in enumerate(chunks):
+            repeats = 0
+            attempts = 0
+            max_attempts = math.ceil(count / MAX_BATCH_QUESTIONS) * 4 + 4
+            while not completed[index] and sum(map(len, parts)) < count:
+                if repeats >= 2 or attempts >= max_attempts:
+                    logger.warning("EXAM_BATCH_FAILED modality=%s part=%d reason=no_progress",
+                                   source_kind, index + 1)
+                    return None
+                attempts += 1
+                remaining = count - sum(map(len, parts))
+                limit = min(MAX_BATCH_QUESTIONS, remaining)
+                instruction = _extraction_batch_prompt(
+                    prompt_template, chunk, limit, parts[index])
+                source = ((chunk["text"],) if "text" in chunk else tuple(
+                    Attachment.from_path(path) for path in chunk["paths"]
+                ))
+                request = AIRequest(
+                    ((user_context,) if user_context else ()) + source,
+                    QuizResponse, system_instruction=instruction, file_session=session,
+                )
+                try:
+                    result = await _execute_cascade(
+                        request, exclude_vertex=exclude_vertex, allow_empty=True,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("EXAM_BATCH_FAILED modality=%s part=%d reason=cascade_error",
+                                   source_kind, index + 1)
+                    return None
+                if result is None:
+                    logger.warning("EXAM_BATCH_FAILED modality=%s part=%d reason=cascade_exhausted",
+                                   source_kind, index + 1)
+                    return None
+                for key, value in zip(
+                    ("total_tokens", "input_tokens", "output_tokens", "thoughts_tokens"),
+                    (result[1], result[2], result[3], result[4]),
+                ):
+                    usage[key] += value
+                details.append({
+                    "provider": result[9], "model": result[5],
+                    "key_index": result[6], "cascade_rank": result[7],
+                    "cascade_total": result[8], "part": index + 1,
+                })
+                if not result[0]:
+                    completed[index] = True
+                    await checkpoint.save(parts, usage, details, completed_parts=completed)
+                    break
+                # An invalid response is not proof that the source ended.
+                if any(not _valid_extracted_question(q) for q in result[0]):
+                    logger.warning("EXAM_BATCH_FAILED modality=%s part=%d reason=malformed_options",
+                                   source_kind, index + 1)
+                    return None
+                added = 0
+                for question in result[0]:
+                    key = _question_key(question)
+                    if key in seen:
+                        continue
+                    parts[index].append(question)
+                    seen.add(key)
+                    added += 1
+                    if added >= limit or sum(map(len, parts)) >= count:
+                        break
+                repeats = repeats + 1 if added == 0 else 0
+                await checkpoint.save(parts, usage, details, completed_parts=completed)
+
+        extracted = [q for part in parts for q in part]
+        if not extracted:
+            return None
+        # Fewer extracted questions than estimated is acceptable only when all
+        # owned source segments explicitly reached EOF. Never pad the result.
+        if len(extracted) < count and not all(completed):
+            return None
+        await checkpoint.clear()
+        providers = {d.get("provider") for d in details}
+        models = {d.get("model") for d in details}
+        _last_model_used_var.set({
+            "provider": next(iter(providers)) if len(providers) == 1 else "mixed",
+            "model": next(iter(models)) if len(models) == 1 else "mixed",
+            "key_index": None, "mode": mode, "chunk_details": details,
+            "cascade_rank": None, "cascade_total": None,
+        })
+        _last_token_usage_var.set(usage)
+        return extracted, usage["total_tokens"]
+    finally:
+        await session.aclose()
+
+
+async def extract_images_in_batches(paths: List[str], count: int,
+                                    prompt_template: str,
+                                    user_context: Optional[str] = None,
+                                    user_id=None, file_hash=None):
+    """Contiguous image groups with overlap to retain spanning exam questions."""
+    if len(paths) <= 10:
+        chunks = [{"paths": paths}]
+    else:
+        chunks = []
+        for i in range(3):
+            start = (len(paths) * i) // 3
+            stop = (len(paths) * (i + 1)) // 3
+            first = max(0, start - 1)
+            last = min(len(paths), stop + 1)
+            chunks.append({
+                "paths": paths[first:last],
+                "image_ownership": (start - first + 1, stop - first, last - first),
+            })
+    return await _extract_exam_chunks(
+        chunks, count, prompt_template, user_context,
+        user_id, file_hash, "images", "batched_exam_images",
+        exclude_vertex=len(paths) > 10,
+    )
