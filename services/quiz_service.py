@@ -431,6 +431,7 @@ async def execute_quiz_generation_workflow(
             count=count,
             skip_cache=True,
             file_hash=file_hash,
+            generation_user_id=user_id,
             status_message=status_message,
             previous_questions=previous_questions if previous_questions else None,
             is_math_mode=is_math_mode,
