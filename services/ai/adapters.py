@@ -5,6 +5,7 @@ import json
 import os
 
 import httpx
+from pydantic import ValidationError
 
 from services.ai.contracts import AIResult, Attachment
 from services.ai.provider_presets import chat_service
@@ -35,17 +36,60 @@ def _http_provider_error(response):
                          reset_after_s=info.reset_after_s)
 
 
+_SAFE_FINISH_REASONS = frozenset({
+    "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "LANGUAGE",
+    "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL",
+    "OTHER", "UNEXPECTED_TOOL_CALL", "NO_IMAGE", "IMAGE_SAFETY",
+})
+
+
+def safe_finish_reason(value):
+    """Allowlist finish codes; never log arbitrary provider-controlled text."""
+    if value is None:
+        return None
+    name = str(getattr(value, "name", value)).rsplit(".", 1)[-1].upper()
+    name = "MAX_TOKENS" if name == "LENGTH" else name
+    return name if name in _SAFE_FINISH_REASONS else "UNKNOWN"
+
+
+class AIResponseDiagnosticError(ValueError):
+    """Non-sensitive machine-readable failure stage for model responses."""
+
+    def __init__(self, detail, result=None):
+        self.detail = detail
+        self.finish_reason = safe_finish_reason(getattr(result, "finish_reason", None))
+        raw = getattr(result, "text", None)
+        self.response_chars = len(raw) if isinstance(raw, str) else None
+        self.output_tokens = getattr(result, "output_tokens", None)
+        self.thoughts_tokens = getattr(result, "thoughts_tokens", None)
+        super().__init__(f"AI response validation failed: {detail}")
+
+
 def parse_result(result, schema):
-    if not result.text.strip():
-        raise ValueError("Empty AI response")
+    raw = getattr(result, "text", None)
+    if not isinstance(raw, str):
+        raise AIResponseDiagnosticError("non_text_response", result)
+    raw = raw.strip()
+    if not raw:
+        detail = ("empty_after_thinking" if getattr(result, "thoughts_tokens", 0)
+                  and not getattr(result, "output_tokens", 0)
+                  else "empty_response")
+        raise AIResponseDiagnosticError(detail, result)
     if schema:
         from services.ai.parsing import _repair_json_backslashes
-        raw = result.text.strip()
         if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        result.parsed = schema.model_validate(json.loads(_repair_json_backslashes(raw)))
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            obj = json.loads(_repair_json_backslashes(raw))
+        except (ValueError, TypeError):
+            detail = "truncated_json" if result.truncated else "malformed_json"
+            raise AIResponseDiagnosticError(detail, result) from None
+        try:
+            result.parsed = schema.model_validate(obj)
+        except (ValidationError, ValueError, TypeError):
+            raise AIResponseDiagnosticError("schema_validation", result) from None
         if hasattr(result.parsed, "questions") and not result.parsed.questions:
-            raise ValueError("AI returned no questions")
+            raise AIResponseDiagnosticError("empty_questions", result)
     return result
 
 
@@ -100,6 +144,7 @@ class ChatAdapter:
                           output_tokens=int(usage.get("completion_tokens") or 0),
                           total_tokens=int(usage.get("total_tokens") or 0),
                           truncated=output.get("finish_reason") == "length",
+                          finish_reason=safe_finish_reason(output.get("finish_reason")),
                           sampled=sum(isinstance(part, Attachment) and part.capability == "image"
                                       for part in request.contents) > 1)
         return parse_result(result, request.schema)
@@ -143,7 +188,10 @@ class ChatAdapter:
                                          headers={"Authorization": "Bearer " + credential}, json=body)
             if response.status_code >= 300:
                 raise _http_provider_error(response)
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                raise AIResponseDiagnosticError("upstream_json_decode") from None
         if payload.get("error") or payload.get("success") is False:
             error = payload.get("error")
             code = error.get("code") if isinstance(error, dict) else None
@@ -152,15 +200,20 @@ class ChatAdapter:
             raise ProviderError(status, reason=info.reason,
                                 retry_after_s=info.retry_after_s,
                                 reset_after_s=info.reset_after_s)
-        choice = payload["choices"][0]
+        try:
+            choice = payload["choices"][0]
+            content_text = choice["message"].get("content") or ""
+        except (KeyError, IndexError, TypeError):
+            raise AIResponseDiagnosticError("upstream_payload_shape") from None
         usage = payload.get("usage") or {}
         # Completion tokens already include reasoning tokens on this protocol.
         # Keep thoughts_tokens=0 to avoid double charging them in existing reports.
-        result = AIResult(text=choice["message"].get("content") or "",
+        result = AIResult(text=content_text,
                           input_tokens=int(usage.get("prompt_tokens") or 0),
                           output_tokens=int(usage.get("completion_tokens") or 0),
                           total_tokens=int(usage.get("total_tokens") or 0),
-                          truncated=choice.get("finish_reason") == "length")
+                          truncated=choice.get("finish_reason") == "length",
+                          finish_reason=safe_finish_reason(choice.get("finish_reason")))
         return parse_result(result, request.schema)
 
 
@@ -223,15 +276,27 @@ class GoogleAdapter:
                 config = classification_config(model, request.schema, types)
                 if request.system_instruction:
                     config.system_instruction = request.system_instruction
-            response = await client.aio.models.generate_content(model=model, contents=contents, config=config)
-            usage = response.usage_metadata
-            finish = response.candidates[0].finish_reason if response.candidates else None
-            result = AIResult(text=response.text or "",
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model, contents=contents, config=config,
+                )
+            except (ValueError, TypeError, KeyError, IndexError):
+                # SDK-side decode errors are distinct from invalid model JSON.
+                # Never record exception messages or upstream payloads.
+                raise AIResponseDiagnosticError("sdk_generation_error") from None
+            try:
+                usage = response.usage_metadata
+                finish = response.candidates[0].finish_reason if response.candidates else None
+                text = response.text or ""
+            except (ValueError, TypeError, KeyError, IndexError):
+                raise AIResponseDiagnosticError("sdk_response_access_error") from None
+            result = AIResult(text=text,
                               input_tokens=int(getattr(usage, "prompt_token_count", 0) or 0),
                               output_tokens=int(getattr(usage, "candidates_token_count", 0) or 0),
                               thoughts_tokens=int(getattr(usage, "thoughts_token_count", 0) or 0),
                               total_tokens=int(getattr(usage, "total_token_count", 0) or 0),
-                              truncated="MAX_TOKENS" in str(finish))
+                              truncated="MAX_TOKENS" in str(finish),
+                              finish_reason=safe_finish_reason(finish))
             return parse_result(result, request.schema)
         finally:
             for name in uploaded:

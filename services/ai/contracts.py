@@ -62,6 +62,8 @@ class AIResult:
     total_tokens: int = 0
     truncated: bool = False
     sampled: bool = False
+    # Fixed provider completion code for diagnostics; never raw output text.
+    finish_reason: str | None = None
 
     @property
     def usage(self):
