@@ -1,3 +1,12 @@
+## Vertex eligibility for super/parallel quiz batches (2026-10-19)
+
+- Admin → General settings → AI control has a persistent button toggling Vertex admission to previously excluded multi-part AI cascade work.
+- Storage: `feature_flags.key = vertex_parallel_enabled`; **default false** when absent or unreadable, preserving the existing production behavior until the admin explicitly enables it.
+- `services.ai.runtime.execute` only reads this flag if a caller passed `exclude_vertex=True`; ordinary model execution is unaffected.
+- For the multi-part PDF and >10-image album routes, an enabled flag allows configured Vertex candidates to join the normal model/key fallback, subject to provider and model enabling and working Vertex credentials.
+- Disabling the flag restores the historical exclusion. Admin saves immediately invalidate local/shared cache; other processes may honor a change after up to 30 seconds, the existing feature-flag cache TTL.
+- This button does not configure Vertex credentials, bypass quotas, or change any price/cost/refund calculations.
+
 # سجل تطوير بوت الكويزات - abiadquizbot (الحالة الحالية)
 
 ## Unified expanded/super generation batches (2026-10-19, draft PR #7)
