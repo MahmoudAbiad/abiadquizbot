@@ -48,6 +48,17 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     request_start = time.monotonic()
     providers = await get_providers()
     models = await get_enabled_models(slot)
+    # Only the historical multi-part/batch exclusion is configurable.
+    # Missing DB flag or transient read errors must preserve the old policy.
+    allow_vertex_for_parts = False
+    if exclude_vertex:
+        try:
+            from helpers.supabase_helper.feature_flags import is_feature_enabled
+            allow_vertex_for_parts = await is_feature_enabled(
+                "vertex_parallel_enabled", default=False,
+            )
+        except Exception:
+            logger.warning("VERTEX_PARALLEL_FLAG_READ_FAILED; keeping Vertex excluded")
     # Sticky model/key only within a multi-batch PDF session. Regular callers
     # retain the configured order and round-robin rotation unchanged.
     session = getattr(request, "file_session", None)
@@ -78,7 +89,7 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
             logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=provider_disabled_or_missing",
                         request_id, slot, entry["provider"], entry["model_name"])
             continue
-        if exclude_vertex and provider["transport"] == "vertex":
+        if exclude_vertex and not allow_vertex_for_parts and provider["transport"] == "vertex":
             logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=vertex_excluded",
                         request_id, slot, provider["id"], entry["model_name"])
             continue
