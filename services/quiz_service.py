@@ -74,7 +74,7 @@ async def _prefetch_math_quiz_images(quiz_id: str, quiz_data: List[Dict[str, Any
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
-def determine_execution_mode(items: int, questions: int, cached: bool = False, is_album: bool = False) -> str:
+def determine_execution_mode(items: int, questions: int, cached: bool = False, is_album: bool = False, content_source: Optional[str] = None) -> str:
     """تحديد وضع التنفيذ - 🆕 صار مطابقاً تماماً لشرط التنفيذ الفعلي بـ
     gemini_helper.generate_quiz_smart (is_super_pdf/is_super_images بالضبط)، بدل عتبة
     صفحات موحّدة وهمية كانت تُطبَّق حتى على الصور:
@@ -92,7 +92,8 @@ def determine_execution_mode(items: int, questions: int, cached: bool = False, i
     if is_album:
         return ("Super-Images" if items > MAX_ALBUM_IMAGES else
                 "Over-Limit" if questions > MAX_STANDARD_QUESTIONS else "Standard")
-    if items > MAX_LIMIT_PAGES: return "Super-PDF"
+    if items > MAX_LIMIT_PAGES:
+        return "Super-Text" if content_source in ("telegram_text", "audio_transcript", "docx", "pptx", "txt") else "Super-PDF"
     if items > MAX_STANDARD_PAGES or questions > MAX_STANDARD_QUESTIONS: return "Over-Limit"
     return "Standard"
 
@@ -100,6 +101,7 @@ MODE_LABELS_AR = {
     "Standard": "⚡ عادي",
     "Over-Limit": "📈 موسّع",
     "Super-PDF": "🚀 معالجة فائقة (PDF كبير)",
+    "Super-Text": "🚀 معالجة فائقة (نص طويل)",
     "Super-Images": "🚀 معالجة فائقة (ألبوم صور كبير)",
     "Cached": "🗃️ من الكاش",
 }
@@ -429,6 +431,7 @@ async def execute_quiz_generation_workflow(
         batch_enabled = determine_execution_mode(
             int(data.get("items_count") or 1), count,
             is_album=bool(data.get("is_album")),
+            content_source=data.get("content_source"),
         ) != "Standard"
         quiz_data = await generate_quiz_smart(
             file_paths=file_paths if is_media else None,
