@@ -36,19 +36,23 @@ class GeminiFileSession:
         return uploaded
 
     async def aclose(self):
-        from google import genai
         uploaded, self._uploaded = list(self._uploaded.values()), {}
+        if not uploaded:
+            return
+        from google import genai
         for file, credential in uploaded:
             client = None
             try:
                 client = genai.Client(api_key=credential)
                 await asyncio.wait_for(client.aio.files.delete(name=file.name), timeout=8)
             except Exception:
-                # Files API uploads expire server-side; cleanup is still best-effort.
+                # Files API uploads expire server-side; cleanup is best-effort.
                 logger.warning("GEMINI_BATCH_FILE_CLEANUP_FAILED")
             finally:
                 if client is not None:
                     try:
                         await client.aio.aclose()
-                    finally:
                         client.close()
+                    except Exception:
+                        # Never fail a completed quiz just because cleanup failed.
+                        logger.warning("GEMINI_BATCH_CLIENT_CLOSE_FAILED")
