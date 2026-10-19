@@ -29,6 +29,8 @@ from helpers.ai_models_helper import (
 from helpers.ai_providers_helper import get_providers
 from helpers.supabase_helper import admin_get_quiz_generation_log, get_ai_model_pricing
 from logger import get_logger
+from helpers.supabase_helper import is_feature_enabled, set_feature_flag
+from services.ai.vertex_parallel_policy import VERTEX_PARALLEL_FLAG
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 
 logger = get_logger(__name__)
@@ -63,11 +65,16 @@ async def _render_ai_menu(event, state: FSMContext = None):
         "⚡ <b>المسار النصي السريع:</b> سلسلة مستقلة لتوليد الأسئلة من نص صريح\n"
         "🔎 <b>نماذج Google:</b> تحديث الكتالوج واختبار نموذج قبل تفعيله\n"
         "📊 <b>سجل توليد الكويزات:</b> وقت كل عملية توليد + الموديل المستخدم فيها\n"
-        "⏱ <b>مهلة الطلب:</b> أقصى انتظار لكل محاولة (مفتاح × موديل) قبل الانتقال للتالي"
+        "⏱ <b>مهلة الطلب:</b> أقصى انتظار لكل محاولة (مفتاح × موديل) قبل الانتقال للتالي\n"
+        "🧩 <b>Vertex في المعالجة متعددة الأجزاء:</b> السماح أو الاستبعاد للطلبات الجديدة "
+        "(PDF والألبومات الكبيرة؛ يتطلب مزوّداً ونموذجاً مفعّلين وإعدادات Vertex صالحة)"
     )
     from helpers.settings_helper import get_app_settings
     settings = await get_app_settings(force_refresh=True)
-    reply_markup = get_ai_control_keyboard(settings.get("ai_request_timeout"))
+    vertex_enabled = await is_feature_enabled(VERTEX_PARALLEL_FLAG, default=False)
+    reply_markup = get_ai_control_keyboard(
+        settings.get("ai_request_timeout"), vertex_parallel_enabled=vertex_enabled,
+    )
 
     if isinstance(event, types.Message):
         await event.answer(text, reply_markup=reply_markup, parse_mode="HTML")
@@ -79,6 +86,17 @@ async def _render_ai_menu(event, state: FSMContext = None):
 @router.callback_query(F.data == "admin_ai_menu")
 async def open_ai_menu(call: types.CallbackQuery, state: FSMContext):
     await _render_ai_menu(call, state)
+
+
+@router.callback_query(F.data.in_({"admin_ai_vertex_parallel_on", "admin_ai_vertex_parallel_off"}))
+async def set_vertex_parallel(call: types.CallbackQuery):
+    """The explicit target value makes repeat taps and old buttons idempotent."""
+    enabled = call.data == "admin_ai_vertex_parallel_on"
+    saved = await set_feature_flag(VERTEX_PARALLEL_FLAG, enabled)
+    if not saved:
+        await call.answer("❌ تعذّر حفظ إعداد Vertex، حاول مرة ثانية.", show_alert=True)
+        return
+    await _render_ai_menu(call)
 
 
 # ==================== عرض سلسلة موديلات slot معيّن ====================
