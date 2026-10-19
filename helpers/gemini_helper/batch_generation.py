@@ -18,6 +18,7 @@ from helpers.gemini_helper.schemas import QuizResponse
 from helpers.gemini_helper.state import _last_model_used_var, _last_token_usage_var
 from services.ai.contracts import AIRequest, Attachment
 from services.ai.file_session import GeminiFileSession
+from services.ai.vertex_parallel_policy import should_exclude_vertex_for_parallel
 
 logger = get_logger(__name__)
 MAX_BATCH_QUESTIONS = 20
@@ -284,13 +285,13 @@ async def generate_pdf_in_batches(
             return await _extract_exam_chunks(
                 chunks, count, prompt_template, user_context,
                 user_id, file_hash, "pdf", "batched_exam_pdf",
-                exclude_vertex=(part_count == 3),
+                exclude_vertex=await should_exclude_vertex_for_parallel(part_count),
             )
         return await _run_batch_chunks(
             chunks, count, prompt_template, progressive, user_context,
             user_id, file_hash, "pdf",
             "batched_super_pdf" if part_count == 3 else "batched_over_limit_pdf",
-            exclude_vertex=(part_count == 3),
+            exclude_vertex=await should_exclude_vertex_for_parallel(part_count),
         )
     finally:
         if part_count != 1:
@@ -317,7 +318,7 @@ async def generate_images_in_batches(
         chunks, count, prompt_template, progressive, user_context,
         user_id, file_hash, "images",
         "batched_super_images" if len(paths) > 10 else "batched_over_limit_images",
-        exclude_vertex=(len(paths) > 10),
+        exclude_vertex=await should_exclude_vertex_for_parallel(3 if len(paths) > 10 else 1),
     )
 
 
@@ -520,5 +521,5 @@ async def extract_images_in_batches(paths: List[str], count: int,
     return await _extract_exam_chunks(
         chunks, count, prompt_template, user_context,
         user_id, file_hash, "images", "batched_exam_images",
-        exclude_vertex=len(paths) > 10,
+        exclude_vertex=await should_exclude_vertex_for_parallel(3 if len(paths) > 10 else 1),
     )
