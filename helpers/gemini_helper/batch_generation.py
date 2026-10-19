@@ -11,6 +11,7 @@ from mem_utils import release_memory_to_os
 from utils import safe_file_cleanup
 from helpers.gemini_helper.generation import (
     _execute_cascade, _generated_pdf_chunk_prompt, _generated_pdf_chunk_targets,
+    _ready_exam_chunk_prompt,
 )
 from helpers.gemini_helper.media import split_pdf_with_context_without_orphans, split_images_into_three_sync
 from helpers.gemini_helper.schemas import QuizResponse
@@ -33,6 +34,15 @@ def _valid_question(question: Dict[str, Any]) -> bool:
     return bool(_question_key(question)) and isinstance(options, list) and len(options) == 4 and (
         type(answer) is int and 0 <= answer < 4
     )
+
+
+def _valid_extracted_question(question: Dict[str, Any]) -> bool:
+    """Keep 4+ original options; the established post-processing handles five choices."""
+    options = question.get("options")
+    answer = question.get("correct_option_id")
+    return (bool(_question_key(question)) and isinstance(options, list) and
+            len(options) >= 4 and all(isinstance(o, str) and o.strip() for o in options) and
+            type(answer) is int and 0 <= answer < len(options))
 
 
 def _batch_prompt(base_prompt: str, chunk: Dict[str, Any], target: int,
@@ -63,7 +73,7 @@ class _Checkpoint:
             )
             self.key = "quiz:question-batches:v2:" + hashlib.sha256(identity.encode()).hexdigest()
 
-    async def load(self, num_parts):
+    async def load(self, num_parts, extraction=False):
         if not self.key:
             return None
         try:
@@ -78,19 +88,26 @@ class _Checkpoint:
                         isinstance(q, dict) and _valid_question(q) for q in part
                     ) for part in parts)):
                 return None
+            if extraction:
+                completed = data.get("completed_parts")
+                if (not isinstance(completed, list) or len(completed) != num_parts or
+                        not all(type(value) is bool for value in completed) or
+                        not all(_valid_extracted_question(q) for part in parts for q in part)):
+                    return None
             return data
         except Exception:
             logger.warning("QUIZ_BATCH_CHECKPOINT_READ_FAILED")
             return None
 
-    async def save(self, parts, usage, details):
+    async def save(self, parts, usage, details, completed_parts=None):
         if not self.key:
             return
         try:
             from config import redis_client
             await redis_client.setex(
                 self.key, CHECKPOINT_TTL_SECONDS,
-                json.dumps({"parts": parts, "usage": usage, "details": details},
+                json.dumps({"parts": parts, "usage": usage, "details": details,
+                            **({"completed_parts": completed_parts} if completed_parts is not None else {})},
                            ensure_ascii=False, separators=(",", ":")),
             )
         except Exception:
