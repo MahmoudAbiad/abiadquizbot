@@ -166,7 +166,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_vertex_exclusion_uses_transport_not_provider_name(self):
         self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
         self.model_rows = [model("cloud")]
-        with patch("helpers.supabase_helper.feature_flags.is_feature_enabled",
+        with patch("helpers.supabase_helper.is_feature_enabled",
                    AsyncMock(return_value=False)) as flag:
             result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
         self.assertIsNone(result)
@@ -179,7 +179,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
             "GOOGLE_VERTEX_PROJECT": "example",
         }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
-            "helpers.supabase_helper.feature_flags.is_feature_enabled",
+            "helpers.supabase_helper.is_feature_enabled",
             AsyncMock(return_value=True),
         ) as flag:
             result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
@@ -195,7 +195,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
             "GOOGLE_VERTEX_PROJECT": "example",
         }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
-            "helpers.supabase_helper.feature_flags.is_feature_enabled",
+            "helpers.supabase_helper.is_feature_enabled",
             AsyncMock(side_effect=RuntimeError("unavailable")),
         ):
             self.assertIsNone(await runtime.execute(AIRequest(("hi",)), timeout=1,
@@ -209,7 +209,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
             "GOOGLE_VERTEX_PROJECT": "example",
         }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
-            "helpers.supabase_helper.feature_flags.is_feature_enabled",
+            "helpers.supabase_helper.is_feature_enabled",
             AsyncMock(return_value=False),
         ) as flag:
             result = await runtime.execute(AIRequest(("hi",)), timeout=1,
