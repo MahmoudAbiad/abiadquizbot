@@ -202,12 +202,12 @@ async def generate_quiz_smart(
 
         # 1. مسار النصوص الصريحة
         if pure_text:
-            if batch_enabled and not is_extraction:
+            if batch_enabled:
                 generated = await generate_text_in_batches(
                     pure_text, count, base_prompt_template,
                     progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
                     user_context=user_context, user_id=generation_user_id,
-                    file_hash=file_hash,
+                    file_hash=file_hash, extraction=is_extraction,
                 )
                 return _finalize(generated[0] if generated else None)
             # 🛠️ FIX: نمط الكويز المصوّر الرياضي (is_math_mode) يُوجَّه مباشرة لمسار Gemini
@@ -263,37 +263,22 @@ async def generate_quiz_smart(
         if is_super_pdf or (is_single_pdf and (
             pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
         )):
-            # Ready-made exam extraction must keep original source questions,
-            # not use generative batches that could create additional questions.
-            if is_ready_exam:
-                generated = await _generate_pdf_with_context(
-                    file_paths[0], count, base_prompt_template,
-                    part_count=3 if is_super_pdf else 2, ready_exam=True,
-                    progressive=False, user_context=user_context,
-                )
-            else:
-                # Preserve overlapping page ownership for large PDFs, but do not
-                # split a short source just because many questions were requested.
-                parts = 3 if is_super_pdf else 2 if pdf_page_count > MAX_STANDARD_PAGES else 1
-                generated = await generate_pdf_in_batches(
-                    file_paths[0], pdf_page_count, count, base_prompt_template,
-                    part_count=parts, progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
-                    user_context=user_context, user_id=generation_user_id,
-                    file_hash=file_hash,
-                )
-        elif (batch_enabled or is_super_images) and not is_ready_exam:
+            # In both creation and exam extraction, short PDFs stay intact.
+            # Long PDFs keep their context-overlap page ownership. Extraction
+            # walks original questions in order instead of filling target quotas.
+            parts = 3 if is_super_pdf else 2 if pdf_page_count > MAX_STANDARD_PAGES else 1
+            generated = await generate_pdf_in_batches(
+                file_paths[0], pdf_page_count, count, base_prompt_template,
+                part_count=parts, progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
+                user_context=user_context, user_id=generation_user_id,
+                file_hash=file_hash, extraction=is_ready_exam,
+            )
+        elif batch_enabled or is_super_images:
             generated = await generate_images_in_batches(
                 file_paths, count, base_prompt_template,
                 progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
                 user_context=user_context, user_id=generation_user_id,
-                file_hash=file_hash,
-            )
-        elif is_super_images:
-            # Do not change literal extraction behavior for uploaded exams.
-            generated = await _generate_super_images(
-                file_paths, count, base_prompt_template,
-                progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
-                user_context=user_context,
+                file_hash=file_hash, extraction=is_ready_exam,
             )
         else:
             generated = await _generate_regular(file_paths, prompt, user_context=user_context)
