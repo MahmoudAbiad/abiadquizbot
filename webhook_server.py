@@ -261,6 +261,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Quiz Maker Bot", version="2.0", lifespan=lifespan)
 
 # 🆕 تقديم صفحة رفع الملفات الصوتية (Mini App) كملفات ستاتيك من نفس الدومين
+from services.runner_api import router as runner_api_router
+app.include_router(runner_api_router)
+
 app.mount("/webapp", StaticFiles(directory="webapp"), name="webapp")
 
 # ==================== Endpoints ====================
@@ -852,3 +855,4 @@ def run_webhook_server():
     import uvicorn
     port = int(os.getenv("PORT", WEBHOOK_PORT))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+

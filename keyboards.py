@@ -133,6 +133,10 @@ def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=Non
         ],
     ]
 
+    from services.runner_core import enabled as runner_enabled
+    if runner_enabled():
+        kb.append([types.InlineKeyboardButton(text="🏃 العب رحلة أبيض", callback_data="runner:current")])
+
     if quiz_id:
         # 🆕 ما في ولا زر متعلق بالنشر/الإخفاء هون - القرار كله صار تحت لوحة
         # الشرف نفسها (راجع get_leaderboard_keyboard)، هون بس زر الدخول إلها.
@@ -561,7 +565,9 @@ def get_favorites_list_keyboard(favorites: list, current_page: int = 1, page_siz
 
 
 def get_favorite_details_keyboard(favorite_id: str, section_id: str = None, quiz_id=None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
-    return types.InlineKeyboardMarkup(inline_keyboard=[
+    from services.runner_core import enabled as runner_enabled
+    game_rows = [[types.InlineKeyboardButton(text="🏃 العب رحلة أبيض", callback_data=f"runner:{quiz_id}")]] if quiz_id and runner_enabled() else []
+    return types.InlineKeyboardMarkup(inline_keyboard=game_rows + [
         [types.InlineKeyboardButton(text="▶️ ابدأ الاختبار", callback_data=f"fav_open_{favorite_id}", style="success")],
         [types.InlineKeyboardButton(text="📄 تحميل PDF أو Word", callback_data=f"fav_export_menu_{favorite_id}", style="primary")],
         [types.InlineKeyboardButton(text="⚙️ إدارة الاختبار", callback_data=f"fav_manage_{favorite_id}")],
@@ -1176,6 +1182,7 @@ def get_group_channel_picker_keyboard(
         rows.append([types.InlineKeyboardButton(text=add_text, url=add_url)])
     rows.append([types.InlineKeyboardButton(text="🔄 تحديث", callback_data=f"{refresh_prefix}:{share_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 

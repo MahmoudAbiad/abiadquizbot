@@ -83,7 +83,9 @@ def main():
     dp.callback_query.middleware(UsageCallbackMiddleware())
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
+    from handlers.runner import router as runner_router
     dp.include_routers(
+        runner_router,
         session_navigation_router,
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
         # (معالج poll_answer العام هناك بيوقف الانتشار) - راجع handlers/group_quiz.py
@@ -168,5 +170,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
