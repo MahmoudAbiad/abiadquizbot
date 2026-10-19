@@ -55,6 +55,18 @@ from helpers.gemini_helper.prompts import (
 # ==============================================================================
 # MAIN PUBLIC API ENTRYPOINT
 # ==============================================================================
+def _expanded_pdf_part_count(page_count: int, count: int) -> int:
+    """Only super PDFs need three parts; expanded PDFs use two owned page ranges.
+
+    A one-page document cannot safely be divided by page ownership.
+    """
+    if page_count > MAX_LIMIT_PAGES:
+        return 3
+    if page_count > 1 and (page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS):
+        return 2
+    return 1
+
+
 async def generate_quiz_smart(
     file_paths: Optional[List[str]] = None,
     pure_text: Optional[str] = None,
@@ -269,9 +281,7 @@ async def generate_quiz_smart(
             # Expanded PDF is two parallel parts for both page-heavy and
             # question-heavy inputs (e.g. 55 questions across only 3 pages).
             # A single-page PDF cannot be split safely by page ownership.
-            parts = (3 if is_super_pdf else 2 if pdf_page_count > 1 and (
-                pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
-            ) else 1)
+            parts = _expanded_pdf_part_count(pdf_page_count, count)
             generated = await generate_pdf_in_batches(
                 file_paths[0], pdf_page_count, count, base_prompt_template,
                 part_count=parts, progressive=(difficulty == DIFFICULTY_PROGRESSIVE),
