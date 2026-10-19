@@ -507,3 +507,215 @@ async def generate_text_in_batches(
         progressive, user_context, user_id, source_hash, "text",
         "batched_over_limit_text",
     )
+
+
+def _extraction_batch_prompt(base_prompt: str, chunk: Dict[str, Any], limit: int,
+                             previous: List[Dict[str, Any]]) -> str:
+    """An extraction cursor must preserve original order and never invent questions."""
+    if chunk.get("pdf_chunk"):
+        prompt = _ready_exam_chunk_prompt(base_prompt, limit, chunk["pdf_chunk"])
+    else:
+        prompt = base_prompt.replace("{count}", str(limit))
+    if chunk.get("image_ownership"):
+        first, last, total = chunk["image_ownership"]
+        prompt += (
+            "\n\n[ملكية أسئلة الألبوم]: الصور مرفقة بترتيب المصدر. "
+            f"استخرج فقط الأسئلة التي تبدأ في الصور من {first} إلى {last} "
+            f"من أصل {total} صور مرفقة بهذا الطلب. "
+            "الصور خارج هذا المجال هي صور سياق فقط؛ لا تكرر سؤالاً يبدأ فيها. "
+            "السؤال الذي يمتد عبر الصور يتبع الصورة التي يبدأ بها."
+        )
+    prompt += (
+        "\n\n[استكمال استخراج الاختبار الجاهز]: "
+        f"أخرج حتى {limit} سؤالاً أصلياً تَالياً بالترتيب، وليس أسئلة مولدة. "
+        "استخرج النص والخيارات الأصلية، والتزم باختيار المستخدم لنقل الإجابات "
+        "أو حلها بالذكاء الاصطناعي. لا تعِد سؤالاً استخرجته في دفعة سابقة. "
+        "لا تعوض نقص عدد الأسئلة بسؤال مؤلف. "
+        "إذا انتهت جميع الأسئلة الأصلية ضمن الصفحات أو الصور المخصصة، "
+        "أرجع JSON يحتوي questions: [] بصورة صريحة. "
+        "إذا تبقى عدد قليل، أعد الموجود فقط دون اختلاق."
+    )
+    if previous:
+        titles = ["- " + str(q["question"])[:220] for q in previous[-50:]]
+        prompt += (
+            "\n\n[الأسئلة المستخرجة سابقاً من هذا الجزء بترتيبها، "
+            "ابدأ بعد آخر سؤال منها ولا تكررها]:\n" + "\n".join(titles)
+        )[:14000]
+    else:
+        prompt += "\n[هذه أول دفعة في هذا الجزء، ابدأ من أول سؤال تابع له.]"
+    return prompt
+
+
+async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
+                               prompt_template: str, user_context: Optional[str],
+                               user_id, source_hash, kind: str, mode: str,
+                               exclude_vertex: bool = False):
+    """No per-chunk quota: density of questions in an existing exam is uneven.
+
+    An empty successful structured output signals end-of-source. Any cascade
+    error remains a failure and preserves the checkpoint, never a fake EOF.
+    """
+    if not chunks or count < 1:
+        return None
+    checkpoint = _Checkpoint(user_id, source_hash, prompt_template, user_context,
+                             count, len(chunks), False, source_kind=kind + ":exam")
+    saved = await checkpoint.load(len(chunks), extraction=True)
+    parts = saved["parts"] if saved else [[] for _ in chunks]
+    completed = saved["completed_parts"] if saved else [False] * len(chunks)
+    usage = saved.get("usage", {}) if saved else {}
+    usage = {key: int(usage.get(key, 0) or 0) for key in
+             ("input_tokens", "output_tokens", "thoughts_tokens", "total_tokens")}
+    details = saved.get("details", []) if saved else []
+    if (not isinstance(details, list) or
+            any(not isinstance(v, dict) for v in details) or
+            sum(map(len, parts)) > count):
+        parts, completed, details = [[] for _ in chunks], [False] * len(chunks), []
+        usage = {key: 0 for key in usage}
+    seen = {_question_key(question) for part in parts for question in part}
+    session = GeminiFileSession()
+    try:
+        for index, chunk in enumerate(chunks):
+            repeats = 0
+            tries = 0
+            max_tries = math.ceil(count / MAX_BATCH_QUESTIONS) * 4 + 4
+            while not completed[index] and sum(map(len, parts)) < count:
+                if repeats >= 2 or tries >= max_tries:
+                    logger.warning("EXAM_BATCH_FAILED source=%s part=%d reason=no_progress",
+                                   kind, index + 1)
+                    return None
+                tries += 1
+                limit = min(MAX_BATCH_QUESTIONS, count - sum(map(len, parts)))
+                prompt = _extraction_batch_prompt(prompt_template, chunk, limit, parts[index])
+                source = ((chunk["text"],) if "text" in chunk else tuple(
+                    Attachment.from_path(path) for path in chunk["paths"]
+                ))
+                request = AIRequest(
+                    ((user_context,) if user_context else ()) + source,
+                    QuizResponse, system_instruction=prompt, file_session=session,
+                )
+                try:
+                    result = await _execute_cascade(
+                        request, exclude_vertex=exclude_vertex, allow_empty=True,
+                    )
+                except Exception:
+                    logger.warning("EXAM_BATCH_FAILED source=%s part=%d reason=unexpected_error",
+                                   kind, index + 1)
+                    return None
+                if result is None:
+                    logger.warning("EXAM_BATCH_FAILED source=%s part=%d reason=cascade_exhausted",
+                                   kind, index + 1)
+                    return None
+                for name, value in zip(
+                    ("total_tokens", "input_tokens", "output_tokens", "thoughts_tokens"),
+                    (result[1], result[2], result[3], result[4]),
+                ):
+                    usage[name] += value
+                details.append({
+                    "provider": result[9], "model": result[5],
+                    "key_index": result[6], "cascade_rank": result[7],
+                    "cascade_total": result[8], "part": index + 1,
+                })
+                if not result[0]:
+                    completed[index] = True
+                    await checkpoint.save(parts, usage, details, completed_parts=completed)
+                    break
+                added = 0
+                for question in result[0]:
+                    if not _valid_extracted_question(question):
+                        logger.warning("EXAM_BATCH_FAILED source=%s part=%d reason=invalid_question",
+                                       kind, index + 1)
+                        return None
+                    key = _question_key(question)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    parts[index].append(question)
+                    added += 1
+                    if sum(map(len, parts)) >= count:
+                        break
+                repeats = repeats + 1 if added == 0 else 0
+                await checkpoint.save(parts, usage, details, completed_parts=completed)
+
+        questions = [question for part in parts for question in part]
+        if not questions:
+            logger.warning("EXAM_BATCH_FAILED source=%s reason=no_questions", kind)
+            return None
+        if len(questions) < count and not all(completed):
+            return None
+        await checkpoint.clear()
+        providers = {info.get("provider") for info in details}
+        models = {info.get("model") for info in details}
+        _last_model_used_var.set({
+            "provider": next(iter(providers)) if len(providers) == 1 else "mixed",
+            "model": next(iter(models)) if len(models) == 1 else "mixed",
+            "key_index": None, "mode": mode, "chunk_details": details,
+            "cascade_rank": None, "cascade_total": None,
+        })
+        _last_token_usage_var.set(usage)
+        return questions, usage["total_tokens"]
+    finally:
+        await session.aclose()
+
+
+async def extract_pdf_in_batches(file_path: str, page_count: int, count: int,
+                                 prompt_template: str, part_count: int,
+                                 user_context: Optional[str] = None,
+                                 user_id=None, file_hash=None):
+    """PDF context-overlap ownership with original exam order."""
+    if part_count == 1:
+        pdf_parts = [{"path": file_path, "owned_first": 1, "owned_last": page_count,
+                      "page_count": page_count}]
+    else:
+        pdf_parts = await split_pdf_with_context_without_orphans(file_path, part_count)
+        await asyncio.to_thread(release_memory_to_os)
+    try:
+        if not pdf_parts or len(pdf_parts) != part_count:
+            return None
+        chunks = [{"paths": [part["path"]], "pdf_chunk": part} for part in pdf_parts]
+        return await _extract_exam_chunks(
+            chunks, count, prompt_template, user_context, user_id,
+            file_hash, "pdf", "batched_exam_pdf", exclude_vertex=(part_count == 3),
+        )
+    finally:
+        if part_count != 1:
+            for part in pdf_parts:
+                if part["path"] != file_path:
+                    safe_file_cleanup(part["path"])
+
+
+async def extract_images_in_batches(paths: List[str], count: int, prompt_template: str,
+                                    user_context: Optional[str] = None,
+                                    user_id=None, file_hash=None):
+    """Split long albums contiguously with one overlap photo for context."""
+    if len(paths) <= 10:
+        chunks = [{"paths": paths}]
+    else:
+        chunks = []
+        length = len(paths)
+        for index in range(3):
+            start = (length * index) // 3
+            end = (length * (index + 1)) // 3
+            first = max(0, start - 1)
+            last = min(length, end + 1)
+            chunks.append({
+                "paths": paths[first:last],
+                "image_ownership": (start - first + 1,
+                                    end - first, last - first),
+            })
+    return await _extract_exam_chunks(
+        chunks, count, prompt_template, user_context, user_id,
+        file_hash, "images", "batched_exam_images",
+        exclude_vertex=(len(paths) > 10),
+    )
+
+
+async def extract_text_in_batches(text: str, count: int, prompt_template: str,
+                                  user_context: Optional[str] = None,
+                                  user_id=None, file_hash=None):
+    """Keep original text intact for each extraction request."""
+    digest = hashlib.sha256((file_hash or "").encode() + b":" +
+                            text.encode("utf-8")).hexdigest()
+    return await _extract_exam_chunks(
+        [{"text": text}], count, prompt_template, user_context, user_id,
+        digest, "text", "batched_exam_text",
+    )
