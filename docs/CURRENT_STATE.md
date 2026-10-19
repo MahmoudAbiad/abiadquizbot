@@ -1,5 +1,16 @@
 # سجل تطوير بوت الكويزات - abiadquizbot (الحالة الحالية)
 
+## PDF expanded/super batch generation (2026-10-19, master scope)
+
+- Ordinary PDF generation (<=15 pages AND <=30 requested questions) remains on the existing one-request path, unchanged. Ready-made exam extraction and image/text/audio paths also retain their existing logic.
+- For newly generated PDF quiz questions in expanded/super routes: requests are bounded to 20 questions each. Short documents stay intact in every batch; >15 page documents keep overlapping source-page ownership (2 parts, or 3 when >35 pages).
+- A request-local Gemini Files API session reuses the upload for each successful model/API-key combination, with sticky preferred model/key while successful. A different key or provider receives its own compatible file input. Cleanup is best-effort and scoped to the generation session.
+- Only failed/unfulfilled batches retry through the existing configured AI model/key cascade. Valid prior batches persist to per-user/per-file/per-prompt Redis checkpoints (TTL 2h), without changing points debit/refund flow or saving incomplete quizzes as finished.
+- New sessions can resume from a checkpoint if the previous run failed; question text is de-duplicated and the total requested number must be reached before success. No OCR conversion or standalone text-extraction stage is introduced.
+- Batch-scoped Gemini SDK 429 quota diagnostics distinguish recognizable daily and per-minute errors; unknown limits still use existing cascade cooldowns. Ordinary-request rotation remains unchanged.
+- Isolated tests: tests/test_pdf_batch_generation.py and tests/test_gemini_file_session.py. No live Gemini/Vertex SDK quota test was run. Production release must be monitored for `PDF_BATCH_FAILED`, `AI_ATTEMPT_FAILED`, `AI_REQUEST_FAILED` and Redis checkpoint warnings.
+
+
 ## تجربة الطالب: البداية إلى التحميل (2026-10-18)
 
 - الرئيسية تقدّم إنشاء الكويز والمحفوظات، مع رابط مساعدة فعلي `/help` وأوامر المحفظة.
