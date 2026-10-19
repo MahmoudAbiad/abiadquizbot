@@ -244,26 +244,24 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+
     async def test_ready_exam_short_pdf_extracts_only_available_questions(self):
         async def cascade(req, **kw):
             self.calls.append(req)
             self.assertTrue(kw.get('allow_empty'))
-            if len(self.calls) == 1:
-                return result(1, 21)
-            if len(self.calls) == 2:
-                self.assertIn('Question 20', req.instruction)
-                return result(21, 41)
-            self.assertIn('Question 40', req.instruction)
-            return result(41, 44)  # Only three original questions remain.
+            if len(self.calls) == 1: return result(1, 21)
+            if len(self.calls) == 2: return result(21, 41)
+            if len(self.calls) == 3: return result(41, 44)
+            self.assertIn('Question 43', req.instruction)
+            return ([], 5, 2, 3, 0, 'test-model', 0, 1, 2, 'gemini')
         self.env['_execute_cascade'] = cascade
         extracted = await self.env['generate_pdf_in_batches'](
             'original.pdf', 2, 60, 'Extract {count}', 1,
-            user_id=9, file_hash='original', extraction=True,
-        )
+            user_id=9, file_hash='original', extraction=True)
         self.assertEqual(len(extracted[0]), 43)
         self.assertEqual([q['question'] for q in extracted[0]],
                          [f'Question {i}' for i in range(1, 44)])
-        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.calls), 4)
         self.assertEqual({req.parts[0].path for req in self.calls}, {'original.pdf'})
         self.assertFalse(self.redis.values)
         self.assertEqual(self.models.value['mode'], 'batched_exam_pdf')
@@ -284,18 +282,22 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertTrue(all(req.parts == ('Source exam with 20 questions',) for req in self.calls))
 
+
     async def test_ready_exam_keeps_five_options_for_existing_normalization(self):
+        calls = []
         async def cascade(req, **kw):
+            calls.append(req)
+            if len(calls) > 1:
+                return ([], 5, 2, 3, 0, 'test-model', 0, 1, 2, 'gemini')
             q = dict(question='Original Q1', options=['a', 'b', 'c', 'd', 'e'],
                      correct_option_id=4)
             return ([q], 33, 10, 23, 0, 'test-model', 0, 1, 2, 'gemini')
         self.env['_execute_cascade'] = cascade
         extracted = await self.env['generate_text_in_batches'](
-            'Original source', 40, 'Extract {count}',
-            user_id=9, extraction=True,
-        )
+            'Original source', 40, 'Extract {count}', user_id=9, extraction=True)
         self.assertEqual(extracted[0][0]['options'], ['a', 'b', 'c', 'd', 'e'])
         self.assertEqual(extracted[0][0]['correct_option_id'], 4)
+
 
     async def test_ready_exam_failed_batch_resumes_using_last_question(self):
         async def fail(req, **kw):
@@ -303,8 +305,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             return result(1, 21) if len(self.calls) == 1 else None
         self.env['_execute_cascade'] = fail
         fn = self.env['generate_text_in_batches']
-        self.assertIsNone(await fn(
-            'Same exam', 60, 'Extract {count}', user_id=9, extraction=True))
+        self.assertIsNone(await fn('Same exam', 60, 'Extract {count}', user_id=9, extraction=True))
         state = json.loads(next(iter(self.redis.values.values())))
         self.assertEqual(len(state['parts'][0]), 20)
         self.assertEqual(state['completed_parts'], [False])
@@ -312,45 +313,50 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         async def succeed(req, **kw):
             resumed.append(req)
             self.assertIn('Question 20', req.instruction)
-            return result(21, 24)
+            if len(resumed) == 1: return result(21, 24)
+            return ([], 5, 2, 3, 0, 'test-model', 0, 1, 2, 'gemini')
         self.env['_execute_cascade'] = succeed
         outcome = await fn('Same exam', 60, 'Extract {count}', user_id=9, extraction=True)
         self.assertEqual(len(outcome[0]), 23)
-        self.assertEqual(len(resumed), 1)
+        self.assertEqual(len(resumed), 2)
         self.assertFalse(self.redis.values)
+
 
     async def test_ready_exam_contiguous_image_groups_keep_source_order(self):
         async def cascade(req, **kw):
             self.calls.append(req)
-            index = len(self.calls)
-            return result((index - 1) * 3 + 1, index * 3 + 1)
+            group = (len(self.calls) - 1) // 2
+            if len(self.calls) % 2 == 0:
+                return ([], 5, 2, 3, 0, 'test-model', 0, 1, 2, 'gemini')
+            return result(group * 3 + 1, group * 3 + 4)
         self.env['_execute_cascade'] = cascade
         paths = [f'photo_{i}.jpg' for i in range(12)]
         outcome = await self.env['generate_images_in_batches'](
-            paths, 45, 'Extract {count}', file_hash='exam', user_id=9,
-            extraction=True,
-        )
+            paths, 45, 'Extract {count}', file_hash='exam', user_id=9, extraction=True)
         self.assertEqual(len(outcome[0]), 9)
         self.assertEqual(
-            [[p.path for p in req.parts] for req in self.calls],
-            [paths[:4], paths[4:8], paths[8:]],
-        )
+            [[p.path for p in req.parts] for req in self.calls[::2]],
+            [paths[:5], paths[3:9], paths[7:]])
+
 
     async def test_ready_exam_five_option_checkpoint_remains_valid_after_failure(self):
         calls = []
         async def first(req, **kw):
             calls.append(req)
-            if len(calls) > 1:
-                return None
+            if len(calls) > 1: return None
             five = dict(question='Original Q1', options=['a','b','c','d','e'],
                         correct_option_id=4)
-            extra = questions(2, 21)
-            return ([five] + extra, 60, 20, 40, 0, 'test-model', 0, 1, 2, 'gemini')
+            return ([five] + questions(2, 21), 60, 20, 40, 0,
+                    'test-model', 0, 1, 2, 'gemini')
         self.env['_execute_cascade'] = first
         self.assertIsNone(await self.env['generate_text_in_batches'](
             'An exam', 40, 'Extract {count}', user_id=9, extraction=True))
         self.assertEqual(len(self.redis.values), 1)
+        last_calls = []
         async def last(req, **kw):
+            last_calls.append(req)
+            if len(last_calls) > 1:
+                return ([], 5, 2, 3, 0, 'test-model', 0, 1, 2, 'gemini')
             return result(21, 23)
         self.env['_execute_cascade'] = last
         outcome = await self.env['generate_text_in_batches'](
@@ -370,16 +376,21 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(json.loads(
             next(iter(self.redis.values.values())))['parts'][0]), 20)
 
+
     async def test_ready_exam_checkpoint_is_separate_from_question_generation(self):
+        extraction_calls = []
         async def cascade(req, **kw):
-            if 'دفعة استخراج' in req.instruction:
-                return result(1, 4)
+            if '[استخراج تتابعي إلزامي]' in req.instruction:
+                extraction_calls.append(req)
+                return result(1, 4) if len(extraction_calls) == 1 else (
+                    [], 10, 5, 5, 0, 'test-model', 0, 1, 2, 'gemini')
             return result(1, 21)
         self.env['_execute_cascade'] = cascade
         self.assertIsNotNone(await self.env['generate_text_in_batches'](
             'A test', 40, 'Extract {count}', user_id=9, extraction=True))
         self.assertIsNotNone(await self.env['generate_text_in_batches'](
             'A test', 20, 'Extract {count}', user_id=9))
+
 
 
 if __name__ == '__main__':
