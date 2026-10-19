@@ -90,7 +90,8 @@ def determine_execution_mode(items: int, questions: int, cached: bool = False, i
       مسار مختلف)."""
     if cached: return "Cached"
     if is_album:
-        return "Super-Images" if items > MAX_ALBUM_IMAGES else "Standard"
+        return ("Super-Images" if items > MAX_ALBUM_IMAGES else
+                "Over-Limit" if questions > MAX_STANDARD_QUESTIONS else "Standard")
     if items > MAX_LIMIT_PAGES: return "Super-PDF"
     if items > MAX_STANDARD_PAGES or questions > MAX_STANDARD_QUESTIONS: return "Over-Limit"
     return "Standard"
@@ -425,6 +426,10 @@ async def execute_quiz_generation_workflow(
                                        else resolve_quiz_extraction_instruction(subject_type, quiz_extraction_mode))
 
         # 3. استدعى محرك AI
+        batch_enabled = determine_execution_mode(
+            int(data.get("items_count") or 1), count,
+            is_album=bool(data.get("is_album")),
+        ) != "Standard"
         quiz_data = await generate_quiz_smart(
             file_paths=file_paths if is_media else None,
             pure_text=pure_text if not is_media else None,
@@ -432,6 +437,7 @@ async def execute_quiz_generation_workflow(
             skip_cache=True,
             file_hash=file_hash,
             generation_user_id=user_id,
+            batch_enabled=batch_enabled,
             status_message=status_message,
             previous_questions=previous_questions if previous_questions else None,
             is_math_mode=is_math_mode,
