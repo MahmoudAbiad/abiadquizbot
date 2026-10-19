@@ -54,6 +54,21 @@ def user_total_points(user: dict) -> float:
     return float(user.get("free_points") or 0) + float(user.get("paid_points") or 0) + float(user.get("gift_points") or 0)
 
 
+def _telegram_profile_link(user_id: int, label: str = "فتح ملف الطالب على تيليغرام") -> str:
+    """رابط HTML لملف الطالب عبر المعرّف الرقمي، حتى لو لم يكن لديه username.
+
+    تيليغرام قد يمنع فتحه بحسب إعدادات خصوصية الطالب؛ لهذا يبقى زر المراسلة
+    عبر البوت متاحاً بصورة مستقلة داخل لوحة الإجراءات.
+    """
+    try:
+        numeric_id = int(user_id)
+    except (TypeError, ValueError):
+        return html.escape(label)
+    if numeric_id <= 0:
+        return html.escape(label)
+    return f'<a href="tg://user?id={numeric_id}">{html.escape(label)}</a>'
+
+
 async def fetch_users_async():
     """Fetch all users in bounded requests for export and confirmed broadcasts."""
     users = []
@@ -119,6 +134,7 @@ async def render_users_page(event, page: int = 1):
         report += (
             f"<b>{idx}. آيدي:</b> <code>{u['user_id']}</code>\n"
             f"┣ 👤 اليوزر: {username_str}\n"
+            f"┣ 🔗 {_telegram_profile_link(u['user_id'])}\n"
             f"┣ 📝 الاسم: <b>{html.escape(str(u.get('first_name') or '')[:100])} {html.escape(str(u.get('last_name') or '')[:100])}</b>\n"
             f"┣ 🕒 انضم: <code>{joined_time}</code>\n"
             f"┣ 🔄 المجاني: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
@@ -303,6 +319,7 @@ async def _present_direct_message_target(answer, state: FSMContext, user: dict):
         f"┣ الاسم: <b>{html.escape(full_name)}</b>\n"
         f"┣ اليوزر: <code>{html.escape(username)}</code>\n"
         f"┣ الآيدي: <code>{target_id}</code>\n"
+        f"┣ 🔗 {_telegram_profile_link(target_id)}\n"
         f"┣ إجمالي النقاط: <code>{free_points + paid_points + gift_points:.2f}</code>\n"
         f"┣ النقاط المجانية: <code>{free_points:.2f}</code>\n"
         f"┣ نقاط الهدايا: <code>{gift_points:.2f}</code>\n"
@@ -635,6 +652,7 @@ def _format_user_profile_report(u: dict) -> str:
         "👤 <b>معلومات المستخدم:</b>\n"
         f"┣ 🆔 الآيدي: <code>{u['user_id']}</code>\n"
         f"┣ 👤 اليوزر: {username_str}\n"
+        f"┣ 🔗 {_telegram_profile_link(u['user_id'])}\n"
         f"┣ 📝 الاسم: <b>{html.escape(str(u.get('first_name') or '')[:100])} {html.escape(str(u.get('last_name') or '')[:100])}</b>\n"
         f"┣ 🔄 النقاط المجانية: <code>{float(u.get('free_points') or 0):.2f}</code>\n"
         f"┣ 🎁 الهدايا: <code>{float(u.get('gift_points') or 0):.2f}</code>\n"
@@ -709,7 +727,8 @@ async def render_user_search_page(event, query: str, token: str, page: int = 1):
         username = str(user.get("username") or "بدون يوزر")[:64]
         name = " ".join(str(user.get(field) or "") for field in ("first_name", "last_name"))[:100]
         report += (f"<b>{index}. {html.escape(name)}</b>\n"
-                   f"👤 {html.escape(username)} — 🆔 <code>{user['user_id']}</code>\n\n")
+                   f"👤 {html.escape(username)} — 🆔 <code>{user['user_id']}</code>\n"
+                   f"🔗 {_telegram_profile_link(user['user_id'])}\n\n")
         keyboard.append([types.InlineKeyboardButton(
             text=f"👤 {index}. {username}", callback_data=f"admin_user_profile_{user['user_id']}")])
     navigation = []
