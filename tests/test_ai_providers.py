@@ -166,8 +166,56 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_vertex_exclusion_uses_transport_not_provider_name(self):
         self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
         self.model_rows = [model("cloud")]
-        result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
+        with patch("helpers.supabase_helper.feature_flags.is_feature_enabled",
+                   AsyncMock(return_value=False)) as flag:
+            result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
         self.assertIsNone(result)
+        flag.assert_awaited_once_with("vertex_parallel_enabled", default=False)
+
+    async def test_admin_flag_enables_vertex_on_previously_excluded_batch(self):
+        self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
+        self.model_rows = [model("cloud")]
+        with patch.dict(os.environ, {
+            "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
+            "GOOGLE_VERTEX_PROJECT": "example",
+        }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
+            "helpers.supabase_helper.feature_flags.is_feature_enabled",
+            AsyncMock(return_value=True),
+        ) as flag:
+            result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
+        self.assertEqual(result.text, "ok")
+        self.adapter.generate.assert_awaited_once()
+        self.assertEqual(_last_model_used_var.get()["provider"], "cloud")
+        flag.assert_awaited_once_with("vertex_parallel_enabled", default=False)
+
+    async def test_vertex_batch_toggle_stays_off_if_flag_read_fails(self):
+        self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
+        self.model_rows = [model("cloud")]
+        with patch.dict(os.environ, {
+            "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
+            "GOOGLE_VERTEX_PROJECT": "example",
+        }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
+            "helpers.supabase_helper.feature_flags.is_feature_enabled",
+            AsyncMock(side_effect=RuntimeError("unavailable")),
+        ):
+            self.assertIsNone(await runtime.execute(AIRequest(("hi",)), timeout=1,
+                                                     exclude_vertex=True))
+        self.adapter.generate.assert_not_awaited()
+
+    async def test_regular_vertex_call_does_not_depend_on_multi_part_switch(self):
+        self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
+        self.model_rows = [model("cloud")]
+        with patch.dict(os.environ, {
+            "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
+            "GOOGLE_VERTEX_PROJECT": "example",
+        }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
+            "helpers.supabase_helper.feature_flags.is_feature_enabled",
+            AsyncMock(return_value=False),
+        ) as flag:
+            result = await runtime.execute(AIRequest(("hi",)), timeout=1,
+                                           exclude_vertex=False)
+        self.assertEqual(result.text, "ok")
+        flag.assert_not_awaited()
 
     async def test_image_batch_failure_waits_for_other_requests(self):
         finished = []
