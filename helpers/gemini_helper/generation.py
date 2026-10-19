@@ -25,13 +25,15 @@ def _build_super_chunk_attempt_fn(paths, prompt, user_context=None):
     return AIRequest(parts, QuizResponse, system_instruction=prompt)
 
 
-async def _execute_cascade(request, exclude_vertex=False):
+async def _execute_cascade(request, exclude_vertex=False, allow_empty=False):
     result = await _execute_request(request, exclude_vertex=exclude_vertex)
     if not result:
         return None
     meta = _last_model_used_var.get() or {}
     questions = [question.model_dump() for question in result.parsed.questions]
-    if not questions:
+    # Extracting an existing exam uses [] as an explicit, successful end-of-source
+    # signal. Generated quizzes must still reject an empty model response.
+    if not questions and not allow_empty:
         raise ValueError("Provider returned no questions")
     return (questions, result.total_tokens, result.input_tokens, result.output_tokens,
             result.thoughts_tokens, meta.get("model"), meta.get("key_index"),
