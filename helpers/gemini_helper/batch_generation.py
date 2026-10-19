@@ -85,7 +85,7 @@ class _Checkpoint:
             parts = data.get("parts")
             if (not isinstance(parts, list) or len(parts) != num_parts or
                     not all(isinstance(part, list) and all(
-                        isinstance(q, dict) and _valid_question(q) for q in part
+                        isinstance(q, dict) and (_valid_extracted_question(q) if extraction else _valid_question(q)) for q in part
                     ) for part in parts)):
                 return None
             if extraction:
