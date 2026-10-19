@@ -5,7 +5,7 @@ helpers/gemini_helper/schemas.py
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ==============================================================================
@@ -33,6 +33,24 @@ class QuizMatrix(BaseModel):
 
 
 class QuizQuestion(BaseModel):
+    estimated_time_seconds: Optional[int] = Field(default=None, description="Estimated student reading and solving time in seconds, 10 to 300; estimate during this generation request")
+
+    @field_validator("estimated_time_seconds", mode="before")
+    @classmethod
+    def tolerant_estimate(cls, value):
+        from services.quiz_timing import valid_time
+        return valid_time(value)
+
+    ai_estimated_time_seconds: Optional[int] = Field(default=None, description="Reserved; leave null")
+
+    @model_validator(mode="after")
+    def fill_timing(self):
+        from services.quiz_timing import fallback_time
+        self.ai_estimated_time_seconds = self.estimated_time_seconds
+        if self.estimated_time_seconds is None:
+            self.estimated_time_seconds = fallback_time({"question": self.question, "options": self.options, "matrices": self.matrices})
+        return self
+
     question: str = Field(description="Question text")
     options: List[str] = Field(description="Exactly four answer options. When extracting a ready-made exam with five or more original choices, identify the correct answer first, then keep it plus the three strongest incorrect distractors; return only those four and update correct_option_id accordingly.")
     correct_option_id: int = Field(description="Correct option index")
@@ -47,3 +65,4 @@ class QuizQuestion(BaseModel):
 
 class QuizResponse(BaseModel):
     questions: List[QuizQuestion]
+

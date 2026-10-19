@@ -41,6 +41,11 @@ def _free_pool_identity(provider, credentials):
 
 
 async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regular", timeout=None):
+    # All generation/extraction/streaming paths use this boundary and QuizResponse.
+    if request.schema is not None and request.schema.__name__ == "QuizResponse":
+        from dataclasses import replace
+        from services.quiz_timing import TIMING_INSTRUCTION
+        request = replace(request, system_instruction=(request.system_instruction or "") + TIMING_INSTRUCTION)
     from helpers.settings_helper import get_ai_request_timeout
     from services.ai.state import _last_model_used_var, _last_token_usage_var
     timeout = timeout if timeout is not None else await get_ai_request_timeout()
@@ -201,3 +206,4 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
         round((time.monotonic() - request_start) * 1000), failed_attempts,
     )
     return None
+
