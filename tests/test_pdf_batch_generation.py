@@ -84,9 +84,9 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.env = load_functions(
             'helpers/gemini_helper/batch_generation.py',
             {'_question_key', '_valid_question', '_valid_extracted_question',
-             '_batch_prompt', '_plain_batch_prompt', '_extraction_prompt',
-             '_Checkpoint', '_run_batch_chunks', '_run_extraction_chunks',
-             '_ordered_image_groups', 'generate_pdf_in_batches',
+             '_batch_prompt', '_plain_batch_prompt', '_extraction_batch_prompt',
+             '_Checkpoint', '_run_batch_chunks', '_extract_exam_chunks',
+             'extract_images_in_batches', 'generate_pdf_in_batches',
              'generate_images_in_batches', 'generate_text_in_batches'},
             hashlib=hashlib, json=json, math=math, asyncio=asyncio, logger=Mock(),
             release_memory_to_os=Mock(),
