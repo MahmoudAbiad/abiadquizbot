@@ -171,10 +171,28 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                           "request_error")
                 retry_after_s = exc.retry_after_s if isinstance(exc, ProviderError) else None
                 reset_after_s = exc.reset_after_s if isinstance(exc, ProviderError) else None
+                # Batch-only Gemini SDK quota details can distinguish RPM from
+                # daily quota. Keep ordinary generation fallback behavior intact.
+                if (status == 429 and reason == "request_error"
+                        and getattr(request, "file_session", None) is not None
+                        and provider["transport"] == "gemini"):
+                    hint = str(exc).casefold()[:4096]  # inspect only; never log raw text
+                    if any(tag in hint for tag in (
+                            "perday", "per_day", "requests/day", "daily quota", "daily limit")):
+                        reason = "daily_quota"
+                    elif any(tag in hint for tag in (
+                            "perminute", "per_minute", "requests/min", "minute limit")):
+                        reason = "minute_rate_limit"
                 cooldown = decide_cooldown(
                     status, RateLimitInfo(reason, retry_after_s, reset_after_s),
                     is_openrouter_free=is_openrouter_free,
                 )
+                if (provider["transport"] == "gemini" and reason == "daily_quota"
+                        and getattr(request, "file_session", None) is not None
+                        and reset_after_s is None and retry_after_s is None):
+                    # Do not assume another vendor's UTC quota reset for Gemini.
+                    from services.ai.rate_limits import Cooldown
+                    cooldown = Cooldown(86400, "model_credential", "conservative_daily")
                 until = time.monotonic() + cooldown.seconds
                 if cooldown.scope == "openrouter_free_models" and pool_identity is not None:
                     _shared_blocked[pool_identity] = (until, reason)
