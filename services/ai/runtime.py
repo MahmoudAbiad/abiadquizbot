@@ -4,11 +4,12 @@ import hashlib
 import os
 import time
 import uuid
+from collections import Counter
 
 from helpers.ai_models_helper import get_enabled_models
 from helpers.ai_providers_helper import get_providers
 from logger import get_logger
-from services.ai.adapters import ADAPTERS, ProviderError
+from services.ai.adapters import ADAPTERS, ProviderError, AIResponseDiagnosticError
 from services.ai.provider_presets import chat_service
 from services.ai.rate_limits import RateLimitInfo, decide_cooldown
 
@@ -107,6 +108,7 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
             item[1]["provider"], item[1]["model_name"]
         ) == preferred[:2] else 1)
     failed_attempts = 0
+    failure_breakdown = Counter()
     logger.info(
         "AI_REQUEST_START request_id=%s slot=%s mode=%s capabilities=%s models=%d timeout_s=%s",
         request_id, slot, mode, sorted(request.capabilities), len(models), timeout,
@@ -246,6 +248,26 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                     elif any(tag in hint for tag in (
                             "perminute", "per_minute", "requests/min", "minute limit")):
                         reason = "minute_rate_limit"
+                # Provider and adapter diagnostics are constrained to fixed
+                # machine-readable codes. Do not log raw SDK errors or output.
+                response_detail = (
+                    exc.detail if isinstance(exc, AIResponseDiagnosticError)
+                    else "other_validation_error" if reason == "invalid_response"
+                    else "not_applicable"
+                )
+                finish_reason = (
+                    exc.finish_reason if isinstance(exc, AIResponseDiagnosticError) else None
+                )
+                response_chars = (
+                    exc.response_chars if isinstance(exc, AIResponseDiagnosticError) else None
+                )
+                output_tokens = (
+                    exc.output_tokens if isinstance(exc, AIResponseDiagnosticError) else None
+                )
+                thoughts_tokens = (
+                    exc.thoughts_tokens if isinstance(exc, AIResponseDiagnosticError) else None
+                )
+                failure_breakdown[(reason, response_detail)] += 1
                 cooldown = decide_cooldown(
                     status, RateLimitInfo(reason, retry_after_s, reset_after_s),
                     is_openrouter_free=is_openrouter_free,
@@ -265,11 +287,15 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                 logger.warning(
                     "AI_ATTEMPT_FAILED request_id=%s slot=%s provider=%s model=%s credential_index=%d "
                     "rank=%d/%d elapsed_ms=%d error_type=%s status=%s reason=%s "
+                    "response_detail=%s finish_reason=%s response_chars=%s "
+                    "output_tokens=%s thoughts_tokens=%s "
                     "retry_after_s=%s reset_after_s=%s cooldown_s=%d "
                     "cooldown_scope=%s cooldown_basis=%s",
                     request_id, slot, provider["id"], entry["model_name"], index, rank, len(models),
                     round((time.monotonic() - started) * 1000),
-                    type(exc).__name__, status, reason, retry_after_s, reset_after_s,
+                    type(exc).__name__, status, reason, response_detail,
+                    finish_reason, response_chars, output_tokens, thoughts_tokens,
+                    retry_after_s, reset_after_s,
                     cooldown.seconds, cooldown.scope, cooldown.basis,
                 )
                 if cooldown.scope == "openrouter_free_models":
@@ -277,8 +303,11 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                     # Do not burn another request against a known account-wide limit.
                     break
     logger.warning(
-        "AI_REQUEST_FAILED request_id=%s slot=%s capabilities=%s elapsed_ms=%d failed_attempts=%d reason=no_eligible_success",
+        "AI_REQUEST_FAILED request_id=%s slot=%s capabilities=%s elapsed_ms=%d "
+        "failed_attempts=%d reason=no_eligible_success diagnostics=%s",
         request_id, slot, sorted(request.capabilities),
         round((time.monotonic() - request_start) * 1000), failed_attempts,
+        [{"reason": reason, "detail": detail, "count": count} for
+         (reason, detail), count in failure_breakdown.most_common(8)],
     )
     return None
