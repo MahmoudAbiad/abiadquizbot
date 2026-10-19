@@ -188,6 +188,16 @@ class GoogleAdapter:
             for part in request.contents:
                 if isinstance(part, str):
                     contents.append(part)
+                elif (part.path and request.file_session is not None
+                      and provider["transport"] == "gemini"):
+                    # Reuse one Files API upload per credential for all batches.
+                    # A different key automatically gets its own private upload.
+                    remote = await request.file_session.get(
+                        client, provider["id"], credential, part.path,
+                    )
+                    contents.append(types.Part.from_uri(
+                        file_uri=remote.uri, mime_type=remote.mime_type or part.mime_type,
+                    ))
                 elif (part.path and total_size > 15 * 1024 * 1024
                       and provider["transport"] != "vertex"):
                     # Upload is asynchronous so cancellation cannot orphan a background
