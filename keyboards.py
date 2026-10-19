@@ -822,7 +822,7 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
 
 # ==================== 🆕 AI Models Control Panel Keyboards ====================
 
-def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboardMarkup:
+def get_ai_control_keyboard(request_timeout: float = None, vertex_parallel_enabled: bool = False) -> types.InlineKeyboardMarkup:
     """اللوحة الرئيسية للتحكم بالذكاء الاصطناعي: نقطة الدخول لكل الأقسام الفرعية
     (سلسلة التوليد، موديل الفحص السريع، موديل Groq السريع، سجل التوليد).
     ملاحظة: إعدادات النقاط ما عادت هون - انتقلت لقسم "الإعدادات العامة" المستقل
@@ -834,6 +834,12 @@ def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboa
         [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
         [types.InlineKeyboardButton(text="⚡ المسار النصي السريع", callback_data="admin_ai_slot_groq_fast")],
         [types.InlineKeyboardButton(text="📊 سجل توليد الكويزات (الوقت + الموديل)", callback_data="admin_quiz_gen_log")],
+        [types.InlineKeyboardButton(
+            text=("✅ Vertex في المعالجة متعددة الأجزاء: مسموح"
+                  if vertex_parallel_enabled else "🚫 Vertex في المعالجة متعددة الأجزاء: مستبعد"),
+            callback_data=("admin_ai_vertex_parallel_off" if vertex_parallel_enabled
+                           else "admin_ai_vertex_parallel_on"),
+        )],
     ]
     if request_timeout is not None:
         from helpers.settings_helper import format_setting_value
