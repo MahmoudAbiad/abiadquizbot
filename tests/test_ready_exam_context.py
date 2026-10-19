@@ -420,13 +420,22 @@ class PdfContextRoutingTests(unittest.IsolatedAsyncioTestCase):
         batch_images.assert_awaited_once()
         self.assertTrue(batch_images.call_args.kwargs['extraction'])
 
-    async def test_short_exam_pdf_with_many_questions_keeps_full_pdf(self):
+    async def test_short_exam_pdf_with_many_questions_uses_two_parts(self):
+        for pages, count in ((2, 50), (3, 55)):
+            with self.subTest(pages=pages, count=count):
+                _, regular, _, batch_pdf, _, _ = await self.run_case(
+                    pages, count, extraction='Extract exam',
+                )
+                regular.assert_not_awaited()
+                self.assertEqual(batch_pdf.call_args.kwargs['part_count'], 2)
+                self.assertTrue(batch_pdf.call_args.kwargs['extraction'])
+
+    async def test_one_page_exam_cannot_be_page_partitioned(self):
         _, regular, _, batch_pdf, _, _ = await self.run_case(
-            2, 50, extraction='Extract exam',
+            1, 50, extraction='Extract exam',
         )
         regular.assert_not_awaited()
         self.assertEqual(batch_pdf.call_args.kwargs['part_count'], 1)
-        self.assertTrue(batch_pdf.call_args.kwargs['extraction'])
 
     async def test_ready_exam_long_text_enters_extraction_batches(self):
         _, regular, _, _, _, batch_text = await self.run_case(
