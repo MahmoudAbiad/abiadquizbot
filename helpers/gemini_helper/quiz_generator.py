@@ -264,9 +264,15 @@ async def generate_quiz_smart(
             pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
         )):
             # In both creation and exam extraction, short PDFs stay intact.
-            # Long PDFs keep their context-overlap page ownership. Extraction
-            # walks original questions in order instead of filling target quotas.
-            parts = 3 if is_super_pdf else 2 if pdf_page_count > MAX_STANDARD_PAGES else 1
+            # Multi-page expanded PDFs use two independent inline requests.
+            # Super retains its existing three-part batch behavior.
+            # Expanded PDF is two parallel parts for both page-heavy and
+            # question-heavy inputs (e.g. 55 questions across only 3 pages).
+            # A single-page PDF cannot be split safely by page ownership.
+            parts = (3 if is_super_pdf else
+                     2 if pdf_page_count > 1 and (
+                         pdf_page_count > MAX_STANDARD_PAGES or count > MAX_STANDARD_QUESTIONS
+                     ) else 1)
             generated = await generate_pdf_in_batches(
                 file_paths[0], pdf_page_count, count, base_prompt_template,
                 part_count=parts, progressive=(difficulty == DIFFICULTY_PROGRESSIVE),

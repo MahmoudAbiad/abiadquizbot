@@ -41,6 +41,11 @@ class AIRequest:
     system_instruction: str | None = None
     # Only populated by extended/super PDF batches; ordinary requests are unchanged.
     file_session: Any | None = None
+    # Extended two-part PDFs start on the same configured model/credential,
+    # then each request independently follows the normal cascade on failure.
+    preferred_attempt: tuple[str, str, int] | None = None
+    # Never upload an expanded PDF through the Gemini Files API.
+    inline_only: bool = False
 
     @property
     def capabilities(self):

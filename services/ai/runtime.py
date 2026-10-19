@@ -40,6 +40,44 @@ def _free_pool_identity(provider, credentials):
     return provider["id"], fingerprint
 
 
+async def choose_parallel_preference(request, *, slot="cascade"):
+    """Pick one eligible model/key for the first attempts of two parallel parts.
+
+    Read-only selection: normal runtime.execute still checks live cooldowns,
+    credentials and capabilities and performs the full cascade on failures.
+    """
+    providers = await get_providers()
+    models = await get_enabled_models(slot)
+    for entry in models:
+        provider = providers.get(entry["provider"])
+        if not provider or not provider["is_enabled"]:
+            continue
+        adapter = ADAPTERS.get(provider["transport"])
+        if adapter is None:
+            continue
+        capabilities = (adapter.capabilities_for(provider) if hasattr(adapter, "capabilities_for")
+                        else adapter.capabilities)
+        if not request.capabilities <= (set(entry["capabilities"]) & capabilities):
+            continue
+        if (hasattr(adapter, "supports_request") and
+                not adapter.supports_request(provider, entry["model_name"], request)):
+            continue
+        credentials = credentials_for(provider)
+        if not credentials:
+            continue
+        if (chat_service(provider.get("base_url") or "") == "openrouter"
+                and entry["model_name"].endswith(":free")):
+            shared = _shared_blocked.get(_free_pool_identity(provider, credentials))
+            if shared and shared[0] > time.monotonic():
+                continue
+        start = _pointers.get(provider["id"], 0) % len(credentials)
+        for offset in range(len(credentials)):
+            index = (start + offset) % len(credentials)
+            if _blocked.get(_attempt_identity(provider, credentials[index], entry["model_name"]), 0) <= time.monotonic():
+                return (provider["id"], entry["model_name"], index)
+    return None
+
+
 async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regular", timeout=None):
     from helpers.settings_helper import get_ai_request_timeout
     from services.ai.state import _last_model_used_var, _last_token_usage_var
@@ -62,7 +100,7 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     # Sticky model/key only within a multi-batch PDF session. Regular callers
     # retain the configured order and round-robin rotation unchanged.
     session = getattr(request, "file_session", None)
-    preferred = getattr(session, "preferred", None)
+    preferred = getattr(request, "preferred_attempt", None) or getattr(session, "preferred", None)
     indexed_models = list(enumerate(models, start=1))
     if preferred is not None:
         indexed_models.sort(key=lambda item: 0 if (

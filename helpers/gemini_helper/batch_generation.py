@@ -11,13 +11,14 @@ from mem_utils import release_memory_to_os
 from utils import safe_file_cleanup
 from helpers.gemini_helper.generation import (
     _execute_cascade, _generated_pdf_chunk_prompt, _generated_pdf_chunk_targets,
-    _ready_exam_chunk_prompt,
+    _ready_exam_chunk_prompt, _merge_pdf_chunk_questions,
 )
 from helpers.gemini_helper.media import split_pdf_with_context_without_orphans, split_images_into_three_sync
 from helpers.gemini_helper.schemas import QuizResponse
 from helpers.gemini_helper.state import _last_model_used_var, _last_token_usage_var
 from services.ai.contracts import AIRequest, Attachment
 from services.ai.file_session import GeminiFileSession
+from services.ai.runtime import choose_parallel_preference
 
 logger = get_logger(__name__)
 MAX_BATCH_QUESTIONS = 20
@@ -148,7 +149,8 @@ def _plain_batch_prompt(base_prompt: str, target: int, previous: List[Dict[str, 
 async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_template: str,
                             progressive: bool, user_context: Optional[str],
                             user_id, source_hash, source_kind: str, mode: str,
-                            exclude_vertex: bool = False):
+                            exclude_vertex: bool = False,
+                            inline_only: bool = False):
     """One orchestrator: exact total, cross-batch de-dup, durable partial work.
 
     Each chunk contains paths OR text plus its proportional weight.
@@ -173,7 +175,7 @@ async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_tem
         parts, details = [[] for _ in chunks], []
         usage = {k: 0 for k in usage}
     existing = {_question_key(q) for part in parts for q in part}
-    file_session = GeminiFileSession()
+    file_session = None if inline_only else GeminiFileSession()
     try:
         for part_index, (chunk, target) in enumerate(zip(chunks, targets)):
             no_progress = 0
@@ -204,7 +206,7 @@ async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_tem
                 contents = ((user_context,) if user_context else ()) + source
                 request = AIRequest(
                     contents, QuizResponse, system_instruction=instruction,
-                    file_session=file_session,
+                    file_session=file_session, inline_only=inline_only,
                 )
                 try:
                     result = await _execute_cascade(request, exclude_vertex=exclude_vertex)
@@ -256,8 +258,196 @@ async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_tem
         _last_token_usage_var.set(usage)
         return questions, usage["total_tokens"]
     finally:
-        await file_session.aclose()
+        if file_session is not None:
+            await file_session.aclose()
 
+
+
+
+async def _run_expanded_pdf_parallel(chunks: List[Dict[str, Any]], count: int,
+                                     prompt_template: str, progressive: bool,
+                                     user_context: Optional[str], user_id, file_hash,
+                                     extraction: bool):
+    """Two independent inline PDF requests, with per-part cascade and checkpoint.
+
+    The first attempt in each part uses the same eligible model and credential.
+    Each task then owns its own fallback cascade. Pages adjacent to the
+    partition are context-only, as specified by the existing PDF prompts.
+    Unlike large/super PDF batches, this path never creates a Files API session.
+    """
+    if len(chunks) != 2 or count < 1:
+        return None
+    targets = _generated_pdf_chunk_targets(count, [c["pdf_chunk"] for c in chunks])
+    source_kind = "expanded_inline_exam" if extraction else "expanded_inline_generated"
+    checkpoint = _Checkpoint(
+        user_id, file_hash, prompt_template, user_context, count, 2,
+        progressive, source_kind=source_kind,
+    )
+    saved = await checkpoint.load(2, extraction=extraction)
+    parts = saved["parts"] if saved else [[], []]
+    completed = saved.get("completed_parts", [False, False]) if saved else [False, False]
+    usage = saved.get("usage", {}) if saved else {}
+    usage = {key: int(usage.get(key, 0) or 0) for key in
+             ("total_tokens", "input_tokens", "output_tokens", "thoughts_tokens")}
+    details = saved.get("details", []) if saved else []
+    if (not isinstance(details, list) or not isinstance(completed, list) or
+            len(completed) != 2 or any(type(v) is not bool for v in completed) or
+            any(not isinstance(v, dict) for v in details) or
+            sum(len(part) for part in parts) > count or
+            (not extraction and any(len(part) > target for part, target in zip(parts, targets)))):
+        parts, completed, details = [[], []], [False, False], []
+        usage = {key: 0 for key in usage}
+    if not extraction:
+        completed = [len(part) >= target for part, target in zip(parts, targets)]
+
+    lock = asyncio.Lock()
+    seed_request = AIRequest(
+        ((user_context,) if user_context else ()) +
+        (Attachment.from_path(chunks[0]["paths"][0]),),
+        QuizResponse, inline_only=True,
+    )
+    try:
+        preference = await choose_parallel_preference(seed_request)
+    except Exception:
+        logger.warning("EXPANDED_PDF_PREFERENCE_FAILED using_regular_cascade")
+        preference = None
+
+    async def attempt(index: int, initial: bool) -> bool:
+        if completed[index]:
+            return True
+        chunk = chunks[index]
+        if extraction:
+            # First request extracts all questions owned by this page range.
+            # Subsequent requests are small only when something is missing.
+            limit = count if initial else min(
+                MAX_BATCH_QUESTIONS, max(1, count - sum(map(len, parts))))
+            instruction = (
+                _ready_exam_chunk_prompt(prompt_template, limit, chunk["pdf_chunk"])
+                if initial else
+                _extraction_batch_prompt(prompt_template, chunk, limit, parts[index])
+            )
+        else:
+            missing = targets[index] - len(parts[index])
+            if missing <= 0:
+                completed[index] = True
+                return True
+            limit = missing if initial else min(MAX_BATCH_QUESTIONS, missing)
+            segment = (
+                "المرحلة الأولى: من السهل إلى المتوسط دون الوصول إلى الأصعب."
+                if index == 0 else
+                "المرحلة الأخيرة: من المتوسط إلى الأصعب."
+            ) if progressive else None
+            instruction = (
+                _generated_pdf_chunk_prompt(prompt_template, limit, chunk["pdf_chunk"], segment)
+                if initial else
+                _batch_prompt(
+                    prompt_template, chunk["pdf_chunk"], limit,
+                    [q for part in parts for q in part],
+                    progressive, sum(map(len, parts)), count,
+                )
+            )
+        source = ((user_context,) if user_context else ()) + tuple(
+            Attachment.from_path(path) for path in chunk["paths"]
+        )
+        request = AIRequest(
+            source, QuizResponse, system_instruction=instruction,
+            preferred_attempt=preference if initial else None,
+            inline_only=True,
+        )
+        try:
+            result = await _execute_cascade(request, allow_empty=extraction)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("EXPANDED_PDF_PART_FAILED part=%d stage=%s reason=cascade_error",
+                           index + 1, "initial" if initial else "continuation")
+            return False
+        if result is None:
+            logger.warning("EXPANDED_PDF_PART_FAILED part=%d stage=%s reason=cascade_exhausted",
+                           index + 1, "initial" if initial else "continuation")
+            return False
+        validator = _valid_extracted_question if extraction else _valid_question
+        if any(not validator(q) for q in result[0]):
+            logger.warning("EXPANDED_PDF_PART_FAILED part=%d reason=invalid_questions", index + 1)
+            return False
+
+        async with lock:
+            existing = {_question_key(q) for q in parts[index]}
+            added = 0
+            for question in result[0]:
+                key = _question_key(question)
+                if key in existing:
+                    continue
+                if not extraction and len(parts[index]) >= targets[index]:
+                    break
+                if extraction and sum(map(len, parts)) >= count:
+                    break
+                parts[index].append(question)
+                existing.add(key)
+                added += 1
+            for key, value in zip(
+                ("total_tokens", "input_tokens", "output_tokens", "thoughts_tokens"),
+                (result[1], result[2], result[3], result[4]),
+            ):
+                usage[key] += value
+            details.append({
+                "provider": result[9], "model": result[5],
+                "key_index": result[6], "cascade_rank": result[7],
+                "cascade_total": result[8], "part": index + 1,
+            })
+            if extraction:
+                # A structured empty response is explicit EOF; lack of progress
+                # otherwise is not evidence that the source has ended.
+                completed[index] = not result[0]
+            else:
+                completed[index] = len(parts[index]) >= targets[index]
+            await checkpoint.save(parts, usage, details, completed_parts=completed)
+        logger.info("EXPANDED_PDF_PART_RESULT part=%d stage=%s added=%d total=%d eof=%s",
+                    index + 1, "initial" if initial else "continuation",
+                    added, len(parts[index]), completed[index])
+        return added > 0 or completed[index]
+
+    # Only missing parts run on retry. Successful parts are durable independently
+    # of their neighbour, so a failure on part two never repeats part one.
+    await asyncio.gather(*(attempt(i, True) for i in range(2) if not completed[i]))
+
+    stalled = 0
+    max_rounds = math.ceil(count / MAX_BATCH_QUESTIONS) * 2 + 2
+    for _ in range(max_rounds):
+        merged = _merge_pdf_chunk_questions([(part,) for part in parts], count)
+        if (len(merged) >= count if extraction else all(completed)):
+            break
+        if extraction and all(completed):
+            break
+        pending = [i for i in range(2) if not completed[i]]
+        if not pending:
+            break
+        previous = (sum(map(len, parts)), sum(completed))
+        outcomes = await asyncio.gather(*(attempt(i, False) for i in pending))
+        progress = (sum(map(len, parts)), sum(completed)) != previous
+        stalled = 0 if progress else stalled + 1
+        if stalled >= 2:
+            logger.warning("EXPANDED_PDF_INCOMPLETE reason=no_progress attempts=%d", max_rounds)
+            break
+
+    questions = _merge_pdf_chunk_questions([(part,) for part in parts], count)
+    if not questions or (not extraction and len(questions) != count):
+        return None
+    if extraction and len(questions) < count and not all(completed):
+        # The estimate may be high, but only an explicit EOF on each owned
+        # range proves that the extraction is complete.
+        return None
+    await checkpoint.clear()
+    providers = {detail.get("provider") for detail in details}
+    models = {detail.get("model") for detail in details}
+    _last_model_used_var.set({
+        "provider": next(iter(providers)) if len(providers) == 1 else "mixed",
+        "model": next(iter(models)) if len(models) == 1 else "mixed",
+        "key_index": None, "mode": source_kind, "chunk_details": details,
+        "cascade_rank": None, "cascade_total": None,
+    })
+    _last_token_usage_var.set(usage)
+    return questions, usage["total_tokens"]
 
 
 async def generate_pdf_in_batches(
@@ -280,17 +470,22 @@ async def generate_pdf_in_batches(
             "pdf_chunk": part,
             "weight": part["owned_last"] - part["owned_first"] + 1,
         } for part in pdf_parts]
+        if part_count == 2:
+            return await _run_expanded_pdf_parallel(
+                chunks, count, prompt_template, progressive, user_context,
+                user_id, file_hash, extraction,
+            )
         if extraction:
             return await _extract_exam_chunks(
                 chunks, count, prompt_template, user_context,
                 user_id, file_hash, "pdf", "batched_exam_pdf",
-                exclude_vertex=(part_count == 3),
+                exclude_vertex=(part_count == 3), inline_only=(part_count == 1),
             )
         return await _run_batch_chunks(
             chunks, count, prompt_template, progressive, user_context,
             user_id, file_hash, "pdf",
             "batched_super_pdf" if part_count == 3 else "batched_over_limit_pdf",
-            exclude_vertex=(part_count == 3),
+            exclude_vertex=(part_count == 3), inline_only=(part_count == 1),
         )
     finally:
         if part_count != 1:
@@ -384,7 +579,8 @@ def _extraction_batch_prompt(prompt_template: str, chunk: Dict[str, Any],
 async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
                                prompt_template: str, user_context: Optional[str],
                                user_id, source_hash, source_kind: str, mode: str,
-                               exclude_vertex: bool = False):
+                               exclude_vertex: bool = False,
+                               inline_only: bool = False):
     """Conservative, resumable extraction with original question ordering.
 
     Actual question counts vary by source chunk; do not divide the estimated
@@ -408,7 +604,7 @@ async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
         parts, completed, details = [[] for _ in chunks], [False] * len(chunks), []
         usage = {k: 0 for k in usage}
     seen = {_question_key(q) for part in parts for q in part}
-    session = GeminiFileSession()
+    session = None if inline_only else GeminiFileSession()
     try:
         for index, chunk in enumerate(chunks):
             repeats = 0
@@ -429,7 +625,8 @@ async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
                 ))
                 request = AIRequest(
                     ((user_context,) if user_context else ()) + source,
-                    QuizResponse, system_instruction=instruction, file_session=session,
+                    QuizResponse, system_instruction=instruction,
+                    file_session=session, inline_only=inline_only,
                 )
                 try:
                     result = await _execute_cascade(
@@ -496,7 +693,8 @@ async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
         _last_token_usage_var.set(usage)
         return extracted, usage["total_tokens"]
     finally:
-        await session.aclose()
+        if session is not None:
+            await session.aclose()
 
 
 async def extract_images_in_batches(paths: List[str], count: int,
