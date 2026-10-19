@@ -17,6 +17,7 @@ class GeminiFileSession:
     def __init__(self):
         # Key by provider + credential fingerprint + local path. Never expose keys in logs.
         self._uploaded = {}
+        self.preferred = None  # (provider, model, key index) after a successful batch
 
     async def get(self, client, provider_id: str, credential: str, path: str):
         key = (provider_id, hashlib.sha256(credential.encode()).digest(), os.path.abspath(path))
