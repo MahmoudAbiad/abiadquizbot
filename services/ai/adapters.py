@@ -188,7 +188,7 @@ class GoogleAdapter:
             for part in request.contents:
                 if isinstance(part, str):
                     contents.append(part)
-                elif (part.path and request.file_session is not None
+                elif (part.path and getattr(request, "file_session", None) is not None
                       and provider["transport"] == "gemini"):
                     # Reuse one Files API upload per credential for all batches.
                     # A different key automatically gets its own private upload.
