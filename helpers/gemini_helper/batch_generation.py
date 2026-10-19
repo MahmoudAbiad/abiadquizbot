@@ -148,7 +148,8 @@ def _plain_batch_prompt(base_prompt: str, target: int, previous: List[Dict[str, 
 async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_template: str,
                             progressive: bool, user_context: Optional[str],
                             user_id, source_hash, source_kind: str, mode: str,
-                            exclude_vertex: bool = False):
+                            exclude_vertex: bool = False,
+                            inline_only: bool = False):
     """One orchestrator: exact total, cross-batch de-dup, durable partial work.
 
     Each chunk contains paths OR text plus its proportional weight.
@@ -173,7 +174,7 @@ async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_tem
         parts, details = [[] for _ in chunks], []
         usage = {k: 0 for k in usage}
     existing = {_question_key(q) for part in parts for q in part}
-    file_session = GeminiFileSession()
+    file_session = None if inline_only else GeminiFileSession()
     try:
         for part_index, (chunk, target) in enumerate(zip(chunks, targets)):
             no_progress = 0
@@ -204,7 +205,7 @@ async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_tem
                 contents = ((user_context,) if user_context else ()) + source
                 request = AIRequest(
                     contents, QuizResponse, system_instruction=instruction,
-                    file_session=file_session,
+                    file_session=file_session, inline_only=inline_only,
                 )
                 try:
                     result = await _execute_cascade(request, exclude_vertex=exclude_vertex)
@@ -256,7 +257,8 @@ async def _run_batch_chunks(chunks: List[Dict[str, Any]], count: int, prompt_tem
         _last_token_usage_var.set(usage)
         return questions, usage["total_tokens"]
     finally:
-        await file_session.aclose()
+        if file_session is not None:
+            await file_session.aclose()
 
 
 
@@ -478,13 +480,13 @@ async def generate_pdf_in_batches(
             return await _extract_exam_chunks(
                 chunks, count, prompt_template, user_context,
                 user_id, file_hash, "pdf", "batched_exam_pdf",
-                exclude_vertex=(part_count == 3),
+                exclude_vertex=(part_count == 3), inline_only=(part_count == 1),
             )
         return await _run_batch_chunks(
             chunks, count, prompt_template, progressive, user_context,
             user_id, file_hash, "pdf",
             "batched_super_pdf" if part_count == 3 else "batched_over_limit_pdf",
-            exclude_vertex=(part_count == 3),
+            exclude_vertex=(part_count == 3), inline_only=(part_count == 1),
         )
     finally:
         if part_count != 1:
@@ -578,7 +580,8 @@ def _extraction_batch_prompt(prompt_template: str, chunk: Dict[str, Any],
 async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
                                prompt_template: str, user_context: Optional[str],
                                user_id, source_hash, source_kind: str, mode: str,
-                               exclude_vertex: bool = False):
+                               exclude_vertex: bool = False,
+                               inline_only: bool = False):
     """Conservative, resumable extraction with original question ordering.
 
     Actual question counts vary by source chunk; do not divide the estimated
@@ -602,7 +605,7 @@ async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
         parts, completed, details = [[] for _ in chunks], [False] * len(chunks), []
         usage = {k: 0 for k in usage}
     seen = {_question_key(q) for part in parts for q in part}
-    session = GeminiFileSession()
+    session = None if inline_only else GeminiFileSession()
     try:
         for index, chunk in enumerate(chunks):
             repeats = 0
@@ -623,7 +626,8 @@ async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
                 ))
                 request = AIRequest(
                     ((user_context,) if user_context else ()) + source,
-                    QuizResponse, system_instruction=instruction, file_session=session,
+                    QuizResponse, system_instruction=instruction,
+                    file_session=session, inline_only=inline_only,
                 )
                 try:
                     result = await _execute_cascade(
@@ -690,7 +694,8 @@ async def _extract_exam_chunks(chunks: List[Dict[str, Any]], count: int,
         _last_token_usage_var.set(usage)
         return extracted, usage["total_tokens"]
     finally:
-        await session.aclose()
+        if session is not None:
+            await session.aclose()
 
 
 async def extract_images_in_batches(paths: List[str], count: int,
