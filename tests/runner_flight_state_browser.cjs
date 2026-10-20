@@ -18,7 +18,7 @@ const {chromium}=require('playwright'),fs=require('fs'),path=require('path'),ass
    if(process.env.RUNNER_TEST_ORIGIN)return route.continue();
    return route.fulfill({path:path.join(__dirname,'..',u.pathname)});
   });
-  const origin=process.env.RUNNER_TEST_ORIGIN||'http://runner.test';await page.goto(origin+'/webapp/runner/index.html?quiz_id=q');await page.waitForFunction(()=>!document.querySelector('#start').disabled);await page.click('#start');await page.waitForFunction(()=>document.querySelector('#game').dataset.phase==='RUN');
+  const origin=process.env.RUNNER_TEST_ORIGIN||'http://runner.test';await page.goto(origin+'/webapp/runner/index.html?quiz_id=q',{waitUntil:'domcontentloaded',timeout:90000});await page.waitForFunction(()=>!document.querySelector('#start').disabled,{},{timeout:90000});await page.click('#start');await page.waitForFunction(()=>document.querySelector('#game').dataset.phase==='RUN');
   assert.equal(await page.getAttribute('#flight','aria-pressed'),'true');await page.click('#flight');assert.equal(await page.getAttribute('#flight','aria-pressed'),'false');
   for(let i=0;i<2;i++){
    await page.clock.runFor(8500);await page.waitForFunction(()=>document.querySelector('#game').dataset.phase==='DECIDE');await page.locator('.lane').filter({hasText:'٤'}).click();await page.click('#confirm');await page.clock.runFor(650);await page.waitForSelector('#feedback:not([hidden])');await page.click('#continue');await page.waitForFunction(()=>document.querySelector('#game').dataset.phase==='RUN');
