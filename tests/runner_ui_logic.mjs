@@ -171,4 +171,11 @@ await test('keyboard lane changes collect coins during RUN',async()=>{
  assert.ok(Number(t.els.get('coins').textContent)>0);
 });
 
+await test('landing choice persists across question segments for the same equipment',async()=>{
+ const t=await scenario(op=>op==='config'?ok({...base(op).body,wallet:{coins:0,jetpack_owned:true,equipped:'jetpack',car_level:0,version:0}}):base(op));
+ await t.click('start');assert.equal(t.els.get('flight').textContent,'↓ هبوط');await t.click('flight');assert.equal(t.els.get('flight').textContent,'🚀 طيران');
+ await t.pump(()=>t.calls.includes('ready'));for(let i=0;i<5;i++)await tick();await t.click('confirm');await t.pump(()=>t.els.get('feedback').hidden===false);await t.click('continue');
+ assert.equal(t.els.get('flight').textContent,'🚀 طيران');
+});
+
 console.log(`${passed} UI logic tests passed`);fs.rmSync(tmp,{recursive:true,force:true});process.exit(0);
