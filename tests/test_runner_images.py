@@ -193,6 +193,23 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(cleanup,'remove_files',AsyncMock()) as remove:
             await cleanup.cleanup_once();remove.assert_not_awaited()
         self.assertEqual(len(self.db.rows['runner_images']),1)
+    async def test_orphan_storage_failure_retains_durable_queue(self):
+        self.db.rows['quizzes']=[];self.db.rows['runner_image_gc']=[{'quiz_id':self.qid}]
+        store=types.SimpleNamespace(list=AsyncMock(side_effect=[[{'name':'hash'}],[{'name':'question.png'}]]),remove=AsyncMock(side_effect=RuntimeError('storage down')))
+        with patch.object(cleanup,'bucket',return_value=store):
+            with self.assertRaises(RuntimeError):await cleanup.delete_runner_prefix(self.qid)
+        self.assertEqual(len(self.db.rows['runner_image_gc']),1)
+    async def test_delete_handler_attempts_prefix_cleanup_after_success(self):
+        import ast,__future__
+        from pathlib import Path
+        source=ast.parse((Path(__file__).parents[1]/'handlers/quiz_delete.py').read_text(encoding='utf-8'))
+        source.body=[n for n in source.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='handle_quiz_delete_execute']
+        source.body[0].decorator_list=[]
+        call=types.SimpleNamespace(data='qdelok_'+self.qid,from_user=types.SimpleNamespace(id=7),answer=AsyncMock(),message=types.SimpleNamespace(edit_text=AsyncMock(),delete=AsyncMock()))
+        env={'admin_get_quiz_by_id':AsyncMock(return_value={'creator_id':7}),'can_delete_quiz':lambda *a:True,'admin_delete_quiz':AsyncMock(return_value=True),'logger':types.SimpleNamespace(warning=lambda *a,**kw:None),'log_error':lambda *a:None}
+        exec(compile(source,'quiz_delete.py','exec',flags=__future__.annotations.compiler_flag),env)
+        with patch.object(cleanup,'delete_runner_prefix',AsyncMock()) as remove:await env['handle_quiz_delete_execute'](call)
+        remove.assert_awaited_once_with(self.qid)
     async def test_orphan_prefix_only_after_quiz_deletion_and_failure_retries(self):
         store=types.SimpleNamespace(list=AsyncMock(side_effect=[[{'name':'hash'}],[{'name':'question.png'}],[]]),remove=AsyncMock())
         with patch.object(cleanup,'bucket',return_value=store):

@@ -163,4 +163,11 @@ await test('explicit exit still reports the round as finished',async()=>{
   const t=await scenario((op)=>base(op));await toQuestion(t);await t.click('exit');
   assert.ok(t.calls.includes('finish'));});
 
+await test('keyboard lane changes collect coins during RUN',async()=>{
+ const t=await scenario(op=>base(op));await t.click('start');
+ t.fire('keydown',{target:{tagName:'BODY'},key:'ArrowLeft',preventDefault(){}});
+ await t.pump(()=>t.calls.includes('question'));
+ assert.ok(Number(t.els.get('coins').textContent)>0);
+});
+
 console.log(`${passed} UI logic tests passed`);fs.rmSync(tmp,{recursive:true,force:true});process.exit(0);

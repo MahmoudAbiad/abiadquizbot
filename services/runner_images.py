@@ -29,7 +29,7 @@ def integer(name, default, maximum):
         return default
 
 
-_background_remote = asyncio.Semaphore(integer('RUNNER_PREWARM_CONCURRENCY_REMOTE', 4, offload.REMOTE_CONCURRENCY))
+_background_remote = asyncio.Semaphore(integer('RUNNER_PREWARM_CONCURRENCY_REMOTE', 4, max(1, offload.REMOTE_CONCURRENCY - 1)))
 
 
 def image_question(q):
