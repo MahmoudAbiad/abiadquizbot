@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const source=fs.readFileSync(new URL('../webapp/runner/world.js',import.meta.url),'utf8');
+const {stepObjects,visibleObject,objectAlpha,phaseSpeed,useClassic,PHASES}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const coin={kind:'coin',lane:1,z:.78,done:false};
+const first=stepObjects([coin],.05,1,0);assert.equal(first.coins,1);assert.equal(visibleObject(coin),false);
+assert.equal(stepObjects(first.objects,.05,1,0).coins,0);
+const barrier={kind:'barrier',lane:1,z:.78};assert.equal(stepObjects([barrier],.05,1,0).hits,1);assert.equal(visibleObject(barrier),false);
+const jumped={kind:'barrier',lane:1,z:.78};assert.equal(stepObjects([jumped],.05,1,.5).dodges,1);assert.equal(visibleObject(jumped),true);
+assert.equal(stepObjects([{kind:'coin',lane:0,z:.78}],.05,1,0).coins,0);
+assert.equal(stepObjects([{z:1.09,done:true}],1,1,0).objects.length,0);
+assert.ok(objectAlpha({z:.95})<objectAlpha({z:.85}));
+assert.deepEqual(PHASES,['RUN','APPROACH','DECIDE','RESOLVE']);assert.equal(phaseSpeed('RUN'),1);assert.equal(phaseSpeed('APPROACH',0),1);
+assert.ok(Math.abs(phaseSpeed('APPROACH',1.5)-.35)<.001);assert.ok(phaseSpeed('DECIDE')<.35);assert.ok(phaseSpeed('RESOLVE')>1);
+assert.ok(useClassic([{text:'x'.repeat(61)}],[],844,390));assert.ok(useClassic([{text:'x'}],[{naturalHeight:1000,naturalWidth:50}],844,390));assert.equal(useClassic([{text:'قصير'}],[],844,390),false);
+console.log('Runner world: coins, collision, jump, fade, four phases, long/math fallback PASS');

@@ -5,7 +5,7 @@ import {pathToFileURL,fileURLToPath} from 'node:url';
 const root=path.join(path.dirname(fileURLToPath(import.meta.url)),'..','webapp','runner');
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'runner-ui-'));
 fs.writeFileSync(path.join(tmp,'package.json'),'{"type":"module"}');
-for(const f of ['game.js','audio.js'])fs.copyFileSync(path.join(root,f),path.join(tmp,f));
+for(const f of ['game.js','audio.js','world.js'])fs.copyFileSync(path.join(root,f),path.join(tmp,f));
 const gameUrl=pathToFileURL(path.join(tmp,'game.js')).href;
 
 let loads=0;
@@ -18,7 +18,7 @@ async function scenario(respond,{imageDecode=()=>Promise.resolve()}={}){
   const els=new Map(),handlers={},calls=[];let queue=null,now=0;
   const get=id=>{if(!els.has(id))els.set(id,el());return els.get(id);};
   globalThis.document={getElementById:get,querySelectorAll:()=>[],createElement:()=>el(),addEventListener(t,f){(handlers['doc:'+t]??=[]).push(f);},hidden:false};
-  globalThis.window=globalThis;globalThis.addEventListener=(t,f)=>{(handlers[t]??=[]).push(f);};
+  globalThis.window=globalThis;globalThis.matchMedia=()=>({matches:true});globalThis.addEventListener=(t,f)=>{(handlers[t]??=[]).push(f);};
   globalThis.localStorage={getItem:()=>null,setItem(){}};globalThis.location={search:'?quiz_id=q'};
   globalThis.devicePixelRatio=1;globalThis.Image=function(){return Object.assign(el(),{decode:imageDecode});};
   globalThis.requestAnimationFrame=f=>{queue=f;return 1;};globalThis.cancelAnimationFrame=()=>{queue=null;};
@@ -38,7 +38,7 @@ const base=(op,count)=>({config:ok({title:'t',can_edit:false,settings:{lives:1,v
   ready:ok({started:true,remaining_seconds:30}),
   answer:ok({correct:true,correct_text:'a',explanation:'e',lives:1,score:100,status:'running',version:1}),finish:ok({saved:true})}[op]);
 const err=(status,code,message='x')=>({status,body:{detail:{message,code}}});
-const toQuestion=async t=>{await t.click('start');await t.pump(()=>t.calls.includes('question'));for(let i=0;i<6;i++)await tick();};
+const toQuestion=async t=>{await t.click('start');await t.pump(()=>t.calls.includes('question'));await t.pump(()=>t.calls.includes('ready'));for(let i=0;i<6;i++)await tick();};
 let passed=0;const test=async(name,fn)=>{await fn();passed++;console.log('ok -',name);};
 
 for(const [status,code] of [[409,'round_over'],[410,'round_expired']])
