@@ -138,6 +138,39 @@ class ErrorCodeTests(APITests):
         with self.assertRaises(HTTPException) as err:await api.access(req,8,manage=True)
         self.assertEqual(err.exception.status_code,403)
         self.assertIsInstance(err.exception.detail,str)
+    async def test_question_does_not_start_timer(self):
+        self.row['issued_at']=None
+        response=await api.question(self.request())
+        self.assertIsNone(self.row['issued_at'])
+        self.assertEqual((response['started'],response['remaining_seconds']),(False,response['seconds']))
+    async def test_question_reports_running_timer_after_reload(self):
+        with patch('services.runner_api.time.time',return_value=110):
+            response=await api.question(self.request())
+        self.assertTrue(response['started']);self.assertEqual(self.row['issued_at'],100)
+        self.assertEqual(response['remaining_seconds'],response['seconds']-10)
+    async def test_ready_starts_timer_and_is_idempotent(self):
+        self.row['issued_at']=None
+        with patch('services.runner_api.time.time',return_value=500):first=await api.ready(self.request())
+        self.assertEqual(self.row['issued_at'],500)
+        self.assertEqual((first['started'],first['remaining_seconds']),(True,self.row['questions'][0]['seconds']))
+        with patch('services.runner_api.time.time',return_value=507):second=await api.ready(self.request())
+        self.assertEqual(self.row['issued_at'],500)
+        self.assertEqual(second['remaining_seconds'],first['remaining_seconds']-7)
+    async def test_ready_rejects_wrong_version_and_finished_round(self):
+        self.row['issued_at']=None
+        with self.assertRaises(HTTPException) as err:await api.ready(self.request(version=3))
+        self.assertEqual(self.code(err),'stale_version');self.assertIsNone(self.row['issued_at'])
+        self.row['status']='completed'
+        with self.assertRaises(HTTPException) as err:await api.ready(self.request())
+        self.assertEqual(self.code(err),'round_over')
+    async def test_ready_lost_race_is_stale_not_started(self):
+        self.row['issued_at']=None;self.db.conflict=True
+        with self.assertRaises(HTTPException) as err:await api.ready(self.request())
+        self.assertEqual((err.exception.status_code,self.code(err)),(409,'stale_version'))
+    async def test_answer_before_ready_is_rejected(self):
+        self.row['issued_at']=None
+        with self.assertRaises(HTTPException) as err:await api.answer(self.request(option_id=1))
+        self.assertEqual(err.exception.status_code,422);self.assertEqual(self.row['version'],0)
     async def test_auth_and_rate_limit_codes(self):
         real=self.patches[1];real.stop()
         try:
