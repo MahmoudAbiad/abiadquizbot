@@ -12,7 +12,8 @@ from services.quiz_timing import question_key, valid_time
 from telegram_webapp_auth import verify_telegram_init_data
 
 router = APIRouter(prefix='/api/runner')
-_render_gate = asyncio.Semaphore(1)
+from services.runner_images import get_or_render_image, prewarm_quiz_images, image_question
+from task_utils import spawn
 
 
 def fail(status, message, code):
@@ -160,22 +161,6 @@ async def estimate(payload: Request):
     return {'saved': True}
 
 
-async def game_image(qid, question, part):
-    key = question_key(question)
-    async with _render_gate:
-        result = await db().table('runner_images').select('game_image_url').eq('quiz_id',qid).eq('question_key',key).eq('part',part).execute()
-        if result.data:
-            return result.data[0]['game_image_url']
-        from services.image_quiz_renderer import render_game_image_async
-        from helpers.supabase_helper.quiz_images import upload_quiz_question_image
-        content = await render_game_image_async(question, part=part)
-        url = await upload_quiz_question_image(content, f'runner/{qid}/{key}/{part}.png')
-        if not url:
-            raise fail(503, 'تعذر تجهيز صورة السؤال؛ حاول مجدداً.', 'image_unavailable')
-        await db().table('runner_images').upsert({'quiz_id':qid, 'question_key':key, 'part':part, 'game_image_url':url}).execute()
-        return url
-
-
 @router.post('/start')
 async def start(payload: Request):
     uid = await identity(payload, 'start')
@@ -192,6 +177,7 @@ async def start(payload: Request):
     rid = str(uuid4())
     await db().table('runner_rounds').insert({'id':rid, 'quiz_id':str(payload.quiz_id), 'user_id':uid,
         'questions':questions, 'lives':config['lives']}).execute()
+    spawn(prewarm_quiz_images(str(payload.quiz_id), [q['source'] for q in questions]), name='runner-prewarm')
     return {'round_id':rid, 'lives':config['lives'], 'total':len(questions), 'version':0}
 
 
@@ -218,10 +204,17 @@ async def question(payload: RoundRequest):
     response = {'text':q['source']['question'], 'options':[dict(o) for o in q['options']],
                 'seconds':q['seconds'], 'number':row['cursor']+1, 'total':len(row['questions']),
                 'version':row['version']}
-    if q['source'].get('is_math') or q['source'].get('table') or q['source'].get('matrices') or '$' in q['source']['question']:
-        response['game_image_url'] = await game_image(str(payload.quiz_id), q['source'], 'question')
-        for option in response['options']:
-            option['image_url'] = await game_image(str(payload.quiz_id), q['source'], str(option['id']))
+    if image_question(q['source']):
+        try:
+            urls = await asyncio.wait_for(asyncio.gather(*(
+                get_or_render_image(str(payload.quiz_id), q['source'], part)
+                for part in ['question', *[str(o['id']) for o in response['options']]]
+            )), timeout=25)
+            response['game_image_url'] = urls[0]
+            for option, url in zip(response['options'], urls[1:]):
+                option['image_url'] = url
+        except Exception:
+            raise fail(503, 'تعذر تجهيز صور السؤال؛ حاول مجدداً.', 'image_unavailable')
     # Images can take seconds to render. Only /ready may start the question clock.
     started = row['issued_at'] is not None
     response['started'] = started

@@ -908,19 +908,26 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
 # استخدم هذه الدالة بدل استدعاء asyncio.to_thread(render_question_image, ...) مباشرة
 # من أي مكان بالمشروع (services/quiz_engine.py و services/export_service.py عبر
 # handlers/export.py).
-async def render_question_image_async(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
-    remote = await offload.remote_render_image(question, idx, total, is_ar)
+async def render_question_image_async(question: Dict[str, Any], idx: int, total: int, is_ar: bool, *, allow_local_fallback=True, local_gate=None) -> bytes:
+    kwargs = {} if allow_local_fallback else {"allow_local_fallback": False}
+    remote = await offload.remote_render_image(question, idx, total, is_ar, **kwargs)
     if remote is not None:
         return remote
-    async with RENDER_SEMAPHORE:
-        result = await asyncio.to_thread(render_question_image, question, idx, total, is_ar)
+    async def local():
+        async with RENDER_SEMAPHORE:
+            return await asyncio.to_thread(render_question_image, question, idx, total, is_ar)
+    if local_gate is not None:
+        async with local_gate:
+            result = await local()
+    else:
+        result = await local()
     from mem_utils import release_memory_to_os
     release_memory_to_os()
     return result
 
 
 
-async def render_game_image_async(question, idx=0, total=1, part="question"):
+async def render_game_image_async(question, idx=0, total=1, part="question", *, allow_local_fallback=True, local_gate=None):
     """Independent projection; reuse worker, semaphore, RTL/LaTeX/table rendering.
 
     Never mutate the source quiz or Telegram image cache. Options are rendered
@@ -931,7 +938,7 @@ async def render_game_image_async(question, idx=0, total=1, part="question"):
     else:
         option_index = int(part)
         projected = {"question": str(question["options"][option_index]), "options": [], "_game_part": True}
-    rendered = await render_question_image_async(projected, idx, total, looks_arabic(str(projected.get("question", ""))))
+    rendered = await render_question_image_async(projected, idx, total, looks_arabic(str(projected.get("question", ""))), **({} if allow_local_fallback else {"allow_local_fallback": False}), **({"local_gate": local_gate} if local_gate is not None else {}))
     if part != "question":
         # A full 1000px question canvas would make short answers illegible in
         # a phone lane. Trim only the independent option image's white margins.

@@ -218,6 +218,8 @@ async def lifespan(app: FastAPI):
         # لتعديل مدة الاحتفاظ الافتراضية 90 يوم).
         from services.group_quiz_store import group_quiz_cleanup_loop
         spawn(group_quiz_cleanup_loop())
+        from services.runner_cleanup import runner_cleanup_loop
+        spawn(runner_cleanup_loop())
         print("🧹 تم جدولة تنظيف بيانات الكويز الجماعي القديمة كل 12 ساعة.")
 
         # 💳 watchdog الشحن الذاتي: إنهاء الطلبات المنتهية + تنبيه الإشعارات اليتيمة (راجع

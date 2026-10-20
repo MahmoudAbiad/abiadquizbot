@@ -152,6 +152,8 @@ def main():
                 # بوضع polling حالياً).
                 from services.group_quiz_store import group_quiz_cleanup_loop
                 spawn(group_quiz_cleanup_loop())
+                from services.runner_cleanup import runner_cleanup_loop
+                spawn(runner_cleanup_loop())
 
                 from handlers.session_navigation import pending_cleanup_loop
                 spawn(pending_cleanup_loop())
