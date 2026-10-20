@@ -37,8 +37,15 @@ def verify_launch(token, quiz_id, user_id, secret, now=None):
         return False
 
 
-def build_questions(questions, settings=None, rng=None):
+def _wrong_pick(wrong, secret, user_id, quiz_id, key):
+    """Deterministic per (user, quiz, question): repeated rounds can't reveal the correct option."""
+    digest = hmac.new(str(secret).encode(), f'{user_id}:{quiz_id}:{key}'.encode(), hashlib.sha256).digest()
+    return random.Random(int.from_bytes(digest, 'big')).sample(wrong, 2)
+
+
+def build_questions(questions, settings=None, rng=None, *, user_id=None, quiz_id=None, seed_secret=None):
     settings, rng = settings or {}, rng or random.SystemRandom()
+    stable = user_id is not None and quiz_id is not None and bool(seed_secret)
     output = []
     for index, q in enumerate(questions or []):
         if not isinstance(q, dict):
@@ -49,9 +56,10 @@ def build_questions(questions, settings=None, rng=None):
                 or any(not isinstance(o, str) or not o.strip() for o in options)):
             raise ValueError(f'السؤال {index+1} غير مؤهل: يلزمه جواب صحيح وخياران خاطئان')
         wrong = [i for i in range(len(options)) if i != correct]
-        selected = [correct] + rng.sample(wrong, 2)
-        rng.shuffle(selected)
         key = question_key(q)
+        picked = _wrong_pick(wrong, seed_secret, user_id, quiz_id, key) if stable else rng.sample(wrong, 2)
+        selected = [correct] + picked
+        rng.shuffle(selected)
         original_ai = valid_time(q.get('ai_estimated_time_seconds', q.get('estimated_time_seconds')))
         ai = original_ai or valid_time(settings.get('ai_times', {}).get(key))
         seconds = (valid_time(settings.get('manual_times', {}).get(key))
