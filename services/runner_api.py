@@ -222,19 +222,40 @@ async def question(payload: RoundRequest):
         response['game_image_url'] = await game_image(str(payload.quiz_id), q['source'], 'question')
         for option in response['options']:
             option['image_url'] = await game_image(str(payload.quiz_id), q['source'], str(option['id']))
+    # Images can take seconds to render. Only /ready may start the question clock.
+    started = row['issued_at'] is not None
+    response['started'] = started
+    response['remaining_seconds'] = remaining_seconds(q, row['issued_at']) if started else q['seconds']
+    return response
+
+
+def remaining_seconds(q, issued_at):
+    return max(0, q['seconds'] - (time.time() - issued_at))
+
+
+@router.post('/ready')
+async def ready(payload: RoundRequest):
+    """Idempotently start the clock after the browser has decoded required images."""
+    uid = await identity(payload)
+    await access(payload, uid)
+    row = await round_row(payload, uid)
+    if row['status'] != 'running':
+        raise fail(409, 'انتهت الجولة.', 'round_over')
+    if payload.version != row['version']:
+        raise fail(409, 'تغيرت الجولة.', 'stale_version')
+    q = row['questions'][row['cursor']]
     if row['issued_at'] is None:
         now = time.time()
         result = await db().table('runner_rounds').update({'issued_at':now}).eq('id',row['id']).eq('version',row['version']).is_('issued_at','null').eq('status','running').execute()
-        if not result.data:
+        if result.data:
+            row['issued_at'] = now
+        else:
             row = await round_row(payload, uid)
             if row['status'] != 'running':
                 raise fail(409, 'انتهت الجولة.', 'round_over')
-            if row['version'] != q_version:
+            if row['version'] != payload.version or row['issued_at'] is None:
                 raise fail(409, 'تغيرت الجولة.', 'stale_version')
-        else:
-            row['issued_at'] = now
-    response['remaining_seconds'] = max(0, q['seconds'] - (time.time()-row['issued_at']))
-    return response
+    return {'started': True, 'remaining_seconds': remaining_seconds(q, row['issued_at'])}
 
 
 @router.post('/answer')
