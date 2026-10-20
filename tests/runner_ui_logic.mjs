@@ -38,7 +38,7 @@ const base=(op,count)=>({config:ok({title:'t',can_edit:false,settings:{lives:1,v
   ready:ok({started:true,remaining_seconds:30}),
   answer:ok({correct:true,correct_text:'a',explanation:'e',lives:1,score:100,status:'running',version:1}),finish:ok({saved:true})}[op]);
 const err=(status,code,message='x')=>({status,body:{detail:{message,code}}});
-const toQuestion=async t=>{await t.click('start');await t.pump(()=>t.calls.includes('question'));await tick();};
+const toQuestion=async t=>{await t.click('start');await t.pump(()=>t.calls.includes('question'));for(let i=0;i<6;i++)await tick();};
 let passed=0;const test=async(name,fn)=>{await fn();passed++;console.log('ok -',name);};
 
 for(const [status,code] of [[409,'round_over'],[410,'round_expired']])
