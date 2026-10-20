@@ -6,7 +6,8 @@ const fs=require('fs');const path=require('path');
  if(url.pathname.startsWith('/api/runner/')){const op=url.pathname.split('/').pop();let result;
  if(op==='config')result={title:'اختبار الرياضيات · رحلة تجريبية',can_edit:true,settings:{lives:1,version:0,ai_status:'new',manual_times:{},ai_times:{}},questions:[{key:'one',text:'ما ناتج ٢ + ٢؟',seconds:30}]};
  if(op==='start')result={round_id:'round',version:0,lives:1,total:2};
- if(op==='question')result={text:'ما ناتج ٢ + ٢؟',options:[{id:0,text:'٣'},{id:3,text:'٤'},{id:1,text:'٥'}],seconds:30,remaining_seconds:30,number:answer+1,total:2,version:answer};
+ if(op==='question')result={text:'ما ناتج ٢ + ٢؟',options:[{id:0,text:'٣'},{id:3,text:'٤'},{id:1,text:'٥'}],seconds:30,remaining_seconds:30,started:false,number:answer+1,total:2,version:answer};
+ if(op==='ready')result={started:true,remaining_seconds:30};
  if(op==='answer'){const b=route.request().postDataJSON();const correct=b.option_id===3;answer++;result={correct,correct_text:'٤',explanation:'عند جمع العددين ٢ و٢ نحصل على ٤.',lives:correct?1:0,score:correct?100:0,status:correct?'running':'caught',version:answer};}
  if(op==='finish'||op==='settings')result={saved:true};return route.fulfill({json:result});}
  const file=path.join(__dirname,'..',url.pathname);if(fs.existsSync(file)&&fs.statSync(file).isFile())return route.fulfill({path:file});return route.abort();});
