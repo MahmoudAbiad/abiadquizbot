@@ -14,13 +14,13 @@ function el(){const e={hidden:false,textContent:'',disabled:false,style:{},datas
   classList:{toggle(){},add(){},remove(){}},append(){},replaceChildren(){},setAttribute(){},addEventListener(){},setPointerCapture(){},
   querySelectorAll:()=>[],getContext:()=>new Proxy({},{get:(t,k)=>k in t?t[k]:k==='createLinearGradient'?()=>({addColorStop(){}}):()=>{},set:(t,k,v)=>(t[k]=v,true)})};return e;}
 
-async function scenario(respond){
+async function scenario(respond,{imageDecode=()=>Promise.resolve()}={}){
   const els=new Map(),handlers={},calls=[];let queue=null,now=0;
   const get=id=>{if(!els.has(id))els.set(id,el());return els.get(id);};
   globalThis.document={getElementById:get,querySelectorAll:()=>[],createElement:()=>el(),addEventListener(t,f){(handlers['doc:'+t]??=[]).push(f);},hidden:false};
   globalThis.window=globalThis;globalThis.addEventListener=(t,f)=>{(handlers[t]??=[]).push(f);};
   globalThis.localStorage={getItem:()=>null,setItem(){}};globalThis.location={search:'?quiz_id=q'};
-  globalThis.devicePixelRatio=1;globalThis.Image=function(){return el();};
+  globalThis.devicePixelRatio=1;globalThis.Image=function(){return Object.assign(el(),{decode:imageDecode});};
   globalThis.requestAnimationFrame=f=>{queue=f;return 1;};globalThis.cancelAnimationFrame=()=>{queue=null;};
   globalThis.Telegram={WebApp:{initData:'x',ready(){},expand(){},disableVerticalSwipes(){},close(){}}};
   Math.random=()=>0.2;
@@ -34,7 +34,8 @@ async function scenario(respond){
 const ok=(body)=>({status:200,body});
 const base=(op,count)=>({config:ok({title:'t',can_edit:false,settings:{lives:1,version:0},questions:[]}),
   start:ok({round_id:'r',version:0,lives:1,total:2}),
-  question:ok({text:'س',options:[{id:0,text:'a'},{id:1,text:'b'},{id:2,text:'c'}],seconds:30,remaining_seconds:30,number:1,total:2,version:0}),
+  question:ok({text:'س',options:[{id:0,text:'a'},{id:1,text:'b'},{id:2,text:'c'}],seconds:30,remaining_seconds:30,number:1,total:2,version:0,started:false}),
+  ready:ok({started:true,remaining_seconds:30}),
   answer:ok({correct:true,correct_text:'a',explanation:'e',lives:1,score:100,status:'running',version:1}),finish:ok({saved:true})}[op]);
 const err=(status,code,message='x')=>({status,body:{detail:{message,code}}});
 const toQuestion=async t=>{await t.click('start');await t.pump(()=>t.calls.includes('question'));await tick();};
@@ -57,6 +58,81 @@ await test(`${code} on /question and /answer shows a blocked screen with close (
     assert.match(t.els.get('continue').textContent,/إغلاق/);
     assert.equal(t.calls.filter(c=>c==='question').length,1);
     await t.click('continue');assert.equal(closed,1);assert.equal(t.calls.filter(c=>c==='start').length,1);}});
+
+await test('question is hidden until /ready finishes, and /ready carries round ID/version',async()=>{
+  let release;const gate=new Promise(r=>{release=r;});const bodies=[];
+  const t=await scenario(async(op,body)=>{if(op==='ready'){bodies.push(body);await gate;}return base(op);});
+  await t.click('start');await t.pump(()=>t.calls.includes('ready'));await tick();
+  assert.deepEqual(t.calls.slice(-2),['question','ready']);
+  assert.equal(t.els.get('question').hidden,true);assert.equal(t.els.get('choices').hidden,true);
+  assert.equal(bodies[0].round_id,'r');assert.equal(bodies[0].version,0);
+  release();for(let i=0;i<4;i++)await tick();
+  assert.equal(t.els.get('question').hidden,false);assert.equal(t.els.get('choices').hidden,false);});
+
+await test('/ready error prevents answering a question without a timer',async()=>{
+  const t=await scenario(op=>op==='ready'?'network':base(op));
+  await t.click('start');await t.pump(()=>t.calls.includes('ready'));
+  for(let i=0;i<4;i++)await tick();
+  assert.equal(t.els.get('question').hidden,true);assert.equal(t.els.get('choices').hidden,true);
+  assert.match(t.els.get('continue').textContent,/إعادة المحاولة/);});
+
+await test('stale /ready silently refetches the current question',async()=>{
+  const t=await scenario((op,body,n)=>op==='ready'&&n===1?err(409,'stale_version'):base(op));
+  await t.click('start');await t.pump(()=>t.calls.filter(c=>c==='question').length===2);
+  for(let i=0;i<5;i++)await tick();
+  assert.equal(t.calls.filter(c=>c==='ready').length,2);
+  assert.equal(t.els.get('question').hidden,false);});
+
+await test('image decode failure never calls /ready and allows retry',async()=>{
+  const t=await scenario(op=>op==='question'?ok({...base(op).body,game_image_url:'/required.png'}):base(op),
+    {imageDecode:()=>Promise.reject(Error('broken image'))});
+  await t.click('start');await t.pump(()=>t.calls.includes('question'));
+  for(let i=0;i<5;i++)await tick();
+  assert.equal(t.calls.filter(c=>c==='ready').length,0);
+  assert.equal(t.els.get('question').hidden,true);
+  assert.match(t.els.get('continue').textContent,/إعادة المحاولة/);});
+
+await test('image decode timeout never calls /ready',async()=>{
+  const nativeSetTimeout=globalThis.setTimeout;
+  globalThis.setTimeout=(fn,ms,...args)=>nativeSetTimeout(fn,ms===8000?1:ms,...args);
+  try{
+    const t=await scenario(op=>op==='question'?ok({...base(op).body,game_image_url:'/hanging.png'}):base(op),
+      {imageDecode:()=>new Promise(()=>{})});
+    await t.click('start');await t.pump(()=>t.calls.includes('question'));
+    await new Promise(resolve=>nativeSetTimeout(resolve,15));
+    for(let i=0;i<4;i++)await tick();
+    assert.equal(t.calls.filter(c=>c==='ready').length,0);
+    assert.equal(t.els.get('question').hidden,true);
+    assert.match(t.els.get('continue').textContent,/إعادة المحاولة/);
+  }finally{globalThis.setTimeout=nativeSetTimeout;}});
+
+await test('hidden app waits for explicit resume before sending /ready',async()=>{
+  let decoded;const gate=new Promise(resolve=>{decoded=resolve;});
+  const t=await scenario(op=>op==='question'?ok({...base(op).body,game_image_url:'/ok.png'}):base(op),
+    {imageDecode:()=>gate});
+  await t.click('start');await t.pump(()=>t.calls.includes('question'));
+  globalThis.document.hidden=true;t.fire('doc:visibilitychange');
+  decoded();for(let i=0;i<5;i++)await tick();
+  assert.equal(t.calls.filter(c=>c==='ready').length,0);
+  globalThis.document.hidden=false;t.fire('doc:visibilitychange');
+  for(let i=0;i<3;i++)await tick();
+  assert.equal(t.calls.filter(c=>c==='ready').length,0);
+  await t.click('resume');for(let i=0;i<5;i++)await tick();
+  assert.equal(t.calls.filter(c=>c==='ready').length,1);
+  assert.equal(t.els.get('question').hidden,false);});
+
+await test('pagehide while loading prevents /ready until pageshow and resume',async()=>{
+  let decoded;const gate=new Promise(resolve=>{decoded=resolve;});
+  const t=await scenario(op=>op==='question'?ok({...base(op).body,game_image_url:'/ok.png'}):base(op),
+    {imageDecode:()=>gate});
+  await t.click('start');await t.pump(()=>t.calls.includes('question'));
+  t.fire('pagehide');decoded();for(let i=0;i<5;i++)await tick();
+  assert.equal(t.calls.filter(c=>c==='ready').length,0);
+  t.fire('pageshow',{persisted:true});for(let i=0;i<5;i++)await tick();
+  assert.equal(t.calls.filter(c=>c==='ready').length,0);
+  await t.click('resume');for(let i=0;i<5;i++)await tick();
+  assert.equal(t.calls.filter(c=>c==='ready').length,1);
+  assert.ok(!t.calls.includes('finish'));});
 
 await test('stale_version on /answer silently refetches the question',async()=>{
   const t=await scenario((op)=>op==='answer'?err(409,'stale_version'):base(op));await toQuestion(t);
