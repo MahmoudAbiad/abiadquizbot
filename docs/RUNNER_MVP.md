@@ -8,6 +8,8 @@ bounded, DPR is capped at 2 and physics uses delta time. No frames reach the ser
 
 ## Persistent coins and permanent jetpack (2026-10-20)
 
+The two-item permanent store also sells a Tesla-styled game car: level 1 costs 1000 knowledge, level 2 adds a three-lane coin magnet for 500, and level 3 adds unlimited flight for 5000. First correct mastery of content grants 100 spendable knowledge once per player; lifetime earned knowledge is preserved when spent. A five-distinct-question daily goal uses Asia/Damascus time, with no absence penalty. Answer commit, mastery, reward and goal progress are atomic. Trousers now contrast with the road and coins rise along the flight path while barriers stay grounded.
+
 Runner currency is now saved per Telegram player, separate from knowledge/bot points. The store sells a permanent unlimited-flight jetpack for 100 coins. See [RUNNER_STORE.md](RUNNER_STORE.md) for schema, retry/concurrency behavior, and verification.
 
 ## Test activation and identity (performed on 2026-10-20)
