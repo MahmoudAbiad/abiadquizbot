@@ -17,3 +17,6 @@ export function objectAlpha(o){return Math.max(0,Math.min(1,(1.03-o.z)/.18));}
 export function useClassic(options,images,height,width){
  return options.some(o=>o.text.length>60)||images.some(img=>img.naturalWidth&&img.naturalHeight/img.naturalWidth*width*.22>height*.25);
 }
+
+// Perspective height follows the airborne player; barriers remain on the road.
+export function objectLift(o,height,flying){return flying&&o.kind==='coin'?height*.16*Math.max(0,o.z)/.81:0;}
