@@ -7,6 +7,22 @@
 
 ---
 
+## [2026-10-20] Runner V2 — T2 وT5 وT6 على test
+
+- كاش أسبوع مشترك + prewarm كل الخيارات، in-flight وRedis locks متجددة، رسم الطلب بالتوازي، أولوية اللاعب، منع fallback المحلي للخلفية عند فشل Worker.
+- Retention مستقل في webhook/polling، Storage قبل metadata، دفعات محدودة وإعادة فحص expiry، طابور حذف دائم للصور اليتيمة بعد cascade.
+- بوابات إجابة بثلاثة مسارات ومراحل RUN/APPROACH/DECIDE/RESOLVE، اختفاء العملات والعوائق ومؤثرات محدودة، fallback للخيارات الطويلة، RTL/لمس/reduced-motion. الحفاظ على /ready والصوت والنقاط والفرص.
+- تطبيق 0018 فعلياً على Test_telegramquizbot (`xhlksusmczccqyvbxylo`) بعد مطابقة Render test. تحقق مستقل: 2 أعمدة +5 فهارس +RLS +حظر anon +trigger.
+- تحقق محلي: 148 pytest +26 subtests، ضمنها 18 كاش/تنظيف و6 renderer/readiness؛ 112 standalone (منها 45 offload)، 18 UI logic، world/PGlite، ومتصفح 390×844 دون أخطاء JS أو overflow.
+- اختبار حي فعلي: /start=0.64ث، سؤال الكاش لطالب آخر=0.594ث؛ 5 صور، expiry/idempotency وصحيح/خاطئ/timeout وحذف Storage. Chromium حي 390×844: 10 عملات، 3 بوابات وصور رياضيات، إجابة صحيحة 100 نقطة، دون JS errors/overflow.
+- علاج تأخر Worker البارد: تهيئة العمليتين قبل readiness (بلا تحميل Matplotlib في الرئيسي). سقف prewarm عالمي مع اتصال محجوز للاعب.
+- منع تسريب API-key من hpack/httpcore DEBUG بعد ظهوره بسجل محلي؛ اختبار خصوصية ناجح وتنقيح السجلات. لم تُرفع أسرار إلى Git؛ تدوير مفتاح الاختبار المعرّض موصى به ولم يُنفذ.
+- النسخة التشغيلية النهائية `5dbff1b…` منشورة live للبوت وWorker؛ أُعيد اختبار المتصفح الفعلي بعدها ونجح، ورسم PNG مباشر من Worker خلال 2.172ث، وhealth=ok للخدمتين.
+- Retention حي: ملف وصف صورة منتهية وجولة قديمة حُذفت فعلياً، والحديثة بقيت قبل cascade؛ ثم حُذفت fixtures ومساراتها وطابور GC. لا أخطاء تشغيل أخيرة؛ تحذير تمديد Canvas تلقائي 16px فقط.
+- لا تعديل لـ master أو الإنتاج أو runner_core.enabled() أو أنظمة التحديات والأراضي.
+
+---
+
 ## [2026-10-20] تطوير T3 — بدء المؤقت عبر `/ready` بعد تحميل الصور واستئناف الواجهة
 
 **التنفيذ على فرع `test` فقط:**
