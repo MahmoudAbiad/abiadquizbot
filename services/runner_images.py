@@ -29,6 +29,9 @@ def integer(name, default, maximum):
         return default
 
 
+_background_remote = asyncio.Semaphore(integer('RUNNER_PREWARM_CONCURRENCY_REMOTE', 4, offload.REMOTE_CONCURRENCY))
+
+
 def image_question(q):
     return bool(q.get('is_math') or q.get('table') or q.get('matrices')
                 or '$' in q.get('question', '') or any('$' in o for o in q.get('options', [])))
@@ -190,7 +193,12 @@ async def prewarm_quiz_images(qid, questions):
                         while _foreground:
                             await asyncio.sleep(.05)
                         if remote:
-                            await get_or_render_image(qid, q, part, background=True)
+                            # A global cap prevents simultaneous quizzes from
+                            # filling every remote slot ahead of waiting players.
+                            async with _background_remote:
+                                while _foreground:
+                                    await asyncio.sleep(.05)
+                                await get_or_render_image(qid, q, part, background=True)
                         else:
                             async with _background_local:
                                 await get_or_render_image(qid, q, part, background=True)

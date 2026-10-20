@@ -121,6 +121,23 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         self.render.assert_not_awaited()
         await images.get_or_render_image(self.qid, self.q, '0')
         self.assertTrue(self.render.call_args.kwargs['allow_local_fallback'])
+    async def test_prewarm_yields_until_foreground_finishes(self):
+        with patch.object(images,'_foreground',1):
+            task=asyncio.create_task(images.prewarm_quiz_images(self.qid,[self.q]))
+            await asyncio.sleep(.02);self.render.assert_not_awaited()
+            images._foreground=0;await task
+        self.assertEqual(self.render.await_count,5)
+    async def test_global_remote_background_cap_across_quizzes(self):
+        other='22222222-2222-2222-2222-222222222222'
+        self.db.rows['quizzes'].append({'id':other})
+        active=peak=0
+        async def render(*a,**kw):
+            nonlocal active,peak
+            active+=1;peak=max(peak,active);await asyncio.sleep(.005);active-=1;return b'png'
+        self.render.side_effect=render
+        with patch.object(images.offload,'ENABLED',True),patch.object(images.offload,'is_active',return_value=True),patch.object(images,'_background_remote',asyncio.Semaphore(2)):
+            await asyncio.gather(images.prewarm_quiz_images(self.qid,[self.q]),images.prewarm_quiz_images(other,[self.q]))
+        self.assertEqual(peak,2);self.assertEqual(self.render.await_count,10)
     async def test_remote_backoff_three_retries_and_continues(self):
         with patch.object(images.offload, 'ENABLED', True), patch.object(images,'get_or_render_image',AsyncMock(side_effect=images.offload.OffloadUnavailable('down'))) as get, patch.object(images,'retry_pause',AsyncMock()) as pause:
             await images.prewarm_quiz_images(self.qid,[{**self.q,'options':[]}])
