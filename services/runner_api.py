@@ -214,7 +214,7 @@ async def question(payload: RoundRequest):
         raise fail(409, 'انتهت الجولة.', 'round_over')
     # Client version is intentionally ignored: this endpoint is idempotent and the
     # real concurrency guard is the compare-and-set in /answer.
-    q, q_version = row['questions'][row['cursor']], row['version']
+    q = row['questions'][row['cursor']]
     response = {'text':q['source']['question'], 'options':[dict(o) for o in q['options']],
                 'seconds':q['seconds'], 'number':row['cursor']+1, 'total':len(row['questions']),
                 'version':row['version']}
