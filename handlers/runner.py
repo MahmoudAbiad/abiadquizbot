@@ -3,6 +3,7 @@ from urllib.parse import urlencode
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from services.runner_core import enabled, sign_launch, build_questions
+from services.runner_static import RUNNER_ASSET_VERSION
 
 router = Router()
 router.callback_query.filter(F.message.chat.type == 'private')
@@ -13,7 +14,7 @@ def launch_keyboard(quiz_id, user_id):
     from constants import WEBAPP_PUBLIC_BASE_URL
     if not enabled() or not WEBAPP_PUBLIC_BASE_URL:
         return None
-    query = urlencode({'quiz_id':str(quiz_id), 'launch':sign_launch(quiz_id,user_id,bot.token)})
+    query = urlencode({'quiz_id':str(quiz_id), 'launch':sign_launch(quiz_id,user_id,bot.token), 'v':RUNNER_ASSET_VERSION})
     return types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(
         text='🏃 افتح رحلة أبيض', web_app=types.WebAppInfo(url=WEBAPP_PUBLIC_BASE_URL+'/webapp/runner/index.html?'+query))]])
 

@@ -9,7 +9,7 @@ import asyncio
 from task_utils import spawn
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.staticfiles import StaticFiles
+from services.runner_static import RunnerAwareStaticFiles
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from aiogram.types import Update
@@ -266,7 +266,7 @@ app = FastAPI(title="Quiz Maker Bot", version="2.0", lifespan=lifespan)
 from services.runner_api import router as runner_api_router
 app.include_router(runner_api_router)
 
-app.mount("/webapp", StaticFiles(directory="webapp"), name="webapp")
+app.mount("/webapp", RunnerAwareStaticFiles(directory="webapp"), name="webapp")
 
 # ==================== Endpoints ====================
 
