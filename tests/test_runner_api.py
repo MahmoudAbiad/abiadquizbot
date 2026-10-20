@@ -122,6 +122,22 @@ class ErrorCodeTests(APITests):
         self.db.conflict=True
         with self.assertRaises(HTTPException) as err:await api.answer(self.request(option_id=1))
         self.assertEqual(self.code(err),'stale_version')
+    async def test_deleted_quiz_means_quiz_changed(self):
+        self.db.rows['quizzes']=[]
+        for call in (api.question,api.answer):
+            with self.assertRaises(HTTPException) as err:await call(self.request(option_id=1))
+            self.assertEqual((err.exception.status_code,self.code(err)),(404,'quiz_changed'))
+    async def test_lost_access_means_auth(self):
+        with self.assertRaises(HTTPException) as err:await api.access(self.request(),8)
+        self.assertEqual((err.exception.status_code,self.code(err)),(403,'auth'))
+        self.db.rows['favorite_quizzes']=[]
+        with self.assertRaises(HTTPException) as err:await api.access(self.request(),9)
+        self.assertEqual(self.code(err),'auth')
+        # Owner-only management stays a plain 403: it is not a session problem.
+        req=self.request();req.launch=sign_launch(self.qid,8,'secret')
+        with self.assertRaises(HTTPException) as err:await api.access(req,8,manage=True)
+        self.assertEqual(err.exception.status_code,403)
+        self.assertIsInstance(err.exception.detail,str)
     async def test_auth_and_rate_limit_codes(self):
         real=self.patches[1];real.stop()
         try:
