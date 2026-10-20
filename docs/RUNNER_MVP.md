@@ -6,6 +6,10 @@ original character art, obstacles, coins, jumps and police pursuit. Canvas was
 chosen to avoid adding a game-engine download for this small scene. Objects are
 bounded, DPR is capped at 2 and physics uses delta time. No frames reach the server.
 
+## Persistent coins and permanent jetpack (2026-10-20)
+
+Runner currency is now saved per Telegram player, separate from knowledge/bot points. The store sells a permanent unlimited-flight jetpack for 100 coins. See [RUNNER_STORE.md](RUNNER_STORE.md) for schema, retry/concurrency behavior, and verification.
+
 ## Test activation and identity (performed on 2026-10-20)
 
 1. Confirm the **test** Render service repository/branch and its `SUPABASE_URL`.

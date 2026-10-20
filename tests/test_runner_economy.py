@@ -32,8 +32,8 @@ class EconomyAPITests(unittest.IsolatedAsyncioTestCase):
             assert calls == [('runner_claim_coins', {'p_user':7,'p_round':str(request.round_id),'p_segment':1,'p_ids':[0,2]})]
             request.coin_ids = [999]
             with pytest.raises(HTTPException): await api.claim_coins(request)
-    
-    
+
+
     async def test_purchase_checks_auth_and_quiz_access_before_rpc(self):
         request=api.Request(init_data='x',quiz_id=uuid4())
         db=types.SimpleNamespace(rpc=AsyncMock())
