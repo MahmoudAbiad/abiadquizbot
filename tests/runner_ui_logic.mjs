@@ -41,7 +41,7 @@ const toQuestion=async t=>{await t.click('start');await t.pump(()=>t.calls.inclu
 let passed=0;const test=async(name,fn)=>{await fn();passed++;console.log('ok -',name);};
 
 for(const [status,code] of [[409,'round_over'],[410,'round_expired']])
-await test(String(status)+' '+code+' on /question shows new-round button that restarts',async()=>{
+await test(`${status} ${code} on /question shows new-round button that restarts`,async()=>{
   const t=await scenario((op)=>op==='question'?err(status,code):base(op));await toQuestion(t);
   assert.equal(t.els.get('feedback').hidden,false);assert.match(t.els.get('feedbackTitle').textContent,/انتهت/);
   assert.match(t.els.get('continue').textContent,/جولة جديدة/);
@@ -76,4 +76,4 @@ await test('explicit exit still reports the round as finished',async()=>{
   const t=await scenario((op)=>base(op));await toQuestion(t);await t.click('exit');
   assert.ok(t.calls.includes('finish'));});
 
-console.log(String(passed)+' UI logic tests passed');fs.rmSync(tmp,{recursive:true,force:true});process.exit(0);
+console.log(`${passed} UI logic tests passed`);fs.rmSync(tmp,{recursive:true,force:true});process.exit(0);
