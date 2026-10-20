@@ -17,7 +17,7 @@ const fs=require('fs');const path=require('path');
  const shots=process.env.RUNNER_SCREENSHOT_DIR||require('os').tmpdir();
  const snap=async name=>page.screenshot({path:path.join(shots,'runner-'+name+'.png')});
  const phase=async value=>page.waitForFunction(p=>document.getElementById('game').dataset.phase===p,value);
- await snap('home');await page.click('#start');await phase('RUN');await phase('APPROACH');await snap('approach');await phase('DECIDE');
+ await snap('home');await page.click('#start');await phase('RUN');await page.keyboard.press('ArrowLeft');await phase('APPROACH');if(Number(await page.textContent('#coins'))<=0)throw Error('keyboard lane/coin collection failed');await snap('approach');await phase('DECIDE');
  await page.waitForSelector('#question:not([hidden])');
  if(!await page.locator('#choices').evaluate(e=>e.classList.contains('gated')))throw Error('short answers missing gates');
  const overlap=await page.evaluate(()=>{const q=document.querySelector('#question').getBoundingClientRect();return [...document.querySelectorAll('.lane')].some(e=>{const r=e.getBoundingClientRect();return r.top<q.bottom||r.right>innerWidth||r.left<0;});});

@@ -17,3 +17,6 @@
 .impact canvas{animation:gate-hit .24s linear}
 @keyframes gate-hit{25%{translate:-4px 0}75%{translate:4px 0}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+[data-phase="RESOLVE"] .gated:not(.timed-out) .lane.correct{animation:gate-open .5s ease-out forwards;pointer-events:none}
+@keyframes gate-open{to{opacity:0;transform:translate(-50%,-125%) scale(.8)}}

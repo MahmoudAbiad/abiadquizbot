@@ -79,7 +79,7 @@ function positionGates(){if(classic)return;const z=gateZ();document.querySelecto
 function drawGates(){
  if(!['approach','question','resolve'].includes(state)||classic)return;
  const z=gateZ();for(let i=0;i<3;i++){const p=point(i,z),width=p.road/3*.95,height=110;const correct=resolveResult&&question.options[i].id===resolveResult.correct_id;
- const open=state==='resolve'&&correct;ctx.save();ctx.globalAlpha=open?Math.max(.1,1-phaseTime/.55):1;
+ const open=state==='resolve'&&correct&&!resolveResult.timeout;ctx.save();ctx.globalAlpha=open?Math.max(.1,1-phaseTime/.55):1;
  roundRect(p.x-width/2-4,p.y-height-8,width+8,height+12,10,correct?'#62e1af':i===lane?'#ffcf80':'#548d9f');
  roundRect(p.x-width/2,p.y-height,width,height,7,'#0d293dcc');ctx.restore();}
  if(phase!=='DECIDE')positionGates();
@@ -134,7 +134,7 @@ async function loadQuestion(){
  }
 }
 async function submit(timeout){if(state!=='question'||answerPending)return;answerPending=true;if(timeout)notice('انتهى وقت السؤال');$('confirm').disabled=true;
- try{const result=await api('answer',{...roundPayload(),option_id:timeout?null:question.options[lane].id});round.version=result.version;lives=result.lives;score=result.score;hud();resolveResult={...result,timeout};state='resolve';setPhase('RESOLVE');$('game').classList.toggle('impact',!result.correct&&!reduced);audio.play(result.correct?'correct':'wrong');if(!result.correct){audio.play('near');tg?.HapticFeedback?.impactOccurred('medium');}if(result.status==='caught')audio.play('caught');
+ try{const result=await api('answer',{...roundPayload(),option_id:timeout?null:question.options[lane].id});round.version=result.version;lives=result.lives;score=result.score;hud();resolveResult={...result,timeout};$('choices').classList.toggle('timed-out',timeout);state='resolve';setPhase('RESOLVE');$('game').classList.toggle('impact',!result.correct&&!reduced);audio.play(result.correct?'correct':'wrong');if(!result.correct){audio.play('near');tg?.HapticFeedback?.impactOccurred('medium');}if(result.status==='caught')audio.play('caught');
  document.querySelectorAll('.lane').forEach((b,i)=>{b.disabled=true;const correct=question.options[i].id===result.correct_id;b.classList.toggle('correct',correct);b.classList.toggle('closed',!correct);b.setAttribute('aria-label',question.options[i].text+(correct?' — الإجابة الصحيحة':''));});
  if(!reduced&&result.correct){const p=point(lane,.81);effects.push({x:p.x,y:p.y-55,age:0,kind:'coin'});}
  }catch(e){if(isBlocked(e)){roundBlocked(e.message);return;}if(isGone(e)){roundGone(e.message);return;}if(e.code==='stale_version'){state='retry';loadQuestion();return;}notice(e.message);retryAt=performance.now()+5000;$('confirm').disabled=false;}finally{answerPending=false;}}
