@@ -73,7 +73,7 @@ async def access(payload, uid, manage=False):
     from services.quiz_permissions import can_manage_quiz
     rows = (await db().table('quizzes').select('*').eq('id', str(payload.quiz_id)).limit(1).execute()).data
     if not rows:
-        raise HTTPException(404, 'الاختبار غير موجود.')
+        raise fail(404, 'الاختبار غير موجود أو تغيّر؛ ارجع للبوت وافتح اللعبة من جديد.', 'quiz_changed')
     quiz = rows[0]
     owner = can_manage_quiz(uid, quiz['creator_id'])
     if manage and not owner:
@@ -84,7 +84,7 @@ async def access(payload, uid, manage=False):
         return quiz, False
     favorite = await db().table('favorite_quizzes').select('favorite_id').eq('quiz_id', str(payload.quiz_id)).eq('user_id', uid).limit(1).execute()
     if not favorite.data:
-        raise HTTPException(403, 'لا تملك حق الوصول لهذا الاختبار.')
+        raise fail(403, 'لا تملك حق الوصول لهذا الاختبار.', 'auth')
     return quiz, False
 
 
