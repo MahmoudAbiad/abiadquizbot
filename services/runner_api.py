@@ -1,6 +1,7 @@
 """Authenticated Mini App API; all DB writes are server-side and TEST gated."""
 import asyncio
 import json
+import os
 import time
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -12,6 +13,11 @@ from telegram_webapp_auth import verify_telegram_init_data
 
 router = APIRouter(prefix='/api/runner')
 _render_gate = asyncio.Semaphore(1)
+
+
+def fail(status, message, code):
+    """HTTPException with a machine-readable code the Mini App can branch on."""
+    return HTTPException(status, detail={'message': message, 'code': code})
 
 
 class Request(BaseModel):
@@ -40,15 +46,15 @@ def db():
 
 async def identity(payload, cost='read'):
     if not enabled():
-        raise HTTPException(503, 'اللعبة لم تُفعّل على بيئة الاختبار بعد.')
+        raise fail(503, 'اللعبة لم تُفعّل على بيئة الاختبار بعد.', 'auth')
     from config import bot, redis_client
     ok, user = verify_telegram_init_data(payload.init_data, bot.token, max_age_seconds=7200)
     if not ok:
-        raise HTTPException(401, 'افتح اللعبة من البوت مجدداً.')
+        raise fail(401, 'افتح اللعبة من البوت مجدداً.', 'auth')
     # Existing verifier permits future timestamps; reject those at this boundary.
     from urllib.parse import parse_qs
     if int(parse_qs(payload.init_data).get('auth_date', ['0'])[0]) > time.time() + 30:
-        raise HTTPException(401, 'Invalid auth date')
+        raise fail(401, 'افتح اللعبة من البوت مجدداً.', 'auth')
     uid = int(user['id'])
     key = f'runner:rate:{uid}:{cost}:{int(time.time()//60)}'
     try:
@@ -58,7 +64,7 @@ async def identity(payload, cost='read'):
     except Exception:
         raise HTTPException(503, 'تعذر التحقق من الجلسة. حاول لاحقاً.')
     if count > (4 if cost == 'start' else 2 if cost == 'ai' else 90):
-        raise HTTPException(429, 'طلبات كثيرة؛ انتظر قليلاً.')
+        raise fail(429, 'طلبات كثيرة؛ انتظر قليلاً.', 'rate_limited')
     return uid
 
 
@@ -165,7 +171,7 @@ async def game_image(qid, question, part):
         content = await render_game_image_async(question, part=part)
         url = await upload_quiz_question_image(content, f'runner/{qid}/{key}/{part}.png')
         if not url:
-            raise HTTPException(503, 'تعذر تجهيز صورة السؤال؛ حاول مجدداً.')
+            raise fail(503, 'تعذر تجهيز صورة السؤال؛ حاول مجدداً.', 'image_unavailable')
         await db().table('runner_images').upsert({'quiz_id':qid, 'question_key':key, 'part':part, 'game_image_url':url}).execute()
         return url
 
@@ -175,8 +181,10 @@ async def start(payload: Request):
     uid = await identity(payload, 'start')
     quiz, _ = await access(payload, uid)
     config = await settings(payload.quiz_id)
+    from config import bot
     try:
-        questions = build_questions([{**q, 'is_math': bool(q.get('is_math') or quiz.get('is_math_quiz'))} for q in quiz['quiz_data']], config)
+        questions = build_questions([{**q, 'is_math': bool(q.get('is_math') or quiz.get('is_math_quiz'))} for q in quiz['quiz_data']], config,
+                                    user_id=uid, quiz_id=str(payload.quiz_id), seed_secret=os.getenv('RUNNER_SIGNING_SECRET') or bot.token)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     # Abandon previous active rounds; history stores server-validated knowledge scores.
@@ -190,10 +198,10 @@ async def start(payload: Request):
 async def round_row(payload, uid):
     result = await db().table('runner_rounds').select('*').eq('id',str(payload.round_id)).eq('user_id',uid).eq('quiz_id',str(payload.quiz_id)).execute()
     if not result.data:
-        raise HTTPException(404, 'الجولة غير موجودة.')
+        raise fail(404, 'الجولة غير موجودة.', 'round_expired')
     row = result.data[0]
     if datetime.fromisoformat(row['expires_at'].replace('Z','+00:00')).timestamp() < time.time():
-        raise HTTPException(410, 'انتهت صلاحية الجولة.')
+        raise fail(410, 'انتهت صلاحية الجولة.', 'round_expired')
     return row
 
 
@@ -203,10 +211,10 @@ async def question(payload: RoundRequest):
     await access(payload, uid)
     row = await round_row(payload, uid)
     if row['status'] != 'running':
-        raise HTTPException(409, 'انتهت الجولة.')
-    if payload.version != row['version']:
-        raise HTTPException(409, 'أعد فتح الجولة؛ ترتيب السؤال تغير.')
-    q = row['questions'][row['cursor']]
+        raise fail(409, 'انتهت الجولة.', 'round_over')
+    # Client version is intentionally ignored: this endpoint is idempotent and the
+    # real concurrency guard is the compare-and-set in /answer.
+    q, q_version = row['questions'][row['cursor']], row['version']
     response = {'text':q['source']['question'], 'options':[dict(o) for o in q['options']],
                 'seconds':q['seconds'], 'number':row['cursor']+1, 'total':len(row['questions']),
                 'version':row['version']}
@@ -219,8 +227,10 @@ async def question(payload: RoundRequest):
         result = await db().table('runner_rounds').update({'issued_at':now}).eq('id',row['id']).eq('version',row['version']).is_('issued_at','null').eq('status','running').execute()
         if not result.data:
             row = await round_row(payload, uid)
-            if row['version'] != payload.version or row['status'] != 'running':
-                raise HTTPException(409, 'تغيرت الجولة.')
+            if row['status'] != 'running':
+                raise fail(409, 'انتهت الجولة.', 'round_over')
+            if row['version'] != q_version:
+                raise fail(409, 'تغيرت الجولة.', 'stale_version')
         else:
             row['issued_at'] = now
     response['remaining_seconds'] = max(0, q['seconds'] - (time.time()-row['issued_at']))
@@ -236,7 +246,9 @@ async def answer(payload: RoundRequest):
     if row['version'] == payload.version+1 and row.get('last_response'):
         return {**row['last_response'], 'version':row['version']}
     if payload.version != row['version']:
-        raise HTTPException(409, 'إجابة قديمة.')
+        raise fail(409, 'إجابة قديمة.', 'stale_version')
+    if row['status'] != 'running':
+        raise fail(409, 'انتهت الجولة.', 'round_over')
     try:
         update, response = answer_transition(row, payload.option_id)
     except ValueError as exc:
@@ -245,7 +257,7 @@ async def answer(payload: RoundRequest):
         update['finished_at'] = datetime.now(timezone.utc).isoformat()
     result = await db().table('runner_rounds').update(update).eq('id',row['id']).eq('version',payload.version).eq('status','running').execute()
     if not result.data:
-        raise HTTPException(409, 'تم تسجيل إجابة أخرى؛ أعد المحاولة.')
+        raise fail(409, 'تم تسجيل إجابة أخرى؛ أعد المحاولة.', 'stale_version')
     return {**response, 'version':update['version']}
 
 
