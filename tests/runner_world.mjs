@@ -7,6 +7,8 @@ const first=stepObjects([coin],.05,1,0);assert.equal(first.coins,1);assert.equal
 assert.equal(stepObjects(first.objects,.05,1,0).coins,0);
 const barrier={kind:'barrier',lane:1,z:.78};assert.equal(stepObjects([barrier],.05,1,0).hits,1);assert.equal(visibleObject(barrier),false);
 const jumped={kind:'barrier',lane:1,z:.78};assert.equal(stepObjects([jumped],.05,1,.5).dodges,1);assert.equal(visibleObject(jumped),true);
+const airborne=stepObjects([{kind:'barrier',lane:1,z:.78}],.05,1,0,true);assert.equal(airborne.hits,0);assert.equal(airborne.dodges,1);
+assert.equal(stepObjects([{kind:'coin',lane:1,z:.78}],.05,1,0,true).coins,1);
 assert.equal(stepObjects([{kind:'coin',lane:0,z:.78}],.05,1,0).coins,0);
 assert.equal(stepObjects([{z:1.09,done:true}],1,1,0).objects.length,0);
 assert.ok(objectAlpha({z:.95})<objectAlpha({z:.85}));

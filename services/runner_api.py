@@ -14,6 +14,7 @@ from telegram_webapp_auth import verify_telegram_init_data
 router = APIRouter(prefix='/api/runner')
 from services.runner_images import get_or_render_image, prewarm_quiz_images, image_question
 from task_utils import spawn
+from services.runner_economy import track_objects, wallet
 
 
 def fail(status, message, code):
@@ -38,6 +39,14 @@ class SettingsRequest(Request):
     lives: int = Field(default=1, ge=1, le=5)
     uniform_seconds: int | None = Field(default=None, ge=10, le=300)
     manual_times: dict[str, int] = Field(default_factory=dict, max_length=300)
+
+
+class TrackRequest(RoundRequest):
+    segment: int = Field(default=0, ge=0, le=10000)
+
+
+class CoinsRequest(TrackRequest):
+    coin_ids: list[int] = Field(max_length=11)
 
 
 def db():
@@ -106,7 +115,7 @@ async def config(payload: Request):
         questions = build_questions([{**q, 'is_math': bool(q.get('is_math') or quiz.get('is_math_quiz'))} for q in quiz['quiz_data']], config)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    return {'title': quiz['source_title'], 'can_edit': owner, 'settings': config,
+    return {'title': quiz['source_title'], 'can_edit': owner, 'settings': config, 'wallet': await wallet(db(), uid),
             'questions': [{'key': q['key'], 'text': q['source']['question'], 'seconds': q['seconds'],
                            'ai_seconds': valid_time(q['source'].get('ai_estimated_time_seconds', q['source'].get('estimated_time_seconds'))) or config['ai_times'].get(q['key'])} for q in questions]}
 
@@ -189,6 +198,52 @@ async def round_row(payload, uid):
     if datetime.fromisoformat(row['expires_at'].replace('Z','+00:00')).timestamp() < time.time():
         raise fail(410, 'انتهت صلاحية الجولة.', 'round_expired')
     return row
+
+
+@router.post('/wallet')
+async def get_wallet(payload: Request):
+    uid = await identity(payload)
+    await access(payload, uid)
+    return await wallet(db(), uid)
+
+
+@router.post('/buy-jetpack')
+async def buy_jetpack(payload: Request):
+    uid = await identity(payload, 'purchase')
+    await access(payload, uid)
+    return (await db().rpc('runner_buy_jetpack', {'p_user': uid}).execute()).data
+
+
+@router.post('/track')
+async def begin_track(payload: TrackRequest):
+    uid = await identity(payload)
+    await access(payload, uid)
+    row = await round_row(payload, uid)
+    from config import bot
+    result = (await db().rpc('runner_begin_track', {
+        'p_user': uid, 'p_round': row['id'], 'p_segment': payload.segment,
+        'p_objects': track_objects(row['id'], payload.segment, os.getenv('RUNNER_SIGNING_SECRET') or bot.token),
+    }).execute()).data
+    if result.get('error'):
+        raise fail(409, 'تغيّر المسار؛ ابدأ جولة جديدة.', 'round_over')
+    return result
+
+
+@router.post('/coins')
+async def claim_coins(payload: CoinsRequest):
+    uid = await identity(payload)
+    # A saved claim stays retryable after an answer/finish, until the round expires.
+    # Ownership and expiry are checked again inside the credit transaction.
+    await round_row(payload, uid)
+    if any(type(i) is not int or i < 0 or i > 9 for i in payload.coin_ids):
+        raise HTTPException(422, 'عملات غير صالحة.')
+    result = (await db().rpc('runner_claim_coins', {
+        'p_user': uid, 'p_round': str(payload.round_id), 'p_segment': payload.segment,
+        'p_ids': payload.coin_ids,
+    }).execute()).data
+    if result.get('error'):
+        raise fail(409, 'انتهى المسار؛ أعد فتح اللعبة.', result['error'])
+    return result
 
 
 @router.post('/question')

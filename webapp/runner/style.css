@@ -20,3 +20,5 @@
 
 [data-phase="RESOLVE"] .gated:not(.timed-out) .lane.correct{animation:gate-open .5s ease-out forwards;pointer-events:none}
 @keyframes gate-open{to{opacity:0;transform:translate(-50%,-125%) scale(.8)}}
+
+.wallet-summary{color:#ffcf80;font-size:16px;padding:12px 0;border-top:1px solid #315366}.wallet-summary small{display:block;min-height:16px;font-size:11px;color:#a8cbd4}.shop-item{padding:18px;border:1px solid #3f7184;border-radius:18px;background:#173c4b80}.shop-item h3{margin:8px 0}.shop-item strong{color:#ffcf80}.shop-item p{font-size:13px}.jetpack-art{font-size:64px;text-align:center}#store{top:14%;max-height:81%}#controls{gap:6px;left:5%;right:5%}#controls button{padding:10px 15px}#flight[aria-pressed="true"]{border-color:#ffc76b;background:#704f2ddd}#flight{font-size:13px}#hud{z-index:2}

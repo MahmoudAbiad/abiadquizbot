@@ -34,6 +34,7 @@ async function scenario(respond,{imageDecode=()=>Promise.resolve()}={}){
 const ok=(body)=>({status:200,body});
 const base=(op,count)=>({config:ok({title:'t',can_edit:false,settings:{lives:1,version:0},questions:[]}),
   start:ok({round_id:'r',version:0,lives:1,total:2}),
+  track:ok({segment:0,objects:[{id:0,at:.7,lane:0,kind:'coin'}],claimed:[]}),wallet:ok({coins:0,jetpack_owned:false,version:0}),coins:ok({coins:1,jetpack_owned:false,version:1,accepted:[0]}),
   question:ok({text:'س',options:[{id:0,text:'a'},{id:1,text:'b'},{id:2,text:'c'}],seconds:30,remaining_seconds:30,number:1,total:2,version:0,started:false}),
   ready:ok({started:true,remaining_seconds:30}),
   answer:ok({correct:true,correct_text:'a',explanation:'e',lives:1,score:100,status:'running',version:1}),finish:ok({saved:true})}[op]);

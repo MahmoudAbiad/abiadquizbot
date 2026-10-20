@@ -5,6 +5,8 @@ const fs=require('fs');const path=require('path');
  await page.route('**/*',async route=>{const url=new URL(route.request().url());if(url.hostname==='telegram.org'){return route.fulfill({contentType:'text/javascript',body:'window.Telegram={WebApp:{initData:"test",ready(){},expand(){},disableVerticalSwipes(){},close(){}}};'});}
  if(url.pathname.startsWith('/api/runner/')){const op=url.pathname.split('/').pop();let result;
  if(op==='config')result={title:'اختبار الرياضيات · رحلة تجريبية',can_edit:true,settings:{lives:1,version:0,ai_status:'new',manual_times:{},ai_times:{}},questions:[{key:'one',text:'ما ناتج ٢ + ٢؟',seconds:30}]};
+ if(op==='track')result={segment:answer,objects:Array.from({length:10},(_,id)=>({id,at:.7*(id+1),lane:0,kind:'coin'})),claimed:[]};
+ if(op==='coins')result={coins:route.request().postDataJSON().coin_ids.length,version:1,jetpack_owned:false,accepted:route.request().postDataJSON().coin_ids};
  if(op==='start'){answer=0;result={round_id:'round',version:0,lives:1,total:2};}
  if(op==='question')result={text:'ما ناتج ٢ + ٢؟',options:[{id:0,text:mode==='long'?'خيار عربي طويل '.repeat(8):'٣'},{id:3,text:'٤'},{id:1,text:'٥'}],seconds:30,remaining_seconds:30,started:false,number:answer+1,total:2,version:answer};
  if(op==='ready')result={started:true,remaining_seconds:mode==='timeout'?.08:30};
