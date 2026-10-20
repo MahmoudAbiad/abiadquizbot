@@ -47,6 +47,17 @@ await test(`${status} ${code} on /question shows new-round button that restarts`
   assert.match(t.els.get('continue').textContent,/جولة جديدة/);
   await t.click('continue');assert.equal(t.calls.filter(c=>c==='start').length,2);});
 
+for(const [status,code] of [[404,'quiz_changed'],[403,'auth']])
+await test(`${code} on /question and /answer shows a blocked screen with close (no restart loop)`,async()=>{
+  for(const failing of ['question','answer']){
+    const t=await scenario((op)=>op===failing?err(status,code,'تعذر المتابعة'):base(op));
+    let closed=0;globalThis.Telegram.WebApp.close=()=>{closed++;};
+    await toQuestion(t);if(failing==='answer')await t.click('confirm');await tick();
+    assert.equal(t.els.get('feedback').hidden,false);assert.match(t.els.get('feedbackTitle').textContent,/تعذر متابعة/);
+    assert.match(t.els.get('continue').textContent,/إغلاق/);
+    assert.equal(t.calls.filter(c=>c==='question').length,1);
+    await t.click('continue');assert.equal(closed,1);assert.equal(t.calls.filter(c=>c==='start').length,1);}});
+
 await test('stale_version on /answer silently refetches the question',async()=>{
   const t=await scenario((op)=>op==='answer'?err(409,'stale_version'):base(op));await toQuestion(t);
   const before=t.calls.filter(c=>c==='question').length;await t.click('confirm');await tick();
