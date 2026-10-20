@@ -84,4 +84,28 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         from pathlib import Path
         Path('/tmp/runner-math.png').write_bytes(image)
 
+
+class StableWrongOptionsTests(unittest.TestCase):
+    Q5={**Q,'options':['a','b','c','d','e','f'],'correct_option_id':2}
+    def shown(self,user,**kw):
+        q=build_questions([self.Q5],user_id=user,quiz_id='quiz',seed_secret='s',**kw)[0]
+        return {o['id'] for o in q['options']}
+    def test_same_user_always_sees_same_option_set(self):
+        sets={frozenset(self.shown(7)) for _ in range(10)}
+        self.assertEqual(len(sets),1);self.assertIn(2,next(iter(sets)))
+    def test_other_users_keep_correct_and_may_differ(self):
+        seen=set()
+        for user in range(1,40):
+            ids=self.shown(user);self.assertIn(2,ids);seen.add(frozenset(ids))
+        self.assertGreater(len(seen),1)
+    def test_order_does_not_change_set_and_lane_still_random(self):
+        lanes={[o['id'] for o in build_questions([self.Q5],user_id=7,quiz_id='quiz',seed_secret='s')[0]['options']].index(2) for _ in range(60)}
+        self.assertEqual(lanes,{0,1,2})
+    def test_without_identity_keeps_legacy_random_behaviour(self):
+        sets={frozenset(o['id'] for o in build_questions([self.Q5])[0]['options']) for _ in range(40)}
+        self.assertGreater(len(sets),1)
+    def test_three_option_question_unchanged(self):
+        q={**Q,'options':['a','b','c'],'correct_option_id':0}
+        self.assertEqual({o['id'] for o in build_questions([q],user_id=1,quiz_id='x',seed_secret='s')[0]['options']},{0,1,2})
+
 if __name__=='__main__':unittest.main()
