@@ -3,7 +3,7 @@ const {chromium}=require('playwright'),fs=require('fs'),path=require('path'),ass
 (async()=>{
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH,args:['--no-sandbox'],headless:true});
  const page=await browser.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
- let wallet={coins:100,jetpack_owned:false,version:0},buyCalls=0,offline=false,claimed=new Set();const errors=[];
+ let wallet={coins:100,jetpack_owned:false,version:0,knowledge:0,knowledge_earned:0,car_level:0,equipped:'none'},buyCalls=0,offline=false,claimed=new Set();const errors=[];
  page.on('pageerror',e=>errors.push(e.message));
  const init=new URLSearchParams({user:JSON.stringify({id:7})}).toString();
  await page.route('**/*',async route=>{
@@ -13,7 +13,7 @@ const {chromium}=require('playwright'),fs=require('fs'),path=require('path'),ass
    const op=u.pathname.split('/').pop(),body=route.request().postDataJSON();let result;
    if(op==='config')result={title:'رحلة تجريبية',wallet,can_edit:false,settings:{lives:1},questions:[]};
    if(op==='wallet')result=wallet;
-   if(op==='buy-jetpack'){buyCalls++;if(!wallet.jetpack_owned){wallet={coins:wallet.coins-100,jetpack_owned:true,version:wallet.version+1};}result={...wallet,purchase_status:'purchased'};}
+   if(op==='buy-jetpack'){buyCalls++;if(!wallet.jetpack_owned){wallet={coins:wallet.coins-100,jetpack_owned:true,equipped:'jetpack',version:wallet.version+1};}result={...wallet,purchase_status:'purchased'};}
    if(op==='start')result={round_id:'r',lives:1,version:0,total:1};
    if(op==='track')result={segment:0,claimed:[],objects:[{id:0,at:.7,lane:1,kind:'coin'},{id:1,at:1.4,lane:1,kind:'barrier'},{id:2,at:2.1,lane:1,kind:'barrier'}]};
    if(op==='coins'){if(offline)return route.abort('internetdisconnected');for(const id of body.coin_ids)if(!claimed.has(id)){claimed.add(id);wallet={...wallet,coins:wallet.coins+1,version:wallet.version+1};}result={...wallet,accepted:[...claimed]};}

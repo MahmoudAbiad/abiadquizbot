@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from typing import Literal
 from services.runner_core import enabled, verify_launch, build_questions, answer_transition
 from services.quiz_timing import question_key, valid_time
 from telegram_webapp_auth import verify_telegram_init_data
@@ -14,7 +15,7 @@ from telegram_webapp_auth import verify_telegram_init_data
 router = APIRouter(prefix='/api/runner')
 from services.runner_images import get_or_render_image, prewarm_quiz_images, image_question
 from task_utils import spawn
-from services.runner_economy import track_objects, wallet
+from services.runner_economy import track_objects, wallet, mastery_key
 
 
 def fail(status, message, code):
@@ -47,6 +48,14 @@ class TrackRequest(RoundRequest):
 
 class CoinsRequest(TrackRequest):
     coin_ids: list[int] = Field(max_length=11)
+
+
+class CarRequest(Request):
+    target_level: int = Field(ge=1, le=3)
+
+
+class EquipRequest(Request):
+    item: Literal['none', 'jetpack', 'tesla']
 
 
 def db():
@@ -214,6 +223,23 @@ async def buy_jetpack(payload: Request):
     return (await db().rpc('runner_buy_jetpack', {'p_user': uid}).execute()).data
 
 
+@router.post('/buy-car')
+async def buy_car(payload: CarRequest):
+    uid = await identity(payload, 'purchase')
+    await access(payload, uid)
+    return (await db().rpc('runner_buy_car', {'p_user':uid, 'p_target':payload.target_level}).execute()).data
+
+
+@router.post('/equip')
+async def equip(payload: EquipRequest):
+    uid = await identity(payload, 'purchase')
+    await access(payload, uid)
+    result = (await db().rpc('runner_equip', {'p_user':uid, 'p_item':payload.item}).execute()).data
+    if result.get('error'):
+        raise fail(403, 'اشترِ هذا العنصر أولًا.', 'not_owned')
+    return result
+
+
 @router.post('/track')
 async def begin_track(payload: TrackRequest):
     uid = await identity(payload)
@@ -322,12 +348,14 @@ async def answer(payload: RoundRequest):
         update, response = answer_transition(row, payload.option_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    if update['status'] != 'running':
-        update['finished_at'] = datetime.now(timezone.utc).isoformat()
-    result = await db().table('runner_rounds').update(update).eq('id',row['id']).eq('version',payload.version).eq('status','running').execute()
-    if not result.data:
-        raise fail(409, 'تم تسجيل إجابة أخرى؛ أعد المحاولة.', 'stale_version')
-    return {**response, 'version':update['version']}
+    result = (await db().rpc('runner_commit_answer', {
+        'p_user':uid, 'p_round':row['id'], 'p_quiz':str(payload.quiz_id), 'p_version':payload.version,
+        'p_key':mastery_key(row['questions'][row['cursor']]['source']), 'p_update':update,
+        'p_response':{**response, 'attempted':payload.option_id is not None},
+    }).execute()).data
+    if result.get('error'):
+        raise fail(409, 'تم تسجيل إجابة أخرى؛ أعد المحاولة.', result['error'])
+    return result
 
 
 @router.post('/finish')

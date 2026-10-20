@@ -18,3 +18,5 @@ assert.ok(useClassic([{text:'x'.repeat(61)}],[],844,390));assert.ok(useClassic([
 console.log('Runner world: coins, collision, jump, fade, four phases, long/math fallback PASS');
 
 assert.equal(objectLift({kind:'barrier',z:.81},844,true),0);assert.equal(objectLift({kind:'coin',z:.81},844,false),0);assert.equal(objectLift({kind:'coin',z:.81},844,true),844*.16);
+assert.equal(stepObjects([{kind:'coin',lane:0,z:.78}],.05,1,0,false,true).coins,1);
+assert.equal(stepObjects([{kind:'barrier',lane:0,z:.78}],.05,1,0,false,true).hits,0);

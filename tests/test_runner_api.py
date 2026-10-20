@@ -32,6 +32,18 @@ class Query:
 class DB:
     def __init__(self,rows):self.rows=rows;self.conflict=False
     def table(self,name):return Query(self,name)
+    def rpc(self,name,args):
+        async def execute():
+            if name=='runner_wallet_state':return types.SimpleNamespace(data={'coins':0,'jetpack_owned':False,'version':0,'knowledge':0,'knowledge_earned':0,'car_level':0,'equipped':'none'})
+            if name=='runner_commit_answer':
+                if self.conflict:return types.SimpleNamespace(data={'error':'stale_version'})
+                row=next(r for r in self.rows['runner_rounds'] if r['id']==args['p_round'])
+                row.update(copy.deepcopy(args['p_update']))
+                response={**args['p_response'],'version':args['p_version']+1}
+                row['last_response']=copy.deepcopy(response)
+                return types.SimpleNamespace(data=response)
+            raise AssertionError(name)
+        return types.SimpleNamespace(execute=execute)
 
 class APITests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

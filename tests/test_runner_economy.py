@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
-from services.runner_economy import track_objects
+from services.runner_economy import track_objects, mastery_key
 from services import runner_api as api
 from uuid import uuid4
 
@@ -16,6 +16,14 @@ def test_tracks_bounded_stable_and_distinct():
     assert len(plan) == 10
     assert [o['id'] for o in plan] == list(range(10))
     assert all(o['lane'] in (0, 1, 2) and o['kind'] in ('coin', 'barrier') for o in plan)
+
+
+def test_mastery_survives_reorder_copy_timing_and_whitespace():
+    q={'question':' What is 2+2? ', 'options':['3','4','5'], 'correct_option_id':1}
+    reordered={**q, 'question':'What is 2+2?', 'options':['4','5','3'],'correct_option_id':0,'estimated_time_seconds':60,'image_url':'ignored'}
+    assert mastery_key(q)==mastery_key(reordered)
+    assert mastery_key(q)!=mastery_key({**q,'correct_option_id':0})
+    assert mastery_key(q)!=mastery_key({**q,'question':'2+3?'})
 
 
 class EconomyAPITests(unittest.IsolatedAsyncioTestCase):
