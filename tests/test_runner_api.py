@@ -97,4 +97,45 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as err:await api.estimate(self.request())
         self.assertEqual(err.exception.status_code,409)
 
+
+class ErrorCodeTests(APITests):
+    def code(self,err):return err.exception.detail['code']
+    async def test_question_ignores_client_version(self):
+        a=await api.question(self.request(version=0));b=await api.question(self.request(version=99))
+        self.assertEqual(a['version'],b['version'])
+    async def test_round_over_code(self):
+        self.row['status']='completed'
+        with self.assertRaises(HTTPException) as err:await api.question(self.request())
+        self.assertEqual((err.exception.status_code,self.code(err)),(409,'round_over'))
+        with self.assertRaises(HTTPException) as err:await api.answer(self.request(option_id=1))
+        self.assertEqual(self.code(err),'round_over')
+    async def test_round_expired_code(self):
+        self.row['expires_at']='2000-01-01T00:00:00+00:00'
+        with self.assertRaises(HTTPException) as err:await api.question(self.request())
+        self.assertEqual((err.exception.status_code,self.code(err)),(410,'round_expired'))
+    async def test_unknown_round_means_expired(self):
+        with self.assertRaises(HTTPException) as err:await api.round_row(self.request(),8)
+        self.assertEqual(self.code(err),'round_expired')
+    async def test_stale_version_codes(self):
+        with self.assertRaises(HTTPException) as err:await api.answer(self.request(version=7,option_id=1))
+        self.assertEqual(self.code(err),'stale_version')
+        self.db.conflict=True
+        with self.assertRaises(HTTPException) as err:await api.answer(self.request(option_id=1))
+        self.assertEqual(self.code(err),'stale_version')
+    async def test_auth_and_rate_limit_codes(self):
+        real=self.patches[1];real.stop()
+        try:
+            with patch('services.runner_api.enabled',return_value=False):
+                with self.assertRaises(HTTPException) as err:await api.identity(self.request())
+            self.assertEqual(self.code(err),'auth')
+            redis=types.SimpleNamespace(incr=AsyncMock(return_value=999),expire=AsyncMock())
+            cfg=types.SimpleNamespace(bot=types.SimpleNamespace(token='t'),redis_client=redis)
+            with patch('services.runner_api.enabled',return_value=True),patch.dict(sys.modules,{'config':cfg}),\
+                 patch('services.runner_api.verify_telegram_init_data',return_value=(True,{'id':7})),\
+                 patch('services.runner_api.time.time',return_value=1000):
+                req=self.request();req.init_data='auth_date=1000'
+                with self.assertRaises(HTTPException) as err:await api.identity(req)
+            self.assertEqual((err.exception.status_code,self.code(err)),(429,'rate_limited'))
+        finally:real.start()
+
 if __name__=='__main__':unittest.main()
