@@ -683,6 +683,8 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
     للمعادلات المضمّنة بعلامتي $...$ ودعم عربي RTL كامل. يُستدعى دائماً عبر
     asyncio.to_thread من services/quiz_engine.py لأنه عملية رسم CPU-bound متزامنة.
     """
+    game_part = bool(question.get("_game_part"))
+    header_height = 0 if game_part else HEADER_HEIGHT_PX
     question_text = str(question.get("question", "")).strip()
     options = [str(o).strip() for o in (question.get("options") or [])]
     letters = letters_for(is_ar, len(options))
@@ -762,7 +764,7 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
     # فقط بحالات نادرة متطرفة. الحل: إضافة نفس الفجوة الأولى هون (+ تعويض الـ 6px) بدل
     # الاعتماد على شبكة الأمان بالأسفل (fig.set_size_inches) لتغطية نقص متوقّع ومنتظم.
     height_px = (
-        HEADER_HEIGHT_PX + MARGIN_PX * 2
+        header_height + MARGIN_PX * 2
         + sum(q_line_heights)
         + table_extra_h
         + matrices_extra_h
@@ -770,7 +772,7 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
         + len(option_row_heights) * OPTION_GAP_PX
         + (OPTION_GAP_PX - 6 if option_blocks else 0)
     )
-    height_px = max(height_px, 380)
+    height_px = max(height_px, 130 if game_part else 380)
 
     # 🩹 FIX (memory-leak): Figure محلي بالكامل (بدل plt.figure()) - لا يُسجَّل بأي
     # سجل عام، فهو آمن للاستدعاء من خيوط متزامنة عبر asyncio.to_thread، ويُحرَّر
@@ -784,17 +786,18 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
     ax.set_ylim(0, height_px)
 
     # شريط العنوان العلوي
-    ax.add_patch(Rectangle((0, height_px - HEADER_HEIGHT_PX), FIG_WIDTH_PX, HEADER_HEIGHT_PX,
-                                facecolor="#4C6FFF", edgecolor="none"))
-    header_text = f"السؤال {idx + 1} من {total}" if is_ar else f"Question {idx + 1} of {total}"
-    header_text = _shape_line(header_text)
-    ax.text(FIG_WIDTH_PX / 2, height_px - HEADER_HEIGHT_PX / 2, _sanitize_line_for_mathtext(header_text),
-            ha="center", va="center", fontsize=22, color="white",
-            fontproperties=_font_prop(is_ar, bold=True))
+    if not game_part:
+        ax.add_patch(Rectangle((0, height_px - header_height), FIG_WIDTH_PX, header_height,
+                                    facecolor="#4C6FFF", edgecolor="none"))
+        header_text = f"السؤال {idx + 1} من {total}" if is_ar else f"Question {idx + 1} of {total}"
+        header_text = _shape_line(header_text)
+        ax.text(FIG_WIDTH_PX / 2, height_px - header_height / 2, _sanitize_line_for_mathtext(header_text),
+                ha="center", va="center", fontsize=22, color="white",
+                fontproperties=_font_prop(is_ar, bold=True))
 
     align = "right" if is_ar else "left"
     x = FIG_WIDTH_PX - MARGIN_PX if is_ar else MARGIN_PX
-    y = height_px - HEADER_HEIGHT_PX - MARGIN_PX + 6
+    y = height_px - header_height - MARGIN_PX + 6
 
     for line, line_h in zip(q_render_lines, q_line_heights):
         ax.text(x, y, line, ha=align, va="top",
@@ -905,12 +908,48 @@ def _render_question_image_impl(question: Dict[str, Any], idx: int, total: int, 
 # استخدم هذه الدالة بدل استدعاء asyncio.to_thread(render_question_image, ...) مباشرة
 # من أي مكان بالمشروع (services/quiz_engine.py و services/export_service.py عبر
 # handlers/export.py).
-async def render_question_image_async(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> bytes:
-    remote = await offload.remote_render_image(question, idx, total, is_ar)
+async def render_question_image_async(question: Dict[str, Any], idx: int, total: int, is_ar: bool, *, allow_local_fallback=True, local_gate=None) -> bytes:
+    kwargs = {} if allow_local_fallback else {"allow_local_fallback": False}
+    remote = await offload.remote_render_image(question, idx, total, is_ar, **kwargs)
     if remote is not None:
         return remote
-    async with RENDER_SEMAPHORE:
-        result = await asyncio.to_thread(render_question_image, question, idx, total, is_ar)
+    async def local():
+        async with RENDER_SEMAPHORE:
+            return await asyncio.to_thread(render_question_image, question, idx, total, is_ar)
+    if local_gate is not None:
+        async with local_gate:
+            result = await local()
+    else:
+        result = await local()
     from mem_utils import release_memory_to_os
     release_memory_to_os()
     return result
+
+
+
+async def render_game_image_async(question, idx=0, total=1, part="question", *, allow_local_fallback=True, local_gate=None):
+    """Independent projection; reuse worker, semaphore, RTL/LaTeX/table rendering.
+
+    Never mutate the source quiz or Telegram image cache. Options are rendered
+    separately by passing their text as a question with an empty option list.
+    """
+    if part == "question":
+        projected = {**question, "options": [], "_game_part": True}
+    else:
+        option_index = int(part)
+        projected = {"question": str(question["options"][option_index]), "options": [], "_game_part": True}
+    rendered = await render_question_image_async(projected, idx, total, looks_arabic(str(projected.get("question", ""))), **({} if allow_local_fallback else {"allow_local_fallback": False}), **({"local_gate": local_gate} if local_gate is not None else {}))
+    if part != "question":
+        # A full 1000px question canvas would make short answers illegible in
+        # a phone lane. Trim only the independent option image's white margins.
+        from PIL import Image, ImageChops, ImageOps
+        import io
+        with Image.open(io.BytesIO(rendered)) as source:
+            rgb = source.convert("RGB")
+            bounds = ImageChops.difference(rgb, Image.new("RGB", rgb.size, "white")).getbbox()
+            if bounds:
+                cropped = ImageOps.expand(rgb.crop(bounds), border=10, fill="white")
+                output = io.BytesIO()
+                cropped.save(output, format="PNG", optimize=True)
+                rendered = output.getvalue()
+    return rendered

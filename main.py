@@ -83,7 +83,9 @@ def main():
     dp.callback_query.middleware(UsageCallbackMiddleware())
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
+    from handlers.runner import router as runner_router
     dp.include_routers(
+        runner_router,
         session_navigation_router,
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
         # (معالج poll_answer العام هناك بيوقف الانتشار) - راجع handlers/group_quiz.py
@@ -150,6 +152,8 @@ def main():
                 # بوضع polling حالياً).
                 from services.group_quiz_store import group_quiz_cleanup_loop
                 spawn(group_quiz_cleanup_loop())
+                from services.runner_cleanup import runner_cleanup_loop
+                spawn(runner_cleanup_loop())
 
                 from handlers.session_navigation import pending_cleanup_loop
                 spawn(pending_cleanup_loop())
@@ -168,5 +172,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

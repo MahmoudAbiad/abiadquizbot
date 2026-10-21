@@ -168,17 +168,17 @@ def is_active() -> bool:
     return ENABLED and _breaker.ready()
 
 
-def _fallback(reason: str) -> Optional[bytes]:
+def _fallback(reason: str, allow_local_fallback: bool = True) -> Optional[bytes]:
     """Apply the same policy to every failure while offload is enabled."""
-    if FALLBACK_LOCAL:
+    if FALLBACK_LOCAL and allow_local_fallback:
         stats["fallback_local"] += 1
         return None
     raise OffloadUnavailable(f"render worker unavailable: {reason}")
 
 
-def _skip_open_circuit() -> Optional[bytes]:
+def _skip_open_circuit(allow_local_fallback=True) -> Optional[bytes]:
     stats["skipped_circuit_open"] += 1
-    return _fallback("circuit open")
+    return _fallback("circuit open", allow_local_fallback)
 
 
 # ==================== النقل (قابل للاستبدال بالاختبارات) ====================
@@ -219,26 +219,26 @@ async def _post(path: str, body: bytes, read_timeout: float) -> Tuple[int, bytes
 _MAGIC = {"png": b"\x89PNG\r\n\x1a\n", "pdf": b"%PDF-", "docx": b"PK"}
 
 
-async def _call(path: str, payload: Dict[str, Any], read_timeout: float, kind: str) -> Optional[bytes]:
+async def _call(path: str, payload: Dict[str, Any], read_timeout: float, kind: str, *, allow_local_fallback=True) -> Optional[bytes]:
     """ينفّذ الاستدعاء كاملاً. يرجع bytes عند النجاح، None عند فشل مسموح معه الرجوع محلياً،
     ويرمي OffloadUnavailable لو الرجوع المحلي معطّل. رسالة 422 (خطأ مستخدم) تُرفع كما هي."""
     if not is_active():
-        return _skip_open_circuit()
+        return _skip_open_circuit(allow_local_fallback)
     try:
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     except (TypeError, ValueError) as exc:
         log_warning(logger, f"offload: payload not serializable: {exc}")
-        return _fallback("payload not serializable")
+        return _fallback("payload not serializable", allow_local_fallback)
     if len(body) > MAX_REQUEST_BYTES:
         log_warning(logger, f"offload: payload {len(body)} bytes exceeds limit")
-        return _fallback("payload exceeds limit")
+        return _fallback("payload exceeds limit", allow_local_fallback)
 
     failure = ""
     async with _remote_sem:
         # Queued callers may have observed a healthy circuit before waiting.
         # Reserve a recovery probe only after a connection slot is available.
         if not _breaker.allow():
-            return _skip_open_circuit()
+            return _skip_open_circuit(allow_local_fallback)
         generation = _breaker.generation
         for attempt in (1, 2):
             try:
@@ -280,19 +280,19 @@ async def _call(path: str, payload: Dict[str, Any], read_timeout: float, kind: s
     _breaker.record_failure(generation)
     stats["remote_fail"] += 1
     log_warning(logger, f"offload: remote call {path} failed ({failure})")
-    return _fallback(failure)
+    return _fallback(failure, allow_local_fallback)
 
 
 # ==================== الواجهة العامة ====================
 
-async def remote_render_image(question: Dict[str, Any], idx: int, total: int, is_ar: bool) -> Optional[bytes]:
+async def remote_render_image(question: Dict[str, Any], idx: int, total: int, is_ar: bool, *, allow_local_fallback=True) -> Optional[bytes]:
     """PNG لسؤال رياضي من السيرفر الثاني، أو None => نفّذ محلياً."""
     if not ENABLED:
         return None
     return await _call(
         "/v1/render/question-image",
         {"question": question, "idx": idx, "total": total, "is_ar": bool(is_ar)},
-        RENDER_READ_TIMEOUT, "png",
+        RENDER_READ_TIMEOUT, "png", allow_local_fallback=allow_local_fallback,
     )
 
 

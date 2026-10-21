@@ -9,7 +9,7 @@ import asyncio
 from task_utils import spawn
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.staticfiles import StaticFiles
+from services.runner_static import RunnerAwareStaticFiles
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from aiogram.types import Update
@@ -218,6 +218,8 @@ async def lifespan(app: FastAPI):
         # لتعديل مدة الاحتفاظ الافتراضية 90 يوم).
         from services.group_quiz_store import group_quiz_cleanup_loop
         spawn(group_quiz_cleanup_loop())
+        from services.runner_cleanup import runner_cleanup_loop
+        spawn(runner_cleanup_loop())
         print("🧹 تم جدولة تنظيف بيانات الكويز الجماعي القديمة كل 12 ساعة.")
 
         # 💳 watchdog الشحن الذاتي: إنهاء الطلبات المنتهية + تنبيه الإشعارات اليتيمة (راجع
@@ -261,7 +263,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Quiz Maker Bot", version="2.0", lifespan=lifespan)
 
 # 🆕 تقديم صفحة رفع الملفات الصوتية (Mini App) كملفات ستاتيك من نفس الدومين
-app.mount("/webapp", StaticFiles(directory="webapp"), name="webapp")
+from services.runner_api import router as runner_api_router
+app.include_router(runner_api_router)
+
+app.mount("/webapp", RunnerAwareStaticFiles(directory="webapp"), name="webapp")
 
 # ==================== Endpoints ====================
 
@@ -852,3 +857,4 @@ def run_webhook_server():
     import uvicorn
     port = int(os.getenv("PORT", WEBHOOK_PORT))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+

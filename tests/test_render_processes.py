@@ -124,6 +124,26 @@ with unittest.mock.patch('os.execv', side_effect=SystemExit(0)) as replace:
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
+class WarmupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_does_not_advertise_ready_before_children_warm(self):
+        import render_worker
+        from unittest.mock import AsyncMock,Mock,patch
+        w=importlib.reload(render_worker)
+        gate=asyncio.Event();calls=[]
+        async def submit(work,payload):
+            calls.append(payload);await gate.wait();return 'ok',b'PNG','image/png'
+        entered=asyncio.Event()
+        async def serve():
+            async with w.lifespan(w.app):entered.set()
+        pool=Mock(shutdown=Mock())
+        with patch.object(w,'_new_pool',return_value=pool),patch.object(w,'_submit',submit),patch.dict(os.environ,{'WORKER_WARMUP':'1'}):
+            task=asyncio.create_task(serve())
+            for _ in range(10):await asyncio.sleep(0)
+            self.assertEqual(len(calls),w.CONCURRENCY);self.assertFalse(entered.is_set())
+            self.assertTrue(all(p['question']['_game_part'] for p in calls))
+            gate.set();await task;self.assertTrue(entered.is_set());pool.shutdown.assert_called_once()
+
+
 class AdmissionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         import render_worker
