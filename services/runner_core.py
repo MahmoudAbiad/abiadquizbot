@@ -10,11 +10,27 @@ from urllib.parse import urlparse
 from services.quiz_timing import fallback_time, question_key, valid_time
 
 
+# Production identity was verified against the live Heroku app before integration.
+_RUNNER_PRODUCTION_REF = 'pqawoanhbgvdtbdhnbod'
+
+
 def enabled():
-    ref = os.getenv('RUNNER_TEST_SUPABASE_REF', '')
-    return (os.getenv('RUNNER_ENABLED') == '1' and bool(ref)
-            and os.getenv('RENDER_GIT_BRANCH', os.getenv('APP_BRANCH', '')) == 'test'
-            and urlparse(os.getenv('SUPABASE_URL', '')).hostname == ref + '.supabase.co')
+    if os.getenv('RUNNER_ENABLED') != '1':
+        return False
+    branch = os.getenv('RENDER_GIT_BRANCH') or os.getenv('APP_BRANCH', '')
+    if branch == 'test':
+        ref = os.getenv('RUNNER_TEST_SUPABASE_REF', '')
+    elif branch == 'master' and os.getenv('RUNNER_PRODUCTION_READY') == '1':
+        ref = os.getenv('RUNNER_PRODUCTION_SUPABASE_REF', '')
+        if ref != _RUNNER_PRODUCTION_REF:
+            return False
+    else:
+        return False
+    try:
+        url = urlparse(os.getenv('SUPABASE_URL', ''))
+        return bool(ref) and url.scheme == 'https' and url.hostname == ref + '.supabase.co'
+    except ValueError:
+        return False
 
 
 def sign_launch(quiz_id, user_id, secret, now=None):

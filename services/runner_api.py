@@ -66,7 +66,7 @@ def db():
 
 async def identity(payload, cost='read', *, existing_round=False):
     if not enabled():
-        raise fail(503, 'اللعبة لم تُفعّل على بيئة الاختبار بعد.', 'auth')
+        raise fail(503, 'اللعبة غير متاحة حالياً.', 'auth')
     from config import bot, redis_client
     ok, user = verify_telegram_init_data(payload.init_data, bot.token, max_age_seconds=7200)
     if not ok:
