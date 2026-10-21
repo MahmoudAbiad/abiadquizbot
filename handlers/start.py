@@ -82,6 +82,15 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
         }))
 
         await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{safe_title(quiz_title)}</b>...", parse_mode="HTML")
+        from handlers.runner import launch_keyboard
+        from services.runner_core import build_questions
+        try:
+            build_questions(shared["quiz_data"])
+            game_keyboard = launch_keyboard(actual_quiz_id, target_msg.from_user.id)
+            if game_keyboard:
+                await target_msg.answer("🏃 هذا الاختبار متاح أيضاً كلعبة ركض:", reply_markup=game_keyboard)
+        except ValueError:
+            pass
         await start_loaded_quiz(
             target_msg, state, shared["quiz_data"], 
             quiz_title, 
@@ -404,4 +413,5 @@ async def cmd_channel(message: types.Message):
     
     # تسجيل حدث فتح القناة
     spawn(log_usage_event(message.from_user.id, "channel_opened"))
+
 

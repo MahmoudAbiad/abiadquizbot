@@ -3,8 +3,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from keyboards import get_ai_control_keyboard
+from aiogram import types
 from reliability_support import load_functions
+
+get_ai_control_keyboard = load_functions(
+    "keyboards.py", {"get_ai_control_keyboard"}, types=types,
+)["get_ai_control_keyboard"]
 
 
 class VertexParallelKeyboardTests(unittest.TestCase):

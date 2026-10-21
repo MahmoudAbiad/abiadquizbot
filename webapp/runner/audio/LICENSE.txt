@@ -1,0 +1,6 @@
+Original synthesized compositions and sound effects created for Abiad Runner.
+No third-party recordings, melodies, samples, or game assets were used.
+Dedicated to the public domain under CC0 1.0 Universal:
+https://creativecommons.org/publicdomain/zero/1.0/
+Commercial use, modification and redistribution permitted without attribution.
+Reproducible source: scripts/build_runner_audio.py.

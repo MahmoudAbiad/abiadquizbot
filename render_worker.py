@@ -86,10 +86,20 @@ async def _submit(work, payload):
 async def lifespan(app: FastAPI):
     global _pool
     _pool = _new_pool()
-    if not WORKER_SECRET:
-        logger.critical("OFFLOAD_WORKER_SECRET is not set - all work requests will be rejected (503).")
-    logger.info(f"render worker ready (concurrency={CONCURRENCY}, max_queue={MAX_QUEUE})")
     try:
+        if not WORKER_SECRET:
+            logger.critical("OFFLOAD_WORKER_SECRET is not set - all work requests will be rejected (503).")
+        if os.getenv('WORKER_WARMUP', '1') == '1':
+            # Spawn/import Matplotlib in the CHILDREN before advertising readiness.
+            # The first real Runner request otherwise pays cold parser/font setup.
+            payload = {'question': {'question': '$1+1$', 'options': [], '_game_part': True},
+                       'idx': 0, 'total': 1, 'is_ar': False}
+            warmed = await asyncio.wait_for(asyncio.gather(*(
+                _submit(core.render_image, payload) for _ in range(CONCURRENCY)
+            )), timeout=120)
+            if any(result[0] != 'ok' for result in warmed):
+                raise RuntimeError('render worker warmup failed')
+        logger.info(f"render worker ready (concurrency={CONCURRENCY}, max_queue={MAX_QUEUE})")
         yield
     finally:
         pool, _pool = _pool, None

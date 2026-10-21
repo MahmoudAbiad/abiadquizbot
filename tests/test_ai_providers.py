@@ -74,6 +74,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime._pointers.clear()
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
+        # Patch the flag boundary without importing a real Supabase client.
+        self.stack.enter_context(patch.dict(sys.modules, {"helpers.supabase_helper":
+            types.SimpleNamespace(is_feature_enabled=AsyncMock(return_value=False))}))
         self.stack.enter_context(patch.dict(os.environ, {"TEST_AI_KEYS": "key-a,key-b"}))
         self.provider_rows = {"custom": provider()}
         self.model_rows = [model()]

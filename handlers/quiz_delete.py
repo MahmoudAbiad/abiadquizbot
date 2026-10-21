@@ -95,6 +95,11 @@ async def handle_quiz_delete_execute(call: types.CallbackQuery) -> None:
 
         success = await admin_delete_quiz(quiz_id)
         if success:
+            try:
+                from services.runner_cleanup import delete_runner_prefix
+                await delete_runner_prefix(quiz_id)
+            except Exception:
+                logger.warning("Runner prefix cleanup deferred to retention loop", exc_info=True)
             await call.answer("🗑️ تم حذف الكويز نهائياً من كل مكان.", show_alert=True)
             try:
                 await call.message.edit_text("🗑 <b>تم حذف هذا الكويز نهائياً من كل مكان.</b>", parse_mode="HTML")

@@ -25,7 +25,7 @@ FEATURE_FLAG_CACHE_TTL_SECONDS = 30
 _FEATURE_FLAG_LOCAL_CACHE = TTLCache(maxsize=128, ttl=30)
 # Prevent an in-flight read from re-caching an old value after an admin update.
 _FEATURE_FLAG_CACHE_EPOCH = 0
-_GAME_FLAGS = {"challenge_system_enabled", "async_attacks_enabled", "spectator_mode_enabled", "live_matches_enabled"}
+_GAME_FLAGS = {"runner_enabled", "challenge_system_enabled", "async_attacks_enabled", "spectator_mode_enabled", "live_matches_enabled"}
 
 
 def _flag_redis_key(key: str) -> str:

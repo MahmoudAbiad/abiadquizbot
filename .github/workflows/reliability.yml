@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install test dependencies only
-        run: python -m pip install pymupdf pillow python-docx python-pptx redis cachetools==5.3.3 aiogram==3.31.0 httpx==0.28.1 google-genai==2.10.0 matplotlib==3.9.2 'reportlab>=4.0.0' arabic-reshaper python-bidi fastapi==0.115.12
+        run: python -m pip install pymupdf pillow python-docx python-pptx redis cachetools==5.3.3 aiogram==3.31.0 httpx==0.28.1 google-genai==2.10.0 matplotlib==3.9.2 'reportlab>=4.0.0' arabic-reshaper python-bidi fastapi==0.115.12 hpack==4.1.0 pytest==8.3.5
       - name: Compile repository
         run: python -m compileall -q .
       - name: Targeted challenge resource and in-flight regressions
@@ -46,7 +46,9 @@ jobs:
       - name: Run regression tests against local Redis
         env:
           TEST_REDIS_URL: redis://localhost:6379/15
-        run: python -m unittest discover -s tests -p 'test_*.py' -v
+        run: |
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          python -m pytest tests/test_runner_economy.py -q
 
       - uses: actions/setup-node@v4
         with:
@@ -55,6 +57,14 @@ jobs:
         run: |
           npm ci --prefix tests/sql --ignore-scripts
           node tests/sql/ai_providers_test.mjs
+      - name: Verify Runner rules, wallet, rewards and admission SQL
+        run: |
+          node tests/sql/runner_test.mjs
+          node tests/sql/runner_wallet_test.mjs
+          node tests/sql/runner_knowledge_test.mjs
+          node tests/sql/runner_flag_test.mjs
+          node tests/runner_ui_logic.mjs
+          node tests/runner_world.mjs
       - name: Verify gift wallet admin and concurrent transactions
         env:
           TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/gift_admin_test

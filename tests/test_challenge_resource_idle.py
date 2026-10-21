@@ -76,7 +76,7 @@ class FeatureFlagCacheTests(unittest.IsolatedAsyncioTestCase):
             {"is_feature_enabled", "set_feature_flag", "_flag_redis_key", "_decode_flag_value"},
             redis_client=self.redis, supabase=self.db,
             _FEATURE_FLAG_LOCAL_CACHE=self.cache, _FEATURE_FLAG_CACHE_EPOCH=0,
-            _GAME_FLAGS={"challenge_system_enabled", "live_matches_enabled", "spectator_mode_enabled"},
+            _GAME_FLAGS={"runner_enabled", "challenge_system_enabled", "live_matches_enabled", "spectator_mode_enabled"},
             FEATURE_FLAG_CACHE_TTL_SECONDS=30,
             _FEATURE_FLAG_REDIS_PREFIX="feature_flag:",
             datetime=datetime, logger=Mock(), log_error=Mock(),
@@ -111,6 +111,9 @@ class FeatureFlagCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.set_flag("spectator_mode_enabled", False))
         self.assertTrue(await self.flag("spectator_mode_enabled"))
         self.assertEqual(self.redis.get_calls, 1)
+
+    async def test_runner_missing_row_defaults_off(self):
+        self.assertFalse(await self.flag("runner_enabled", default=True))
 
     async def test_disabled_game_flag_missing_row_defaults_off(self):
         self.assertFalse(await self.flag("challenge_system_enabled", default=True))
