@@ -11,6 +11,7 @@ if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error
 const admin = new pg.Client({connectionString: source});
 const database = `runner_test_${randomUUID().replaceAll('-', '')}`;
 let pool;
+const createdRoles = [];
 await admin.connect();
 try {
   await admin.query(`create database "${database}"`);
@@ -18,7 +19,10 @@ try {
   pool = new pg.Pool({connectionString: url.toString(), max: 20});
   for (const role of ['anon', 'authenticated', 'service_role']) {
     const exists = await admin.query('select 1 from pg_roles where rolname=$1', [role]);
-    if (!exists.rowCount) await admin.query(`create role ${role}${role === 'service_role' ? ' bypassrls' : ''}`);
+    if (!exists.rowCount) {
+      await admin.query(`create role ${role}${role === 'service_role' ? ' bypassrls' : ''}`);
+      createdRoles.push(role);
+    }
   }
   await pool.query(`create table public.users(user_id bigint primary key);
     create table public.quizzes(id uuid primary key,quiz_data jsonb);
@@ -72,5 +76,6 @@ try {
 } finally {
   if (pool) await pool.end();
   await admin.query(`drop database if exists "${database}"`);
+  for (const role of createdRoles) await admin.query(`drop role ${role}`);
   await admin.end();
 }
