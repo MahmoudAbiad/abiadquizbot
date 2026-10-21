@@ -112,7 +112,7 @@ class AdminUsersTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self): self.message = Message(); self.answer = AsyncMock()
         widget = lambda **kwargs: types.SimpleNamespace(**kwargs)
         ui = types.SimpleNamespace(Message=Message, CallbackQuery=Callback, InlineKeyboardButton=widget, InlineKeyboardMarkup=widget)
-        env = load_functions('handlers/admin/users.py', {'render_user_search_page', 'callback_user_search_page'},
+        env = load_functions('handlers/admin/users.py', {'render_user_search_page', 'callback_user_search_page', '_telegram_profile_link'},
             types=ui, html=html, logger=Mock(), admin_get_users_page=self.helpers(db)['admin_get_users_page'], safe_edit_text=AsyncMock())
         return env, Message, Callback
 
