@@ -63,8 +63,13 @@ jobs:
           node tests/sql/runner_wallet_test.mjs
           node tests/sql/runner_knowledge_test.mjs
           node tests/sql/runner_flag_test.mjs
+          node tests/sql/runner_rollout_test.mjs
           node tests/runner_ui_logic.mjs
           node tests/runner_world.mjs
+      - name: Verify real Runner PostgreSQL concurrency
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/gift_admin_test
+        run: node tests/sql/runner_concurrency_test.mjs
       - name: Verify gift wallet admin and concurrent transactions
         env:
           TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/gift_admin_test
