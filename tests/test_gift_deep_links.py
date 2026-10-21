@@ -15,8 +15,8 @@ class GiftLinks(unittest.TestCase):
         self.fn = load_functions(
             'services/gift_links.py', {'gift_code_from_start', 'build_gift_link'},
             re=re, GIFT_PREFIX='gift_',
-            _CODE=re.compile(r'[A-Za-z0-9-]{12,59}\\Z'),
-            _USERNAME=re.compile(r'[A-Za-z0-9_]{5,32}\\Z'),
+            _CODE=re.compile(r'[A-Za-z0-9-]{12,59}\Z'),
+            _USERNAME=re.compile(r'[A-Za-z0-9_]{5,32}\Z'),
         )
 
     def test_link_round_trip_with_existing_code_format(self):
