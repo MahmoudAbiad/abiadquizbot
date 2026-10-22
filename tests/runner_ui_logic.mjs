@@ -71,12 +71,12 @@ await test(`${code} on /question and /answer shows a blocked screen with close (
     assert.equal(t.calls.filter(c=>c==='question').length,1);
     await t.click('continue');assert.equal(closed,1);assert.equal(t.calls.filter(c=>c==='start').length,1);}});
 
-await test('question is hidden until /ready finishes, and /ready carries round ID/version',async()=>{
+await test('card morphs before /ready, answers wait for readiness and carry round ID/version',async()=>{
   let release;const gate=new Promise(r=>{release=r;});const bodies=[];
   const t=await scenario(async(op,body)=>{if(op==='ready'){bodies.push(body);await gate;}return base(op);});
   await t.click('start');await t.pump(()=>t.calls.includes('ready'));await tick();
   assert.equal(t.calls.filter(c=>c==='question').length,1);assert.ok(t.calls.indexOf('ready')>t.calls.indexOf('question'));
-  assert.equal(t.els.get('question').hidden,true);assert.equal(t.els.get('choices').hidden,true);
+  assert.equal(t.els.get('game').dataset.questionPresentation,'card');assert.equal(t.els.get('choices').hidden,true);
   assert.equal(bodies[0].round_id,'r');assert.equal(bodies[0].version,0);
   release();for(let i=0;i<4;i++)await tick();
   assert.equal(t.els.get('question').hidden,false);assert.equal(t.els.get('choices').hidden,false);});

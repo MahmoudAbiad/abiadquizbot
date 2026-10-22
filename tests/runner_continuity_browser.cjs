@@ -41,7 +41,7 @@ const {chromium}=require('playwright'),path=require('path'),assert=require('asse
   });
   await page.goto((process.env.RUNNER_TEST_ORIGIN||'http://runner.test')+'/webapp/runner/index.html?quiz_id=q',{waitUntil:'domcontentloaded',timeout:90000});
   await page.waitForFunction(()=>!document.querySelector('#start').disabled);await page.click('#start');await page.waitForFunction(()=>document.querySelector('#game').dataset.phase==='RUN');
-  await page.clock.runFor(14000);await page.waitForSelector('#question:not([hidden])');await page.clock.runFor(20);
+  await page.clock.runFor(14000);await page.waitForSelector('#choices:not([hidden])');await page.clock.runFor(20);
   const snapshot=()=>page.evaluate(()=>({distance:Number(document.querySelector('#game').dataset.distance),lane:document.querySelector('#game').dataset.playerLane,...window.canvasScene}));
   const stopped=await snapshot();assert.equal(stopped.coins.length,1);assert.equal(stopped.obstacles.length,1);assert.equal(stopped.marks.length,30);
   await page.clock.runFor(1000);assert.deepEqual(await snapshot(),stopped);

@@ -35,7 +35,7 @@ const {chromium}=require('playwright'),path=require('path'),assert=require('asse
   await page.clock.runFor(6000);const nearer=Number(await page.getAttribute('#game','data-barrier-z'));assert.ok(nearer>far&&nearer<.62);
   const shots=process.env.RUNNER_SCREENSHOT_DIR||require('os').tmpdir();
   if(scenario.name==='jetpack-correct')await page.screenshot({path:path.join(shots,'runner-road-barrier-approaching.png')});
-  await page.clock.runFor(6000);await page.waitForSelector('#question:not([hidden])');
+  await page.clock.runFor(6000);await page.waitForSelector('#choices:not([hidden])');
   assert.equal(await page.locator('#choices').evaluate(e=>e.classList.contains('gated')),false);
   assert.equal(await page.getAttribute('#game','data-barrier'),'closed');assert.equal(await page.locator('.lane').count(),3);
   if(scenario.name==='jetpack-correct'||scenario.compact)await page.screenshot({path:path.join(shots,'runner-road-barrier-'+scenario.name+'-question.png')});

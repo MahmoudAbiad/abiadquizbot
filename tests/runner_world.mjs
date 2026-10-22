@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const source=fs.readFileSync(new URL('../webapp/runner/world.js',import.meta.url),'utf8');
-const {stepObjects,visibleObject,objectAlpha,objectLift,phaseSpeed,useClassic,PHASES,roadZ,roadMarkZ,WORLD_SPEED,projectRoad,previewLines}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {stepObjects,visibleObject,objectAlpha,objectLift,phaseSpeed,useClassic,PHASES,roadZ,roadMarkZ,WORLD_SPEED,projectRoad,previewLines,wallPlaqueRect,stepChase,CHASE_SECONDS}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+let chase=stepChase(0,0,0,1);assert.deepEqual(chase,{strikes:1,remaining:CHASE_SECONDS,caught:false});
+assert.deepEqual(stepChase(chase.strikes,chase.remaining,0),chase); // Question/background time never calls the tick.
+assert.equal(stepChase(1,8,1,1).caught,true);assert.equal(stepChase(0,0,0,2).caught,true);
+chase=stepChase(1,8,8.1);assert.deepEqual(chase,{strikes:0,remaining:0,caught:false});
+assert.equal(stepChase(chase.strikes,chase.remaining,0,1).caught,false);
+const plaque=wallPlaqueRect(.7,390,844);assert.ok(plaque.width>0&&plaque.height>0);assert.ok(wallPlaqueRect(.7,390,844,1).y<plaque.y);
 const measure=t=>Array.from(t).length;
 assert.deepEqual(previewLines('ما ناتج الجمع؟',measure,40),['ما ناتج الجمع؟']);
 for(const text of ['سؤال طويل '.repeat(80),'x'.repeat(500),'نص عربي مع رموز 🚀 '.repeat(30)]){

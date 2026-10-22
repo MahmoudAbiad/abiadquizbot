@@ -23,6 +23,16 @@ export function projectRoad(lane,z,width,height){
  const road=width*(.18+.92*(y/height-.34)/.66);
  return {x:width/2+(lane-1)*road/3,y,scale:.15+.95*depth,road};
 }
+export function wallPlaqueRect(z,width,height,open=0){
+ const p=projectRoad(1,z,width,height),frameWidth=p.road*1.03,frameHeight=height*.48*p.scale,post=Math.max(3,10*p.scale),plateWidth=(frameWidth-post*2)*.91;
+ return {x:p.x-plateWidth/2,y:p.y-frameHeight+post-open*frameHeight+frameHeight*.06,width:plateWidth,height:plateWidth*360/640};
+}
+export const CHASE_SECONDS=8;
+export function stepChase(strikes,remaining,dt,hits=0){
+ remaining=Math.max(0,remaining-dt);if(!remaining)strikes=0;
+ if(hits){strikes+=hits;remaining=CHASE_SECONDS;}
+ return {strikes,remaining,caught:strikes>=2};
+}
 export function phaseSpeed(phase,elapsed=0,reduced=false){
  if(phase==='RUN')return 1;
  if(phase==='APPROACH'){const t=Math.min(1,elapsed/1.5);return reduced?.35:1-.65*(1-(1-t)**3);}

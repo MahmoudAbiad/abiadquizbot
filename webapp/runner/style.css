@@ -3,8 +3,9 @@
 .lane.correct{outline:3px solid #6af0b4!important;background:#175443!important;opacity:1}
 .lane.closed{opacity:.45}
 [data-phase="RESOLVE"] .lane.correct{box-shadow:0 0 25px #64e2ac;}
-#question{animation:question-in .25s ease-out}
-@keyframes question-in{from{opacity:0;translate:0 -12px}to{opacity:1;translate:0 0}}
+#question.preparing{overflow:hidden;pointer-events:none}
+#question.preparing #timer,#question.preparing .track{visibility:hidden}
+#answerText img{display:block;width:100%;max-height:28vh;object-fit:contain;background:#fff;border-radius:10px;padding:8px;margin:12px auto 0}
 .impact canvas{animation:gate-hit .24s linear}
 @keyframes gate-hit{25%{translate:-4px 0}75%{translate:4px 0}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
