@@ -4,6 +4,19 @@ export const PHASES=Object.freeze(['RUN','APPROACH','DECIDE','RESOLVE']);
 export const WORLD_SPEED=.31;
 export function roadZ(distance,anchor){return .02+distance-anchor;}
 export function roadMarkZ(index,distance){return (index/15+distance)%1;}
+export function previewLines(text,measure,width,maxLines=4){
+ const original=Array.from(String(text).replace(/\s+/g,' ').trim()),chars=original.slice(0,320),lines=[];
+ while(chars.length&&lines.length<maxLines){
+  let count=1;while(count<chars.length&&measure(chars.slice(0,count+1).join(''))<=width)count++;
+  if(count<chars.length){const space=chars.slice(0,count).lastIndexOf(' ');if(space>0)count=space;}
+  let line=chars.splice(0,count).join('').trim();while(chars[0]===' ')chars.shift();
+  if(lines.length===maxLines-1&&(chars.length||original.length>320)){
+   while(line&&measure(line+'…')>width)line=Array.from(line).slice(0,-1).join('');line+='…';
+  }
+  lines.push(line);
+ }
+ return lines;
+}
 export function projectRoad(lane,z,width,height){
  const t=Math.max(0,z),depth=t*t,y=height*(.34+.72*depth);
  // Match the asphalt's straight edges at this screen height.

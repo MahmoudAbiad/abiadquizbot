@@ -1,12 +1,12 @@
-import {GameAudio} from './audio.js?v=continuous-road-20261022-1';
-import {WORLD_SPEED,roadZ,roadMarkZ,projectRoad,phaseSpeed,stepObjects,visibleObject,objectAlpha,objectLift} from './world.js?v=continuous-road-20261022-1';
+import {GameAudio} from './audio.js?v=question-wall-20261022-1';
+import {WORLD_SPEED,roadZ,roadMarkZ,projectRoad,previewLines,phaseSpeed,stepObjects,visibleObject,objectAlpha,objectLift} from './world.js?v=question-wall-20261022-1';
 const $=id=>document.getElementById(id),tg=window.Telegram?.WebApp;
 tg?.ready();tg?.expand();tg?.disableVerticalSwipes?.();
 const params=new URLSearchParams(location.search),base={init_data:tg?.initData||'',quiz_id:params.get('quiz_id'),launch:params.get('launch')||''};
 const audio=new GameAudio(),canvas=$('world'),ctx=canvas.getContext('2d',{alpha:false});
 let w=0,h=0,state='home',lane=1,visualLane=1,jump=0,clock=0,runTime=0,lastSpawn=0,objects=[],coins=0,score=0,lives=1,strikes=0,round=null,question=null,deadline=0,last=0,raf=0,config=null,disposed=false,paused=false,answerPending=false,final=false,retryAt=0,gone=false,blocked=false,retries=0,pageHidden=false,loadGeneration=0,foregroundWaiters=[];
 const reduced=window.matchMedia?.('(prefers-reduced-motion: reduce)').matches||false;
-let phase='RUN',phaseTime=0,approachWaiters=[],effects=[],resolveResult=null;
+let phase='RUN',phaseTime=0,effects=[],resolveResult=null;
 let roadDistance=0,segmentStart=0,loadedSegment=-1,barriers=[],currentBarrier=null,answerLane=1;
 let wallet={coins:0,jetpack_owned:false,version:0,knowledge:0,knowledge_earned:0,car_level:0,equipped:'none'},flying=false,track=null,trackIndex=0,segment=0,claimBusy=null,saveClock=0,buying=false,equipment='none',carLevel=0,wantsFlight=true;
 const carPrices=[1000,500,5000];
@@ -33,7 +33,7 @@ function walletUI(){const balance=wallet.coins+pendingCount();$('homeBalance').t
  $('buyJetpack').textContent=wallet.jetpack_owned?'✓ تمتلك الحقيبة':buying?'جارٍ الشراء…':'شراء بـ100 عملة';
  $('shopMessage').textContent=wallet.jetpack_owned?'الحقيبة ملكك دائمًا. الطيران متاح في كل جولة.':wallet.coins<100?`تحتاج ${100-wallet.coins} عملة إضافية.`:'';
  show('flight',canFly());$('flight').textContent=flying?'↓ هبوط':'🚀 طيران';$('flight').setAttribute('aria-pressed',String(flying));$('jump').disabled=flying;
- $('hint').textContent=hasMagnet()?`🧲 المغناطيس يجمع من المسارات الثلاثة${flying?' · طيران بلا حد':''}`:flying?'طيران بلا حد · بدّل المسار ↔ لجمع العملات':'اسحب ↔ لتغيير المسار · ↑ للقفز';}
+ $('hint').textContent=state==='approach'?'اقرأ السؤال على الجدار · الأجوبة عند الوصول':hasMagnet()?`🧲 المغناطيس يجمع من المسارات الثلاثة${flying?' · طيران بلا حد':''}`:flying?'طيران بلا حد · بدّل المسار ↔ لجمع العملات':'اسحب ↔ لتغيير المسار · ↑ للقفز';}
 async function flushCoins(){
  if(claimBusy)return claimBusy;
  claimBusy=(async()=>{for(const [key,ids] of pendingCoins){if(!ids.size){pendingCoins.delete(key);continue;}
@@ -45,7 +45,7 @@ async function flushCoins(){
 function queueCoin(id,part){const key=round.round_id+':'+part+':'+base.quiz_id;if(!pendingCoins.has(key))pendingCoins.set(key,new Set());pendingCoins.get(key).add(id);saveReceipts();}
 function sendFinalCoins(){saveReceipts();for(const [key,ids] of pendingCoins){const [rid,part,qid]=key.split(':');fetch('/api/runner/coins',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...base,quiz_id:qid,round_id:rid,segment:Number(part),coin_ids:[...ids]}),keepalive:true}).catch(()=>{});}}
 window.addEventListener('online',()=>flushCoins().catch(()=>{}));
-$('flight').onclick=()=>{if(canFly()&&state==='run'){wantsFlight=!wantsFlight;flying=canFly()&&wantsFlight;jump=0;walletUI();audio.play('jump');}};
+$('flight').onclick=()=>{if(canFly()&&['run','approach'].includes(state)){wantsFlight=!wantsFlight;flying=canFly()&&wantsFlight;jump=0;walletUI();audio.play('jump');}};
 $('storeButton').onclick=async()=>{show('home',false);show('store',true);walletUI();try{await flushCoins();applyWallet(await api('wallet'));}catch(e){notice(e.message);}};
 $('closeStore').onclick=()=>{show('store',false);show('home',true);};
 $('buyJetpack').onclick=async()=>{if(buying||wallet.jetpack_owned)return;buying=true;walletUI();try{await flushCoins();const result=await api('buy-jetpack');applyWallet(result);notice(result.purchase_status==='insufficient'?'رصيدك غير كافٍ.':result.purchase_status==='purchased'?'الحقيبة أصبحت ملكك! الطيران بلا حد في كل جولة.':'الحقيبة موجودة لديك بالفعل.');}catch(e){notice(e.message);}finally{buying=false;walletUI();}};
@@ -99,7 +99,7 @@ function person(x,y,size,cop=false,phase=0){ctx.save();ctx.translate(x,y);ctx.sc
  ctx.beginPath();ctx.moveTo(-7,-20);ctx.lineTo(-10+step,4);ctx.moveTo(7,-20);ctx.lineTo(10-step,4);ctx.stroke();
  roundRect(-16,-57,32,40,9,cop?'#1f3654':'#54dbcf');ctx.strokeStyle=cop?'#1f3654':'#54dbcf';ctx.beginPath();ctx.moveTo(-14,-48);ctx.lineTo(-23,-26-step*.5);ctx.moveTo(14,-48);ctx.lineTo(23,-26+step*.5);ctx.stroke();
  roundRect(-12,-78,24,25,10,'#e9ad7b');roundRect(-13,-81,26,11,5,cop?'#213959':'#212c3f');if(cop){roundRect(-17,-74,34,5,2,'#10223a');ctx.fillStyle='#ffcf6e';ctx.fillRect(5,-49,6,7);}else{roundRect(-12,-52,24,26,6,'#faad63');ctx.fillStyle='#fae7c5';ctx.fillRect(-5,-45,11,3);}ctx.restore();}
-function draw(dt){clock+=dt;const active=!!round&&!['home','loading','gone'].includes(state);phaseTime+=dt;if(phaseTime>=1.5)approachWaiters.splice(0).forEach(f=>f());
+function draw(dt){clock+=dt;const active=!!round&&!['home','loading','gone'].includes(state);phaseTime+=dt;
  if(!paused&&['run','approach'].includes(state)){
   let travel=dt*WORLD_SPEED*phaseSpeed(phase,phaseTime,reduced);
   if(state==='approach'&&currentBarrier)travel=Math.min(travel,Math.max(0,currentBarrier.anchor+.68-roadDistance));
@@ -122,7 +122,7 @@ function draw(dt){clock+=dt;const active=!!round&&!['home','loading','gone'].inc
 }
 let caughtAt=0;
 function updateWorld(dt){
- if(state==='run'&&track)while(trackIndex<track.objects.length&&track.objects[trackIndex].at<=runTime){const item=track.objects[trackIndex++];const anchor=segmentStart+item.at*WORLD_SPEED;objects.push({...item,anchor,segment:loadedSegment,z:roadZ(roadDistance,anchor),done:false});}
+ if((state==='run'||state==='approach')&&track)while(trackIndex<track.objects.length&&track.objects[trackIndex].at<=runTime){const item=track.objects[trackIndex++];const anchor=segmentStart+item.at*WORLD_SPEED;objects.push({...item,anchor,segment:loadedSegment,z:roadZ(roadDistance,anchor),done:false});}
  if(state==='run'||state==='approach'){
   const step=stepObjects(objects,dt,visualLane,jump,flying,hasMagnet(),roadDistance);objects=step.objects;
   if(step.coins){coins+=step.coins;for(const o of step.effects)if(o.kind==='coin')queueCoin(o.id,o.segment);audio.play('coin');hud();}
@@ -131,7 +131,31 @@ function updateWorld(dt){
   if(step.hits){strikes+=step.hits;audio.play('near');tg?.HapticFeedback?.impactOccurred('medium');if(strikes>=2){caughtAt=clock;state='caught';audio.play('caught');showEnd('أمسك بك الشرطي!','تفادَ الحواجز أو اقفز فوقها في المحاولة القادمة.');api('finish',roundPayload()).catch(()=>{});return;}}
  }
  saveClock+=dt;if(saveClock>=1){saveClock=0;flushCoins().catch(()=>{});}
- if(state==='run'&&runTime>=8)loadQuestion();
+ if(state==='run'&&currentBarrier&&roadZ(roadDistance,currentBarrier.anchor)>=.25){state='approach';setPhase('APPROACH');$('hint').textContent='اقرأ السؤال على الجدار · الأجوبة عند الوصول';audio.setMode('think');}
+ if(state==='approach'&&currentBarrier&&roadZ(roadDistance,currentBarrier.anchor)>=.70-1e-8)loadQuestion();
+}
+function makeQuestionPreview(barrier,data,image=null){
+ const panel=document.createElement('canvas');panel.width=640;panel.height=360;const c=panel.getContext('2d');
+ c.fillStyle='#f4f8fb';c.fillRect(0,0,640,360);c.direction='rtl';c.textAlign='center';c.textBaseline='middle';
+ c.fillStyle='#247b7a';c.font='bold 25px system-ui';c.fillText(`السؤال ${data.number}`,320,35);
+ if(image){const scale=Math.min(592/image.naturalWidth,225/image.naturalHeight);c.drawImage(image,320-image.naturalWidth*scale/2,175-image.naturalHeight*scale/2,image.naturalWidth*scale,image.naturalHeight*scale);}
+ else{
+  const text=data.game_image_url?'جارٍ تجهيز معاينة السؤال…':data.text;
+  const font=text.length>90?36:46;c.fillStyle='#142536';c.font=`bold ${font}px system-ui`;
+  const lines=previewLines(text,value=>c.measureText(value)?.width??Array.from(value).length*font*.6,570);
+  lines.forEach((line,i)=>c.fillText(line,320,175+(i-(lines.length-1)/2)*font*1.3));
+ }
+ c.fillStyle='#477087';c.font='24px system-ui';c.fillText('السؤال والأجوبة كاملة عند الوصول',320,328);barrier.previewCanvas=panel;
+}
+function prepareQuestion(barrier){
+ if(barrier.request)return barrier.request;
+ // /question only fetches content. /ready is still reserved for arrival.
+ const payload=roundPayload(),request=api('question',payload).then(data=>{
+  if(barrier.request!==request)return data;
+  barrier.preview=data;makeQuestionPreview(barrier,data);
+  if(data.game_image_url){const img=new Image();img.src=data.game_image_url;imageDecoded(img).then(()=>{if(barrier.preview===data&&img.naturalWidth&&img.naturalHeight)makeQuestionPreview(barrier,data,img);}).catch(()=>{});}
+  return data;
+ });barrier.request=request;return request;
 }
 function drawQuestionBarrier(){
  if(!round||['home','loading','gone'].includes(state))return;
@@ -150,6 +174,7 @@ function drawQuestionBarrier(){
  roundRect(left+post,doorY,width-post*2,height-post,0,success?'#347c70':'#cc7655');
  ctx.strokeStyle=success?'#77e6b6':'#ffdc9c';ctx.lineWidth=Math.max(2,12*p.scale);
  for(let x=left-height;x<left+width+height;x+=35*p.scale){ctx.beginPath();ctx.moveTo(x,doorY);ctx.lineTo(x+height,doorY+height);ctx.stroke();}
+ if(barrier.previewCanvas){const plateWidth=(width-post*2)*.91,plateHeight=plateWidth*360/640;ctx.drawImage(barrier.previewCanvas,p.x-plateWidth/2,doorY+height*.06,plateWidth,plateHeight);}
  ctx.restore();
  if(z>.25){ctx.fillStyle='#092738';ctx.font=`bold ${Math.max(8,16*p.scale)}px system-ui`;ctx.textAlign='center';ctx.fillText(success?'✓': '؟',p.x,top+post*.8);}
  ctx.restore();}
@@ -159,8 +184,8 @@ function drawEffects(dt){for(const e of effects){e.age+=dt;const t=Math.min(1,e.
  if(e.kind==='coin'){const x=e.x+(w*.84-e.x)*t,y=e.y+(85-e.y)*t;ctx.beginPath();ctx.arc(x,y,10+4*t,0,Math.PI*2);ctx.fill();}ctx.restore();}effects=effects.filter(e=>e.age<.22);}
 function hud(){$('coins').textContent=wallet.coins+pendingCount();$('score').textContent=score;$('lives').textContent=lives;walletUI();}
 function selectLane(value){answerLane=Math.max(0,Math.min(2,value));document.querySelectorAll('.lane').forEach((el,i)=>el.classList.toggle('selected',i===answerLane));}
-function move(d){if(state==='run')lane=Math.max(0,Math.min(2,lane+d));else if(state==='question')selectLane(answerLane+d);}
-function doJump(){if(state==='run'&&!flying&&jump===0){jump=.72;audio.play('jump');}}
+function move(d){if(state==='run'||state==='approach')lane=Math.max(0,Math.min(2,lane+d));else if(state==='question')selectLane(answerLane+d);}
+function doJump(){if(['run','approach'].includes(state)&&!flying&&jump===0){jump=.72;audio.play('jump');}}
 let touch=null;canvas.addEventListener('pointerdown',e=>{touch={x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId);});canvas.addEventListener('pointerup',e=>{if(!touch)return;const dx=e.clientX-touch.x,dy=e.clientY-touch.y;if(Math.abs(dx)>25&&Math.abs(dx)>Math.abs(dy))move(dx>0?1:-1);else if(dy< -25)doJump();touch=null;});
 window.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT')return;if(['ArrowLeft','ArrowRight','ArrowUp',' ','Enter'].includes(e.key))e.preventDefault();if(e.key==='ArrowLeft')move(-1);if(e.key==='ArrowRight')move(1);if(e.key==='ArrowUp'||e.key===' ')doJump();if(e.key==='Enter'&&state==='question')submit(false);});
 $('left').onclick=()=>move(-1);$('right').onclick=()=>move(1);$('jump').onclick=doJump;
@@ -179,18 +204,20 @@ async function beginRun(){
   // Retry leaves the same anchors, pending objects and distance untouched.
   if(loadedSegment!==segment){
    track=nextTrack;loadedSegment=segment;trackIndex=0;runTime=0;segmentStart=roadDistance;
-   currentBarrier={anchor:roadDistance+8*WORLD_SPEED-.60,open:0,broken:false};
+   currentBarrier={anchor:roadDistance+8*WORLD_SPEED-.60,open:0,broken:false,request:null};
+   makeQuestionPreview(currentBarrier,{number:segment+1,text:'جارٍ تجهيز السؤال…'});
    barriers=barriers.filter(b=>roadZ(roadDistance,b.anchor)<1.15);barriers.push(currentBarrier);
   }
-  state='run';setPhase('RUN');resolveResult=null;$('choices').classList.remove('timed-out');audio.setMode('run');show('controls',true);show('hint',true);hud();
+  state='run';setPhase('RUN');resolveResult=null;$('choices').classList.remove('timed-out');audio.setMode('run');show('controls',true);show('hint',true);hud();prepareQuestion(currentBarrier).catch(()=>{});
  }catch(e){if(isBlocked(e)){roundBlocked(e.message);return;}if(isGone(e)){roundGone(e.message);return;}state='track-retry';notice(e.message);show('feedback',true);$('feedbackTitle').textContent='تعذر تجهيز المسار';$('answerText').textContent='عملاتك المحفوظة محفوظة في حسابك.';$('explanation').textContent='';$('resultStats').textContent='';$('continue').textContent='إعادة المحاولة';}
 }
 async function loadQuestion(){
- if(state!=='run'&&state!=='retry')return;
+ if(state!=='approach'&&state!=='retry')return;
+ if(state==='retry'&&currentBarrier)currentBarrier.request=null;
  const generation=++loadGeneration;
- state='approach';setPhase('APPROACH');show('hint',false);show('controls',false);show('question',false);show('choices',false);show('feedback',false);audio.setMode('think');
+ state='question-loading';show('hint',false);show('controls',false);show('question',false);show('choices',false);show('feedback',false);audio.setMode('think');
  try{
-  const next=await api('question',roundPayload());ensureCurrentLoad(generation);
+  const next=await prepareQuestion(currentBarrier);ensureCurrentLoad(generation);
   question=next;round.version=next.version;
   const imgs=[],content=$('questionContent');content.replaceChildren();
   if(question.game_image_url){const img=new Image();img.alt=question.text;img.src=question.game_image_url;content.append(img);imgs.push(img);}
@@ -198,7 +225,6 @@ async function loadQuestion(){
   $('number').textContent=`السؤال ${question.number} / ${question.total}`;$('lanes').replaceChildren();
   question.options.forEach((o,i)=>{const b=document.createElement('button');b.className='lane';b.setAttribute('aria-label',o.text);const tag=document.createElement('span');tag.className='letter';tag.textContent=['أ','ب','ج'][i];b.append(tag);if(o.image_url){const img=new Image();img.src=o.image_url;img.alt=o.text;b.append(img);imgs.push(img);}else{const span=document.createElement('span');span.textContent=o.text;b.append(span);}b.onclick=()=>selectLane(i);$('lanes').append(b);});
   await decodeAll(imgs);ensureCurrentLoad(generation);
-  if(!reduced&&phaseTime<1.5)await new Promise(resolve=>approachWaiters.push(resolve));ensureCurrentLoad(generation);
   // Never send /ready while the app is hidden or waiting for the user to resume.
   await waitForForeground();ensureCurrentLoad(generation);
   const readySent=performance.now(),ready=await api('ready',roundPayload());
@@ -223,7 +249,7 @@ async function submit(timeout){if(state!=='question'||answerPending)return;answe
  }catch(e){if(isBlocked(e)){roundBlocked(e.message);return;}if(isGone(e)){roundGone(e.message);return;}if(e.code==='stale_version'){state='retry';loadQuestion();return;}notice(e.message);retryAt=performance.now()+5000;$('confirm').disabled=false;}finally{answerPending=false;}}
 function finishResolve(){const result=resolveResult;if(!result)return;if(currentBarrier)currentBarrier.open=result.correct?1:.75;flushCoins().catch(()=>{});state=result.status==='caught'?'caught':'feedback';caughtAt=clock;$('game').classList.remove('impact');audio.setMode('think');show('choices',false);show('question',false);show('feedback',true);$('feedbackIcon').textContent=result.correct?'✦':'♡';$('feedbackTitle').textContent=result.timeout?'انتهى وقت السؤال — اصطدمت بالحاجز':result.correct?'إجابة صحيحة!':(result.status==='caught'?'أمسك بك الشرطي!':'اصطدمت بالحاجز!');$('answerText').textContent='الإجابة الصحيحة: '+result.correct_text;$('explanation').textContent=result.explanation;$('knowledgeReward').textContent=result.knowledge_awarded?`+${result.knowledge_awarded} نقطة معرفة · إتقان جديد`:result.correct&&result.knowledge_awarded===0?'مراجعة صحيحة — مكافأة هذا السؤال محفوظة سابقًا.':'';final=result.status!=='running';$('resultStats').textContent=final?`نتيجة الجولة ${score} · عملات الركض ${coins}`:'';$('continue').textContent=final?'العب من جديد ←':'تابع الركض ←';if(final)setTimeout(()=>{if(final)audio.stop();},900);}
 $('confirm').onclick=()=>submit(false);
-function showEnd(title,explanation){$('knowledgeReward').textContent='';flushCoins().catch(()=>{});final=true;loadGeneration++;approachWaiters.splice(0).forEach(f=>f());show('controls',false);show('hint',false);show('feedback',true);$('feedbackTitle').textContent=title;$('answerText').textContent='';$('explanation').textContent=explanation;$('resultStats').textContent=`نتيجة الجولة ${score} · عملات الركض ${coins}`;$('continue').textContent='العب من جديد ←';setTimeout(()=>{if(final)audio.stop();},900);}
+function showEnd(title,explanation){$('knowledgeReward').textContent='';flushCoins().catch(()=>{});final=true;loadGeneration++;show('controls',false);show('hint',false);show('feedback',true);$('feedbackTitle').textContent=title;$('answerText').textContent='';$('explanation').textContent=explanation;$('resultStats').textContent=`نتيجة الجولة ${score} · عملات الركض ${coins}`;$('continue').textContent='العب من جديد ←';setTimeout(()=>{if(final)audio.stop();},900);}
 $('continue').onclick=()=>{if(blocked){if(tg){tg.close();return;}blocked=false;gone=false;show('feedback',false);show('home',true);state='home';$('start').disabled=false;return;}if(gone){gone=false;show('feedback',false);state='home';start();return;}if(state==='track-retry'){beginRun();}else if(state==='retry'){show('feedback',false);loadQuestion();}else if(final){show('feedback',false);show('home',true);state='home';$('start').disabled=false;}else beginRun();};
 $('settingsButton').onclick=()=>{show('home',false);show('settings',true);$('livesInput').value=config.settings.lives;$('uniform').value=config.settings.uniform_seconds||'';$('estimate').disabled=['done','running'].includes(config.settings.ai_status);$('estimate').textContent=config.settings.ai_status==='done'?'تم حفظ اقتراح AI':config.settings.ai_status==='running'?'التهيئة قيد التنفيذ':'تقدير AI مرة واحدة';$('timings').replaceChildren();config.questions.forEach((q,i)=>{const label=document.createElement('label');label.className='timing';const span=document.createElement('span');span.textContent=`${i+1}. ${q.text.slice(0,90)}`;const small=document.createElement('small');small.textContent=`المعتمد: ${q.seconds}ث · AI: ${q.ai_seconds??'غير متاح'}`;span.append(small);const input=document.createElement('input');input.type='number';input.min=10;input.max=300;input.dataset.key=q.key;input.value=config.settings.manual_times[q.key]||'';label.append(span,input);$('timings').append(label);});};
 $('closeSettings').onclick=()=>{show('settings',false);show('home',true);};
@@ -233,7 +259,7 @@ function animate(now){if(disposed)return;const dt=Math.min(.04,(now-last)/1000||
 raf=requestAnimationFrame(animate);
 document.addEventListener('visibilitychange',()=>{if(document.hidden){flushCoins().catch(()=>{});paused=true;audio.suspend();}else if(round&&!final){show('resume',true);}else{paused=false;wakeForeground();}});
 $('resume').onclick=()=>{if(document.hidden||pageHidden)return;paused=false;last=performance.now();audio.resume();show('resume',false);wakeForeground();};
-function cleanup(){sendFinalCoins();disposed=true;loadGeneration++;approachWaiters.splice(0).forEach(f=>f());cancelAnimationFrame(raf);audio.stop();objects=[];if(round&&!final){fetch('/api/runner/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...base,...roundPayload()}),keepalive:true}).catch(()=>{});}}
+function cleanup(){sendFinalCoins();disposed=true;loadGeneration++;cancelAnimationFrame(raf);audio.stop();objects=[];if(round&&!final){fetch('/api/runner/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...base,...roundPayload()}),keepalive:true}).catch(()=>{});}}
 window.addEventListener('pagehide',()=>{sendFinalCoins();pageHidden=true;paused=true;audio.suspend();});
-window.addEventListener('pageshow',e=>{pageHidden=false;if(!e.persisted){wakeForeground();return;}disposed=false;cancelAnimationFrame(raf);last=performance.now();raf=requestAnimationFrame(animate);if(round&&!final&&!gone){paused=true;show('resume',true);if(['question','approach','loading','retry'].includes(state)){state='retry';loadQuestion();}}else if(!round||final)refreshConfig().catch(()=>{});});$('exit').onclick=()=>{cleanup();tg?.close();if(!tg){show('home',true);$('title').textContent='انتهت الجولة. أعد فتح اللعبة من البوت.';}};
+window.addEventListener('pageshow',e=>{pageHidden=false;if(!e.persisted){wakeForeground();return;}disposed=false;cancelAnimationFrame(raf);last=performance.now();raf=requestAnimationFrame(animate);if(round&&!final&&!gone){paused=true;show('resume',true);if(['question','question-loading','loading','retry'].includes(state)){state='retry';loadQuestion();}}else if(!round||final)refreshConfig().catch(()=>{});});$('exit').onclick=()=>{cleanup();tg?.close();if(!tg){show('home',true);$('title').textContent='انتهت الجولة. أعد فتح اللعبة من البوت.';}};
 if(base.init_data&&base.quiz_id)refreshConfig().catch(e=>{$('title').textContent=e.message;});else $('title').textContent='افتح اللعبة من زر «العب رحلة أبيض» داخل البوت التجريبي.';
