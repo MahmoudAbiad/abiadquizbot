@@ -1,5 +1,15 @@
 // Pure bounded world rules; Runner currency never affects knowledge scores.
 export const PHASES=Object.freeze(['RUN','APPROACH','DECIDE','RESOLVE']);
+// One road-wide question barrier exists from the start of every segment.
+// It stops short of the player until the server grades the answer; flight
+// never changes its height, position, or whether passage is allowed.
+export function questionBarrier(phase,runTime,elapsed,correct=false){
+ const t=Math.max(0,Math.min(1,elapsed/.55));
+ if(phase==='RUN')return {z:.02+.60*Math.min(1,runTime/8),open:0};
+ if(phase==='APPROACH')return {z:.62+.08*Math.min(1,elapsed/1.5),open:0};
+ if(phase==='RESOLVE')return {z:.70+(correct?.43:.11)*t,open:correct?t:0};
+ return {z:.70,open:0};
+}
 export function phaseSpeed(phase,elapsed=0,reduced=false){
  if(phase==='RUN')return 1;
  if(phase==='APPROACH'){const t=Math.min(1,elapsed/1.5);return reduced?.35:1-.65*(1-(1-t)**3);}

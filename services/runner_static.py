@@ -1,7 +1,7 @@
 """Keep Runner updates fresh without changing caching for other bot WebApps."""
 from starlette.staticfiles import StaticFiles
 
-RUNNER_ASSET_VERSION = 'flight-choice-20261020-2'
+RUNNER_ASSET_VERSION = 'road-barrier-20261022-1'
 
 
 class RunnerAwareStaticFiles(StaticFiles):

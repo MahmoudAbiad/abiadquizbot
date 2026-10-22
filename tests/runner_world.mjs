@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const source=fs.readFileSync(new URL('../webapp/runner/world.js',import.meta.url),'utf8');
-const {stepObjects,visibleObject,objectAlpha,objectLift,phaseSpeed,useClassic,PHASES}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {stepObjects,visibleObject,objectAlpha,objectLift,phaseSpeed,useClassic,PHASES,questionBarrier}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+assert.equal(questionBarrier('RUN',0,0).z,.02);
+assert.equal(questionBarrier('RUN',8,0).z,questionBarrier('APPROACH',8,0).z);
+assert.equal(questionBarrier('APPROACH',8,1.5).z,questionBarrier('DECIDE',8,0).z);
+assert.equal(questionBarrier('DECIDE',100,100).open,0);
+assert.ok(questionBarrier('RESOLVE',8,.55,true).z>1);
+assert.equal(questionBarrier('RESOLVE',8,.55,true).open,1);
+assert.ok(Math.abs(questionBarrier('RESOLVE',8,.55,false).z-.81)<1e-12);
+assert.equal(questionBarrier('RESOLVE',8,.55,false).open,0);
 const coin={kind:'coin',lane:1,z:.78,done:false};
 const first=stepObjects([coin],.05,1,0);assert.equal(first.coins,1);assert.equal(visibleObject(coin),false);
 assert.equal(stepObjects(first.objects,.05,1,0).coins,0);
