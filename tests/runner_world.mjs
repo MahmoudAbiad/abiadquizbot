@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const source=fs.readFileSync(new URL('../webapp/runner/world.js',import.meta.url),'utf8');
-const {stepObjects,visibleObject,objectAlpha,objectLift,phaseSpeed,useClassic,PHASES,roadZ,roadMarkZ,WORLD_SPEED,projectRoad}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {stepObjects,visibleObject,objectAlpha,objectLift,phaseSpeed,useClassic,PHASES,roadZ,roadMarkZ,WORLD_SPEED,projectRoad,previewLines}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const measure=t=>Array.from(t).length;
+assert.deepEqual(previewLines('ما ناتج الجمع؟',measure,40),['ما ناتج الجمع؟']);
+for(const text of ['سؤال طويل '.repeat(80),'x'.repeat(500),'نص عربي مع رموز 🚀 '.repeat(30)]){
+ const lines=previewLines(text,measure,25);assert.ok(lines.length<=4);assert.ok(lines.every(t=>measure(t)<=25));assert.ok(lines.at(-1).endsWith('…'));
+}
 for(const z of [.02,.2,.5,.81,1]){
  const p=projectRoad(1,z,390,844),edgeWidth=390*(.18+.92*(p.y/844-.34)/.66);
  assert.ok(Math.abs(p.road-edgeWidth)<1e-9);

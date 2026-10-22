@@ -21,7 +21,7 @@ const {chromium}=require('playwright'),path=require('path'),assert=require('asse
     if(op==='start')data={round_id:'r',version:0,lives:3,total:3};
     if(op==='track')data={equipment:scenario.item,car_level:3,objects:[],claimed:[]};
     if(op==='question')data={text:'ما ناتج ٢ + ٢؟',options:[{id:0,text:scenario.compact?'إجابة طويلة لاختبار التفاف النص '.repeat(7):'٣'},{id:1,text:'٤'},{id:2,text:'٥'}],seconds:30,number:1,total:3,version:0};
-    if(op==='ready')data={remaining_seconds:scenario.timeout?1:30};
+    if(op==='ready')data={remaining_seconds:scenario.timeout?5:30};
     if(op==='answer'){const b=route.request().postDataJSON();answers.push(b);data={correct:!!scenario.correct,correct_id:1,correct_text:'٤',explanation:'٢ + ٢ = ٤',lives:scenario.correct?3:2,score:scenario.correct?100:0,status:'running',version:1,knowledge_awarded:0};}
     if(op==='finish')data={saved:true};return route.fulfill({json:data});
    }
@@ -35,13 +35,13 @@ const {chromium}=require('playwright'),path=require('path'),assert=require('asse
   await page.clock.runFor(6000);const nearer=Number(await page.getAttribute('#game','data-barrier-z'));assert.ok(nearer>far&&nearer<.62);
   const shots=process.env.RUNNER_SCREENSHOT_DIR||require('os').tmpdir();
   if(scenario.name==='jetpack-correct')await page.screenshot({path:path.join(shots,'runner-road-barrier-approaching.png')});
-  await page.clock.runFor(3000);await page.waitForSelector('#question:not([hidden])');
+  await page.clock.runFor(6000);await page.waitForSelector('#question:not([hidden])');
   assert.equal(await page.locator('#choices').evaluate(e=>e.classList.contains('gated')),false);
   assert.equal(await page.getAttribute('#game','data-barrier'),'closed');assert.equal(await page.locator('.lane').count(),3);
   if(scenario.name==='jetpack-correct'||scenario.compact)await page.screenshot({path:path.join(shots,'runner-road-barrier-'+scenario.name+'-question.png')});
   const overlaps=await page.evaluate(()=>{const q=document.querySelector('#question').getBoundingClientRect();return [...document.querySelectorAll('.lane')].some(e=>{const r=e.getBoundingClientRect();return r.top<q.bottom||r.left<0||r.right>innerWidth;});});assert.equal(overlaps,false);
   if(!scenario.timeout){await page.locator('.lane').nth(scenario.correct?1:0).click();await page.click('#confirm');}
-  else await page.clock.runFor(1100);
+  else await page.clock.runFor(5100);
   if(!scenario.reduced){await page.clock.runFor(180);assert.equal(await page.getAttribute('#game','data-barrier'),scenario.correct?'open':'impact');}
   await page.clock.runFor(650);await page.waitForSelector('#feedback:not([hidden])');assert.equal(answers.length,1);
   assert.equal(answers[0].option_id,scenario.timeout?null:scenario.correct?1:0);

@@ -39,8 +39,19 @@ const base=(op,count)=>({config:ok({title:'t',can_edit:false,settings:{lives:1,v
   ready:ok({started:true,remaining_seconds:30}),
   answer:ok({correct:true,correct_text:'a',explanation:'e',lives:1,score:100,status:'running',version:1}),finish:ok({saved:true})}[op]);
 const err=(status,code,message='x')=>({status,body:{detail:{message,code}}});
-const toQuestion=async t=>{await t.click('start');await t.pump(()=>t.calls.includes('question'));await t.pump(()=>t.calls.includes('ready'));for(let i=0;i<6;i++)await tick();};
+const toQuestion=async t=>{await t.click('start');await t.pump(()=>Number(t.els.get('game')?.dataset.barrierZ)>=.70);await t.pump(()=>t.calls.includes('ready'));for(let i=0;i<6;i++)await tick();};
 let passed=0;const test=async(name,fn)=>{await fn();passed++;console.log('ok -',name);};
+
+await test('preview is prefetched once without starting the timer, including approach resume',async()=>{
+ const t=await scenario(op=>base(op));await t.click('start');
+ assert.equal(t.calls.filter(c=>c==='question').length,1);assert.ok(!t.calls.includes('ready'));
+ await t.pump(()=>t.els.get('game')?.dataset.phase==='APPROACH');
+ assert.ok(!t.calls.includes('ready'));assert.equal(t.els.get('question').hidden,true);
+ assert.equal(t.els.get('controls').hidden,false);t.fire('keydown',{target:{tagName:'BODY'},key:'ArrowLeft',preventDefault(){}});
+ t.fire('pagehide');t.fire('pageshow',{persisted:true});for(let i=0;i<3;i++)await tick();
+ assert.ok(!t.calls.includes('ready'));await t.click('resume');await t.pump(()=>t.calls.includes('ready'));
+ for(let i=0;i<4;i++)await tick();assert.equal(t.calls.filter(c=>c==='question').length,1);assert.equal(t.els.get('question').hidden,false);assert.equal(t.els.get('game').dataset.playerLane,'0.000000');
+});
 
 for(const [status,code] of [[409,'round_over'],[410,'round_expired']])
 await test(`${status} ${code} on /question shows new-round button that restarts`,async()=>{
@@ -64,7 +75,7 @@ await test('question is hidden until /ready finishes, and /ready carries round I
   let release;const gate=new Promise(r=>{release=r;});const bodies=[];
   const t=await scenario(async(op,body)=>{if(op==='ready'){bodies.push(body);await gate;}return base(op);});
   await t.click('start');await t.pump(()=>t.calls.includes('ready'));await tick();
-  assert.deepEqual(t.calls.slice(-2),['question','ready']);
+  assert.equal(t.calls.filter(c=>c==='question').length,1);assert.ok(t.calls.indexOf('ready')>t.calls.indexOf('question'));
   assert.equal(t.els.get('question').hidden,true);assert.equal(t.els.get('choices').hidden,true);
   assert.equal(bodies[0].round_id,'r');assert.equal(bodies[0].version,0);
   release();for(let i=0;i<4;i++)await tick();
@@ -87,7 +98,7 @@ await test('stale /ready silently refetches the current question',async()=>{
 await test('image decode failure never calls /ready and allows retry',async()=>{
   const t=await scenario(op=>op==='question'?ok({...base(op).body,game_image_url:'/required.png'}):base(op),
     {imageDecode:()=>Promise.reject(Error('broken image'))});
-  await t.click('start');await t.pump(()=>t.calls.includes('question'));
+  await t.click('start');await t.pump(()=>Number(t.els.get('game')?.dataset.barrierZ)>=.70);
   for(let i=0;i<5;i++)await tick();
   assert.equal(t.calls.filter(c=>c==='ready').length,0);
   assert.equal(t.els.get('question').hidden,true);
@@ -99,7 +110,7 @@ await test('image decode timeout never calls /ready',async()=>{
   try{
     const t=await scenario(op=>op==='question'?ok({...base(op).body,game_image_url:'/hanging.png'}):base(op),
       {imageDecode:()=>new Promise(()=>{})});
-    await t.click('start');await t.pump(()=>t.calls.includes('question'));
+    await t.click('start');await t.pump(()=>Number(t.els.get('game')?.dataset.barrierZ)>=.70);
     await new Promise(resolve=>nativeSetTimeout(resolve,15));
     for(let i=0;i<4;i++)await tick();
     assert.equal(t.calls.filter(c=>c==='ready').length,0);
@@ -111,7 +122,7 @@ await test('hidden app waits for explicit resume before sending /ready',async()=
   let decoded;const gate=new Promise(resolve=>{decoded=resolve;});
   const t=await scenario(op=>op==='question'?ok({...base(op).body,game_image_url:'/ok.png'}):base(op),
     {imageDecode:()=>gate});
-  await t.click('start');await t.pump(()=>t.calls.includes('question'));
+  await t.click('start');await t.pump(()=>Number(t.els.get('game')?.dataset.barrierZ)>=.70);
   globalThis.document.hidden=true;t.fire('doc:visibilitychange');
   decoded();for(let i=0;i<5;i++)await tick();
   assert.equal(t.calls.filter(c=>c==='ready').length,0);
@@ -126,7 +137,7 @@ await test('pagehide while loading prevents /ready until pageshow and resume',as
   let decoded;const gate=new Promise(resolve=>{decoded=resolve;});
   const t=await scenario(op=>op==='question'?ok({...base(op).body,game_image_url:'/ok.png'}):base(op),
     {imageDecode:()=>gate});
-  await t.click('start');await t.pump(()=>t.calls.includes('question'));
+  await t.click('start');await t.pump(()=>Number(t.els.get('game')?.dataset.barrierZ)>=.70);
   t.fire('pagehide');decoded();for(let i=0;i<5;i++)await tick();
   assert.equal(t.calls.filter(c=>c==='ready').length,0);
   t.fire('pageshow',{persisted:true});for(let i=0;i<5;i++)await tick();
@@ -167,7 +178,7 @@ await test('explicit exit still reports the round as finished',async()=>{
 await test('keyboard lane changes collect coins during RUN',async()=>{
  const t=await scenario(op=>base(op));await t.click('start');
  t.fire('keydown',{target:{tagName:'BODY'},key:'ArrowLeft',preventDefault(){}});
- await t.pump(()=>t.calls.includes('question'));
+ await t.pump(()=>Number(t.els.get('game')?.dataset.barrierZ)>=.70);
  assert.ok(Number(t.els.get('coins').textContent)>0);
 });
 
