@@ -17,7 +17,9 @@ from handlers.quiz_runner import start_loaded_quiz
 from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
 from utils import safe_title
 from helpers.student_ui import UPLOAD_TEXT, HELP_TEXT, HOME_TEXT, welcome_text as build_welcome_text
-from helpers.supabase_helper.gifts import gift_balances
+from helpers.supabase_helper.gifts import gift_balances, redeem as redeem_gift_code
+from services.gift_links import gift_code_from_start
+from services.gift_presentation import expiry_text, remaining_expiry_text
 
 logger = get_logger(__name__)
 router = Router()
@@ -101,11 +103,65 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
         await target_msg.answer("❌ عذراً، هذا الرابط منتهي الصلاحية أو لم يعد موجوداً في قاعدة البيانات.")
 
 
+async def redeem_linked_gift(msg: types.Message, payload: str):
+    """Redeem directly from /start without touching an existing quiz/FSM state."""
+    code = gift_code_from_start(payload)
+    if code is None:
+        await msg.answer("❌ رابط الهدية غير صالح. اطلب رابطاً جديداً من القناة.")
+        return
+
+    user_info = await check_or_add_user(
+        msg.from_user.id,
+        msg.from_user.username or "Unknown",
+        msg.from_user.first_name,
+        msg.from_user.last_name or "Unknown",
+        None,
+    )
+    if user_info.get("status") == "error":
+        await msg.answer("تعذر الوصول إلى حسابك حالياً. افتح رابط الهدية مجدداً لاحقاً.")
+        return
+
+    result = await redeem_gift_code(msg.from_user.id, code)
+    errors = {
+        "invalid": "الكود غير موجود.",
+        "expired": "انتهت مهلة شحن هذا الكود.",
+        "disabled": "هذا الكود موقوف.",
+        "exhausted": "وصل الكود إلى العدد الأقصى للمستفيدين.",
+        "already_used": "سبق لك استرداد هذه الهدية. يمكن لكل طالب الاستفادة مرة واحدة فقط.",
+        "missing_user": "تعذر تجهيز حسابك. أرسل /start ثم افتح الرابط مجدداً.",
+    }
+    if result.get("status") != "ok":
+        spawn(log_usage_event(msg.from_user.id, "gift_code_rejected", {
+            "reason": result.get("status", "unknown"), "source": "deep_link",
+        }))
+        await msg.answer("❌ " + errors.get(result.get("status"), "تعذر الشحن. حاول مجدداً."))
+        return
+
+    spawn(log_usage_event(msg.from_user.id, "gift_code_redeemed", {
+        "points": result["points"], "source": "deep_link",
+    }))
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📝 إنشاء كويز", callback_data="student_create_quiz")],
+        [types.InlineKeyboardButton(text="🎁 رصيدي وهداياي", callback_data="gift:wallet")],
+    ])
+    await msg.answer(
+        f"✅ أُضيفت <b>{result['points']:g} نقطة هدية</b> إلى حسابك تلقائياً!\n"
+        f"⏳ {remaining_expiry_text(result.get('expires_at'))}\n"
+        f"📅 انتهاء الهدية: {expiry_text(result.get('expires_at'))}",
+        parse_mode="HTML", reply_markup=keyboard,
+    )
+
+
 @router.message(Command("start"))
 async def start(msg: types.Message, command: CommandObject, state: FSMContext):
     try:
         bot_info = await bot.get_me()
         
+        # Links are available to new and existing users, without clearing quiz state.
+        if command.args and command.args.startswith("gift_"):
+            await redeem_linked_gift(msg, command.args)
+            return
+
         # حماية التدفق: التحقق من وجود كويز معلق قادم من رابط عميق
         if command.args and (command.args.startswith("share_") or command.args.startswith("quiz_")):
             await launch_deep_linked_quiz(msg, state, command.args)
