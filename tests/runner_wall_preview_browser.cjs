@@ -47,7 +47,7 @@ const {chromium}=require('playwright'),path=require('path'),assert=require('asse
    else{assert.equal(calls.includes('ready'),false);const before=await page.getAttribute('#game','data-distance');await page.clock.runFor(1000);assert.equal(await page.getAttribute('#game','data-distance'),before);}
    releaseOption();
   }
-  await page.waitForSelector('#question:not([hidden])');assert.equal(calls.filter(x=>x==='ready').length,1);assert.equal(await page.getAttribute('#game','data-barrier-z'),'0.700');
+  await page.waitForSelector('#choices:not([hidden])');assert.equal(calls.filter(x=>x==='ready').length,1);assert.equal(await page.getAttribute('#game','data-barrier-z'),'0.700');
   assert.equal(calls.filter(x=>x==='question').length,mode==='broken-math'?2:1);assert.deepEqual(errors,[]);
   results.push({mode,questionOnApproachingWall:true,noAnswersOnWall:true,noEarlyTimer:true,interfaceAtArrival:true,imagesGateTimer:true,errors});await page.close();
  }

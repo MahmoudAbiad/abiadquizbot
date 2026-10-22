@@ -1,5 +1,5 @@
-import {GameAudio} from './audio.js?v=question-wall-20261022-1';
-import {WORLD_SPEED,roadZ,roadMarkZ,projectRoad,previewLines,phaseSpeed,stepObjects,visibleObject,objectAlpha,objectLift} from './world.js?v=question-wall-20261022-1';
+import {GameAudio} from './audio.js?v=morph-chase-20261022-1';
+import {WORLD_SPEED,roadZ,roadMarkZ,projectRoad,wallPlaqueRect,stepChase,previewLines,phaseSpeed,stepObjects,visibleObject,objectAlpha,objectLift} from './world.js?v=morph-chase-20261022-1';
 const $=id=>document.getElementById(id),tg=window.Telegram?.WebApp;
 tg?.ready();tg?.expand();tg?.disableVerticalSwipes?.();
 const params=new URLSearchParams(location.search),base={init_data:tg?.initData||'',quiz_id:params.get('quiz_id'),launch:params.get('launch')||''};
@@ -8,6 +8,7 @@ let w=0,h=0,state='home',lane=1,visualLane=1,jump=0,clock=0,runTime=0,lastSpawn=
 const reduced=window.matchMedia?.('(prefers-reduced-motion: reduce)').matches||false;
 let phase='RUN',phaseTime=0,effects=[],resolveResult=null;
 let roadDistance=0,segmentStart=0,loadedSegment=-1,barriers=[],currentBarrier=null,answerLane=1;
+let chaseRemaining=0,copPresence=0,morphAnimation=null;
 let wallet={coins:0,jetpack_owned:false,version:0,knowledge:0,knowledge_earned:0,car_level:0,equipped:'none'},flying=false,track=null,trackIndex=0,segment=0,claimBusy=null,saveClock=0,buying=false,equipment='none',carLevel=0,wantsFlight=true;
 const carPrices=[1000,500,5000];
 function canFly(){return equipment==='jetpack'||equipment==='tesla'&&carLevel>=3;}
@@ -57,7 +58,7 @@ function notice(text){$('notice').textContent=text;show('notice',true);clearTime
 async function api(path,extra={}){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),120000);try{const r=await fetch('/api/runner/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...base,...extra}),signal:controller.signal});let data=null;try{data=await r.json();}catch{}if(!r.ok){const d=data?.detail,err=Error(typeof d==='string'?d:(d&&d.message)||'تعذر تنفيذ الطلب.');err.code=(d&&d.code)||(r.status===410?'round_expired':null);err.status=r.status;throw err;}return data;}catch(e){if(!e.status){e.code='network';e.message=e.name==='AbortError'?'انتهت مهلة الاتصال.':'تعذر الاتصال بالشبكة.';}throw e;}finally{clearTimeout(timeout);}}
 function isGone(e){return e&&(e.code==='round_over'||e.code==='round_expired');}
 function isBlocked(e){return e&&(e.code==='quiz_changed'||e.code==='auth');}
-function roundGone(text){$('knowledgeReward').textContent='';gone=true;state='gone';audio.setMode('think');['question','choices','controls','hint','resume'].forEach(id=>show(id,false));show('feedback',true);$('feedbackIcon').textContent='⌛';$('feedbackTitle').textContent='انتهت هذه الجولة';$('answerText').textContent=text||'يمكنك البدء بجولة جديدة.';$('explanation').textContent='';$('resultStats').textContent='';$('continue').textContent='ابدأ جولة جديدة ←';}
+function roundGone(text){morphAnimation?.cancel();$('knowledgeReward').textContent='';gone=true;state='gone';audio.setMode('think');['question','choices','controls','hint','resume'].forEach(id=>show(id,false));show('feedback',true);$('feedbackIcon').textContent='⌛';$('feedbackTitle').textContent='انتهت هذه الجولة';$('answerText').textContent=text||'يمكنك البدء بجولة جديدة.';$('explanation').textContent='';$('resultStats').textContent='';$('continue').textContent='ابدأ جولة جديدة ←';}
 function roundBlocked(text){roundGone(text||'ارجع للبوت وافتح اللعبة من جديد.');blocked=true;$('feedbackIcon').textContent='🔒';$('feedbackTitle').textContent='تعذر متابعة الجولة';$('continue').textContent='إغلاق';}
 function roundPayload(){return {round_id:round.round_id,version:round.version};}
 function isForeground(){return !document.hidden&&!pageHidden&&!paused;}
@@ -101,11 +102,14 @@ function person(x,y,size,cop=false,phase=0){ctx.save();ctx.translate(x,y);ctx.sc
  roundRect(-12,-78,24,25,10,'#e9ad7b');roundRect(-13,-81,26,11,5,cop?'#213959':'#212c3f');if(cop){roundRect(-17,-74,34,5,2,'#10223a');ctx.fillStyle='#ffcf6e';ctx.fillRect(5,-49,6,7);}else{roundRect(-12,-52,24,26,6,'#faad63');ctx.fillStyle='#fae7c5';ctx.fillRect(-5,-45,11,3);}ctx.restore();}
 function draw(dt){clock+=dt;const active=!!round&&!['home','loading','gone'].includes(state);phaseTime+=dt;
  if(!paused&&['run','approach'].includes(state)){
+  const chase=stepChase(strikes,chaseRemaining,dt);strikes=chase.strikes;chaseRemaining=chase.remaining;
   let travel=dt*WORLD_SPEED*phaseSpeed(phase,phaseTime,reduced);
   if(state==='approach'&&currentBarrier)travel=Math.min(travel,Math.max(0,currentBarrier.anchor+.68-roadDistance));
   roadDistance+=travel;runTime+=travel/WORLD_SPEED;jump=Math.max(0,jump-travel/WORLD_SPEED);visualLane+=(lane-visualLane)*Math.min(1,dt*15);updateWorld(travel/WORLD_SPEED);
  }
  $('game').dataset.distance=roadDistance.toFixed(6);$('game').dataset.playerLane=visualLane.toFixed(6);
+ copPresence+=((strikes>0?1:0)-copPresence)*Math.min(1,dt*3);
+ $('game').dataset.chaseRemaining=chaseRemaining.toFixed(3);$('game').dataset.chase=state==='caught'?'caught':strikes?'near':copPresence>.01?'retreating':'clear';
  if(state==='resolve'&&phaseTime>=(reduced?.1:.55))finishResolve();
  const sky=ctx.createLinearGradient(0,0,0,h);sky.addColorStop(0,'#081b31');sky.addColorStop(.55,'#256075');sky.addColorStop(1,'#142c43');ctx.fillStyle=sky;ctx.fillRect(0,0,w,h);
  ctx.fillStyle='#ffe6b1';ctx.beginPath();ctx.arc(w*.2,h*.18,27,0,Math.PI*2);ctx.fill();
@@ -118,7 +122,7 @@ function draw(dt){clock+=dt;const active=!!round&&!['home','loading','gone'].inc
  const p=point(visualLane,.81),lift=flying&&active?h*.16+(reduced?0:Math.sin(clock*4)*3):jump>0?Math.sin((.72-jump)/.72*Math.PI)*h*.15:0;
  ctx.fillStyle='#0005';ctx.beginPath();ctx.ellipse(p.x,p.y+6,25,8,0,0,Math.PI*2);ctx.fill();if(equipment==='tesla'&&active)car(p.x,p.y-lift,Math.min(w/340,1.35));else person(p.x,p.y-lift,Math.min(w/340,1.35),false,clock*(state==='question'?3:13));
  if(flying&&active&&equipment==='jetpack'){const size=Math.min(w/340,1.35);ctx.save();ctx.translate(p.x,p.y-lift);ctx.scale(size,size);roundRect(-25,-56,12,31,4,'#e6f3f6');roundRect(13,-56,12,31,4,'#e6f3f6');for(const x of [-19,19]){poly([[x-5,-24],[x+5,-24],[x,2+(reduced?4:Math.sin(clock*30)*5)]],'#ffb950');}ctx.restore();}
- if(strikes>0||state==='caught'){const distance=state==='caught'?Math.min(1,(clock-caughtAt)/.8):.4;person(p.x+45*(1-distance),p.y+95*(1-distance),Math.min(w/340,1.35),true,clock*15);}
+ if(copPresence>.01||state==='caught'){const caught=state==='caught',distance=caught?Math.min(1,(clock-caughtAt)/.8):.4*copPresence;ctx.save();ctx.globalAlpha=caught?1:copPresence;person(p.x+45*(1-distance),p.y+95*(1-distance)+(caught?0:80*(1-copPresence)),Math.min(w/340,1.35),true,clock*15);ctx.restore();}
 }
 let caughtAt=0;
 function updateWorld(dt){
@@ -128,7 +132,7 @@ function updateWorld(dt){
   if(step.coins){coins+=step.coins;for(const o of step.effects)if(o.kind==='coin')queueCoin(o.id,o.segment);audio.play('coin');hud();}
   if(step.dodges)audio.play('dodge');
   if(!reduced)for(const o of step.effects){const p=point(o.lane,o.z);effects.push({x:p.x,y:p.y-18-objectLift(o,h,flying),age:0,kind:o.kind});}effects=effects.slice(-24);
-  if(step.hits){strikes+=step.hits;audio.play('near');tg?.HapticFeedback?.impactOccurred('medium');if(strikes>=2){caughtAt=clock;state='caught';audio.play('caught');showEnd('أمسك بك الشرطي!','تفادَ الحواجز أو اقفز فوقها في المحاولة القادمة.');api('finish',roundPayload()).catch(()=>{});return;}}
+  if(step.hits){const chase=stepChase(strikes,chaseRemaining,0,step.hits);strikes=chase.strikes;chaseRemaining=chase.remaining;audio.play('near');tg?.HapticFeedback?.impactOccurred('medium');if(chase.caught){caughtAt=clock;state='caught';audio.play('caught');showEnd('أمسك بك الشرطي!','تفادَ الحواجز أو اقفز فوقها في المحاولة القادمة.');api('finish',roundPayload()).catch(()=>{});return;}}
  }
  saveClock+=dt;if(saveClock>=1){saveClock=0;flushCoins().catch(()=>{});}
  if(state==='run'&&currentBarrier&&roadZ(roadDistance,currentBarrier.anchor)>=.25){state='approach';setPhase('APPROACH');$('hint').textContent='اقرأ السؤال على الجدار · الأجوبة عند الوصول';audio.setMode('think');}
@@ -157,6 +161,31 @@ function prepareQuestion(barrier){
   return data;
  });barrier.request=request;return request;
 }
+async function revealQuestion(generation){
+ const card=$('question');card.classList.add('preparing');card.setAttribute('aria-busy','true');show('question',true);
+ if(currentBarrier)currentBarrier.transferred=true;
+ $('game').dataset.questionPresentation='morphing';draw(0);
+ if(!reduced&&card.animate&&currentBarrier){
+  const target=card.getBoundingClientRect(),surface=canvas.getBoundingClientRect(),from=wallPlaqueRect(roadZ(roadDistance,currentBarrier.anchor),w,h);
+  const previous=morphAnimation,animation=card.animate([
+   {transformOrigin:'0 0',transform:`translate(${surface.left+from.x-target.left}px,${surface.top+from.y-target.top}px) scale(${from.width/target.width},${from.height/target.height})`,borderRadius:'12px'},
+   {transformOrigin:'0 0',transform:'none',borderRadius:'18px'}
+  ],{duration:420,easing:'cubic-bezier(.2,.7,.2,1)',fill:'both'});
+  morphAnimation=animation;previous?.cancel();
+  try{await animation.finished;}catch{}finally{animation.cancel();if(morphAnimation===animation)morphAnimation=null;}
+ }
+ ensureCurrentLoad(generation);$('game').dataset.questionPresentation='card';
+}
+function showCorrectAnswer(result){
+ const index=question.options.findIndex(o=>o.id===result.correct_id),option=question.options[index];
+ $('answerText').textContent='الإجابة الصحيحة: '+(option?.image_url?'':result.correct_text);
+ if(option?.image_url){
+  // Move the already decoded option image, rather than displaying its LaTeX source.
+  let image=document.querySelectorAll('.lane')[index]?.querySelector?.('img');
+  if(!image){image=new Image();image.alt=option.text;image.src=option.image_url;}
+  $('answerText').append(image);
+ }
+}
 function drawQuestionBarrier(){
  if(!round||['home','loading','gone'].includes(state))return;
  if(state==='resolve'&&currentBarrier&&resolveResult?.correct)currentBarrier.open=Math.min(1,phaseTime/(reduced?.1:.55));
@@ -174,9 +203,9 @@ function drawQuestionBarrier(){
  roundRect(left+post,doorY,width-post*2,height-post,0,success?'#347c70':'#cc7655');
  ctx.strokeStyle=success?'#77e6b6':'#ffdc9c';ctx.lineWidth=Math.max(2,12*p.scale);
  for(let x=left-height;x<left+width+height;x+=35*p.scale){ctx.beginPath();ctx.moveTo(x,doorY);ctx.lineTo(x+height,doorY+height);ctx.stroke();}
- if(barrier.previewCanvas){const plateWidth=(width-post*2)*.91,plateHeight=plateWidth*360/640;ctx.drawImage(barrier.previewCanvas,p.x-plateWidth/2,doorY+height*.06,plateWidth,plateHeight);}
+ if(barrier.previewCanvas&&!barrier.transferred){const plate=wallPlaqueRect(z,w,h,open);ctx.drawImage(barrier.previewCanvas,plate.x,plate.y,plate.width,plate.height);}
  ctx.restore();
- if(z>.25){ctx.fillStyle='#092738';ctx.font=`bold ${Math.max(8,16*p.scale)}px system-ui`;ctx.textAlign='center';ctx.fillText(success?'✓': '؟',p.x,top+post*.8);}
+ if(z>.25&&!barrier.transferred){ctx.fillStyle='#092738';ctx.font=`bold ${Math.max(8,16*p.scale)}px system-ui`;ctx.textAlign='center';ctx.fillText(success?'✓': '؟',p.x,top+post*.8);}
  ctx.restore();}
 }
 function drawEffects(dt){for(const e of effects){e.age+=dt;const t=Math.min(1,e.age/.22);ctx.save();ctx.globalAlpha=1-t;ctx.fillStyle=e.kind==='coin'?'#ffdb83':'#efa17d';
@@ -192,7 +221,7 @@ $('left').onclick=()=>move(-1);$('right').onclick=()=>move(1);$('jump').onclick=
 function soundButtons(){$('music').classList.toggle('muted',!audio.music);$('sfx').classList.toggle('muted',!audio.sfx);$('music').setAttribute('aria-pressed',String(audio.music));$('sfx').setAttribute('aria-pressed',String(audio.sfx));}
 $('music').onclick=()=>{audio.toggleMusic();soundButtons();};$('sfx').onclick=()=>{audio.toggleSfx();soundButtons();};soundButtons();
 async function refreshConfig(){config=await api('config');applyWallet(config.wallet);$('title').textContent=config.title;$('start').disabled=false;show('settingsButton',config.can_edit);flushCoins().catch(()=>{if(pendingCount())notice('توجد عملات بانتظار المزامنة. تحقق من الاتصال.');});}
-async function start(){if(state==='loading')return;state='loading';$('start').disabled=true;audio.mode='run';audio.start().catch(()=>{});try{await flushCoins();round=await api('start');segment=0;roadDistance=0;segmentStart=0;loadedSegment=-1;barriers=[];currentBarrier=null;answerLane=1;coins=0;score=0;lives=round.lives;strikes=0;wantsFlight=true;equipment=wallet.equipped||(wallet.jetpack_owned?'jetpack':'none');carLevel=wallet.car_level;flying=canFly();objects=[];lane=1;visualLane=1;runTime=0;lastSpawn=0;final=false;gone=false;blocked=false;retries=0;loadGeneration++;hud();show('home',false);show('feedback',false);$('knowledgeReward').textContent='';show('hud',true);await beginRun();}catch(e){state='home';audio.stop();notice(e.message);$('start').disabled=false;show('home',true);}}
+async function start(){if(state==='loading')return;state='loading';$('start').disabled=true;audio.mode='run';audio.start().catch(()=>{});try{await flushCoins();round=await api('start');segment=0;roadDistance=0;segmentStart=0;loadedSegment=-1;barriers=[];currentBarrier=null;answerLane=1;coins=0;score=0;lives=round.lives;strikes=0;chaseRemaining=0;copPresence=0;morphAnimation?.cancel();morphAnimation=null;wantsFlight=true;equipment=wallet.equipped||(wallet.jetpack_owned?'jetpack':'none');carLevel=wallet.car_level;flying=canFly();objects=[];lane=1;visualLane=1;runTime=0;lastSpawn=0;final=false;gone=false;blocked=false;retries=0;loadGeneration++;hud();show('home',false);show('feedback',false);$('knowledgeReward').textContent='';show('hud',true);await beginRun();}catch(e){state='home';audio.stop();notice(e.message);$('start').disabled=false;show('home',true);}}
 $('start').onclick=start;
 async function beginRun(){
  clearTimeout(notice.timeout);show('notice',false);$('knowledgeReward').textContent='';state='track-loading';show('controls',false);show('feedback',false);show('question',false);show('choices',false);
@@ -227,14 +256,18 @@ async function loadQuestion(){
   await decodeAll(imgs);ensureCurrentLoad(generation);
   // Never send /ready while the app is hidden or waiting for the user to resume.
   await waitForForeground();ensureCurrentLoad(generation);
+  await revealQuestion(generation);
+  await waitForForeground();ensureCurrentLoad(generation);
   const readySent=performance.now(),ready=await api('ready',roundPayload());
   // /ready could complete after the user backgrounds the app. Do not expose
   // the question until foreground; preserve server time elapsed in deadline.
   await waitForForeground();ensureCurrentLoad(generation);
   retries=0;deadline=readySent+ready.remaining_seconds*1000;state='question';setPhase('DECIDE');selectLane(1);
+  $('question').classList.remove('preparing');$('question').setAttribute('aria-busy','false');$('game').dataset.questionPresentation='answer';
   show('question',true);show('choices',true);$('confirm').disabled=false;
  }catch(e){
   if(e.code==='superseded'||generation!==loadGeneration)return;
+  show('question',false);$('question').classList.remove('preparing');$('question').setAttribute('aria-busy','false');
   if(isBlocked(e)){roundBlocked(e.message);return;}
   if(isGone(e)){roundGone(e.message);return;}
   if(e.code==='stale_version'&&retries<3){retries++;state='retry';loadQuestion();return;}
@@ -247,7 +280,7 @@ async function submit(timeout){if(state!=='question'||answerPending)return;answe
  document.querySelectorAll('.lane').forEach((b,i)=>{b.disabled=true;const correct=question.options[i].id===result.correct_id;b.classList.toggle('correct',correct);b.classList.toggle('closed',!correct);b.setAttribute('aria-label',question.options[i].text+(correct?' — الإجابة الصحيحة':''));});
  if(!reduced&&result.correct){const p=point(lane,.81);effects.push({x:p.x,y:p.y-55,age:0,kind:'coin'});}
  }catch(e){if(isBlocked(e)){roundBlocked(e.message);return;}if(isGone(e)){roundGone(e.message);return;}if(e.code==='stale_version'){state='retry';loadQuestion();return;}notice(e.message);retryAt=performance.now()+5000;$('confirm').disabled=false;}finally{answerPending=false;}}
-function finishResolve(){const result=resolveResult;if(!result)return;if(currentBarrier)currentBarrier.open=result.correct?1:.75;flushCoins().catch(()=>{});state=result.status==='caught'?'caught':'feedback';caughtAt=clock;$('game').classList.remove('impact');audio.setMode('think');show('choices',false);show('question',false);show('feedback',true);$('feedbackIcon').textContent=result.correct?'✦':'♡';$('feedbackTitle').textContent=result.timeout?'انتهى وقت السؤال — اصطدمت بالحاجز':result.correct?'إجابة صحيحة!':(result.status==='caught'?'أمسك بك الشرطي!':'اصطدمت بالحاجز!');$('answerText').textContent='الإجابة الصحيحة: '+result.correct_text;$('explanation').textContent=result.explanation;$('knowledgeReward').textContent=result.knowledge_awarded?`+${result.knowledge_awarded} نقطة معرفة · إتقان جديد`:result.correct&&result.knowledge_awarded===0?'مراجعة صحيحة — مكافأة هذا السؤال محفوظة سابقًا.':'';final=result.status!=='running';$('resultStats').textContent=final?`نتيجة الجولة ${score} · عملات الركض ${coins}`:'';$('continue').textContent=final?'العب من جديد ←':'تابع الركض ←';if(final)setTimeout(()=>{if(final)audio.stop();},900);}
+function finishResolve(){const result=resolveResult;if(!result)return;if(currentBarrier)currentBarrier.open=result.correct?1:.75;flushCoins().catch(()=>{});state=result.status==='caught'?'caught':'feedback';caughtAt=clock;$('game').classList.remove('impact');audio.setMode('think');show('choices',false);show('question',false);show('feedback',true);$('feedbackIcon').textContent=result.correct?'✦':'♡';$('feedbackTitle').textContent=result.timeout?'انتهى وقت السؤال — اصطدمت بالحاجز':result.correct?'إجابة صحيحة!':(result.status==='caught'?'أمسك بك الشرطي!':'اصطدمت بالحاجز!');showCorrectAnswer(result);$('explanation').textContent=result.explanation;$('knowledgeReward').textContent=result.knowledge_awarded?`+${result.knowledge_awarded} نقطة معرفة · إتقان جديد`:result.correct&&result.knowledge_awarded===0?'مراجعة صحيحة — مكافأة هذا السؤال محفوظة سابقًا.':'';final=result.status!=='running';$('resultStats').textContent=final?`نتيجة الجولة ${score} · عملات الركض ${coins}`:'';$('continue').textContent=final?'العب من جديد ←':'تابع الركض ←';if(final)setTimeout(()=>{if(final)audio.stop();},900);}
 $('confirm').onclick=()=>submit(false);
 function showEnd(title,explanation){$('knowledgeReward').textContent='';flushCoins().catch(()=>{});final=true;loadGeneration++;show('controls',false);show('hint',false);show('feedback',true);$('feedbackTitle').textContent=title;$('answerText').textContent='';$('explanation').textContent=explanation;$('resultStats').textContent=`نتيجة الجولة ${score} · عملات الركض ${coins}`;$('continue').textContent='العب من جديد ←';setTimeout(()=>{if(final)audio.stop();},900);}
 $('continue').onclick=()=>{if(blocked){if(tg){tg.close();return;}blocked=false;gone=false;show('feedback',false);show('home',true);state='home';$('start').disabled=false;return;}if(gone){gone=false;show('feedback',false);state='home';start();return;}if(state==='track-retry'){beginRun();}else if(state==='retry'){show('feedback',false);loadQuestion();}else if(final){show('feedback',false);show('home',true);state='home';$('start').disabled=false;}else beginRun();};
@@ -259,7 +292,7 @@ function animate(now){if(disposed)return;const dt=Math.min(.04,(now-last)/1000||
 raf=requestAnimationFrame(animate);
 document.addEventListener('visibilitychange',()=>{if(document.hidden){flushCoins().catch(()=>{});paused=true;audio.suspend();}else if(round&&!final){show('resume',true);}else{paused=false;wakeForeground();}});
 $('resume').onclick=()=>{if(document.hidden||pageHidden)return;paused=false;last=performance.now();audio.resume();show('resume',false);wakeForeground();};
-function cleanup(){sendFinalCoins();disposed=true;loadGeneration++;cancelAnimationFrame(raf);audio.stop();objects=[];if(round&&!final){fetch('/api/runner/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...base,...roundPayload()}),keepalive:true}).catch(()=>{});}}
+function cleanup(){morphAnimation?.cancel();sendFinalCoins();disposed=true;loadGeneration++;cancelAnimationFrame(raf);audio.stop();objects=[];if(round&&!final){fetch('/api/runner/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...base,...roundPayload()}),keepalive:true}).catch(()=>{});}}
 window.addEventListener('pagehide',()=>{sendFinalCoins();pageHidden=true;paused=true;audio.suspend();});
 window.addEventListener('pageshow',e=>{pageHidden=false;if(!e.persisted){wakeForeground();return;}disposed=false;cancelAnimationFrame(raf);last=performance.now();raf=requestAnimationFrame(animate);if(round&&!final&&!gone){paused=true;show('resume',true);if(['question','question-loading','loading','retry'].includes(state)){state='retry';loadQuestion();}}else if(!round||final)refreshConfig().catch(()=>{});});$('exit').onclick=()=>{cleanup();tg?.close();if(!tg){show('home',true);$('title').textContent='انتهت الجولة. أعد فتح اللعبة من البوت.';}};
 if(base.init_data&&base.quiz_id)refreshConfig().catch(e=>{$('title').textContent=e.message;});else $('title').textContent='افتح اللعبة من زر «العب رحلة أبيض» داخل البوت التجريبي.';
