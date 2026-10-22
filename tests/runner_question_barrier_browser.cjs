@@ -31,11 +31,11 @@ const {chromium}=require('playwright'),path=require('path'),assert=require('asse
   await page.goto((process.env.RUNNER_TEST_ORIGIN||'http://runner.test')+'/webapp/runner/index.html?quiz_id=q',{waitUntil:'domcontentloaded',timeout:90000});
   await page.waitForFunction(()=>!document.querySelector('#start').disabled);await page.click('#start');await page.waitForFunction(()=>document.querySelector('#game').dataset.phase==='RUN');
   await page.clock.runFor(1000);const far=Number(await page.getAttribute('#game','data-barrier-z'));
-  assert.ok(far>.02&&far<.2);assert.equal(await page.locator('#question').isVisible(),false);
-  await page.clock.runFor(4000);const nearer=Number(await page.getAttribute('#game','data-barrier-z'));assert.ok(nearer>far&&nearer<.62);
+  assert.ok(far<0);assert.equal(await page.locator('#question').isVisible(),false);
+  await page.clock.runFor(6000);const nearer=Number(await page.getAttribute('#game','data-barrier-z'));assert.ok(nearer>far&&nearer<.62);
   const shots=process.env.RUNNER_SCREENSHOT_DIR||require('os').tmpdir();
   if(scenario.name==='jetpack-correct')await page.screenshot({path:path.join(shots,'runner-road-barrier-approaching.png')});
-  await page.clock.runFor(5000);await page.waitForSelector('#question:not([hidden])');
+  await page.clock.runFor(3000);await page.waitForSelector('#question:not([hidden])');
   assert.equal(await page.locator('#choices').evaluate(e=>e.classList.contains('gated')),false);
   assert.equal(await page.getAttribute('#game','data-barrier'),'closed');assert.equal(await page.locator('.lane').count(),3);
   if(scenario.name==='jetpack-correct'||scenario.compact)await page.screenshot({path:path.join(shots,'runner-road-barrier-'+scenario.name+'-question.png')});
