@@ -1,0 +1,20 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const source=fs.readFileSync(new URL('../webapp/runner/presence.js',import.meta.url),'utf8');
+const {createPresence}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+let clock=0,state={visible:true,active:false,roundId:null};const element={},pending=[],requests=[];
+const p=createPresence({base:{init_data:'signed'},element,current:()=>state,now:()=>clock,session:'s',fetcher:async(url,options)=>{
+ requests.push(JSON.parse(options.body));return new Promise(resolve=>pending.push(resolve));
+}});
+const response=n=>({ok:true,json:async()=>({online:n})});
+const first=p.sync();pending.shift()(response(12));await first;assert.match(element.textContent,/12|١٢/);
+for(let i=0;i<1000;i++)p.sync();assert.equal(requests.length,1);
+state={visible:true,active:true,roundId:'round-a'};const joining=p.sync();
+state={visible:false,active:false,roundId:'round-a'};const leaving=p.sync(false,true);
+const [join,leave]=pending.splice(0);leave(response(0));await leaving;join(response(99));await joining;
+assert.match(element.textContent,/0|٠/);assert.equal(requests.at(-1).active,false);assert.ok(requests.at(-1).sequence>requests.at(-2).sequence);
+clock+=60000;p.sync();assert.equal(requests.length,3);
+state={visible:true,active:true,roundId:'round-b'};const resumed=p.sync();pending.shift()(response(1));await resumed;
+clock+=20000;const failed=p.sync();pending.shift()({ok:false});await failed;assert.equal(element.hidden,true);
+clock+=20000;const recovered=p.sync();pending.shift()(response(2));await recovered;assert.equal(element.hidden,false);
+console.log('Presence logic passed: throttling, departure ordering, stale responses, hidden idle, resume, failure and recovery');

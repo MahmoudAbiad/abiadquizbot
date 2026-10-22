@@ -51,6 +51,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Verify Runner presence and frontend lifecycle
+        run: |
+          node tests/runner_presence_logic.mjs
+          node tests/runner_ui_logic.mjs
+          node tests/runner_world.mjs
       - name: Verify provider SQL in isolated PostgreSQL
         run: |
           npm ci --prefix tests/sql --ignore-scripts

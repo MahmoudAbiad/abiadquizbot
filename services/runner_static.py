@@ -1,7 +1,7 @@
 """Keep Runner updates fresh without changing caching for other bot WebApps."""
 from starlette.staticfiles import StaticFiles
 
-RUNNER_ASSET_VERSION = 'morph-chase-20261022-1'
+RUNNER_ASSET_VERSION = 'presence-20261022-1'
 
 
 class RunnerAwareStaticFiles(StaticFiles):

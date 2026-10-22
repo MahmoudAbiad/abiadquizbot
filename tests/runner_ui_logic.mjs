@@ -5,7 +5,7 @@ import {pathToFileURL,fileURLToPath} from 'node:url';
 const root=path.join(path.dirname(fileURLToPath(import.meta.url)),'..','webapp','runner');
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'runner-ui-'));
 fs.writeFileSync(path.join(tmp,'package.json'),'{"type":"module"}');
-for(const f of ['game.js','audio.js','world.js'])fs.copyFileSync(path.join(root,f),path.join(tmp,f));
+for(const f of ['game.js','audio.js','world.js','presence.js'])fs.copyFileSync(path.join(root,f),path.join(tmp,f));
 const gameUrl=pathToFileURL(path.join(tmp,'game.js')).href;
 
 let loads=0;

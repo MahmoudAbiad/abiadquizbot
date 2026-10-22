@@ -35,6 +35,36 @@ class RoundRequest(Request):
     option_id: int | None = Field(default=None, ge=0, le=100)
 
 
+class PresenceRequest(Request):
+    session_id: UUID | None = None
+    sequence: int = Field(default=0, ge=0, le=2147483647)
+    active: bool = False
+    round_id: UUID | None = None
+
+
+@router.post('/presence')
+async def online_presence(payload: PresenceRequest):
+    uid = await identity(payload)
+    if payload.active:
+        if not payload.session_id or not payload.round_id:
+            raise fail(422, 'الجولة مطلوبة.', 'round_expired')
+        # Read only the receipt fields; never load question snapshots for heartbeats.
+        result = await db().table('runner_rounds').select('status,expires_at').eq(
+            'id', str(payload.round_id)).eq('user_id', uid).eq('quiz_id', str(payload.quiz_id)).limit(1).execute()
+        row = next(iter(result.data or []), None)
+        if not row or row['status'] != 'running' or datetime.fromisoformat(
+                row['expires_at'].replace('Z', '+00:00')).timestamp() <= time.time():
+            raise fail(410, 'انتهت هذه الجولة.', 'round_expired')
+    from config import redis_client
+    from services.runner_presence import presence
+    try:
+        count = await asyncio.wait_for(presence(redis_client, uid, payload.session_id,
+                                               payload.sequence, payload.active), timeout=2)
+    except Exception:
+        raise HTTPException(503, 'عدد اللاعبين غير متاح مؤقتًا.')
+    return {'online': count}
+
+
 class SettingsRequest(Request):
     version: int = Field(ge=0)
     lives: int = Field(default=1, ge=1, le=5)
