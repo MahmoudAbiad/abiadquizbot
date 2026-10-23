@@ -114,7 +114,7 @@ class SimilarMathTests(unittest.IsolatedAsyncioTestCase):
         await ns['show_question_count_screen'](message,state,edit=True)
         self.assertEqual(state.data['selected_question_count'],37)
 
-    async def test_unsolved_math_gets_choice_but_other_exams_keep_existing_flow(self):
+    async def test_all_unsolved_exams_offer_generation_or_extraction(self):
         show=AsyncMock()
         ns=load_functions('handlers/files.py', ['_proceed_to_quiz_unsolved_screen'], {
             **keyboards(), 'show_question_count_screen':show,
@@ -126,7 +126,49 @@ class SimilarMathTests(unittest.IsolatedAsyncioTestCase):
         show.assert_not_awaited()
         state=State(subject_type='quiz_unsolved',content_subject_type='english')
         await ns['_proceed_to_quiz_unsolved_screen'](message,state)
-        show.assert_awaited_once()
+        self.assertEqual(state.current, 'choice')
+        show.assert_not_awaited()
+
+    async def test_new_generation_reuses_suggestions_and_clears_extraction_state(self):
+        show = AsyncMock()
+        ns = load_functions('handlers/files.py', ['handle_quiz_generate_new'],
+                            {'_show_quiz_options_screen': show})
+        for subject in ('math', 'english', 'french', 'other', None):
+            state = State(subject_type='quiz_solved', content_subject_type=subject,
+                          suggested_question_types=['مفردات الدرس'], english_mode='translated',
+                          quiz_extraction_mode='as_is', detected_question_count=37,
+                          selected_question_count=37, review_count_to_restore=37)
+            call = types.SimpleNamespace(message=object(), answer=AsyncMock())
+            await ns['handle_quiz_generate_new'](call, state)
+            self.assertEqual(state.data['subject_type'], subject or 'other')
+            self.assertIsNone(state.data['quiz_extraction_mode'])
+            self.assertIsNone(state.data['detected_question_count'])
+            self.assertIsNone(state.data['review_count_to_restore'])
+            self.assertEqual(state.data['suggested_question_types'], ['مفردات الدرس'])
+            self.assertEqual(state.data['english_mode'], 'translated')
+        self.assertEqual(show.await_count, 5)
+
+    def test_new_generation_button_and_dynamic_suggestions_for_every_subject(self):
+        ns = keyboards()
+        for solved in (True, False):
+            kb = ns['get_quiz_extraction_choice_keyboard'](solved=solved)
+            self.assertIn('quiz_generate_new', [b.callback_data for row in kb.inline_keyboard for b in row])
+        for subject in ('math', 'english', 'french', 'other'):
+            kb = ns['get_quiz_type_keyboard'](subject, ['مفردات الدرس'], 'general')
+            buttons = [b for row in kb.inline_keyboard for b in row]
+            self.assertIn('qtype_other_0', [b.callback_data for b in buttons])
+            self.assertTrue(any('أسئلة شاملة عن الدرس' in b.text for b in buttons))
+
+    def test_two_and_three_original_options_are_valid_in_regular_and_batch_extraction(self):
+        normalize = load_functions('services/quiz_service.py', ['normalize_quiz_option_count'])['normalize_quiz_option_count']
+        batch = load_functions('helpers/gemini_helper/batch_generation.py',
+                               ['_question_key', '_valid_extracted_question', '_valid_question'])
+        for count in (2, 3, 4, 5):
+            question = dict(question='Original', options=list('ABCDE')[:count], correct_option_id=count-1)
+            original = question.copy()
+            self.assertEqual(normalize([question]), [original])
+            self.assertTrue(batch['_valid_extracted_question'](question))
+            self.assertEqual(batch['_valid_question'](question), count == 4)
 
     async def test_generation_uses_new_prompt_and_ignores_extraction_only_when_selected(self):
         class Var:

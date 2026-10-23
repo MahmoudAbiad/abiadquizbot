@@ -406,27 +406,18 @@ async def _proceed_to_quiz_solved_screen(reply_target: types.Message, state: FSM
 
 
 async def _proceed_to_quiz_unsolved_screen(reply_target: types.Message, state: FSMContext, edit: bool = True) -> None:
-    """
-    🆕 اختبار غير محلول: لا تخيير إطلاقاً (لا توجد إجابات أصلاً لاعتمادها) - ينتقل الطالب
-    مباشرة لشاشة تأكيد خصم النقاط (شاشة عدد الأسئلة)، مع حفظ رسالة التنويه بأن الحل سيكون
-    بالذكاء الاصطناعي لتُدمج هناك بنص العدد المرصود وتكلفته. مستخرجة كدالة مستقلة لنفس سبب
-    _proceed_to_quiz_solved_screen أعلاه (راجعها).
-    """
+    """Offer extraction or new generation for every unsolved subject."""
     data = await state.get_data()
-    if data.get("content_subject_type") == SUBJECT_MATH:
-        await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
-        text = "🗂️ <b>هذا المحتوى اختبار رياضيات جاهز بلا إجابات مرفقة.</b>\n\nاختر استخراج أسئلته وحلّها، أو إنشاء مسائل جديدة بنفس النمط."
-        keyboard = get_quiz_extraction_choice_keyboard(is_math=True, solved=False)
-        if edit:
-            await reply_target.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
-        else:
-            await reply_target.answer(text, parse_mode="HTML", reply_markup=keyboard)
-        return
-    await state.update_data(
-        quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE,
-        quiz_detection_notice=MSG_QUIZ_UNSOLVED_DETECTED,
-    )
-    await show_question_count_screen(reply_target, state, edit=edit)
+    await state.update_data(quiz_detection_notice=None)
+    await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
+    text = ("🗂️ <b>وجدنا أسئلة جاهزة بلا إجابات مرفقة.</b>\n\n"
+            "اختر استخراج الأسئلة وحلّها، أو توليد أسئلة جديدة من المحتوى.")
+    keyboard = get_quiz_extraction_choice_keyboard(
+        is_math=data.get("content_subject_type") == SUBJECT_MATH, solved=False)
+    if edit:
+        await reply_target.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await reply_target.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def ask_question_count(
@@ -910,6 +901,25 @@ async def _apply_quiz_extraction_choice(call: types.CallbackQuery, state: FSMCon
         return
     await state.update_data(quiz_extraction_mode=extraction_mode, question_type=QUESTION_TYPE_GENERAL, custom_question_type_text=None)
     await show_question_count_screen(call.message, state, edit=True)
+
+@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_generate_new")
+async def handle_quiz_generate_new(call: types.CallbackQuery, state: FSMContext) -> None:
+    """Reuse detection and suggestions, but start ordinary generation, not extraction."""
+    data = await state.get_data()
+    if data.get("subject_type") not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        await call.answer()
+        return
+    await state.update_data(
+        subject_type=data.get("content_subject_type") or SUBJECT_OTHER,
+        quiz_extraction_mode=None, quiz_detection_notice=None,
+        question_type=QUESTION_TYPE_GENERAL, custom_question_type_text=None,
+        difficulty=DIFFICULTY_MEDIUM, detected_question_count=None,
+        selected_question_count=None, review_count_to_restore=None,
+        count_prompt_text="📝 كم سؤالاً جديداً تريد توليده من هذا المحتوى؟",
+    )
+    await _show_quiz_options_screen(call.message, state, edit=True)
+    await call.answer()
+
 
 @router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_generate_similar_math")
 async def handle_quiz_generate_similar_math(call: types.CallbackQuery, state: FSMContext) -> None:

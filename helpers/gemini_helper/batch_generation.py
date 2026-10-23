@@ -38,11 +38,11 @@ def _valid_question(question: Dict[str, Any]) -> bool:
 
 
 def _valid_extracted_question(question: Dict[str, Any]) -> bool:
-    """Keep 4+ original options; the established post-processing handles five choices."""
+    """Keep every original choice, including two- and three-choice exams."""
     options = question.get("options")
     answer = question.get("correct_option_id")
     return (bool(_question_key(question)) and isinstance(options, list) and
-            len(options) >= 4 and all(isinstance(o, str) and o.strip() for o in options) and
+            len(options) >= 2 and all(isinstance(o, str) and o.strip() for o in options) and
             type(answer) is int and 0 <= answer < len(options))
 
 

@@ -174,6 +174,7 @@ async def generate_quiz_smart(
             # Never ask an extractor to invent different questions or to reorder the original exam.
             base_prompt_template += quiz_extraction_instruction
         else:
+            base_prompt_template += "\nأنشئ أسئلة جديدة من المحتوى التعليمي وفق نوع الأسئلة المطلوب؛ لا تكتفِ بنقل التمارين الموجودة. لكل سؤال جديد أربعة خيارات وإجابة صحيحة واحدة.\n"
             base_prompt_template = base_prompt_template.replace(
                 "{difficulty_instruction}", _resolve_difficulty_instruction(difficulty)
             ).replace(

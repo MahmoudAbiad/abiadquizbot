@@ -52,6 +52,7 @@ CALLBACK_EVENTS = {
     "gift:wallet": ("wallet_clicked", "💰 ضغط رصيدي وهداياي"),
     "gift:redeem": ("gift_code_clicked", "🎟 ضغط إدخال كود هدية"),
     "gift:cancel": ("gift_cancel_clicked", "🎟 ضغط إلغاء إدخال الكود"),
+    "quiz_generate_new": ("new_questions_clicked", "✨ ضغط توليد أسئلة جديدة من المحتوى"),
     "quiz_generate_similar_math": ("similar_math_clicked", "🧩 ضغط مسائل رياضيات مشابهة"),
     "quiz_extract_as_is": ("extract_as_is_clicked", "📋 ضغط استخراج الاختبار كما هو"),
     "quiz_extract_ai_solve": ("extract_solve_clicked", "🧠 ضغط حل الاختبار بالذكاء الاصطناعي"),

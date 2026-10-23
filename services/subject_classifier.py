@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
 # v2 could associate a retained text input with a newly uploaded file's hash.
 # Ignore those temporary results without deleting votes, locks or saved quizzes.
-_CLASSIFY_CACHE_PREFIX = "subject_classify:v3:"
+_CLASSIFY_CACHE_PREFIX = "subject_classify:v4:"
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
 _VALID_SUBJECTS = {
@@ -135,8 +135,6 @@ def _normalize(result: Optional[SubjectClassification]) -> SubjectClassification
         log_warning(logger, f"[subject_classifier] Unexpected subject value '{subject}', defaulting to 'other'")
         subject = SUBJECT_OTHER
     suggested = [s.strip() for s in (result.suggested_types or []) if s and s.strip()][:4]
-    if subject != SUBJECT_OTHER:
-        suggested = []
 
     # 🆕 question_count منطقي فقط لاختبار جاهز (محلول/غير محلول) - لأي مادة أخرى يبقى null
     # حتى لو أرجع النموذج قيمة عن طريق الخطأ. القيمة المُرجَعة تُقيَّد ضمن نفس مجال العدد

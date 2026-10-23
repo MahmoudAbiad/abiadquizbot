@@ -146,32 +146,17 @@ def build_transparency_text(
     return "\n".join(lines)
 
 def normalize_quiz_option_count(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Enforce exactly four options while preserving the model's marked correct answer.
-
-    A ready-made exam can contain five choices. Keep the correct choice and the
-    first OPTION_COUNT - 1 incorrect choices (i.e. discard the last incorrect
-    choice), preserving their original order. The normal shuffle happens later
-    and updates correct_option_id again.
-
-    Fail closed if there are too few choices or the answer index is invalid:
-    guessing a correct answer or inventing a distractor would be misleading.
-    """
+    """Validate original exam choices without inventing or deleting options."""
     for question_number, question in enumerate(quiz_data, start=1):
         options = question.get("options")
         correct_index = question.get("correct_option_id")
-        if not isinstance(options, list) or len(options) < OPTION_COUNT:
-            raise ValueError(f"Question {question_number}: expected at least {OPTION_COUNT} options")
+        if not isinstance(options, list) or len(options) < 2:
+            raise ValueError(f"Question {question_number}: expected at least 2 options")
         if type(correct_index) is not int or not 0 <= correct_index < len(options):
             raise ValueError(f"Question {question_number}: invalid correct option index")
         if any(not isinstance(option, str) or not option.strip() for option in options):
             raise ValueError(f"Question {question_number}: empty or invalid option")
 
-        if len(options) > OPTION_COUNT:
-            kept = [i for i in range(len(options)) if i != correct_index][:OPTION_COUNT - 1]
-            kept.append(correct_index)
-            kept.sort()
-            question["options"] = [options[i] for i in kept]
-            question["correct_option_id"] = kept.index(correct_index)
 
     return quiz_data
 
@@ -258,7 +243,7 @@ def build_question_type_label(
     for value, label in QUESTION_TYPE_OPTIONS.get(subject_type, []):
         if value == question_type:
             return label
-    return "🔀 متنوع (بدون تخصيص)"
+    return "📚 أسئلة شاملة عن الدرس"
 
 
 def resolve_quiz_extraction_instruction(subject_type: str, extraction_mode: Optional[str]) -> Optional[str]:
@@ -455,11 +440,9 @@ async def execute_quiz_generation_workflow(
         if not quiz_data:
             return None, None, "ai_failed", None
 
-        # Five-choice fallback applies ONLY when extracting an existing exam
-        # (quiz_solved / quiz_unsolved). Other generated quiz types retain their
-        # existing validation and are never modified by this extraction-specific
-        # safeguard. Run before shuffle, persistence, image rendering and polls.
-        if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        # Validate extracted choices before persistence, rendering and polls.
+        if (subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+                and question_type != QUESTION_TYPE_SIMILAR_MATH):
             try:
                 quiz_data = normalize_quiz_option_count(quiz_data)
             except ValueError as exc:
@@ -490,7 +473,8 @@ async def execute_quiz_generation_workflow(
 
         # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
         #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
-        quiz_data = shuffle_quiz_options(quiz_data)
+        if not quiz_extraction_instruction:
+            quiz_data = shuffle_quiz_options(quiz_data)
 
         # 3.6 تعليم كل سؤال بنمط الكويز المصوّر LaTeX ليتحول التنفيذ لاحقاً
         #     (services/quiz_engine.py) لمسار الصورة + Poll الحروف بدل النص العادي

@@ -52,7 +52,8 @@ class LanguagePromptTests(unittest.TestCase):
         self.assertIn("لا تولّد أسئلة جديدة", C.SYSTEM_PROMPT_EXTRACT_READY_QUIZ)
         for mode in (C.QUIZ_EXTRACTION_MODE_AS_IS, C.QUIZ_EXTRACTION_MODE_AI_SOLVE):
             text = C.QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS[mode]
-            self.assertEqual(text.count("أخرج أربعة خيارات فقط"), 1)
+            self.assertIn("لا تضف مشتتات ولا تحذف خيارات", text)
+            self.assertNotIn("أخرج أربعة خيارات فقط", text)
         self.assertIn("مصفوفة", C.SYSTEM_PROMPT_EXTRACT_READY_MATH_FORMAT)
 
 

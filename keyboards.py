@@ -6,6 +6,7 @@ from constants import (
     BTN_TRANSLATE_YES_FRENCH, BTN_TRANSLATE_NO_FRENCH,
     BTN_QUIZ_EXTRACT_AS_IS, BTN_QUIZ_EXTRACT_AI_SOLVE,
     QUESTION_TYPE_OPTIONS, QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM,
+    QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH,
     DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE, DIFFICULTY_LABELS_AR,
     BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_BACK_TO_TYPE_SCREEN,
     SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH,
@@ -271,12 +272,16 @@ def get_quiz_detected_count_keyboard(selected_count: int) -> types.InlineKeyboar
 def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_type: str) -> types.InlineKeyboardMarkup:
     """
     🆕 المرحلة الأولى من شاشة الخيارات (نوع الأسئلة فقط - بدون صعوبة بنفس الشاشة لتقليل
-    الازدحام البصري). اختيار أي نوع (أو "متنوع") ينقل تلقائياً لمرحلة الصعوبة - لا حاجة
+    الازدحام البصري). اختيار أي نوع (أو الشمول) ينقل تلقائياً لمرحلة الصعوبة - لا حاجة
     لزر "متابعة" منفصل.
     """
     kb = []
 
-    if subject_type in (SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH):
+    if suggested_types:
+        type_options = [(f"other_{i}", label) for i, label in enumerate(suggested_types[:4])]
+        if subject_type == SUBJECT_MATH:
+            type_options.append((QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH))
+    elif subject_type in (SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH):
         type_options = list(QUESTION_TYPE_OPTIONS.get(subject_type, []))
     else:
         # 🆕 اقتراحات AI الديناميكية للمواد غير المصنّفة
@@ -298,7 +303,7 @@ def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_ty
     # (general_test) من القائمة الجاهزة أعلاه يؤدي نفس الغرض بالضبط - عرض الاثنين معاً
     # كان يبدو كخيارين متطابقين مربكين بصرياً. باقي المواد (رياضيات/أخرى) لا تملك خياراً
     # مكافئاً بنفس المعنى ضمن قوائمها، فيبقى الزر العمومي ضرورياً لها.
-    if subject_type not in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
+    if suggested_types or subject_type not in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
         kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
     kb.append([types.InlineKeyboardButton(text=custom_text, callback_data="qtype_custom")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
@@ -369,6 +374,7 @@ def get_quiz_extraction_choice_keyboard(is_math: bool = False, solved: bool = Tr
         [types.InlineKeyboardButton(text=BTN_QUIZ_EXTRACT_AI_SOLVE, callback_data="quiz_extract_ai_solve")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
+    kb.insert(-1, [types.InlineKeyboardButton(text="✨ توليد أسئلة جديدة من المحتوى", callback_data="quiz_generate_new")])
     if not solved:
         kb = [row for row in kb if row[0].callback_data != "quiz_extract_as_is"]
     if is_math:
@@ -452,7 +458,7 @@ async def get_multiple_quizzes_keyboard(
         qt = q.get("question_type") or "general"
         if qt not in seen_types:
             seen_types.add(qt)
-            distinct_types.append((qt, q.get("question_type_label") or "🔀 متنوع"))
+            distinct_types.append((qt, q.get("question_type_label") or "📚 أسئلة شاملة عن الدرس"))
     if len(distinct_types) > 1:
         row = [types.InlineKeyboardButton(
             text=("✅ الكل" if filter_type == "all" else "الكل"), callback_data="cachefilter_type_all"
@@ -490,7 +496,7 @@ async def get_multiple_quizzes_keyboard(
         is_math = bool(q.get('is_math_quiz')) or (q_count > 0 and bool(quiz_data[0].get('is_math')))
         icon = "📐" if is_math else "📝"
         # 🆕 تفاصيل النوع + الصعوبة بجانب كل كويز مخزّن (بدل عرضها كوحدة متجانسة كسابقاً)
-        type_label = q.get("question_type_label") or "🔀 متنوع"
+        type_label = q.get("question_type_label") or "📚 أسئلة شاملة عن الدرس"
         diff_label = DIFFICULTY_LABELS_AR.get(q.get("difficulty") or "medium", "🟡 متوسط")
         # 🩹 سعر هذا الكويز تحديداً (وليس سعراً عاماً موحّداً) بناءً على عدد أسئلته الفعلي
         # 🆕 calculate_cached_points_cost صارت async (تقرأ معدّلي التسعير من إعدادات
