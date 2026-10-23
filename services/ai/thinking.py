@@ -1,4 +1,4 @@
-"""Translate the detection thinking policy without inventing vendor settings."""
+"""Translate admin thinking levels without inventing vendor settings."""
 import re
 
 from logger import get_logger
@@ -10,16 +10,16 @@ def google_thinking(model, effort, types):
     if not effort:
         return None
     name = model.rsplit("/", 1)[-1].lower()
-    # These families expose MEDIUM. Image models and Pro variants differ.
+    # These families expose low/medium/high. Image models and Pro variants differ.
     if (re.match(r"gemini-3(?:\.\d+)?-flash(?:-|$)", name)
             and "image" not in name) or name == "gemini-4-argon":
         logger.info("AI_THINKING model=%s requested=%s applied=level", model, effort)
         return types.ThinkingConfig(thinking_level=effort.upper())
     if re.match(r"gemini-2\.5-(?:flash|pro)(?:-|$)", name):
-        # Application mapping, not a Google-defined medium level. 4096 is
-        # inside the supported budget ranges of 2.5 Flash, Flash-Lite and Pro.
-        logger.info("AI_THINKING model=%s requested=%s applied=budget_4096", model, effort)
-        return types.ThinkingConfig(thinking_budget=4096)
+        # Application approximations, within all three 2.5 models' ranges.
+        budget = {"low": 1024, "medium": 4096, "high": 8192}[effort]
+        logger.info("AI_THINKING model=%s requested=%s applied=budget_%d", model, effort, budget)
+        return types.ThinkingConfig(thinking_budget=budget)
     logger.warning("AI_THINKING_UNSUPPORTED model=%s requested=%s applied=provider_default", model, effort)
     return None
 

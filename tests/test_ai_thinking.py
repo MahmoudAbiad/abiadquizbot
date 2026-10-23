@@ -10,15 +10,17 @@ class ThinkingTests(unittest.TestCase):
                       'gemini-3-flash-preview', 'gemini-3.8-flash',
                       'publishers/google/models/gemini-3.6-flash', 'gemini-4-argon'):
             with self.subTest(model=model):
-                config = google_thinking(model, 'medium', types)
-                self.assertEqual(config.thinking_level.value, 'MEDIUM')
-                self.assertIsNone(config.thinking_budget)
+                for level in ('low', 'medium', 'high'):
+                    config = google_thinking(model, level, types)
+                    self.assertEqual(config.thinking_level.value, level.upper())
+                    self.assertIsNone(config.thinking_budget)
 
     def test_2_5_uses_numeric_budget_instead_of_unsupported_level(self):
         for model in ('gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro'):
-            config = google_thinking(model, 'medium', types)
-            self.assertEqual(config.thinking_budget, 4096)
-            self.assertIsNone(config.thinking_level)
+            for level, budget in (('low', 1024), ('medium', 4096), ('high', 8192)):
+                config = google_thinking(model, level, types)
+                self.assertEqual(config.thinking_budget, budget)
+                self.assertIsNone(config.thinking_level)
 
     def test_unsupported_google_models_and_regular_requests_keep_defaults(self):
         for model in ('gemma-4-31b-it', 'gemini-2.0-flash', 'gemini-3.1-flash-lite-image',

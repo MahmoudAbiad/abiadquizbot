@@ -103,13 +103,15 @@ class SubjectClassificationResponse(SubjectClassification):
     )
 
 
-async def _get_cached_classification(file_hash: Optional[str]) -> Optional[SubjectClassification]:
+async def _get_cached_classification(file_hash: Optional[str], *, thinking_level=None) -> Optional[SubjectClassification]:
     """يرجع نتيجة تصنيف محفوظة سابقاً لنفس file_hash إن وُجدت، وإلا None بصمت (أي خطأ
     اتصال بـ Redis لا يوقف تدفق التصنيف العادي - فشل آمن دائماً)."""
     if not file_hash:
         return None
     try:
-        cached_raw = await redis_client.get(f"{_CLASSIFY_CACHE_PREFIX}{file_hash}")
+        from helpers.settings_helper import get_ai_thinking_level
+        effort = thinking_level or await get_ai_thinking_level("detection")
+        cached_raw = await redis_client.get(f"{_CLASSIFY_CACHE_PREFIX}{effort or 'auto'}:{file_hash}")
         if cached_raw:
             return SubjectClassification.model_validate_json(cached_raw)
     except Exception as exc:
@@ -117,12 +119,14 @@ async def _get_cached_classification(file_hash: Optional[str]) -> Optional[Subje
     return None
 
 
-async def _store_cached_classification(file_hash: Optional[str], result: SubjectClassification) -> None:
+async def _store_cached_classification(file_hash: Optional[str], result: SubjectClassification, *, thinking_level=None) -> None:
     if not file_hash:
         return
     try:
+        from helpers.settings_helper import get_ai_thinking_level
+        effort = thinking_level or await get_ai_thinking_level("detection")
         await redis_client.set(
-            f"{_CLASSIFY_CACHE_PREFIX}{file_hash}", result.model_dump_json(), ex=CLASSIFY_CACHE_TTL_SECONDS,
+            f"{_CLASSIFY_CACHE_PREFIX}{effort or 'auto'}:{file_hash}", result.model_dump_json(), ex=CLASSIFY_CACHE_TTL_SECONDS,
         )
     except Exception as exc:
         log_warning(logger, f"[subject_classifier] Cache store failed for {file_hash}: {exc}")
@@ -289,7 +293,9 @@ async def classify_subject(
             log_warning(logger, f"[subject_classifier] Failed to parse locked classification for {file_hash}: {exc}")
             # لا نمنع التدفق العادي لو كانت بيانات التثبيت تالفة لأي سبب - نكمل كالمعتاد (فشل آمن)
 
-    cached = await _get_cached_classification(file_hash)
+    from helpers.settings_helper import get_ai_thinking_level
+    thinking_level = await get_ai_thinking_level("detection") or "auto"
+    cached = await _get_cached_classification(file_hash, thinking_level=thinking_level)
     if cached is not None:
         logger.info("SUBJECT_CLASSIFICATION source=redis subject=%s content_subject=%s", cached.subject, cached.content_subject)
         return cached
@@ -307,7 +313,10 @@ async def classify_subject(
     except Exception as exc:
         log_warning(logger, f"[subject_classifier] Unexpected error during classification, defaulting to 'other': {exc}")
         return _fallback()
-    await _store_cached_classification(file_hash, result)
+    # If an admin changes policy during the request, do not label its result
+    # with a different effort. A later upload will be classified afresh.
+    if (await get_ai_thinking_level("detection") or "auto") == thinking_level:
+        await _store_cached_classification(file_hash, result, thinking_level=thinking_level)
     logger.info("SUBJECT_CLASSIFICATION source=%s subject=%s content_subject=%s", source, result.subject, result.content_subject)
     return result
 

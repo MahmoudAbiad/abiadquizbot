@@ -6,7 +6,7 @@ import os
 import types
 import typing
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import BaseModel, Field
 
@@ -124,6 +124,16 @@ class QuizInputIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(key, first.data)
         self.assertEqual(second.data['input_channel'], 'web_upload')
         self.assertEqual(self.classifier['_classify_media'].await_count, 1)
+
+    async def test_changing_detection_effort_does_not_reuse_previous_cached_estimate(self):
+        effort = AsyncMock(return_value="medium")
+        with patch('helpers.settings_helper.get_ai_thinking_level', effort):
+            await self.finalize(State())
+            await self.finalize(State())
+            self.assertEqual(self.classifier['_classify_media'].await_count, 1)
+            effort.return_value = "high"
+            await self.finalize(State())
+            self.assertEqual(self.classifier['_classify_media'].await_count, 2)
 
     async def test_new_pdf_ignores_old_cache_version(self):
         self.cache['subject_classify:v2:new-pdf'] = json.dumps({'subject': 'english'})

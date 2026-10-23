@@ -98,6 +98,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.execute(AIRequest(("generate",)), timeout=1)
         self.assertIsNone(self.adapter.generate.await_args.args[3].reasoning_effort)
 
+    async def test_admin_levels_apply_to_detection_cascade_and_fast_text_independently(self):
+        from helpers import settings_helper as sh
+        settings = {"ai_detection_thinking": 1, "ai_generation_thinking": 3}
+        with patch.object(sh, "get_app_settings", AsyncMock(side_effect=lambda: settings)):
+            for slot, expected in (("detection", "low"), ("cascade", "high"), ("groq_fast", "high")):
+                await runtime.execute(AIRequest(("content",)), slot=slot, timeout=1)
+                self.assertEqual(self.adapter.generate.await_args.args[3].reasoning_effort, expected)
+            settings["ai_generation_thinking"] = 0
+            await runtime.execute(AIRequest(("content",), reasoning_effort="high"), timeout=1)
+            self.assertIsNone(self.adapter.generate.await_args.args[3].reasoning_effort)
+
     async def test_custom_provider_runs_without_gemini_and_records_real_identity(self):
         result = await runtime.execute(AIRequest(("hello",)), timeout=1)
         self.assertEqual(result.text, "ok")

@@ -67,13 +67,16 @@ async def _render_ai_menu(event, state: FSMContext = None):
         "🔎 <b>نماذج Google:</b> تحديث الكتالوج واختبار نموذج قبل تفعيله\n"
         "📊 <b>سجل توليد الكويزات:</b> وقت كل عملية توليد + الموديل المستخدم فيها\n"
         "⏱ <b>مهلة الطلب:</b> أقصى انتظار لكل محاولة (مفتاح × موديل) قبل الانتقال للتالي\n"
+        "💭 <b>مستوى التفكير:</b> إعداد مستقل للفحص وآخر لتوليد الأسئلة\n"
         "🧩 <b>Vertex في المعالجة متعددة الأجزاء:</b> السماح باستخدام Vertex عند توليد أو استخراج الاختبارات المجزأة، إذا كان مفعّلاً ومهيأً بسلسلة النماذج."
     )
-    from helpers.settings_helper import get_app_settings
+    from helpers.settings_helper import get_app_settings, thinking_level_from_settings
     settings = await get_app_settings(force_refresh=True)
     vertex_parallel_enabled = await is_feature_enabled("vertex_parallel_enabled", default=False)
     reply_markup = get_ai_control_keyboard(
         settings.get("ai_request_timeout"), vertex_parallel_enabled=vertex_parallel_enabled,
+        detection_thinking=thinking_level_from_settings(settings, "detection"),
+        generation_thinking=thinking_level_from_settings(settings, "generation"),
     )
 
     if isinstance(event, types.Message):
@@ -86,6 +89,55 @@ async def _render_ai_menu(event, state: FSMContext = None):
 @router.callback_query(F.data == "admin_ai_menu")
 async def open_ai_menu(call: types.CallbackQuery, state: FSMContext):
     await _render_ai_menu(call, state)
+
+
+async def _render_thinking_screen(call, task):
+    from helpers.settings_helper import get_app_settings, thinking_level_from_settings, AI_THINKING_LABELS
+    from keyboards import get_ai_thinking_keyboard
+    settings = await get_app_settings(force_refresh=True)
+    current = thinking_level_from_settings(settings, task)
+    title = "فحص المحتوى" if task == "detection" else "توليد الأسئلة"
+    text = (
+        f"💭 <b>مستوى التفكير — {title}</b>\n\n"
+        f"الإعداد الحالي: <b>{AI_THINKING_LABELS[current]}</b>\n\n"
+        "تلقائي: إعداد النموذج الافتراضي.\n"
+        "منخفض: يعطي الأولوية للسرعة.\n"
+        "متوسط: يوازن بين السرعة والتفكير.\n"
+        "مرتفع: تفكير أعمق وقد يزيد الوقت واستهلاك التوكنات.\n\n"
+        "يسري التغيير على طلبات الذكاء الاصطناعي الجديدة والنماذج الاحتياطية. "
+        "إعداد التوليد يشمل النصوص والملفات والاستخراج والمعالجة متعددة الأجزاء.\n\n"
+        "حسب دعم النموذج: يُرسل المستوى مباشرة، أو يُحوّل لميزانية تقريبية "
+        "(1024 / 4096 / 8192 توكن). النموذج غير الداعم يحتفظ بإعداده الافتراضي "
+        "ويظهر تنبيه في السجلات."
+    )
+    await safe_edit_text(call.message, text, reply_markup=get_ai_thinking_keyboard(task, current))
+
+
+@router.callback_query(F.data.startswith("ait:open:"))
+async def open_thinking_settings(call: types.CallbackQuery, state: FSMContext):
+    task = call.data.removeprefix("ait:open:")
+    if task not in {"detection", "generation"}:
+        await call.answer("❌ إعداد غير معروف.", show_alert=True)
+        return
+    await state.clear()
+    await _render_thinking_screen(call, task)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ait:set:"))
+async def set_thinking_level(call: types.CallbackQuery):
+    from helpers.settings_helper import update_ai_thinking_level, AI_THINKING_LEVELS
+    parts = call.data.split(":")
+    if len(parts) != 4 or parts[2] not in {"detection", "generation"} or parts[3] not in AI_THINKING_LEVELS:
+        await call.answer("❌ مستوى أو إعداد غير معروف.", show_alert=True)
+        return
+    task, level = parts[2:]
+    if not await update_ai_thinking_level(task, level):
+        await call.answer("❌ تعذّر حفظ الإعداد، حاول مجدداً.", show_alert=True)
+        return
+    logger.info("AI_THINKING_SETTING_CHANGED task=%s level=%s", task, level)
+    await call.answer("✅ تم حفظ مستوى التفكير.")
+    await _render_thinking_screen(call, task)
 
 
 @router.callback_query(F.data == "admin_ai_vertex_parallel_toggle")

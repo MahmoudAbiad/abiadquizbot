@@ -80,9 +80,11 @@ async def choose_parallel_preference(request, *, slot="cascade"):
 
 
 async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regular", timeout=None):
-    if slot == "detection" or mode == "detection":
-        from dataclasses import replace
-        request = replace(request, reasoning_effort="medium")
+    from dataclasses import replace
+    from helpers.settings_helper import get_ai_thinking_level
+    task = "detection" if slot == "detection" or mode == "detection" else "generation"
+    # Resolve once for this cascade: fallback attempts keep the same policy.
+    request = replace(request, reasoning_effort=await get_ai_thinking_level(task))
     # All generation/extraction/streaming paths use this boundary and QuizResponse.
     if request.schema is not None and request.schema.__name__ == "QuizResponse":
         from dataclasses import replace
@@ -197,8 +199,9 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                 continue
             started = time.monotonic()
             logger.info(
-                "AI_ATTEMPT_START request_id=%s slot=%s provider=%s model=%s credential_index=%d rank=%d/%d",
+                "AI_ATTEMPT_START request_id=%s slot=%s provider=%s model=%s credential_index=%d rank=%d/%d thinking=%s",
                 request_id, slot, provider["id"], entry["model_name"], index, rank, len(models),
+                request.reasoning_effort or "auto",
             )
             try:
                 result = await asyncio.wait_for(

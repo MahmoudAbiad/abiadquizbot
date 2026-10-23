@@ -833,7 +833,8 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
 
 # ==================== 🆕 AI Models Control Panel Keyboards ====================
 
-def get_ai_control_keyboard(request_timeout: float = None, vertex_parallel_enabled: bool = False) -> types.InlineKeyboardMarkup:
+def get_ai_control_keyboard(request_timeout: float = None, vertex_parallel_enabled: bool = False,
+                            detection_thinking: str = "medium", generation_thinking: str = "auto") -> types.InlineKeyboardMarkup:
     """اللوحة الرئيسية للتحكم بالذكاء الاصطناعي: نقطة الدخول لكل الأقسام الفرعية
     (سلسلة التوليد، موديل الفحص السريع، موديل Groq السريع، سجل التوليد).
     ملاحظة: إعدادات النقاط ما عادت هون - انتقلت لقسم "الإعدادات العامة" المستقل
@@ -851,6 +852,13 @@ def get_ai_control_keyboard(request_timeout: float = None, vertex_parallel_enabl
         )],
         [types.InlineKeyboardButton(text="📊 سجل توليد الكويزات (الوقت + الموديل)", callback_data="admin_quiz_gen_log")],
     ]
+    from helpers.settings_helper import AI_THINKING_LABELS
+    kb.extend([
+        [types.InlineKeyboardButton(
+            text=f"🔍 تفكير الفحص: {AI_THINKING_LABELS[detection_thinking]}", callback_data="ait:open:detection")],
+        [types.InlineKeyboardButton(
+            text=f"🧠 تفكير التوليد: {AI_THINKING_LABELS[generation_thinking]}", callback_data="ait:open:generation")],
+    ])
     if request_timeout is not None:
         from helpers.settings_helper import format_setting_value
         kb.append([types.InlineKeyboardButton(
@@ -859,6 +867,16 @@ def get_ai_control_keyboard(request_timeout: float = None, vertex_parallel_enabl
         )])
     kb.append([types.InlineKeyboardButton(text="🔙 الإعدادات العامة", callback_data="admin_settings_general")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_ai_thinking_keyboard(task: str, current: str) -> types.InlineKeyboardMarkup:
+    from helpers.settings_helper import AI_THINKING_LABELS
+    rows = [[types.InlineKeyboardButton(
+        text=f"{'✅ ' if level == current else ''}{label}",
+        callback_data=f"ait:set:{task}:{level}",
+    )] for level, label in AI_THINKING_LABELS.items()]
+    rows.append([types.InlineKeyboardButton(text="🔙 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_ai_slot_keyboard(slot: str, models: list) -> types.InlineKeyboardMarkup:

@@ -78,7 +78,7 @@ class CatalogError(RuntimeError):
 
 
 def classification_config(model, schema, types):
-    """Probe with the same medium policy used by live detection."""
+    """Use balanced medium thinking for synthetic catalog capability probes."""
     from services.ai.thinking import google_thinking
     values = {"response_mime_type": "application/json", "response_schema": schema}
     thinking = google_thinking(model, "medium", types)
