@@ -27,7 +27,7 @@ VISION = "@cf/meta/llama-3.2-11b-vision-instruct"
 
 
 def classifier_functions():
-    names = {'SubjectClassification', 'ClassificationUnavailable', '_dispatch_classification',
+    names = {'SubjectClassification', 'SubjectClassificationResponse', 'ClassificationUnavailable', '_dispatch_classification',
              '_merge_classification_results', '_normalize', '_fallback', 'classify_subject'}
     deps = {key: getattr(constants, key) for key in dir(constants) if key.isupper()}
     deps.update(BaseModel=BaseModel, Field=Field, List=typing.List, Optional=typing.Optional,
@@ -35,6 +35,7 @@ def classifier_functions():
                 _VALID_SUBJECTS={'math', 'english', 'french', 'other', 'quiz_solved', 'quiz_unsolved'})
     env = load_functions('services/subject_classifier.py', names, **deps)
     env['SubjectClassification'].model_rebuild(_types_namespace=env)
+    env['SubjectClassificationResponse'].model_rebuild(_types_namespace=env)
     return env
 
 
@@ -48,7 +49,7 @@ class WorkersVisionTests(unittest.IsolatedAsyncioTestCase):
         self.rows = [{'provider': 'cloudflare', 'model_name': VISION,
                       'capabilities': ['text', 'image'], 'is_enabled': True}]
         self.calls, self.clients = [], []
-        self.reply = {'subject': 'math'}
+        self.reply = {'subject': 'math', 'content_subject': 'math'}
         self.status = 200
         self.error = None
         original = httpx.AsyncClient
@@ -92,6 +93,18 @@ class WorkersVisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['stream'])
         self.assertTrue(self.clients[0].is_closed)
         self.assertEqual(_last_model_used_var.get()['provider'], 'cloudflare')
+
+    def test_wire_schema_requires_academic_subject_even_for_solved_exam(self):
+        schema = self.env['SubjectClassificationResponse']
+        self.assertIn('content_subject', schema.model_json_schema()['required'])
+        with self.assertRaises(ValueError):
+            schema(subject='quiz_solved')
+        result = self.env['_normalize'](schema(subject='quiz_solved', content_subject='english'))
+        self.assertEqual(result.content_subject, 'english')
+        lesson = self.env['_normalize'](schema(subject='other', content_subject='english'))
+        self.assertEqual(lesson.subject, 'english')
+        # Old cached data remains readable, separately from the stricter AI schema.
+        self.assertIsNone(self.schema(subject='quiz_solved').content_subject)
 
     async def test_same_vision_model_classifies_plain_text(self):
         result = await self.env['_dispatch_classification'](contents=('English grammar',))

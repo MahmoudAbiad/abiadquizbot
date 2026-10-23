@@ -80,6 +80,21 @@ class QuizInputIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.message.answer = AsyncMock(return_value=self.message)
         self.message.edit_text = AsyncMock()
 
+    async def test_english_lesson_and_english_exam_both_show_translation_choice(self):
+        schema = self.classifier['SubjectClassification']
+        for subject in ('english', 'quiz_solved', 'quiz_unsolved'):
+            with self.subTest(subject=subject):
+                self.classifier['_classify_media'].return_value = schema(
+                    subject=subject, content_subject='english', question_count=10,
+                    suggested_types=['مفردات الدرس', 'فهم المقروء'])
+                state = State()
+                self.message.edit_text.reset_mock()
+                await self.finalize(state, file_hash='english-' + subject)
+                self.assertEqual(state.current, 'translation')
+                self.assertEqual(self.message.edit_text.await_args.args[0],
+                                 constants.MSG_ENGLISH_CONTENT_DETECTED)
+                self.env['_show_quiz_options_screen'].assert_not_awaited()
+
     def completed(self):
         return State({'pure_text': 'Old English lesson about grammar and verbs.',
             'file_hash': 'previous-document', 'cached_office_text': 'Old office document',

@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
 # v2 could associate a retained text input with a newly uploaded file's hash.
 # Ignore those temporary results without deleting votes, locks or saved quizzes.
-_CLASSIFY_CACHE_PREFIX = "subject_classify:v4:"
+_CLASSIFY_CACHE_PREFIX = "subject_classify:v5:"
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
 _VALID_SUBJECTS = {
@@ -96,6 +96,13 @@ class SubjectClassification(BaseModel):
     )
 
 
+class SubjectClassificationResponse(SubjectClassification):
+    """Require the academic subject on the wire; tolerate legacy cached snapshots separately."""
+    content_subject: Literal["math", "english", "french", "other"] = Field(
+        description="REQUIRED academic subject, independent of exam format. English language lessons with reading, vocabulary or comprehension are english even when the passage is about science."
+    )
+
+
 async def _get_cached_classification(file_hash: Optional[str]) -> Optional[SubjectClassification]:
     """يرجع نتيجة تصنيف محفوظة سابقاً لنفس file_hash إن وُجدت، وإلا None بصمت (أي خطأ
     اتصال بـ Redis لا يوقف تدفق التصنيف العادي - فشل آمن دائماً)."""
@@ -134,6 +141,11 @@ def _normalize(result: Optional[SubjectClassification]) -> SubjectClassification
     if subject not in _VALID_SUBJECTS:
         log_warning(logger, f"[subject_classifier] Unexpected subject value '{subject}', defaulting to 'other'")
         subject = SUBJECT_OTHER
+    # Academic subject remains authoritative for ordinary teaching material.
+    academic_subject = result.content_subject
+    if (subject not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+            and academic_subject in (SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH)):
+        subject = academic_subject
     suggested = [s.strip() for s in (result.suggested_types or []) if s and s.strip()][:4]
 
     # 🆕 question_count منطقي فقط لاختبار جاهز (محلول/غير محلول) - لأي مادة أخرى يبقى null
@@ -192,7 +204,7 @@ async def _dispatch_classification(*, contents=None, paths=None):
     from services.ai.runtime import execute
     parts = (tuple(Attachment.from_path(path) for path in paths)
              if paths else tuple(contents or []))
-    result = await execute(AIRequest(parts, SubjectClassification, allow_image_sampling=True,
+    result = await execute(AIRequest(parts, SubjectClassificationResponse, allow_image_sampling=True,
                                      system_instruction=SYSTEM_PROMPT_CLASSIFY_SUBJECT),
                            slot="detection", mode="detection",
                            timeout=MATH_DETECTION_TIMEOUT)
@@ -208,7 +220,7 @@ async def _dispatch_classification(*, contents=None, paths=None):
         async for batch in page_batches(paths):
             prompt = (SYSTEM_PROMPT_CLASSIFY_SUBJECT +
                       "\nThese pages belong to one document. Count only questions STARTING on these pages.")
-            result = await execute(AIRequest(tuple(batch), SubjectClassification, allow_image_sampling=True,
+            result = await execute(AIRequest(tuple(batch), SubjectClassificationResponse, allow_image_sampling=True,
                                              system_instruction=prompt),
                 slot="detection", mode="detection", timeout=MATH_DETECTION_TIMEOUT)
             if result:
@@ -271,7 +283,7 @@ async def classify_subject(
     if locked is not None:
         try:
             result = SubjectClassification.model_validate(locked["classification_data"])
-            logger.info("SUBJECT_CLASSIFICATION source=community_lock subject=%s", result.subject)
+            logger.info("SUBJECT_CLASSIFICATION source=community_lock subject=%s content_subject=%s", result.subject, result.content_subject)
             return result
         except Exception as exc:
             log_warning(logger, f"[subject_classifier] Failed to parse locked classification for {file_hash}: {exc}")
@@ -279,7 +291,7 @@ async def classify_subject(
 
     cached = await _get_cached_classification(file_hash)
     if cached is not None:
-        logger.info("SUBJECT_CLASSIFICATION source=redis subject=%s", cached.subject)
+        logger.info("SUBJECT_CLASSIFICATION source=redis subject=%s content_subject=%s", cached.subject, cached.content_subject)
         return cached
     try:
         # Explicit media takes precedence even for pre-existing dirty FSM data.
@@ -296,6 +308,6 @@ async def classify_subject(
         log_warning(logger, f"[subject_classifier] Unexpected error during classification, defaulting to 'other': {exc}")
         return _fallback()
     await _store_cached_classification(file_hash, result)
-    logger.info("SUBJECT_CLASSIFICATION source=%s subject=%s", source, result.subject)
+    logger.info("SUBJECT_CLASSIFICATION source=%s subject=%s content_subject=%s", source, result.subject, result.content_subject)
     return result
 
