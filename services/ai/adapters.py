@@ -156,6 +156,8 @@ class ChatAdapter:
                 not self.supports_request(provider, model, request)):
             raise ValueError("Unsupported attachment for this provider endpoint")
         if service == "cloudflare" and model == "@cf/meta/llama-3.2-11b-vision-instruct":
+            from services.ai.thinking import chat_thinking
+            chat_thinking(service, model, request.reasoning_effort)
             return await self._generate_cloudflare_vision(provider, credential, model, request)
         content = []
         for part in request.contents:
@@ -173,6 +175,8 @@ class ChatAdapter:
                     if request.system_instruction else [])
         messages.append({"role": "user", "content": content})
         body = {"model": model, "messages": messages}
+        from services.ai.thinking import chat_thinking
+        body.update(chat_thinking(service, model, request.reasoning_effort))
         if request.schema:
             content.append({"type": "text", "text": "Return ONLY valid JSON matching this schema:\n" +
                             json.dumps(request.schema.model_json_schema(), ensure_ascii=False)})
@@ -269,14 +273,13 @@ class GoogleAdapter:
                       if request.schema else
                       types.GenerateContentConfig(system_instruction=request.system_instruction)
                       if request.system_instruction else None)
-            if (provider["transport"] == "gemini" and request.schema is not None
-                    and getattr(request.schema, "__name__", "") == "SubjectClassification"):
-                # Match the catalog probe's low-latency configuration for
-                # Gemini 3.8 Flash classification. Do not change quiz generation.
-                from services.ai.google_catalog import classification_config
-                config = classification_config(model, request.schema, types)
-                if request.system_instruction:
-                    config.system_instruction = request.system_instruction
+            if request.reasoning_effort:
+                from services.ai.thinking import google_thinking
+                thinking = google_thinking(model, request.reasoning_effort, types)
+                if thinking is not None:
+                    if config is None:
+                        config = types.GenerateContentConfig()
+                    config.thinking_config = thinking
             try:
                 response = await client.aio.models.generate_content(
                     model=model, contents=contents, config=config,

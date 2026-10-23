@@ -78,15 +78,12 @@ class CatalogError(RuntimeError):
 
 
 def classification_config(model, schema, types):
-    """Use the same fast, structured config in both probe and live detection.
-
-    Gemini 3.8 Flash defaults to medium thinking. Google recommends low for
-    latency-sensitive work. Do not apply it to Gemma or other model families
-    whose thinking-level support differs.
-    """
+    """Probe with the same medium policy used by live detection."""
+    from services.ai.thinking import google_thinking
     values = {"response_mime_type": "application/json", "response_schema": schema}
-    if model == "gemini-3.8-flash":
-        values["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
+    thinking = google_thinking(model, "medium", types)
+    if thinking is not None:
+        values["thinking_config"] = thinking
     return types.GenerateContentConfig(**values)
 
 

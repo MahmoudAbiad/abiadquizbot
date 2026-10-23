@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
 # v2 could associate a retained text input with a newly uploaded file's hash.
 # Ignore those temporary results without deleting votes, locks or saved quizzes.
-_CLASSIFY_CACHE_PREFIX = "subject_classify:v6:"
+_CLASSIFY_CACHE_PREFIX = "subject_classify:v7:"
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
 _VALID_SUBJECTS = {

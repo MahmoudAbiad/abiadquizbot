@@ -80,6 +80,9 @@ async def choose_parallel_preference(request, *, slot="cascade"):
 
 
 async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regular", timeout=None):
+    if slot == "detection" or mode == "detection":
+        from dataclasses import replace
+        request = replace(request, reasoning_effort="medium")
     # All generation/extraction/streaming paths use this boundary and QuizResponse.
     if request.schema is not None and request.schema.__name__ == "QuizResponse":
         from dataclasses import replace

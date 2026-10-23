@@ -48,6 +48,8 @@ class AIRequest:
     inline_only: bool = False
     # Only explicit extraction EOF may contain a valid empty questions array.
     allow_empty_questions: bool = False
+    # Task policy, translated to the provider's supported wire format.
+    reasoning_effort: str | None = None
 
     @property
     def capabilities(self):

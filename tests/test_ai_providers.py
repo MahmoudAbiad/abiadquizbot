@@ -86,6 +86,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             generate=AsyncMock(return_value=AIResult("ok", total_tokens=12)))
         self.stack.enter_context(patch.dict(runtime.ADAPTERS, {"openai_compatible": self.adapter}))
 
+    async def test_detection_medium_survives_failover_and_leaves_generation_unchanged(self):
+        self.provider_rows["other"] = provider("other")
+        self.model_rows.append(model("other"))
+        self.adapter.generate.side_effect = [ProviderError(500), ProviderError(500), AIResult("ok")]
+        await runtime.execute(AIRequest(("file",), reasoning_effort="low"), slot="detection", timeout=1)
+        self.assertEqual(len(self.adapter.generate.await_args_list), 3)
+        self.assertTrue(all(call.args[3].reasoning_effort == "medium"
+                            for call in self.adapter.generate.await_args_list))
+        self.adapter.generate.side_effect = None
+        await runtime.execute(AIRequest(("generate",)), timeout=1)
+        self.assertIsNone(self.adapter.generate.await_args.args[3].reasoning_effort)
+
     async def test_custom_provider_runs_without_gemini_and_records_real_identity(self):
         result = await runtime.execute(AIRequest(("hello",)), timeout=1)
         self.assertEqual(result.text, "ok")
@@ -263,6 +275,14 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ChatAdapter().capabilities_for(config), {'text', 'image'})
         with self.assertRaises(ValueError):
             await ChatAdapter().generate(config, 'key', '@cf/model', AIRequest((Attachment('image/png', data=b'x'),)))
+
+    async def test_openrouter_detection_sends_medium_only_when_requested(self):
+        config = provider_preset('openrouter')
+        _, body = await self.capture_named_request(config,
+            AIRequest(('material',), Answer, reasoning_effort="medium"))
+        self.assertEqual(body['reasoning'], {'effort': 'medium'})
+        _, body = await self.capture_named_request(config, AIRequest(('material',), Answer))
+        self.assertNotIn('reasoning', body)
 
     async def test_openrouter_requires_json_support_only_for_structured_requests(self):
         config = provider_preset('openrouter')
