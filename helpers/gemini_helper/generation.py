@@ -26,6 +26,9 @@ def _build_super_chunk_attempt_fn(paths, prompt, user_context=None):
 
 
 async def _execute_cascade(request, exclude_vertex=False, allow_empty=False):
+    if allow_empty:
+        from dataclasses import replace
+        request = replace(request, allow_empty_questions=True)
     result = await _execute_request(request, exclude_vertex=exclude_vertex)
     if not result:
         return None

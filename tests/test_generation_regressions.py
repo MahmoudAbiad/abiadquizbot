@@ -246,7 +246,8 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
                     SUBJECT_ENGLISH='english', SUBJECT_FRENCH='french',
                     QUESTION_TYPE_GENERAL='general',QUESTION_TYPE_SIMILAR_MATH='similar_math', DIFFICULTY_MEDIUM='medium',
                     resolve_generation_question_type_text=lambda *args: None,
-                    resolve_quiz_extraction_instruction=lambda *args: None,
+                    resolve_quiz_extraction_instruction=lambda subject, mode: 'convert' if subject == 'unsolved' else None,
+                    MAX_QUESTIONS_TO_GENERATE=120,
                     generate_quiz_smart=AsyncMock(return_value=generated),
                     determine_execution_mode=lambda *args, **kw: 'Standard',
                     get_last_generation_metadata=lambda: None, spawn=spawn,
@@ -258,6 +259,8 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(error, '')
                 self.assertEqual(quiz[0]['options'], expected_options)
+                self.assertEqual(env['generate_quiz_smart'].await_args.kwargs['count'],
+                                 120 if subject_type == 'unsolved' else 1)
                 self.assertEqual(quiz[0]['options'][quiz[0]['correct_option_id']], 'e')
 
 

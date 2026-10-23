@@ -301,7 +301,8 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
     heading = "✅ مراجعة العدد والتكلفة" if ready_exam else "3 من 3 · مراجعة وتوليد"
     text = f"<b>{heading}</b>\n\n{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
-    text += "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك."
+    text += ("\n\nالتكلفة المعروضة تقدير الطلب المعتمد قبل البدء. لا نخصم زيادة تلقائياً إذا تجاوز الناتج العدد المقدّر."
+             if ready_exam else "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك.")
     if mode in ("Super-PDF", "Super-Images", "Super-Text"):
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
@@ -411,7 +412,7 @@ async def _proceed_to_quiz_unsolved_screen(reply_target: types.Message, state: F
     await state.update_data(quiz_detection_notice=None)
     await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
     text = ("🗂️ <b>وجدنا أسئلة جاهزة بلا إجابات مرفقة.</b>\n\n"
-            "اختر استخراج الأسئلة وحلّها، أو توليد أسئلة جديدة من المحتوى.")
+            "نحوّل الأسئلة المؤتمتة والتقليدية القابلة للتحويل إلى أتمتة. نستبعد الإنشاء والمهمات المفتوحة الواسعة. اختر أجوبة الذكاء الاصطناعي أو توليد أسئلة جديدة من المحتوى.")
     keyboard = get_quiz_extraction_choice_keyboard(
         is_math=data.get("content_subject_type") == SUBJECT_MATH, solved=False)
     if edit:
@@ -1037,6 +1038,11 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(QuizState.waiting_for_count, F.data.startswith("qcount_pick_"))
 async def handle_count_pick(call: types.CallbackQuery, state: FSMContext) -> None:
     """اختيار عدد من الأزرار السريعة (toggle) - يحدّث نفس الشاشة (سعر + زر البدء) فوراً."""
+    data = await state.get_data()
+    if (data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+            and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
+        await call.answer("عدد أسئلة الاختبار يُحدّد تلقائياً من محتواه.")
+        return
     try:
         count = int(call.data.replace("qcount_pick_", "", 1))
         valid, error = validate_question_count(count)
@@ -1058,6 +1064,11 @@ async def handle_count_pick(call: types.CallbackQuery, state: FSMContext) -> Non
 @router.callback_query(QuizState.waiting_for_count, F.data == "qcount_custom")
 async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContext) -> None:
     """يطلب من الطالب كتابة عدد مخصص - نفس الرسالة تتحول لطلب إدخال نصي (edit)."""
+    data = await state.get_data()
+    if (data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+            and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
+        await call.answer("عدد أسئلة الاختبار يُحدّد تلقائياً من محتواه.")
+        return
     try:
         await call.message.edit_text(
             "✏️ اكتب الآن عدد الأسئلة المطلوب (رقم فقط):",
@@ -1086,6 +1097,11 @@ async def process_count_custom_text(message: types.Message, state: FSMContext) -
     count_screen_chat_id/message_id المخزّنة بالحالة) بدل إرسال شاشة تأكيد منفصلة،
     فيبقى التدفق كله شاشة واحدة متجدّدة حتى لو غيّر الطالب طريقة الإدخال بمنتصف الطريق.
     """
+    data = await state.get_data()
+    if (data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+            and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
+        await message.answer("عدد أسئلة الاختبار يُحدّد تلقائياً من محتواه.")
+        return
     count = int(message.text)
     valid, error = validate_question_count(count)
     if not valid:
@@ -1363,6 +1379,14 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # لأي خطأ UI/Telegram لاحق أن يحوّل نجاحاً فعلياً إلى refund خاطئ.
         charged_this_attempt = False
         await _clear_quiz_charge_markers(state)
+
+        if (data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+                and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
+            await call.message.answer(
+                f"✅ أصبح الاختبار جاهزاً: {len(quiz_data)} سؤال اختيار من متعدد.\n"
+                "يشمل الأسئلة الأصلية المؤتمتة والتقليدية التي أمكن تحويلها؛ "
+                "ولا يشمل الإنشاء أو المهمات المفتوحة التي لا يحافظ تحويلها على المهارة."
+            )
 
         # Generation already owns UserLock; do not try to acquire it twice.
         await start_loaded_quiz.__wrapped__(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)

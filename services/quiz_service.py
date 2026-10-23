@@ -6,7 +6,7 @@ import random
 from typing import Any, Dict, Tuple, Optional, List
 
 from constants import (
-    MAX_ALBUM_IMAGES, MAX_LIMIT_PAGES, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS, OPTION_COUNT,
+    MAX_ALBUM_IMAGES, MAX_LIMIT_PAGES, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS, OPTION_COUNT, MAX_QUESTIONS_TO_GENERATE,
     SUBJECT_MATH, SUBJECT_OTHER, SUBJECT_ENGLISH, SUBJECT_FRENCH, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
     QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM, QUESTION_TYPE_OPTIONS,
     QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH,
@@ -421,7 +421,7 @@ async def execute_quiz_generation_workflow(
         quiz_data = await generate_quiz_smart(
             file_paths=file_paths if is_media else None,
             pure_text=pure_text if not is_media else None,
-            count=count,
+            count=MAX_QUESTIONS_TO_GENERATE if quiz_extraction_instruction else count,
             skip_cache=True,
             file_hash=file_hash,
             generation_user_id=user_id,

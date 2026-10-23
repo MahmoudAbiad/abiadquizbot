@@ -30,6 +30,41 @@ def page_chunks():
 
 
 class ExpandedParallelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_small_mixed_exam_keeps_distant_key_as_full_pdf_context(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'exam.pdf'
+            path.write_bytes(b'fixture')
+            run = AsyncMock(return_value='converted')
+            split = AsyncMock()
+            with (patch.object(batches, '_run_expanded_pdf_parallel', run),
+                  patch.object(batches, 'split_pdf_with_context_without_orphans', split)):
+                result = await batches.generate_pdf_in_batches(
+                    str(path), 14, 120, 'Convert {count}', 2, extraction=True)
+            self.assertEqual(result, 'converted')
+            split.assert_not_awaited()
+            chunks = run.await_args.args[0]
+            self.assertEqual([c['paths'] for c in chunks], [[str(path)], [str(path)]])
+            self.assertEqual([(c['pdf_chunk']['owned_first'], c['pdf_chunk']['owned_last'])
+                              for c in chunks], [(1, 7), (8, 14)])
+            self.assertTrue(path.exists())
+
+    async def test_answer_key_only_part_finishes_once_without_filling_estimate(self):
+        calls = Counter()
+        async def cascade(request, **kwargs):
+            path = request.contents[-1].path
+            calls[path] += 1
+            self.assertTrue(kwargs.get('allow_empty'))
+            return completed_result([question(i) for i in range(1, 14)]
+                                    if path == 'first.pdf' and calls[path] == 1 else [])
+        with (patch.object(batches, '_execute_cascade', new=cascade),
+              patch.object(batches, 'choose_parallel_preference', AsyncMock(return_value=None))):
+            result = await batches._run_expanded_pdf_parallel(
+                page_chunks(), 120, 'Convert {count}', False, None, None, None, True)
+        self.assertEqual(len(result[0]), 13)
+        self.assertEqual(calls, {'first.pdf': 2, 'second.pdf': 1})
+
     async def test_generation_starts_both_parts_together_on_same_model_and_key(self):
         arrived = asyncio.Event()
         requests = []

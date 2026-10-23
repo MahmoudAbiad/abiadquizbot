@@ -262,8 +262,7 @@ def get_quiz_detected_count_keyboard(selected_count: int) -> types.InlineKeyboar
     مع get_question_count_keyboard ولإتاحة أي تخصيص مستقبلي بالأزرار بحسب العدد الحالي.
     """
     kb = [
-        [types.InlineKeyboardButton(text="✏️ تعديل العدد يدوياً", callback_data="qcount_custom")],
-        [types.InlineKeyboardButton(text="🚀 ابدأ الاستخراج", callback_data="qcount_start")],
+        [types.InlineKeyboardButton(text="🚀 حوّل الاختبار إلى أتمتة", callback_data="qcount_start")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)

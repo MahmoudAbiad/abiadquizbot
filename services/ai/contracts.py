@@ -46,6 +46,8 @@ class AIRequest:
     preferred_attempt: tuple[str, str, int] | None = None
     # Never upload an expanded PDF through the Gemini Files API.
     inline_only: bool = False
+    # Only explicit extraction EOF may contain a valid empty questions array.
+    allow_empty_questions: bool = False
 
     @property
     def capabilities(self):

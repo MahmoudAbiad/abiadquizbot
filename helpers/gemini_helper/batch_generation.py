@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 from typing import Any, Dict, List, Optional
 
 from logger import get_logger
@@ -456,7 +457,13 @@ async def generate_pdf_in_batches(
     user_id=None, file_hash=None, extraction: bool = False,
 ):
     """Full short PDFs; overlapping page ownership for longer PDFs."""
-    if part_count == 1:
+    if extraction and part_count == 2 and os.path.getsize(file_path) <= 15 * 1024 * 1024:
+        pdf_parts = [
+            {"path": file_path, "owned_first": page_count * i // 2 + 1,
+             "owned_last": page_count * (i + 1) // 2, "page_count": page_count}
+            for i in range(2)
+        ]
+    elif part_count == 1:
         pdf_parts = [{"path": file_path, "owned_first": 1, "owned_last": page_count,
                       "page_count": page_count}]
     else:

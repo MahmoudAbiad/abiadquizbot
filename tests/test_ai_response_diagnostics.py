@@ -54,6 +54,14 @@ class ParseDiagnosticTests(unittest.TestCase):
                     parse_result(result, schema)
                 self.assertEqual(caught.exception.detail, detail)
 
+    def test_empty_questions_only_valid_for_explicit_nontruncated_extraction_eof(self):
+        result = parse_result(AIResult('{"questions":[]}'), QuestionsSchema,
+                              allow_empty_questions=True)
+        self.assertEqual(result.parsed.questions, [])
+        for response in (AIResult(''), AIResult('{"questions":[]}', truncated=True)):
+            with self.assertRaises(AIResponseDiagnosticError):
+                parse_result(response, QuestionsSchema, allow_empty_questions=True)
+
     def test_finish_reason_is_allowlisted(self):
         self.assertEqual(safe_finish_reason("length"), "MAX_TOKENS")
         self.assertEqual(safe_finish_reason("FinishReason.STOP"), "STOP")
@@ -61,6 +69,30 @@ class ParseDiagnosticTests(unittest.TestCase):
 
 
 class RuntimeDiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extraction_eof_reaches_adapter_without_cascade_retries(self):
+        from services.ai.adapters import ChatAdapter
+        from helpers.gemini_helper import generation
+        calls = []
+        def transport(request):
+            calls.append(request)
+            return __import__('httpx').Response(200, json={
+                'choices': [{'message': {'content': '{"questions":[]}'}, 'finish_reason': 'stop'}]})
+        import httpx
+        client_type = httpx.AsyncClient
+        async def execute(request, **kwargs):
+            return await ChatAdapter().generate(
+                {'base_url': 'https://example.com/v1'}, 'fixture', 'model', request)
+        request = AIRequest(('exam section without original questions',), QuestionsSchema)
+        with (patch('services.ai.adapters.httpx.AsyncClient',
+                    side_effect=lambda **kw: client_type(transport=httpx.MockTransport(transport), **kw)),
+              patch.object(generation, '_execute_request', new=execute)):
+            result = await generation._execute_cascade(request, allow_empty=True)
+            self.assertEqual(result[0], [])
+            self.assertEqual(len(calls), 1)
+            self.assertFalse(request.allow_empty_questions)
+            with self.assertRaises(AIResponseDiagnosticError):
+                await generation._execute_cascade(request)
+
     async def test_log_contains_safe_detail_and_breakdown_but_no_raw_payload(self):
         runtime._blocked.clear()
         runtime._pointers.clear()

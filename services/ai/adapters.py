@@ -65,7 +65,7 @@ class AIResponseDiagnosticError(ValueError):
         super().__init__(f"AI response validation failed: {detail}")
 
 
-def parse_result(result, schema):
+def parse_result(result, schema, *, allow_empty_questions=False):
     raw = getattr(result, "text", None)
     if not isinstance(raw, str):
         raise AIResponseDiagnosticError("non_text_response", result)
@@ -88,7 +88,8 @@ def parse_result(result, schema):
             result.parsed = schema.model_validate(obj)
         except (ValidationError, ValueError, TypeError):
             raise AIResponseDiagnosticError("schema_validation", result) from None
-        if hasattr(result.parsed, "questions") and not result.parsed.questions:
+        if (hasattr(result.parsed, "questions") and not result.parsed.questions
+                and (not allow_empty_questions or result.truncated)):
             raise AIResponseDiagnosticError("empty_questions", result)
     return result
 
@@ -147,7 +148,7 @@ class ChatAdapter:
                           finish_reason=safe_finish_reason(output.get("finish_reason")),
                           sampled=sum(isinstance(part, Attachment) and part.capability == "image"
                                       for part in request.contents) > 1)
-        return parse_result(result, request.schema)
+        return parse_result(result, request.schema, allow_empty_questions=request.allow_empty_questions)
 
     async def generate(self, provider, credential, model, request):
         service = chat_service(provider["base_url"])
@@ -214,7 +215,7 @@ class ChatAdapter:
                           total_tokens=int(usage.get("total_tokens") or 0),
                           truncated=choice.get("finish_reason") == "length",
                           finish_reason=safe_finish_reason(choice.get("finish_reason")))
-        return parse_result(result, request.schema)
+        return parse_result(result, request.schema, allow_empty_questions=request.allow_empty_questions)
 
 
 class GoogleAdapter:
@@ -297,7 +298,7 @@ class GoogleAdapter:
                               total_tokens=int(getattr(usage, "total_token_count", 0) or 0),
                               truncated="MAX_TOKENS" in str(finish),
                               finish_reason=safe_finish_reason(finish))
-            return parse_result(result, request.schema)
+            return parse_result(result, request.schema, allow_empty_questions=request.allow_empty_questions)
         finally:
             for name in uploaded:
                 try:

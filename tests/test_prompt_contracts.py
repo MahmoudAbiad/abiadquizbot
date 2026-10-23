@@ -93,7 +93,10 @@ class ComposedPromptTests(unittest.IsolatedAsyncioTestCase):
             C.QUIZ_EXTRACTION_MODE_AS_IS], previous=old,
             difficulty=C.DIFFICULTY_ADVANCED, question_type="grammar")
         self.assertIn("مهمة استخراج اختبار جاهز", prompt)
-        self.assertIn("انقل أسئلة", prompt)
+        self.assertIn("حوّل نفس السؤال", prompt)
+        self.assertIn("بأربعة خيارات", prompt)
+        self.assertIn("سلّم التصحيح", prompt)
+        self.assertIn("الإنشاء", prompt)
         self.assertNotIn("Question originally extracted", prompt)
         self.assertNotIn("مستوى الصعوبة المطلوب", prompt)
         self.assertNotIn("ركّز حصراً على أسئلة القواعد", prompt)
