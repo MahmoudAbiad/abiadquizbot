@@ -71,6 +71,8 @@ from utils import ensure_directory_exists, safe_file_cleanup
 
 logger = get_logger(__name__)
 router = Router()
+# Voice/audio processing is a private-chat workflow, never a group message handler.
+router.message.filter(F.chat.type == "private")
 
 MAX_AUDIO_FILE_SIZE = 20 * 1024 * 1024  # حد تيليجرام لتحميل الملفات عبر بوتات API (20 ميجابايت)
 MAX_INLINE_TEXT_CHARS = 4000  # حد رسالة تيليجرام النصية الآمن قبل اللجوء لإرسال مستند .txt

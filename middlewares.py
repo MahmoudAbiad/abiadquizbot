@@ -16,6 +16,59 @@ from error_context import set_error_context, reset_error_context
 logger = get_logger(__name__)
 
 
+
+class GroupQuizOnlyMiddleware(BaseMiddleware):
+    """Ignore unrelated group traffic before maintenance, FSM and quiz handlers.
+
+    Group quiz launch commands and group-quiz buttons still work; poll votes,
+    poll closures and membership events pass through unchanged.
+    """
+
+    _GROUP_TYPES = {"group", "supergroup"}
+    _GROUP_QUIZ_CALLBACK_PREFIXES = (
+        "gqa:", "gqn:", "gqk:", "gqt:", "gqp:", "gqc:", "gqe:",
+        "gqg:", "gqgr:", "gqchl:", "gqchr:", "gqchp:",
+    )
+
+    @staticmethod
+    def _is_group_quiz_launch(message: Message) -> bool:
+        text = (getattr(message, "text", None) or "").strip()
+        command, separator, payload = text.partition(" ")
+        if not separator or not payload.strip():
+            return False
+        command = command.split("@", 1)[0].lower()
+        payload = payload.strip()
+        if command == "/groupquiz":
+            return True
+        return command == "/start" and payload.startswith("gq_") and bool(payload[3:].strip())
+
+    async def __call__(self, handler, event: Update, data: Dict[str, Any]) -> Any:
+        # Telegram group messages must not enter generic student handlers.
+        # Keep only the two explicit group-quiz launch entry points.
+        message = getattr(event, "message", None) or getattr(event, "edited_message", None)
+        if message is not None and getattr(getattr(message, "chat", None), "type", None) in self._GROUP_TYPES:
+            if getattr(event, "edited_message", None) is not None:
+                return None
+            if not self._is_group_quiz_launch(message):
+                return None
+
+        # Stale unrelated inline buttons can otherwise trigger personal menus
+        # and error messages inside a group. Answer silently to clear spinner.
+        callback = getattr(event, "callback_query", None)
+        if callback is not None:
+            callback_chat = getattr(getattr(callback, "message", None), "chat", None)
+            if getattr(callback_chat, "type", None) in self._GROUP_TYPES:
+                callback_data = getattr(callback, "data", None) or ""
+                if not callback_data.startswith(self._GROUP_QUIZ_CALLBACK_PREFIXES):
+                    try:
+                        await callback.answer()
+                    except Exception:
+                        logger.warning("Could not acknowledge ignored group callback")
+                    return None
+
+        return await handler(event, data)
+
+
 class ErrorTrackingMiddleware(BaseMiddleware):
     """
     ميدل وير على مستوى الـ Update (يغطي كل الأنواع: رسائل، ضغطات أزرار، إجابات استفتاء

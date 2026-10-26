@@ -40,7 +40,7 @@ from handlers import (
     gifts_router,
 )
 from handlers.session_navigation import router as session_navigation_router
-from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware
+from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware, GroupQuizOnlyMiddleware
 from services.mistake_practice import PracticeCallbackGuard
 
 # تهيئة Sentry للتتبع
@@ -73,6 +73,8 @@ def main():
     # كل خطأ يواجهه الطالب فعلياً بلوحة تحليلات الأدمن. يجب تسجيله كـ outer middleware
     # (أول شيء يشتغل وآخر شيء يلف حوله) ليغطي أي استثناء يحدث بأي مرحلة لاحقة، بما فيها
     # ThrottlingMiddleware نفسها.
+    # Keep groups quiz-only before maintenance/error middleware can send notices.
+    dp.update.outer_middleware(GroupQuizOnlyMiddleware())
     dp.update.outer_middleware(ErrorTrackingMiddleware())
     dp.update.outer_middleware(MaintenanceMiddleware())
 

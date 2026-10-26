@@ -71,6 +71,8 @@ from handlers.quiz_runner import start_loaded_quiz
 
 logger = get_logger(__name__)
 router = Router()
+# Uploads, photos and free text generate quizzes only in private chats.
+router.message.filter(F.chat.type == "private")
 DOWNLOADS_DIR = "downloads"
 
 
