@@ -86,7 +86,9 @@ def main():
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
     from handlers.runner import router as runner_router
+    from handlers.settings import router as settings_router
     dp.include_routers(
+        settings_router,
         runner_router,
         session_navigation_router,
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
@@ -161,6 +163,8 @@ def main():
                 spawn(pending_cleanup_loop())
                 from services.gift_campaigns import gift_campaign_loop
                 spawn(gift_campaign_loop())
+                from services.daily_renewal import daily_renewal_loop
+                spawn(daily_renewal_loop())
                 await dp.start_polling(bot)
                 
             except Exception as e:

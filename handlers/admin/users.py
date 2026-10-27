@@ -49,6 +49,75 @@ router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
 
 
+@router.callback_query(F.data == "admin_renewal_report")
+async def show_renewal_report(call: types.CallbackQuery):
+    from services.daily_renewal import report_text
+    response = await supabase.table("daily_renewal_runs").select("day,report_status").order("day", desc=True).limit(1).execute()
+    text = "📭 لم يحن موعد أول تجديد مجدول بعد."
+    if response.data:
+        run = response.data[0]
+        summary = await supabase.rpc("daily_renewal_summary", {"p_day": run["day"]}).execute()
+        text = report_text(summary.data) + f"\n⏳ بانتظار الإرسال: {summary.data['pending']}"
+        if run["report_status"] == "uncertain":
+            text += "\n❔ تعذر تأكيد وصول نسخة التقرير للأدمن؛ هذه النسخة محفوظة."
+    await safe_edit_text(call.message, text, reply_markup=get_admin_users_menu_keyboard())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("admin_renewal_failures:"))
+async def show_renewal_failures(call: types.CallbackQuery):
+    _, mode, raw_page = call.data.split(":")
+    if mode not in {"all", "blocked"} or not raw_page.isdigit():
+        await call.answer("طلب غير صالح", show_alert=True)
+        return
+    page = int(raw_page)
+    size = 2
+    if mode == "blocked":
+        result = await supabase.table("users").select("*", count="exact").eq(
+            "bot_delivery_state", "blocked").order("user_id").range(page*size, page*size+size-1).execute()
+        entries = [{"user_snapshot": u, "error": "المستخدم حظر البوت — مستثنى من الإرسال القادم",
+                    "day": "", "status": "blocked"} for u in result.data or []]
+    else:
+        result = await supabase.table("daily_renewal_deliveries").select("*", count="exact").in_(
+            "status", ["blocked", "unavailable", "failed", "uncertain", "expired"]).order(
+            "day", desc=True).order("user_id").range(page*size, page*size+size-1).execute()
+        entries = result.data or []
+    await enrich_balances([entry["user_snapshot"] for entry in entries])
+    total = result.count or 0
+    text = ("🚫 المستخدمون الذين حظروا البوت" if mode == "blocked" else "📭 سجل تعذر وصول إشعارات التجديد")
+    text += f"\nالإجمالي: {total} — صفحة {page+1}\n"
+    if mode == "all":
+        text += "الهوية والأرصدة المجانية والمدفوعة محفوظة وقت المحاولة؛ رصيد الهدايا المعروض حالي.\n"
+    kb = []
+    for entry in entries:
+        u = entry["user_snapshot"]
+        text += "\n" + _format_user_profile_report(u)
+        text += (
+            f"\n📅 تاريخ التسجيل: {html.escape(str(u.get('joined_at') or 'غير مسجل'))}"
+            f"\n🔗 مصدر الانضمام: {html.escape(str(u.get('join_source') or 'غير مسجل'))}"
+            f" · المُحيل: {html.escape(str(u.get('referred_by') or '—'))}"
+            f"\n🔄 آخر تجديد: {html.escape(str(u.get('last_renewal') or '—'))}"
+            f"\n🔔 إشعارات التجديد: {'مفعّلة' if u.get('renewal_notifications', True) else 'متوقفة'}"
+            f"\n📨 تاريخ المحاولة: {html.escape(str(entry.get('day') or '—'))}"
+            f"\n❌ السبب: {html.escape(str(entry['error'])[:220])}\n"
+        )
+        kb.append([types.InlineKeyboardButton(
+            text=f"{'🚫 حظر البوت' if entry['status']=='blocked' else '👤 بيانات المستخدم'} · {u['user_id']}",
+            callback_data=f"admin_user_profile_{u['user_id']}")])
+    if not entries:
+        text += "\nلا توجد حالات مسجلة."
+    nav = []
+    if page:
+        nav.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"admin_renewal_failures:{mode}:{page-1}"))
+    if (page+1)*size < total:
+        nav.append(types.InlineKeyboardButton(text="التالي ➡️", callback_data=f"admin_renewal_failures:{mode}:{page+1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([types.InlineKeyboardButton(text="🔙 إدارة المستخدمين", callback_data="admin_users_menu")])
+    await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+    await call.answer()
+
+
 def user_total_points(user: dict) -> float:
     """حساب إجمالي رصيد الطالب من الخانتين المجانية والمدفوعة."""
     return float(user.get("free_points") or 0) + float(user.get("paid_points") or 0) + float(user.get("gift_points") or 0)

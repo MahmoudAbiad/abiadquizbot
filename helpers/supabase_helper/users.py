@@ -39,6 +39,9 @@ async def check_or_add_user(user_id: int, username: str, first_name: str, last_n
         if not response.data:
             return await _add_new_user(user_id, username, first_name, last_name, referrer_id, today,
                                        join_source=join_source, join_quiz_id=join_quiz_id)
+
+        if response.data[0].get("bot_delivery_state", "reachable") != "reachable":
+            await supabase.table("users").update({"bot_delivery_state": "reachable"}).eq("user_id", user_id).execute()
         
         return await _check_daily_renewal(user_id, response.data[0], today)
     except Exception as e:

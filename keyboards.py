@@ -49,6 +49,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
             [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
             [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu", style="primary")],
             [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
+            [types.InlineKeyboardButton(text="⚙️ الإعدادات", callback_data="student_settings")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
@@ -793,6 +794,9 @@ def get_admin_users_menu_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
         [types.InlineKeyboardButton(text="👥 استعراض الطلاب", callback_data="admin_users_page_1")],
+        [types.InlineKeyboardButton(text="📭 تعذر وصول إشعار التجديد", callback_data="admin_renewal_failures:all:0")],
+        [types.InlineKeyboardButton(text="🚫 حظروا البوت", callback_data="admin_renewal_failures:blocked:0")],
+        [types.InlineKeyboardButton(text="📊 آخر تقرير تجديد", callback_data="admin_renewal_report")],
         [types.InlineKeyboardButton(text="📥 تصدير الكل كـ CSV", callback_data="admin_export_users")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
