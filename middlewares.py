@@ -178,6 +178,14 @@ class MaintenanceMiddleware(BaseMiddleware):
         # Keep Telegram membership/service notifications operational.
         if event.event_type in {"my_chat_member", "chat_member", "poll"}:
             return await handler(event, data)
+        # Group administrators must be able to end a quiz and release its lock
+        # during maintenance. The handler still checks live administrator rights.
+        if (event.event_type == "callback_query"
+                and isinstance(getattr(tg_event, "data", None), str)
+                and tg_event.data.startswith("gqe:")
+                and getattr(getattr(getattr(tg_event, "message", None), "chat", None), "type", None)
+                    in {"group", "supergroup", "channel"}):
+            return await handler(event, data)
         notice = await maintenance_notice(user.id if user else None)
         if notice is None:
             return await handler(event, data)

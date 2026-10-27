@@ -122,10 +122,12 @@ async def acquire_quiz_lock(session):
             if not res.data:
                 raise RuntimeError("Cannot durably save original permissions")
             row = res.data[0]
-        await bot.set_chat_permissions(
+        result = await bot.set_chat_permissions(
             chat_id=chat_id, permissions=ChatPermissions(**row["locked_permissions"]),
             use_independent_chat_permissions=True, request_timeout=20,
         )
+        if result is not True:
+            raise RuntimeError("Telegram did not confirm group locking")
         await supabase.table(_TABLE).update({"state": "locked"}).eq("chat_id", chat_id).eq("session_id", sid).execute()
         # Finish may have won while Telegram was applying the restriction.
         fresh = await _live_session(sid)

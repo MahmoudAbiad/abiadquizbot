@@ -388,3 +388,20 @@ class RolloutGateTests(unittest.IsolatedAsyncioTestCase):
         cache['until'] = 0
         query.execute.side_effect = None
         self.assertTrue(await env['quiz_lock_schema_ready']())
+
+
+class MaintenanceEndTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quiz_end_reaches_live_admin_guard_during_maintenance(self):
+        from cachetools import TTLCache
+        from unittest.mock import patch
+        env = load_functions('middlewares.py', {'MaintenanceMiddleware'},
+            BaseMiddleware=object, TTLCache=TTLCache)
+        gate = env['MaintenanceMiddleware']()
+        handler = AsyncMock(return_value='live-admin-guard')
+        callback = types.SimpleNamespace(data='gqe:' + SID,
+            from_user=types.SimpleNamespace(id=42),
+            message=types.SimpleNamespace(chat=types.SimpleNamespace(type='supergroup')))
+        with patch('services.maintenance.maintenance_notice', AsyncMock(side_effect=AssertionError('must not block unlock'))):
+            self.assertEqual(await gate(handler, types.SimpleNamespace(event=callback,event_type='callback_query'), {}),
+                             'live-admin-guard')
+        handler.assert_awaited_once()
