@@ -56,6 +56,7 @@ jobs:
       - name: Verify provider SQL in isolated PostgreSQL
         run: |
           npm ci --prefix tests/sql --ignore-scripts
+          node tests/sql/group_quiz_lock_test.mjs
           node tests/sql/ai_providers_test.mjs
           node tests/sql/daily_renewal_test.mjs
       - name: Verify Runner rules, wallet, rewards and admission SQL

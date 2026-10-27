@@ -62,7 +62,7 @@ def _decode_cached(raw: Any) -> bool:
     return str(raw) == "1"
 
 
-async def is_group_admin(chat_id: int, user_id: Optional[int]) -> bool:
+async def is_group_admin(chat_id: int, user_id: Optional[int], *, fresh: bool = False) -> bool:
     """يتحقق إذا كان `user_id` أدمن أو مالك بالغروب `chat_id`.
 
     fail-closed: أي غموض (مستخدم مجهول، خطأ شبكة، البوت مطرود من الغروب)
@@ -78,8 +78,8 @@ async def is_group_admin(chat_id: int, user_id: Optional[int]) -> bool:
 
     # 1) الكاش أولاً - أي عطل بـ Redis ما بيمنع الفحص، منكمل لتيليجرام مباشرة.
     try:
-        cached = await redis_client.get(key)
-        if cached is not None:
+        cached = None if fresh else await redis_client.get(key)
+        if cached is not None and not fresh:
             return _decode_cached(cached)
     except Exception as e:
         log_error(logger, f"Redis error reading admin cache for {chat_id}:{user_id} (falling back to Telegram): {e}")

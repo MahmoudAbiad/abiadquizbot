@@ -155,6 +155,10 @@ async def redeem_linked_gift(msg: types.Message, payload: str):
 @router.message(Command("start"))
 async def start(msg: types.Message, command: CommandObject, state: FSMContext):
     try:
+        if command.args and command.args.startswith("gqsetup_"):
+            from handlers.group_quiz import resume_group_setup
+            await resume_group_setup(msg, command.args)
+            return
         bot_info = await bot.get_me()
         
         # Links are available to new and existing users, without clearing quiz state.

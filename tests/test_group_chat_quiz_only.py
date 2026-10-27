@@ -74,7 +74,7 @@ class GroupChatQuizOnlyTests(unittest.IsolatedAsyncioTestCase):
                 callback.answer.assert_awaited_once_with()
 
     async def test_group_quiz_callbacks_still_work(self):
-        for prefix in ("gqa:", "gqn:", "gqk:", "gqt:", "gqp:", "gqc:",
+        for prefix in ("gql:", "gqa:", "gqn:", "gqk:", "gqt:", "gqp:", "gqc:",
                        "gqe:", "gqg:", "gqgr:", "gqchl:", "gqchr:", "gqchp:"):
             with self.subTest(prefix=prefix):
                 self.handler.reset_mock()

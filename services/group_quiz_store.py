@@ -137,8 +137,9 @@ async def get_due_sessions(limit: int = 50) -> List[Dict[str, Any]]:
 
 
 async def update_session(session_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Setup-only writes cannot mutate a concurrently started/finished session."""
     try:
-        res = await supabase.table("group_quiz_sessions").update(fields).eq("id", session_id).execute()
+        res = await supabase.table("group_quiz_sessions").update(fields).eq("id", session_id).eq("status", "waiting").execute()
         return res.data[0] if res.data else None
     except Exception as e:
         log_error(logger, f"Error updating group quiz session {session_id}: {e}")
@@ -755,3 +756,18 @@ async def group_quiz_cleanup_loop(interval_seconds: int = 43200) -> None:
         except Exception as e:
             log_error(logger, f"Error inside group quiz cleanup loop: {e}", exception=e)
         await asyncio.sleep(interval_seconds)
+
+
+async def activate_session_due(session_id: str) -> Optional[Dict[str, Any]]:
+    """Arm the heartbeat only if this session has not ended concurrently."""
+    res = await (supabase.table("group_quiz_sessions")
+                 .update({"next_question_due_at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+                 .eq("id", session_id).eq("status", "active").execute())
+    return res.data[0] if res.data else None
+
+
+async def start_waiting_session(session_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Only one setup callback can transition waiting -> active."""
+    res = await (supabase.table("group_quiz_sessions").update(fields)
+                 .eq("id", session_id).eq("status", "waiting").execute())
+    return res.data[0] if res.data else None

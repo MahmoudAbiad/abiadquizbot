@@ -26,7 +26,7 @@ class GroupQuizOnlyMiddleware(BaseMiddleware):
 
     _GROUP_TYPES = {"group", "supergroup"}
     _GROUP_QUIZ_CALLBACK_PREFIXES = (
-        "gqa:", "gqn:", "gqk:", "gqt:", "gqp:", "gqc:", "gqe:",
+        "gql:", "gqa:", "gqn:", "gqk:", "gqt:", "gqp:", "gqc:", "gqe:",
         "gqg:", "gqgr:", "gqchl:", "gqchr:", "gqchp:",
     )
 

@@ -39,6 +39,7 @@ import asyncio
 import datetime
 import html
 import json
+import secrets
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -63,6 +64,8 @@ from keyboards import (
 from logger import get_logger, log_error, log_info
 from services.group_permissions import invalidate_group_admin_cache, is_group_admin
 from services.group_quiz_store import (
+    start_waiting_session,
+    activate_session_due,
     claim_question_slot,
     claim_session_cancel,
     claim_session_finish,
@@ -81,6 +84,7 @@ from services.group_quiz_store import (
     update_session,
     upsert_chat_membership,
 )
+from services.group_quiz_lock import acquire_quiz_lock, restore_quiz_lock, recover_quiz_locks, quiz_lock_schema_ready
 from services.quiz_engine import send_quiz_poll
 from task_utils import spawn
 from helpers.supabase_helper import check_or_add_user, get_shared_quiz
@@ -211,7 +215,7 @@ async def _start_session_setup(
     - `message_thread_id`: توبيك الغروب - دايماً `None` للقنوات (ما في توبيكس).
     - `dest_title`: اسم القناة لعرضه بشاشة الإعداد (مسار القناة بس).
     """
-    if not await is_group_admin(chat_id, user.id):
+    if not await is_group_admin(chat_id, user.id, fresh=True):
         not_admin_txt = ("⛔ فقط أدمن القناة يقدر يشغّل كويز جماعي عليها." if is_channel
                          else "⛔ فقط أدمن الغروب يقدر يشغّل كويز جماعي هون.")
         await _safe_call(lambda: ui_msg.reply(not_admin_txt), what="reply not-admin")
@@ -293,7 +297,7 @@ async def _begin_group_session(msg: types.Message, share_id: str) -> None:
 
     الأمر جوا الغروب بس بيحدّد الغروب الهدف؛ شاشات الإعداد بتنبعت لخاص الأدمن (نفس مسار
     القنوات). لو الأدمن ما فتح البوت بالخاص أبداً (تيليجرام بتمنع البوت يبدأ محادثة)
-    بنطلب منه يضغط Start وبعدين يعيد الأمر.
+    بيفتح رابط متابعة مؤقت مرتبط به، بلا إعادة الأمر.
     """
     user = msg.from_user
     if not user:
@@ -312,38 +316,50 @@ async def _begin_group_session(msg: types.Message, share_id: str) -> None:
             status="member", can_post_messages=None,
         )
 
-    title = chat.title or "الغروب"
-    dm = await _safe_call(
-        lambda: bot.send_message(
-            chat_id=user.id,
-            text=f"👥 الغروب: <b>{html.escape(title)}</b>\nكمّل إعداد الكويز من هون 👇",
-            parse_mode="HTML",
-        ),
-        what=f"DM setup start to {user.id}",
+    # A random, short-lived capability. Never embed chat/quiz IDs or credentials
+    # in the URL. Redemption is additionally bound to the initiating admin.
+    token = secrets.token_urlsafe(24)
+    await redis_client.set(
+        f"gq:setup:{token}",
+        json.dumps({"user_id": user.id, "chat_id": chat.id, "share_id": share_id,
+                    "message_thread_id": msg.message_thread_id, "title": chat.title}),
+        ex=600,
     )
-    if dm is None:
-        username = await _get_bot_username()
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[[
-            types.InlineKeyboardButton(text="📩 افتح البوت بالخاص", url=f"https://t.me/{username}")
-        ]])
-        await _safe_call(
-            lambda: msg.reply(
-                "📩 إعداد الكويز صار من خاص البوت. افتحه واضغط Start، وبعدها أعد كتابة الأمر هون.",
-                reply_markup=kb,
-            ),
-            what="reply open-bot-privately",
-        )
-        return
+    username = await _get_bot_username()
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text="📩 إكمال إعداد الاختبار في الخاص",
+                                   url=f"https://t.me/{username}?start=gqsetup_{token}")
+    ]])
+    await _safe_call(
+        lambda: msg.reply("📩 تابع إعداد هذا الاختبار في الخاص. الرابط صالح لعشر دقائق وللمشرف الذي بدأه فقط.", reply_markup=kb),
+        what="reply private setup link",
+    )
 
-    await _safe_call(lambda: msg.reply("📩 كمّل إعداد الكويز من خاص البوت."), what="reply setup-in-dm")
+
+async def resume_group_setup(msg: types.Message, payload: str) -> None:
+    """Private /start entry point; no dependency on an existing user or FSM."""
+    token = payload.removeprefix("gqsetup_")
+    if msg.chat.type != "private" or len(token) != 32 or not all(c.isalnum() or c in "_-" for c in token):
+        await msg.answer("❌ رابط إعداد غير صالح أو منتهي الصلاحية.")
+        return
+    key = f"gq:setup:{token}"
+    raw = await redis_client.get(key)
+    if not raw:
+        await msg.answer("⌛ انتهت صلاحية الرابط أو استُخدم بالفعل. ابدأ الاختبار مجدداً من المجموعة.")
+        return
+    data = json.loads(raw)
+    if data["user_id"] != msg.from_user.id or not await is_group_admin(data["chat_id"], msg.from_user.id, fresh=True):
+        await msg.answer("⛔ هذا الرابط للمشرف الذي بدأ الاختبار، ويشترط بقاء صلاحياته في المجموعة.")
+        return
+    # GETDEL is atomic across webhook workers. Unauthorized attempts never consume it.
+    claimed = await redis_client.getdel(key)
+    if not claimed:
+        await msg.answer("ℹ️ تم فتح هذا الرابط بالفعل.")
+        return
     await _start_session_setup(
-        ui_msg=dm,
-        chat_id=chat.id,
-        user=user,
-        share_id=share_id,
-        message_thread_id=msg.message_thread_id,
-        is_channel=False,
-        dest_title=title,
+        ui_msg=msg, chat_id=data["chat_id"], user=msg.from_user,
+        share_id=data["share_id"], message_thread_id=data.get("message_thread_id"),
+        dest_title=data.get("title"),
     )
 
 
@@ -398,12 +414,12 @@ async def _guard_config_callback(call: types.CallbackQuery, session_id: str) -> 
                 or chat.id != call.from_user.id):
             await call.answer("⚠️ هالجلسة ما عادت متاحة", show_alert=True)
             return None
-        if not await is_group_admin(int(session["chat_id"]), call.from_user.id):
+        if not await is_group_admin(int(session["chat_id"]), call.from_user.id, fresh=True):
             await call.answer("⛔ للأدمن فقط", show_alert=True)
             return None
         return session
 
-    if not await is_group_admin(chat.id, call.from_user.id):
+    if not await is_group_admin(chat.id, call.from_user.id, fresh=True):
         await call.answer("⛔ للأدمن فقط", show_alert=True)
         return None
     session = await get_session(session_id)
@@ -546,14 +562,30 @@ async def choose_group_timer(call: types.CallbackQuery):
             return
 
         seconds = int(raw_seconds)
+        if seconds not in {0, 15, 30, 45, 60, 90, 120, 300, 600}:
+            await call.answer("❌ مدة غير صالحة", show_alert=True)
+            return
         timer = seconds if seconds > 0 else None
-        await update_session(session_id, {"question_timer_seconds": timer})
-
-        hint = f"⏱ المؤقّت: {timer} ثانية لكل سؤال" if timer else "🚫 بلا مؤقّت داخلي"
-        await call.message.edit_text(
-            f"{hint}\n\n⏳ وهلق: إيمتى يُرسل السؤال التالي؟",
-            reply_markup=get_group_pacing_keyboard(session_id, timer_enabled=bool(timer)),
-        )
+        lock_available = await quiz_lock_schema_ready()
+        timer_fields = {"question_timer_seconds": timer}
+        if lock_available:
+            timer_fields["lock_chat"] = False
+        if not await update_session(session_id, timer_fields):
+            await call.answer("❌ تعذر حفظ الإعدادات", show_alert=True)
+            return
+        if lock_available and not await _is_channel_chat(int(session["chat_id"])):
+            await call.message.edit_text(
+                "🔒 قفل رسائل المجموعة أثناء الاختبار؟ التصويت يبقى متاحاً.\n"
+                "اختياري ومطفأ افتراضياً، ويتطلب مؤقّتاً للأسئلة أو فاصلاً زمنياً محدداً.",
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="🔓 متابعة دون قفل (الافتراضي)", callback_data=f"gql:{session_id}:0")],
+                    [types.InlineKeyboardButton(text="🔒 تفعيل القفل", callback_data=f"gql:{session_id}:1")],
+                    [types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{session_id}")],
+                ]),
+            )
+        else:
+            await call.message.edit_text("⏳ إيمتى يُرسل السؤال التالي؟",
+                reply_markup=get_group_pacing_keyboard(session_id, timer_enabled=bool(timer)))
     except Exception as e:
         log_error(logger, f"Error in choose_group_timer: {e}", exception=e)
     finally:
@@ -561,6 +593,26 @@ async def choose_group_timer(call: types.CallbackQuery):
             await call.answer()
         except Exception:
             pass
+
+
+@router.callback_query(F.data.startswith("gql:"))
+async def choose_group_lock(call: types.CallbackQuery):
+    _, session_id, value = call.data.split(":", 2)
+    session = await _guard_config_callback(call, session_id)
+    if not session:
+        return
+    if (not await quiz_lock_schema_ready() or value not in {"0", "1"}
+            or await _is_channel_chat(int(session["chat_id"]))):
+        await call.answer("❌ إعداد غير صالح", show_alert=True)
+        return
+    if not await update_session(session_id, {"lock_chat": value == "1"}):
+        await call.answer("❌ تعذر حفظ الإعدادات", show_alert=True)
+        return
+    await call.message.edit_text(
+        "⏳ إيمتى يُرسل السؤال التالي؟" + ("\n🔒 القفل مفعّل، ويُعاد فتح المجموعة تلقائياً عند النهاية." if value == "1" else "\n🔓 القفل معطّل."),
+        reply_markup=get_group_pacing_keyboard(session_id, timer_enabled=bool(session.get("question_timer_seconds"))),
+    )
+    await call.answer()
 
 
 @router.callback_query(F.data.startswith("gqp:"))
@@ -571,6 +623,12 @@ async def choose_group_pacing(call: types.CallbackQuery):
         if not session:
             return
 
+        if session.get("lock_chat") and mode_code == "b":
+            await call.answer("⚠️ القفل يتطلب اختباراً بمؤقّت أو فاصلاً زمنياً، ولا يعمل مع الإرسال دفعة واحدة", show_alert=True)
+            return
+        if mode_code not in {"b", "c", "f"}:
+            await call.answer("❌ إعداد غير صالح", show_alert=True)
+            return
         if mode_code == "b":
             if session.get("question_timer_seconds"):
                 # حماية ضد callback_data مزوّر: مع مؤقّت داخلي الاستفتاءات الأولى بتسكّر
@@ -587,6 +645,9 @@ async def choose_group_pacing(call: types.CallbackQuery):
             pacing_mode, interval = "chain_to_timer", None
         else:
             pacing_mode = "fixed_interval"
+            if int(raw_value) not in {30, 60, 120, 300}:
+                await call.answer("❌ فاصل زمني غير صالح", show_alert=True)
+                return
             interval = max(MIN_QUESTION_INTERVAL_SECONDS, int(raw_value))
 
         start_fields = {
@@ -594,15 +655,29 @@ async def choose_group_pacing(call: types.CallbackQuery):
             "question_interval_seconds": interval,
             "status": "active",
             "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "next_question_due_at": _utc_iso(120),
         }
         if not session.get("poll_is_anonymous") and await _is_channel_chat(int(session["chat_id"])):
             # شبكة أمان أخيرة (جلسة قناة قديمة غير مجهولة): تيليجرام ما بتسمح بغير المجهول بالقنوات.
             start_fields["poll_is_anonymous"] = True
-        updated = await update_session(session_id, start_fields)
+        updated = await start_waiting_session(session_id, start_fields)
         if not updated:
             await call.answer("❌ تعذّر بدء الجلسة", show_alert=True)
             return
 
+        if updated.get("lock_chat"):
+            try:
+                await acquire_quiz_lock(updated)
+            except Exception:
+                await claim_session_cancel(session_id)
+                await restore_quiz_lock(session_id, int(updated["chat_id"]))
+                await call.message.edit_text("❌ تعذر تفعيل قفل المجموعة بأمان. تحقق أن البوت مشرف ولديه صلاحية تقييد الأعضاء، ثم أعد الإعداد.")
+                return
+        # Never overwrite a concurrent finish. Heartbeat resumes after a crash.
+        updated = await activate_session_due(session_id)
+        if not updated:
+            await restore_quiz_lock(session_id, int(session["chat_id"]))
+            return
         if pacing_mode == "burst":
             total = int(updated.get("total_questions") or 0)
             minutes = max(1, -(-(total * BURST_GAP_SECONDS) // 60))
@@ -652,7 +727,7 @@ async def end_group_session_now(call: types.CallbackQuery):
     يتدخّل لو صاحب الجلسة غاب)."""
     try:
         session_id = call.data.split(":", 1)[1]
-        if not await is_group_admin(call.message.chat.id, call.from_user.id):
+        if not await is_group_admin(call.message.chat.id, call.from_user.id, fresh=True):
             await call.answer("⛔ للأدمن فقط", show_alert=True)
             return
 
@@ -1082,6 +1157,7 @@ async def _cancel_session_on_first_send_failure(session: Dict[str, Any], error: 
     session_id = str(session["id"])
     if not await claim_session_cancel(session_id):
         return
+    await restore_quiz_lock(session_id, int(session["chat_id"]))
     await clear_session_questions_cache(session_id)
     log_error(logger, f"Session {session_id} cancelled: first question could not be sent ({error})")
 
@@ -1136,6 +1212,13 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
     session_id = str(session["id"])
     if session.get("status") != "active":
         return False
+
+    if session.get("lock_chat"):
+        try:
+            await acquire_quiz_lock(session)
+        except Exception:
+            await _cancel_session_on_first_send_failure(session, None)
+            return False
 
     questions = await get_session_questions(session)
     idx = int(session.get("questions_sent") or 0)
@@ -1227,6 +1310,7 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
         # جلسة تانية (سباق) سبقتنا بالإنهاء، أو الجلسة خلصت أصلاً - انسحب بصمت
         # بلا ما ننشر رسالة نهاية مكرّرة.
         return
+    await restore_quiz_lock(session_id, int(session["chat_id"]))
     await clear_session_questions_cache(session_id)
 
     open_poll = await _pop_open_poll(session_id)
@@ -1454,6 +1538,7 @@ async def group_quiz_heartbeat_tick() -> None:
     `next_question_due_at` نفسه مخزَّن بقاعدة البيانات، فالاستئناف بعد إعادة
     تشغيل تلقائي بلا أي كود إضافي.
     """
+    await recover_quiz_locks()
     sessions = await get_due_sessions()
     for session in sessions:
         try:
