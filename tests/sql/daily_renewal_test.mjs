@@ -10,6 +10,7 @@ for (const table of ['users','app_settings']) {
 }
 const migration = readFileSync('db/migrations/20261026235246_daily_renewal_notifications.sql','utf8');
 await db.exec(migration.split('-- SCHEDULER:')[0]);
+await db.exec(readFileSync('db/migrations/20261027001007_daily_renewal_delivery_revision.sql','utf8'));
 const scalar = async(sql,args=[]) => (await db.query(sql,args)).rows[0]?.v;
 const rpc = async(name,args=[]) => scalar(`select public.${name}(${args.map((_,i)=>'$'+(i+1)).join(',')}) as v`,args);
 const today = await scalar("select (now() at time zone 'Asia/Damascus')::date::text as v");
@@ -49,6 +50,8 @@ claim=await rpc('daily_renewal_claim');
 assert.equal(claim.user_id,5,'opted-out after campaign start is skipped');
 assert.equal(await scalar('select status as v from public.daily_renewal_deliveries where user_id=4'),'skipped');
 await db.exec("update public.users set bot_delivery_state='reachable' where user_id=5;");
+// Equal timestamps must not erase a newer membership event.
+await db.exec("update public.users set bot_delivery_updated_at=(select claimed_at from public.daily_renewal_deliveries where user_id=5) where user_id=5");
 await rpc('daily_renewal_finish',[today,5,claim.token,'blocked','old send failed',0]);
 assert.equal(await scalar('select bot_delivery_state as v from public.users where user_id=5'),'reachable','newer incoming interaction wins');
 claim=await rpc('daily_renewal_claim');
