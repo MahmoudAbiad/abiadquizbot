@@ -57,6 +57,7 @@ jobs:
         run: |
           npm ci --prefix tests/sql --ignore-scripts
           node tests/sql/ai_providers_test.mjs
+          node tests/sql/daily_renewal_test.mjs
       - name: Verify Runner rules, wallet, rewards and admission SQL
         run: |
           node tests/sql/runner_test.mjs

@@ -427,6 +427,7 @@ async def set_bot_commands(bot):
     # النسخة الفعلية المستخدمة على Railway/الويبهوك هي config.py::set_bot_commands
     commands = [
         types.BotCommand(command="wallet", description="رصيدي وهداياي وصلاحيتها"),
+        types.BotCommand(command="settings", description="⚙️ الإعدادات والإشعارات"),
         types.BotCommand(command="start", description="تشغيل البوت والتحقق من الرصيد"),
         types.BotCommand(command="favorites", description="⭐ قائمتي المفضلة المنظمة"),
     ]
