@@ -67,7 +67,8 @@ from services.quiz_service import (
 )
 from services.flow_state import build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لرفع الصوت عبر الويب
 from services.wallet_errors import WalletDebitError, WALLET_DEBIT_ERROR_TEXT
-from handlers.quiz_runner import start_loaded_quiz
+from handlers.quiz_runner import start_loaded_quiz, _start_loaded_quiz
+from services.excel_import import ExcelImportError, read_quiz_xlsx
 
 logger = get_logger(__name__)
 router = Router()
@@ -787,10 +788,17 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 else:
                     await message.answer(error)
                 return
-            extension = supported_extension(message.document.file_name, DOCUMENT_EXTENSIONS)
+            if document_extension == ".xls":
+                await message.answer("❌ احفظ ملف Excel بصيغة .xlsx ثم أعد إرساله للبوت.")
+                return
+            extension = supported_extension(message.document.file_name, DOCUMENT_EXTENSIONS | {".xlsx"})
             title = os.path.splitext(message.document.file_name)[0]
             destination = os.path.join(DOWNLOADS_DIR, f"{message.from_user.id}_{uuid.uuid4().hex}{extension}")
             await bot.download(message.document, destination=destination)
+
+            if extension == ".xlsx":
+                await _import_excel_quiz(message, state, destination, title)
+                return
             
             items = await asyncio.to_thread(validate_document, destination)
             if destination.lower().endswith(".pdf"):
@@ -807,12 +815,22 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 
             transferred = True
 
+    except ExcelImportError as exc:
+        await message.answer(f"❌ {exc}", parse_mode=None)
     except Exception as exc:
         log_error(logger, f"Media handling failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
     finally:
         if destination and not transferred:
             safe_file_cleanup(destination)
+
+
+async def _import_excel_quiz(message, state, path, title):
+    # handle_media owns the user lock; do not reacquire start_loaded_quiz's lock.
+    title, questions = await asyncio.to_thread(read_quiz_xlsx, path, title)
+    await state.set_data({"input_type": "excel", "content_source": "xlsx", "input_channel": "telegram"})
+    await message.answer(f"✅ تم استيراد {len(questions)} سؤالاً من Excel مع الإجابات. سيبدأ الكويز الآن، دون خصم نقاط.")
+    await _start_loaded_quiz(message, state, questions, title, origin="excel_import")
 
 @router.message(StateFilter(None, QuizState.answering_quiz), F.text, ~F.text.startswith("/"), F.text != ".")
 @user_locked()
