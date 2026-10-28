@@ -32,7 +32,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_records_delivery_and_inline_opt_out(self):
         await renewal_step(self.client, self.bot, 999)
         self.assertEqual(self.finished()[0]["p_status"], "sent")
-        self.assertIn("12 منتصف الليل بتوقيت دمشق",self.bot.send_message.await_args.args[1])
+        self.assertIn("8 مساءً بتوقيت دمشق",self.bot.send_message.await_args.args[1])
         button=renewal_keyboard().inline_keyboard[0][0]
         self.assertEqual(button.callback_data,"renewal:off")
         self.assertIn("الإعدادات",button.text)
@@ -90,3 +90,4 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__=="__main__":
     unittest.main()
+

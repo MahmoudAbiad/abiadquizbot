@@ -14,7 +14,7 @@ async def settings_panel(user_id):
     result = await supabase.table("users").select("renewal_notifications").eq("user_id", user_id).single().execute()
     enabled = result.data["renewal_notifications"]
     text = ("⚙️ الإعدادات\n\n"
-            "🔄 النقاط المجانية تتجدد يوميًا عند 12 منتصف الليل بتوقيت دمشق.\n"
+            "🔄 النقاط المجانية تتجدد يوميًا عند الساعة 8 مساءً بتوقيت دمشق.\n"
             f"إشعارات التجديد: {'🔔 مفعّلة' if enabled else '🔕 متوقفة'}\n\n"
             "إيقاف الإشعار لا يؤثر على تجدد نقاطك.")
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -63,3 +63,4 @@ async def private_membership(update: types.ChatMemberUpdated):
     await supabase.table("users").update({
         "bot_delivery_state": "blocked" if status == "kicked" else "reachable",
     }).eq("user_id", update.chat.id).execute()
+

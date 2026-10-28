@@ -1,4 +1,4 @@
-"""Durable Damascus-midnight renewal notices; Telegram sends are never retried blindly."""
+"""Durable Damascus-20:00 renewal notices; Telegram sends are never retried blindly."""
 import asyncio
 
 from aiogram import types
@@ -19,7 +19,7 @@ def renewal_keyboard():
 
 def report_text(r):
     return (
-        f"📊 تقرير تجديد النقاط — {r['day']} (توقيت دمشق)\n\n"
+        f"📊 تقرير تجديد النقاط — دورة تنتهي يوم {r['day']} الساعة 8 مساءً (توقيت دمشق)\n\n"
         f"✅ استلموا رسالة التجديد: {r['sent']}\n"
         f"🔔 يفعّلون الإشعارات حاليًا: {r['enabled']}\n"
         f"🔕 أوقفوا الإشعارات حاليًا: {r['disabled']}\n"
@@ -55,9 +55,9 @@ async def renewal_step(client, bot, admin_id):
         try:
             await bot.send_message(
                 recipient["user_id"],
-                f"🔄 تجددت نقاطك المجانية ليوم {recipient['day']}!\n\n"
+                "🔄 تجددت نقاطك المجانية!\n\n"
                 f"الحد المجاني اليومي: {recipient['amount']:g} نقطة.\n"
-                "يتجدد يوميًا الساعة 12 منتصف الليل بتوقيت دمشق، دون تراكم.\n"
+                "يتجدد يوميًا الساعة 8 مساءً بتوقيت دمشق، دون تراكم.\n"
                 "يمكنك إيقاف هذه الإشعارات بالزر أدناه وإعادة تفعيلها من ⚙️ الإعدادات.",
                 reply_markup=renewal_keyboard(), request_timeout=10,
             )
@@ -108,3 +108,4 @@ async def daily_renewal_loop():
         except Exception:
             logger.exception("Daily renewal step failed; durable queue retained")
         await asyncio.sleep(delay)
+
