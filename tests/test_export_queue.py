@@ -62,6 +62,23 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(a.message.answer_document.call_args.kwargs['document'], b'remote-docx')
         self.assertFalse(ns['_PENDING_EXPORT_USERS'])
 
+    async def test_excel_waits_for_shared_heavy_processing_slot(self):
+        ns = load_functions()
+        gate = ns['HEAVY_PROCESSING_SEMAPHORE']
+        await gate.acquire()
+        await gate.acquire()
+        builder = ns['build_quiz_xlsx'] = Mock(return_value=b'excel')
+        task = asyncio.create_task(ns['_generate_and_send'](
+            call(1), [{'is_math': True}], 'title', 'xlsx', 's'))
+        try:
+            await asyncio.sleep(0.02)
+            builder.assert_not_called()
+        finally:
+            gate.release()
+            gate.release()
+        await asyncio.wait_for(task, 2)
+        builder.assert_called_once()
+
     async def test_buttons_roundtrip_and_legacy(self):
         import re
         from aiogram import types

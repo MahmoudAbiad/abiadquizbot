@@ -95,9 +95,12 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
         style = STYLE_CODE_TO_NAME.get(style_code, "simple")
         async with EXPORT_SLOT:
             if fmt == "xlsx":
-                # Excel is lightweight and does not need the image-render worker.
+                # Math workbooks render panels locally; share the same resource
+                # gates and cancellation protection as other rendered exports.
                 await status.edit_text(MSG_GENERATING)
-                file_bytes = await _build_export(build_quiz_xlsx, title, questions, style, include_answers)
+                async with HEAVY_PROCESSING_SEMAPHORE:
+                    async with RENDER_SEMAPHORE:
+                        file_bytes = await _build_export(build_quiz_xlsx, title, questions, style, include_answers)
             elif offload.ENABLED:
                 await status.edit_text(MSG_GENERATING)
             if fmt != "xlsx":
