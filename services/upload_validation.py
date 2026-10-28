@@ -3,6 +3,7 @@ import os
 import warnings
 
 DOCUMENT_EXTENSIONS = frozenset({'.pdf', '.docx', '.pptx', '.txt'})
+TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS = frozenset({'.png', '.jpg', '.jpeg'})
 IMAGE_EXTENSIONS = frozenset({'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff'})
 AUDIO_EXTENSIONS = frozenset({'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.oga', '.opus', '.flac', '.aiff', '.aif', '.wma', '.webm', '.mp4', '.3gp', '.amr'})
 MAX_IMAGE_PIXELS = 25_000_000
