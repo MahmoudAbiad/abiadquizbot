@@ -1,6 +1,5 @@
 # handlers/export.py
-"""معالجات تصدير الكويز إلى ملف Word أو PDF (من شاشة النتيجة أو من المفضلة).
-المسار: اختيار الستايل (بسيط/عصري/أكاديمي) → اختيار الصيغة (Word/PDF) → توليد الملف."""
+"""تصدير الكويز إلى Word أو PDF أو Excel من النتيجة أو المفضلة."""
 import asyncio
 from task_utils import spawn
 import re
@@ -50,6 +49,7 @@ from services.export_service import (
     build_export_filename,
     build_quiz_docx,
     build_quiz_pdf,
+    build_quiz_xlsx,
 )
 from helpers.supabase_helper import get_favorite_quiz, log_usage_event
 
@@ -60,9 +60,9 @@ MSG_NO_QUESTIONS = "❌ لا يوجد كويز متاح للتصدير حالي�
 MSG_GENERATING = "⏳ جارٍ تجهيز ملفك. سنرسله هنا عند الانتهاء؛ لا تحتاج لإعادة الطلب."
 MSG_FAILED = "تعذّر تجهيز الملف الآن. الكويز ما زال متاحاً؛ أعد المحاولة من خيارات التحميل بعد قليل."
 
-_FORMAT_RE = re.compile(r"^export_(docx|pdf)([st]?)_([sma])$")
+_FORMAT_RE = re.compile(r"^export_(docx|pdf|xlsx)([st]?)_([sma])$")
 _STYLE_RE = re.compile(r"^export_style_([sma])$")
-_FAV_FORMAT_RE = re.compile(r"^fav_export_(docx|pdf)([st]?)_([sma])_(.+)$")
+_FAV_FORMAT_RE = re.compile(r"^fav_export_(docx|pdf|xlsx)([st]?)_([sma])_(.+)$")
 _FAV_STYLE_RE = re.compile(r"^fav_export_style_([sma])_(.+)$")
 
 
@@ -94,9 +94,14 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
         status = await call.message.answer("⏳ تم تسجيل طلبك في طابور التصدير؛ يبدأ التجهيز عند توفر الدور.")
         style = STYLE_CODE_TO_NAME.get(style_code, "simple")
         async with EXPORT_SLOT:
-            if offload.ENABLED:
+            if fmt == "xlsx":
+                # Excel is lightweight and does not need the image-render worker.
                 await status.edit_text(MSG_GENERATING)
-            file_bytes = await offload.remote_build_quiz(fmt, title, questions, style, include_answers)
+                file_bytes = await _build_export(build_quiz_xlsx, title, questions, style, include_answers)
+            elif offload.ENABLED:
+                await status.edit_text(MSG_GENERATING)
+            if fmt != "xlsx":
+                file_bytes = await offload.remote_build_quiz(fmt, title, questions, style, include_answers)
             if file_bytes is None:
                 async with HEAVY_PROCESSING_SEMAPHORE:
                     await status.edit_text(MSG_GENERATING)

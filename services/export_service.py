@@ -183,6 +183,116 @@ def _letters_for(is_ar: bool) -> List[str]:
     return ARABIC_LETTERS if is_ar else ENGLISH_LETTERS
 
 
+def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
+                    style: str = DEFAULT_STYLE, include_answers: bool = True) -> bytes:
+    """Editable question bank. Student files never contain answer-key fields.
+
+    Math notation and structured tables/matrices stay as source text so they can
+    be edited without losing information. All strings are literal Excel text.
+    """
+    import json
+    from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    if not questions:
+        raise ExportError("لا توجد أسئلة لتصديرها.")
+    option_count = max(len(q.get("options") or []) for q in questions)
+    if len(questions) > 1_048_575 or option_count > 16_370:
+        raise ExportError("حجم الكويز يتجاوز حدود ملف Excel.")
+
+    is_ar = detect_language(questions) == "ar"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "الأسئلة" if is_ar else "Questions"
+    info = wb.create_sheet("معلومات الاختبار" if is_ar else "Quiz Info")
+    accent = {STYLE_SIMPLE: "334155", STYLE_MODERN: "2563EB",
+              STYLE_ACADEMIC: "374151"}[normalize_style(style)]
+
+    def add_row(sheet, values):
+        # Setting data_type explicitly prevents Excel formulas in user/AI text.
+        # Reject oversized/invalid text rather than letting openpyxl truncate it.
+        row = sheet.max_row + 1 if sheet.cell(1, 1).value is not None else 1
+        for col, value in enumerate(values, 1):
+            cell = sheet.cell(row, col)
+            if isinstance(value, str):
+                if len(value) > 32767 or ILLEGAL_CHARACTERS_RE.search(value):
+                    raise ExportError("أحد النصوص طويل جداً أو يحتوي رموزاً غير صالحة لملف Excel.")
+                cell.value = value
+                cell.data_type = "s"
+            else:
+                cell.value = value
+
+    has_table = any(q.get("table") for q in questions)
+    has_matrices = any(q.get("matrices") for q in questions)
+    headers = (["رقم السؤال", "نص السؤال", "نوع السؤال"] if is_ar else
+               ["Question Number", "Question", "Question Type"])
+    headers += [f"الخيار {i}" if is_ar else f"Option {i}" for i in range(1, option_count + 1)]
+    headers += ["الدرجة" if is_ar else "Points"]
+    if has_table:
+        headers += ["الجدول (JSON)" if is_ar else "Table (JSON)"]
+    if has_matrices:
+        headers += ["المصفوفات (JSON)" if is_ar else "Matrices (JSON)"]
+    if include_answers:
+        headers += (["رقم الإجابة الصحيحة", "الإجابة الصحيحة", "الشرح"] if is_ar else
+                    ["Correct Option Number", "Correct Answer", "Explanation"])
+    add_row(ws, headers)
+    for number, q in enumerate(questions, 1):
+        options = q.get("options") or []
+        kind = q.get("type") or ("اختيار من متعدد" if is_ar else "Multiple choice")
+        values = [number, str(q.get("question") or ""), str(kind)]
+        values += [str(o) for o in options] + [""] * (option_count - len(options))
+        values += [q.get("points", 1)]
+        if has_table:
+            values += [json.dumps(q["table"], ensure_ascii=False) if q.get("table") else ""]
+        if has_matrices:
+            values += [json.dumps(q["matrices"], ensure_ascii=False) if q.get("matrices") else ""]
+        if include_answers:
+            try:
+                correct = int(q.get("correct_option_id"))
+            except (ValueError, TypeError):
+                correct = -1
+            valid = 0 <= correct < len(options)
+            values += [correct + 1 if valid else None,
+                       str(options[correct]) if valid else "", str(q.get("explanation") or "")]
+        add_row(ws, values)
+
+    metadata = ([
+        ["المعلومة", "القيمة"], ["عنوان الاختبار", title or "كويز"],
+        ["عدد الأسئلة", len(questions)], ["النسخة", "الأستاذ" if include_answers else "الطالب"],
+        ["المدة", "غير محددة"],
+        ["ملاحظات", "ترقيم الخيارات يبدأ من 1. الصيغ الرياضية محفوظة كنص قابل للتعديل."],
+    ] if is_ar else [
+        ["Field", "Value"], ["Quiz Title", title or "Quiz"],
+        ["Question Count", len(questions)], ["Version", "Teacher" if include_answers else "Student"],
+        ["Duration", "Not specified"],
+        ["Notes", "Option numbers start at 1. Math notation is preserved as editable text."],
+    ])
+    for values in metadata:
+        add_row(info, values)
+    for sheet in (ws, info):
+        sheet.sheet_view.rightToLeft = is_ar
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        for row in sheet:
+            for cell in row:
+                cell.alignment = Alignment(horizontal="right" if is_ar else "left",
+                                           vertical="top", wrap_text=True)
+                cell.font = Font(name="Calibri", size=11)
+        for cell in sheet[1]:
+            cell.fill = PatternFill("solid", fgColor=accent)
+            cell.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        sheet.row_dimensions[1].height = 30
+        for col in range(1, sheet.max_column + 1):
+            sheet.column_dimensions[get_column_letter(col)].width = 28
+        sheet.column_dimensions["B"].width = 65
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    return buf.getvalue()
+
+
 # ==================== DOCX ====================
 
 def _set_paragraph_rtl(paragraph, align_right: bool = True) -> None:

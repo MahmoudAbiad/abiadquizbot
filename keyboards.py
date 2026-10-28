@@ -106,7 +106,7 @@ def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMark
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
-    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF)، مع الحفاظ على الستايل المختار،
+    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF أو Excel)، مع الحفاظ على الستايل المختار،
     تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
     prefix = "fav_export_" if favorite_id else "export_"
     suffix = f"_{favorite_id}" if favorite_id else ""
@@ -116,6 +116,10 @@ def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> 
             types.InlineKeyboardButton(text=f"📕 PDF — {label}", callback_data=f"{prefix}pdf{variant}_{style_code}{suffix}"),
             types.InlineKeyboardButton(text=f"📄 Word — {label}", callback_data=f"{prefix}docx{variant}_{style_code}{suffix}"),
         ])
+    kb.append([
+        types.InlineKeyboardButton(text=f"📊 Excel — {label}", callback_data=f"{prefix}xlsx{variant}_{style_code}{suffix}")
+        for variant, label in (("s", "نسخة الطالب"), ("t", "نسخة الأستاذ"))
+    ])
     kb.append([types.InlineKeyboardButton(text="🔙 تغيير التنسيق",
         callback_data=f"fav_export_back_{favorite_id}" if favorite_id else "export_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
