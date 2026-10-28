@@ -595,6 +595,36 @@ async def choose_group_timer(call: types.CallbackQuery):
             pass
 
 
+async def _ensure_group_lock_permission(call: types.CallbackQuery, session: Dict[str, Any]) -> bool:
+    """Check Telegram live and keep the waiting session intact while granting rights."""
+    try:
+        member = await bot.get_chat_member(int(session["chat_id"]), bot.id, request_timeout=15)
+        if _member_status(member) == "administrator" and getattr(member, "can_restrict_members", False):
+            return True
+        heading = "🔑 لتفعيل القفل، يحتاج البوت صلاحية «تقييد الأعضاء»."
+    except Exception:
+        heading = "⚠️ تعذر التحقق من صلاحيات البوت حالياً. جرّب «تحقق مجدداً» بعد قليل."
+    username = await _get_bot_username()
+    sid = str(session["id"])
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔑 منح الصلاحية",
+            url=f"https://t.me/{username}?startgroup&admin=restrict_members")],
+        [types.InlineKeyboardButton(text="🔄 تحقق مجدداً", callback_data=f"gql:{sid}:1")],
+        [types.InlineKeyboardButton(text="🔓 متابعة دون قفل", callback_data=f"gql:{sid}:0")],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{sid}")],
+    ])
+    await _safe_call(lambda: call.message.edit_text(
+        heading + "\n\n"
+        "1️⃣ اضغط «منح الصلاحية» واختر نفس مجموعة الاختبار.\n"
+        "2️⃣ أكّد صلاحية «حظر المستخدمين / تقييد الأعضاء»، ثم ارجع واضغط «تحقق مجدداً».\n\n"
+        "يلزم أن تكون مالك المجموعة أو مشرفاً يستطيع تعديل صلاحيات المشرفين.\n"
+        "إذا لم تظهر المجموعة: افتح إعداداتها ← المشرفون ← بوت أبيض، وفعّل الصلاحية.\n\n"
+        "✅ إعدادات الاختبار محفوظة، ولم تبدأ الجلسة بعد.", reply_markup=keyboard),
+        what="show group lock permission help")
+    await call.answer("إعداداتك محفوظة. امنح الصلاحية ثم تحقق مجدداً.")
+    return False
+
+
 @router.callback_query(F.data.startswith("gql:"))
 async def choose_group_lock(call: types.CallbackQuery):
     _, session_id, value = call.data.split(":", 2)
@@ -604,6 +634,8 @@ async def choose_group_lock(call: types.CallbackQuery):
     if (not await quiz_lock_schema_ready() or value not in {"0", "1"}
             or await _is_channel_chat(int(session["chat_id"]))):
         await call.answer("❌ إعداد غير صالح", show_alert=True)
+        return
+    if value == "1" and not await _ensure_group_lock_permission(call, session):
         return
     if not await update_session(session_id, {"lock_chat": value == "1"}):
         await call.answer("❌ تعذر حفظ الإعدادات", show_alert=True)
@@ -649,6 +681,9 @@ async def choose_group_pacing(call: types.CallbackQuery):
                 await call.answer("❌ فاصل زمني غير صالح", show_alert=True)
                 return
             interval = max(MIN_QUESTION_INTERVAL_SECONDS, int(raw_value))
+
+        if session.get("lock_chat") and not await _ensure_group_lock_permission(call, session):
+            return
 
         start_fields = {
             "pacing_mode": pacing_mode,
