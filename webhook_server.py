@@ -34,6 +34,8 @@ from constants import (
 from telegram_webapp_auth import verify_telegram_init_data
 from services.redis_reliability import complete_once
 from services.webhook_queue import WebhookQueue
+from services.public_website_stats import cache as website_stats_cache, enabled as website_stats_enabled
+from services.public_website_stats import router as website_stats_router
 from services.upload_validation import cleanup_stale_downloads, supported_extension, DOCUMENT_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS
 import re
 
@@ -244,9 +246,14 @@ async def lifespan(app: FastAPI):
     # until an update is enqueued (idle polling by all workers exhausted Upstash's quota).
     workers = [spawn(webhook_queue.worker(consume, sweeper=(i == 0)), name=f"telegram-queue-{i}")
                for i in range(UPDATE_CONCURRENCY_LIMIT)]
+    stats_task = (spawn(website_stats_cache.run(), name="public-website-stats")
+                  if website_stats_enabled else None)
     try:
         yield
     finally:
+        if stats_task is not None:
+            stats_task.cancel()
+            await asyncio.gather(stats_task, return_exceptions=True)
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
@@ -267,6 +274,7 @@ app = FastAPI(title="Quiz Maker Bot", version="2.0", lifespan=lifespan)
 # 🆕 تقديم صفحة رفع الملفات الصوتية (Mini App) كملفات ستاتيك من نفس الدومين
 from services.runner_api import router as runner_api_router
 app.include_router(runner_api_router)
+app.include_router(website_stats_router)
 
 app.mount("/webapp", RunnerAwareStaticFiles(directory="webapp"), name="webapp")
 
