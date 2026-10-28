@@ -226,9 +226,22 @@ class GoogleAdapter:
     capabilities = {"text", "image", "pdf", "audio"}
 
     async def generate(self, provider, credential, model, request):
+        from services.ai.diagnostics import google_http_options, mark
         from google import genai
         from google.genai import types
-        http_options = types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1))
+        mark("client_setup")
+        diagnostics_options, diagnostic_session = google_http_options()
+        uploaded = []
+        try:
+            http_options = types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1), **diagnostics_options)
+            return await self._generate(provider, credential, model, request, genai, types, http_options, uploaded)
+        finally:
+            # SDK deliberately leaves an injected session open: we own it.
+            if diagnostic_session is not None:
+                await diagnostic_session.close()
+
+    async def _generate(self, provider, credential, model, request, genai, types, http_options, uploaded):
+        from services.ai.diagnostics import begin_cleanup, mark
         if provider["transport"] == "vertex":
             from google.oauth2 import service_account
             credentials = service_account.Credentials.from_service_account_info(
@@ -238,8 +251,8 @@ class GoogleAdapter:
                                   credentials=credentials, http_options=http_options)
         else:
             client = genai.Client(api_key=credential, http_options=http_options)
-        uploaded = []
         try:
+            mark("attachment_prepare")
             contents = []
             total_size = sum(os.path.getsize(part.path) if part.path else len(part.data or b"")
                              for part in request.contents if isinstance(part, Attachment))
@@ -250,6 +263,7 @@ class GoogleAdapter:
                       and provider["transport"] == "gemini"):
                     # Reuse one Files API upload per credential for all batches.
                     # A different key automatically gets its own private upload.
+                    mark("file_session_upload")
                     remote = await request.file_session.get(
                         client, provider["id"], credential, part.path,
                     )
@@ -261,10 +275,12 @@ class GoogleAdapter:
                       and not getattr(request, "inline_only", False)):
                     # Upload is asynchronous so cancellation cannot orphan a background
                     # upload thread; files belong to this credential and this attempt.
+                    mark("file_upload")
                     uploaded_file = await client.aio.files.upload(file=part.path)
                     uploaded.append(uploaded_file.name)
                     contents.append(uploaded_file)
                 else:
+                    mark("attachment_read")
                     contents.append(types.Part.from_bytes(
                         data=await asyncio.to_thread(part.read), mime_type=part.mime_type))
             config = (types.GenerateContentConfig(response_mime_type="application/json",
@@ -281,6 +297,7 @@ class GoogleAdapter:
                         config = types.GenerateContentConfig()
                     config.thinking_config = thinking
             try:
+                mark("generate_wait")
                 response = await client.aio.models.generate_content(
                     model=model, contents=contents, config=config,
                 )
@@ -289,6 +306,7 @@ class GoogleAdapter:
                 # Never record exception messages or upstream payloads.
                 raise AIResponseDiagnosticError("sdk_generation_error") from None
             try:
+                mark("response_parse")
                 usage = response.usage_metadata
                 finish = response.candidates[0].finish_reason if response.candidates else None
                 text = response.text or ""
@@ -303,6 +321,9 @@ class GoogleAdapter:
                               finish_reason=safe_finish_reason(finish))
             return parse_result(result, request.schema, allow_empty_questions=request.allow_empty_questions)
         finally:
+            # Preserve the last processing milestone on failure/timeout. Cleanup
+            # emits its own events rather than hiding where the request stalled.
+            begin_cleanup()
             for name in uploaded:
                 try:
                     await asyncio.wait_for(client.aio.files.delete(name=name), timeout=5)

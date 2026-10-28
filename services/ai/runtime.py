@@ -12,6 +12,7 @@ from logger import get_logger
 from services.ai.adapters import ADAPTERS, ProviderError, AIResponseDiagnosticError
 from services.ai.provider_presets import chat_service
 from services.ai.rate_limits import RateLimitInfo, decide_cooldown
+from services.ai.diagnostics import run_attempt
 
 logger = get_logger(__name__)
 _blocked = {}
@@ -204,9 +205,11 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                 request.reasoning_effort or "auto",
             )
             try:
-                result = await asyncio.wait_for(
+                result = await run_attempt(
                     adapter.generate(provider, credentials[index], entry["model_name"], request),
                     timeout=timeout,
+                    request_id=request_id, slot=slot, provider=provider["id"],
+                    model=entry["model_name"], credential_index=index,
                 )
                 if session is not None:
                     session.preferred = (provider["id"], entry["model_name"], index)
@@ -238,7 +241,7 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
             except Exception as exc:
                 failed_attempts += 1
                 status = getattr(exc, "status", None)
-                if status is None:
+                if type(status) is not int:
                     status = getattr(exc, "code", None)
                 status = status if type(status) is int else None
                 reason = (exc.reason if isinstance(exc, ProviderError) else
