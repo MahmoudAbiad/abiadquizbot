@@ -4,7 +4,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 def load_functions():
@@ -34,6 +34,17 @@ def call(user):
 
 
 class QueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_excel_stays_local_and_preserves_student_variant(self):
+        ns = load_functions()
+        ns['offload'].ENABLED = True
+        builder = ns['build_quiz_xlsx'] = Mock(return_value=b'excel')
+        a = call(1)
+        await ns['_generate_and_send'](a, [{'question': 'sample'}], 'title', 'xlsx', 's', False)
+        builder.assert_called_once_with('title', [{'question': 'sample'}], 'simple', False)
+        ns['offload'].remote_build_quiz.assert_not_awaited()
+        self.assertEqual(a.message.answer_document.call_args.kwargs['document'], b'excel')
+        self.assertFalse(ns['_PENDING_EXPORT_USERS'])
+
     async def test_remote_export_preserves_student_variant_without_local_work(self):
         ns = load_functions()
         ns['offload'].ENABLED = True

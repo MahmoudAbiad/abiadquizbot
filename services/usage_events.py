@@ -35,7 +35,7 @@ EVENT_LABELS = {
     "channel_opened": "📢 فتح القناة",
     "request_cancelled": "🚫 إلغاء طلب أثناء العملية",
     # 🆕 أحداث جديدة أضيفت بهذا التحديث
-    "quiz_exported": "📄 تصدير كويز (Word/PDF)",
+    "quiz_exported": "📄 تصدير كويز (Word/PDF/Excel)",
     "favorite_opened": "⭐ فتح كويز من المفضلة",
     "favorite_deleted": "🗑 حذف كويز من المفضلة",
     "joined_via_referral": "🎯 انضمام عبر رابط دعوة",
