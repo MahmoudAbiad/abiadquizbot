@@ -968,7 +968,7 @@ async def _build_group_screen(share_id: str, user_id: int):
     candidates = await list_postable_groups()
     mine = await _filter_channels_user_admins(candidates, user_id)
     username = await _get_bot_username()
-    add_url = f"https://t.me/{username}?startgroup=gqadd"
+    add_url = f"https://t.me/{username}?startgroup=gqadd&admin=restrict_members"
     ready = "✅ <b>غروباتك الجاهزة</b> (البوت فيها): اختر وحدة من الأزرار تحت.\n\n" if mine else ""
     text = (
         "👥 <b>تشغيل الكويز بغروب</b>\n\n"
@@ -976,8 +976,10 @@ async def _build_group_screen(share_id: str, user_id: int):
         "الإعداد كله بيصير <b>هون بخاص البوت</b> - ما بتحتاج تفتح الغروب.\n\n"
         "➕ <b>غروب جديد؟</b>\n"
         "1️⃣ اضغط «➕ أضف البوت لغروب» تحت واختر الغروب.\n"
-        "2️⃣ أكّد الإضافة، وارجع لهون - رح يوصلك زر «🚀 ابدأ» تلقائياً (أو اضغط «🔄 تحديث»).\n\n"
-        "⚠️ لازم تكون أدمن بالغروب.\n"
+        "2️⃣ أكّد إضافة البوت كمشرف مع صلاحية «تقييد الأعضاء» اللازمة لقفل المجموعة أثناء الاختبار.\n"
+        "3️⃣ ارجع لهون - رح يوصلك زر «🚀 ابدأ» تلقائياً (أو اضغط «🔄 تحديث»).\n\n"
+        "⚠️ لإضافة البوت كمشرف، لازم تكون مالك الغروب أو مشرف عندك صلاحية إضافة مشرفين.\n"
+        "🔒 البوت موجود من قبل؟ فعّل له «تقييد الأعضاء» من إعدادات مشرفي الغروب إذا بدك تستخدم القفل.\n"
         "📌 البوت موجود أصلاً بالغروب ومش ظاهر باللائحة؟ اكتب داخل الغروب مرة وحدة:\n"
         f"<code>/groupquiz {html.escape(share_id)}</code>"
     )
