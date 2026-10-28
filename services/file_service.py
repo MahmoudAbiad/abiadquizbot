@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Tuple
 from config import bot
 from utils import calculate_file_hash, extract_text_from_file, safe_file_cleanup
 from validators import validate_file_size
-from services.upload_validation import validate_image
+from services.upload_validation import validate_image, supported_extension, TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS
 
 DOWNLOADS_DIR = "downloads"
 
@@ -29,7 +29,9 @@ async def download_photos_service(message_user_id: int, photos: List[Dict[str, A
                 for previous in paths:
                     safe_file_cleanup(previous)
                 return [], f"❌ الصورة رقم {index}: {error}"
-            path = os.path.join(DOWNLOADS_DIR, f"{message_user_id}_{uuid.uuid4().hex}.jpg")
+            # Preserve uncompressed image documents, including their MIME extension.
+            extension = supported_extension("image" + (photo.get("extension") or ".jpg"), TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS)
+            path = os.path.join(DOWNLOADS_DIR, f"{message_user_id}_{uuid.uuid4().hex}{extension}")
             paths.append(path)
             await bot.download(photo["file_id"], destination=path)
             await asyncio.to_thread(validate_image, path)

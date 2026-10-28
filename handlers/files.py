@@ -55,7 +55,7 @@ from helpers.supabase_helper import (
 from helpers.r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, safe_title, short_token_to_hash
 from validators import validate_file_size, validate_question_count
-from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, InvalidUploadError
+from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS, InvalidUploadError
 from services.redis_reliability import UserLock, user_locked
 
 # استيراد الخدمات الجديدة
@@ -750,9 +750,11 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 
         ensure_directory_exists(DOWNLOADS_DIR)
 
-        if message.photo:
-            photo = message.photo[-1]
-            current = {"file_id": photo.file_id, "file_unique_id": photo.file_unique_id, "file_size": photo.file_size}
+        document_extension = os.path.splitext(message.document.file_name or "")[1].lower() if message.document else ""
+        if message.photo or document_extension in TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS:
+            photo = message.photo[-1] if message.photo else message.document
+            current = {"file_id": photo.file_id, "file_unique_id": photo.file_unique_id, "file_size": photo.file_size,
+                       "extension": ".jpg" if message.photo else document_extension}
             if message.media_group_id:
                 group_id = message.media_group_id
                 await redis_client.rpush(f"album_list:{group_id}", json.dumps(current))
@@ -763,7 +765,10 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 return
             else:
                 file_paths, err = await download_photos_service(message.from_user.id, [current])
-                if err or not file_paths: return
+                if err:
+                    await message.answer(err)
+                    return
+                if not file_paths: return
                 file_hash = await asyncio.to_thread(compute_combined_hash, file_paths)
                 await _finalize_media_processing(message, state, file_paths, "كويز من صورة", 1, False, file_hash, content_source="images")
         else:
