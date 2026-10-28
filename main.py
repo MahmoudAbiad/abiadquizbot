@@ -42,6 +42,7 @@ from handlers import (
 from handlers.session_navigation import router as session_navigation_router
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware
 from services.mistake_practice import PracticeCallbackGuard
+from services.consent import ConsentMiddleware
 
 # تهيئة Sentry للتتبع
 SENTRY_DSN = os.getenv("SENTRY_DSN")
@@ -78,13 +79,19 @@ def main():
 
     # 1. تفعيل الحماية من التكرار (Rate Limiting)
     dp.message.middleware(ThrottlingMiddleware(limit=1.2))
+    # بوابة شروط الاستخدام على الرسائل والأزرار بالخاص
+    consent_gate = ConsentMiddleware()
+    dp.message.middleware(consent_gate)
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
+    dp.callback_query.middleware(consent_gate)
     dp.callback_query.middleware(PracticeCallbackGuard())
     dp.callback_query.middleware(UsageCallbackMiddleware())
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
     from handlers.runner import router as runner_router
+    from handlers.consent import router as consent_router
     dp.include_routers(
+        consent_router,
         runner_router,
         session_navigation_router,
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
