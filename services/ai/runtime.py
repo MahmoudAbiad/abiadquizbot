@@ -94,6 +94,10 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     from helpers.settings_helper import get_ai_request_timeout
     from services.ai.state import _last_model_used_var, _last_token_usage_var
     timeout = timeout if timeout is not None else await get_ai_request_timeout()
+    from services.ai.time_budget import current_quiz_budget, QuizAITimeout
+    budget = current_quiz_budget()
+    if budget is not None:
+        timeout = min(timeout, budget.attempt_seconds)
     request_id = uuid.uuid4().hex[:12]
     request_start = time.monotonic()
     providers = await get_providers()
@@ -121,8 +125,9 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     failed_attempts = 0
     failure_breakdown = Counter()
     logger.info(
-        "AI_REQUEST_START request_id=%s slot=%s mode=%s capabilities=%s models=%d timeout_s=%s",
+        "AI_REQUEST_START request_id=%s slot=%s mode=%s capabilities=%s models=%d timeout_s=%s budget_remaining_s=%s",
         request_id, slot, mode, sorted(request.capabilities), len(models), timeout,
+        round(budget.remaining(), 2) if budget else None,
     )
     now = time.monotonic()
     for key, until in list(_blocked.items()):
@@ -198,6 +203,12 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                     request_id, slot, provider["id"], entry["model_name"], index, round(remaining),
                 )
                 continue
+            attempt_timeout = timeout
+            if budget is not None:
+                remaining_seconds = budget.remaining()
+                if remaining_seconds <= 0:
+                    raise QuizAITimeout("Quiz AI deadline exceeded")
+                attempt_timeout = min(timeout, remaining_seconds)
             started = time.monotonic()
             logger.info(
                 "AI_ATTEMPT_START request_id=%s slot=%s provider=%s model=%s credential_index=%d rank=%d/%d thinking=%s",
@@ -207,7 +218,7 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
             try:
                 result = await run_attempt(
                     adapter.generate(provider, credentials[index], entry["model_name"], request),
-                    timeout=timeout,
+                    timeout=attempt_timeout,
                     request_id=request_id, slot=slot, provider=provider["id"],
                     model=entry["model_name"], credential_index=index,
                 )
@@ -315,6 +326,10 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                 if cooldown.scope == "openrouter_free_models":
                     # Other OpenRouter keys under this provider share the same free quota.
                     # Do not burn another request against a known account-wide limit.
+                    break
+                if budget is not None and reason == "timeout":
+                    # Slow model responses rarely improve by switching API keys.
+                    # Preserve the remaining quiz allowance for the next model.
                     break
     logger.warning(
         "AI_REQUEST_FAILED request_id=%s slot=%s capabilities=%s elapsed_ms=%d "

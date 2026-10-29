@@ -418,24 +418,34 @@ async def execute_quiz_generation_workflow(
             is_album=bool(data.get("is_album")),
             content_source=data.get("content_source"),
         ) != "Standard"
-        quiz_data = await generate_quiz_smart(
-            file_paths=file_paths if is_media else None,
-            pure_text=pure_text if not is_media else None,
-            count=count,
-            skip_cache=True,
-            file_hash=file_hash,
-            generation_user_id=user_id,
-            batch_enabled=batch_enabled,
-            status_message=status_message,
-            previous_questions=previous_questions if previous_questions else None,
-            is_math_mode=is_math_mode,
-            english_mode=english_mode,
-            content_language=content_language,
-            difficulty=difficulty,
-            question_type=question_type,
-            custom_question_type_text=custom_question_type_text,
-            quiz_extraction_instruction=quiz_extraction_instruction,
-        )
+        from services.ai.time_budget import quiz_ai_budget, QuizAITimeout
+        try:
+            async with quiz_ai_budget(int(data.get("items_count") or 1), count) as budget:
+                quiz_data = await generate_quiz_smart(
+                    file_paths=file_paths if is_media else None,
+                    pure_text=pure_text if not is_media else None,
+                    count=count,
+                    skip_cache=True,
+                    file_hash=file_hash,
+                    generation_user_id=user_id,
+                    batch_enabled=batch_enabled,
+                    status_message=status_message,
+                    previous_questions=previous_questions if previous_questions else None,
+                    is_math_mode=is_math_mode,
+                    english_mode=english_mode,
+                    content_language=content_language,
+                    difficulty=difficulty,
+                    question_type=question_type,
+                    custom_question_type_text=custom_question_type_text,
+                    quiz_extraction_instruction=quiz_extraction_instruction,
+                )
+                # Some generation helpers turn provider errors into None.
+                # An expired shared deadline must still reach the refund UI.
+                if budget.remaining() <= 0:
+                    raise QuizAITimeout("Quiz AI deadline exceeded")
+        except QuizAITimeout:
+            log_warning(logger, "QUIZ_AI_DEADLINE_EXCEEDED")
+            return None, None, "ai_timeout", None
 
         if not quiz_data:
             return None, None, "ai_failed", None
