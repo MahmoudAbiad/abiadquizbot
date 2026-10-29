@@ -171,7 +171,10 @@ def _replace_scripts(text: str) -> str:
     text = re.sub(r"_\{([^{}]*)\}", lambda m: sub_build(m.group(1)), text)
     # ^x أو _x (حرف/رقم واحد بدون أقواس)
     text = re.sub(r"\^(\w)", lambda m: sup_build(m.group(1)), text)
-    text = re.sub(r"_(\w)", lambda m: sub_build(m.group(1)), text)
+    # Underscore runs are fill-in-the-blank placeholders, not subscripts.
+    # Exclude underscores from both the base and the argument so even blanks
+    # touching a word ("____five") survive conversion unchanged.
+    text = re.sub(r"(?<!_)_([^\W_])", lambda m: sub_build(m.group(1)), text)
     return text
 
 
