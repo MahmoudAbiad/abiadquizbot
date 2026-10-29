@@ -307,13 +307,11 @@ class WorkerCoreTests(unittest.TestCase):
             document = Document(io.BytesIO(data))
             text = '\n'.join(p.text for p in document.paragraphs)
             text += '\n'.join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
-            # Current print exports draw answers as images, not selectable text.
+            # Ordinary answers are native editable text; inspect the actual
+            # teacher-only content instead of using image count as a proxy.
             self.assertEqual(('Answers and solutions' in text or 'الإجابات والحلول' in text), include_answers)
-            if include_answers:
-                teacher_shapes = len(document.inline_shapes)
-            else:
-                student_shapes = len(document.inline_shapes)
-        self.assertGreater(teacher_shapes, student_shapes)
+            self.assertEqual('UNIQUE_TEACHER_ANSWER_SENTINEL' in text, include_answers)
+            self.assertEqual(len(document.inline_shapes), 0)
 
     def test_include_answers_requires_boolean(self):
         from services import offload_worker_core as core
