@@ -420,7 +420,9 @@ async def execute_quiz_generation_workflow(
         ) != "Standard"
         from services.ai.time_budget import quiz_ai_budget, QuizAITimeout
         try:
-            async with quiz_ai_budget(int(data.get("items_count") or 1), count) as budget:
+            async with quiz_ai_budget(
+                int(data.get("items_count") or 1), count, is_math=is_math_mode,
+            ) as budget:
                 quiz_data = await generate_quiz_smart(
                     file_paths=file_paths if is_media else None,
                     pure_text=pure_text if not is_media else None,

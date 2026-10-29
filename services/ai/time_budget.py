@@ -28,12 +28,26 @@ class QuizTimeBudget:
 _current_budget = ContextVar("quiz_ai_time_budget", default=None)
 
 
-def quiz_timeout_limits(items: int, questions: int) -> tuple[float, float]:
+def quiz_timeout_limits(items: int, questions: int, *, is_math: bool = False) -> tuple[float, float]:
+    # Calibrated against 30 days of production successes; see
+    # docs/quiz-timeout-policy.md for cohort limitations and sparse large inputs.
     # Pages/images are counted upstream; text uses its word-based page count.
-    # A dense one-page exam also needs more time to produce a long response.
-    attempt = min(300.0, 50.0 + 10 * max(0, items - 1)
-                  + 2 * max(0, questions - 10))
-    return attempt, min(600.0, attempt * 3)
+    if items <= 1:
+        source_limit = 120.0
+    elif items <= 5:
+        source_limit = 150.0
+    elif items <= 15:
+        source_limit = 180.0
+    elif items <= 35:
+        source_limit = 240.0
+    else:
+        source_limit = 300.0
+    question_limit = (120.0 if questions <= 10 else 180.0 if questions <= 30
+                      else 240.0 if questions <= 60 else 300.0)
+    math_limit = (180.0 if items <= 5 else 240.0) if is_math else 0.0
+    # Take the largest allowance; don't add independent safety margins together.
+    attempt = max(source_limit, question_limit, math_limit)
+    return attempt, min(600.0, attempt * 2)
 
 
 def current_quiz_budget():
@@ -41,18 +55,18 @@ def current_quiz_budget():
 
 
 @asynccontextmanager
-async def quiz_ai_budget(items: int, questions: int):
+async def quiz_ai_budget(items: int, questions: int, *, is_math: bool = False):
     # Never give nested work a fresh allowance. Child tasks inherit this same
     # immutable absolute deadline through ContextVar propagation.
     existing = current_quiz_budget()
     if existing is not None:
         yield existing
         return
-    attempt, total = quiz_timeout_limits(items, questions)
+    attempt, total = quiz_timeout_limits(items, questions, is_math=is_math)
     budget = QuizTimeBudget(attempt, total, time.monotonic() + total)
     logging.getLogger(__name__).info(
-        "QUIZ_AI_BUDGET items=%s questions=%s attempt_s=%s total_s=%s",
-        items, questions, attempt, total,
+        "QUIZ_AI_BUDGET items=%s questions=%s is_math=%s attempt_s=%s total_s=%s",
+        items, questions, is_math, attempt, total,
     )
     token = _current_budget.set(budget)
     timer = asyncio.timeout(total)
