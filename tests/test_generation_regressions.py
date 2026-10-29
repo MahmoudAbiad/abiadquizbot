@@ -260,7 +260,7 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(error, '')
                 self.assertEqual(quiz[0]['options'], expected_options)
                 self.assertEqual(env['generate_quiz_smart'].await_args.kwargs['count'],
-                                 120 if subject_type == 'unsolved' else 1)
+                                 1)
                 self.assertEqual(quiz[0]['options'][quiz[0]['correct_option_id']], 'e')
 
 

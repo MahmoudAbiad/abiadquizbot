@@ -77,7 +77,7 @@ class SubjectClassification(BaseModel):
     question_count: Optional[int] = Field(
         default=None,
         description=(
-            "approximate count of actual questions found in the document; only set when "
+            "count of actual convertible questions counted in the document, not a guess; only set when "
             "subject is quiz_solved or quiz_unsolved, otherwise null"
         ),
     )

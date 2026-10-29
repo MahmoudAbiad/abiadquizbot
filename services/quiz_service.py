@@ -6,7 +6,7 @@ import random
 from typing import Any, Dict, Tuple, Optional, List
 
 from constants import (
-    MAX_ALBUM_IMAGES, MAX_LIMIT_PAGES, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS, OPTION_COUNT, MAX_QUESTIONS_TO_GENERATE,
+    MAX_ALBUM_IMAGES, MAX_LIMIT_PAGES, MAX_STANDARD_PAGES, MAX_STANDARD_QUESTIONS, OPTION_COUNT,
     SUBJECT_MATH, SUBJECT_OTHER, SUBJECT_ENGLISH, SUBJECT_FRENCH, DIFFICULTY_MEDIUM, DIFFICULTY_LABELS_AR,
     QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM, QUESTION_TYPE_OPTIONS,
     QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH,
@@ -421,7 +421,7 @@ async def execute_quiz_generation_workflow(
         quiz_data = await generate_quiz_smart(
             file_paths=file_paths if is_media else None,
             pure_text=pure_text if not is_media else None,
-            count=MAX_QUESTIONS_TO_GENERATE if quiz_extraction_instruction else count,
+            count=count,
             skip_cache=True,
             file_hash=file_hash,
             generation_user_id=user_id,
@@ -439,6 +439,15 @@ async def execute_quiz_generation_workflow(
 
         if not quiz_data:
             return None, None, "ai_failed", None
+
+        if quiz_extraction_instruction:
+            # The reviewed count governs extraction, routing and billing alike.
+            # Never pad a short source or persist a silently incomplete exam.
+            if len(quiz_data) < count:
+                metadata = dict(get_last_generation_metadata() or {})
+                metadata.update(requested_count=count, extracted_count=len(quiz_data))
+                return None, None, "extraction_count_mismatch", metadata
+            quiz_data = quiz_data[:count]
 
         # Validate extracted choices before persistence, rendering and polls.
         if (subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
