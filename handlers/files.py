@@ -268,10 +268,7 @@ async def process_album_background(message: types.Message, state: FSMContext):
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
 DEFAULT_COUNT_SUGGESTIONS = [5, 10, 15, 20]
-# 🆕 يُستخدم فقط كشبكة أمان لو تعذّر على classify_subject رصد عدد تقريبي فعلي لأسئلة
-# اختبار جاهز (quiz_solved/quiz_unsolved) - راجع detected_question_count بالأسفل. ليس
-# قيمة مقترحة تُعرض للطالب كخيار عادي كباقي DEFAULT_COUNT_SUGGESTIONS.
-DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK = 10
+
 
 
 async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[int], state: FSMContext, target_for_send: Optional[types.Message] = None) -> None:
@@ -286,11 +283,19 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     data = await state.get_data()
     items = int(data.get("items_count") or 1)
     is_album = bool(data.get("is_album"))
-    selected_count = int(data.get("selected_question_count") or DEFAULT_COUNT_SUGGESTIONS[1])
+    ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
+    selected_count = int(data.get("selected_question_count") or (0 if ready_exam else DEFAULT_COUNT_SUGGESTIONS[1]))
     count_prompt_text = data.get(
         "count_prompt_text",
         "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟",
     )
+
+    if ready_exam:
+        count_prompt_text = (MSG_QUIZ_DETECTED_COUNT_TEMPLATE.format(count=selected_count)
+                             if selected_count else "تعذر تحديد عدد الأسئلة تلقائياً. اضغط «تعديل عدد الأسئلة» وأدخل العدد الموجود في اختبارك.")
+        notice = data.get("quiz_detection_notice")
+        if notice:
+            count_prompt_text = f"{notice}\n\n{count_prompt_text}"
 
     mode = determine_execution_mode(items, selected_count, is_album=is_album, content_source=data.get("content_source"))
     cost = await calculate_quiz_points_cost(items, selected_count, is_album)
@@ -301,10 +306,9 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         extraction_mode=data.get("quiz_extraction_mode"),
     )
 
-    ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
     heading = "✅ مراجعة العدد والتكلفة" if ready_exam else "3 من 3 · مراجعة وتوليد"
     text = f"<b>{heading}</b>\n\n{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
-    text += ("\n\nالتكلفة المعروضة تقدير الطلب المعتمد قبل البدء. لا نخصم زيادة تلقائياً إذا تجاوز الناتج العدد المقدّر."
+    text += ("\n\nالتكلفة محسوبة على العدد المعتمد أعلاه. يمكنك تعديله قبل بدء الاستخراج."
              if ready_exam else "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك.")
     if mode in ("Super-PDF", "Super-Images", "Super-Text"):
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
@@ -317,6 +321,9 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         keyboard = get_quiz_detected_count_keyboard(selected_count)
     else:
         keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
+
+    if ready_exam and not selected_count:
+        text = f"<b>{heading}</b>\n\n{count_prompt_text}"
 
     if message_id:
         try:
@@ -343,17 +350,13 @@ async def show_question_count_screen(reply_target: types.Message, state: FSMCont
     التوليد بضغطة واحدة أخيرة، بدل شاشتين منفصلتين كما كان سابقاً). count_prompt_text
     مخزَّن مسبقاً بالحالة (وُضع هناك من ask_question_count عند نقطة الدخول الأصلية).
 
-    🆕 اختبار جاهز (محلول/غير محلول): لا نسأل الطالب "كم سؤالاً تريد؟" (لا معنى له - عدد
-    الأسئلة محدَّد فعلياً بالمستند نفسه وليس اختياراً حراً). بدلاً من ذلك نستخدم العدد
-    التقريبي المرصود آلياً (detected_question_count، وُضع بالحالة من classify_subject عبر
-    handlers/files.py.ask_question_count) كعدد افتراضي مباشر لحساب التكلفة، ونعرض نص
-    "رصدنا ما يقارب N سؤال" بدل نص السؤال المعتاد - راجع get_quiz_detected_count_keyboard
-    بـ keyboards.py للكيبورد المصاحب (بدون أزرار عدد جاهزة).
+    للاختبار الجاهز نبدأ بالعدد المكتشف، ونحافظ على تصحيح المستخدم عند مراجعة الشاشة.
+    إذا تعذّر العدّ التلقائي، يبقى البدء معطلاً حتى يدخل المستخدم عدداً صالحاً.
     """
     data = await state.get_data()
     subject_type = data.get("subject_type")
     if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH:
-        detected_count = int(data.get("detected_question_count") or DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK)
+        detected_count = int(data.get("selected_question_count") or data.get("detected_question_count") or 0)
         notice = data.get("quiz_detection_notice")
         count_text = MSG_QUIZ_DETECTED_COUNT_TEMPLATE.format(count=detected_count)
         await state.update_data(
@@ -553,9 +556,10 @@ async def ask_question_count(
         # فور معرفته، بغض النظر عن مسار الشاشات اللاحق (تخيير محلول/انتقال مباشر لغير
         # محلول) - كلاهما ينتهي عند show_question_count_screen التي تقرأه لاحقاً بدل
         # سؤال الطالب "كم سؤالاً تريد؟" بأزرار عدد عشوائية (راجع التعليق هناك).
-        detected_count = classification.question_count or DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
-        detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
-        await state.update_data(detected_question_count=detected_count)
+        detected_count = classification.question_count
+        if detected_count is not None:
+            detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
+        await state.update_data(detected_question_count=detected_count, selected_question_count=detected_count)
 
         # 🆕 اختبار جاهز بمادة إنجليزي/فرنسي (content_subject - راجع services/subject_classifier.py):
         # نعرض شاشة اختيار "مترجمة/بدون ترجمة" أولاً (نفس شاشة المواد العادية بالأسفل)
@@ -1089,11 +1093,6 @@ async def handle_count_pick(call: types.CallbackQuery, state: FSMContext) -> Non
 @router.callback_query(QuizState.waiting_for_count, F.data == "qcount_custom")
 async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContext) -> None:
     """يطلب من الطالب كتابة عدد مخصص - نفس الرسالة تتحول لطلب إدخال نصي (edit)."""
-    data = await state.get_data()
-    if (data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
-            and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
-        await call.answer("عدد أسئلة الاختبار يُحدّد تلقائياً من محتواه.")
-        return
     try:
         await call.message.edit_text(
             "✏️ اكتب الآن عدد الأسئلة المطلوب (رقم فقط):",
@@ -1122,11 +1121,6 @@ async def process_count_custom_text(message: types.Message, state: FSMContext) -
     count_screen_chat_id/message_id المخزّنة بالحالة) بدل إرسال شاشة تأكيد منفصلة،
     فيبقى التدفق كله شاشة واحدة متجدّدة حتى لو غيّر الطالب طريقة الإدخال بمنتصف الطريق.
     """
-    data = await state.get_data()
-    if (data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
-            and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
-        await message.answer("عدد أسئلة الاختبار يُحدّد تلقائياً من محتواه.")
-        return
     count = int(message.text)
     valid, error = validate_question_count(count)
     if not valid:
@@ -1319,6 +1313,25 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
         finally:
             heartbeat_task.cancel()
+
+        if error_code == "extraction_count_mismatch":
+            if charged_this_attempt:
+                await refund_user_on_failure(call.from_user.id, data)
+                charged_this_attempt = False
+                refunded_this_attempt = True
+            await _clear_quiz_charge_markers(state)
+            preserve_upload = True
+            await state.set_state(QuizState.waiting_for_count)
+            actual_count = (generation_meta or {}).get("extracted_count", 0)
+            await status_msg.edit_text(
+                f"⚠️ تمكّنا من استخراج {actual_count} سؤال من أصل {count} معتمداً.\n"
+                "لم نبدأ كويزاً ناقصاً، وتم إرجاع نقاطك. "
+                "تحقق من الاختبار وعدّل العدد أو أعد المحاولة."
+            )
+            await _render_question_count_screen(
+                call.bot, call.message.chat.id, None, state, target_for_send=call.message,
+            )
+            return
 
         if error_code == "unreadable_office":
             if charged_this_attempt:

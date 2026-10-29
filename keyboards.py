@@ -257,19 +257,15 @@ def get_question_count_keyboard(
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_detected_count_keyboard(selected_count: int) -> types.InlineKeyboardMarkup:
-    """
-    🆕 كيبورد شاشة تأكيد عدد الأسئلة عندما subject_type = اختبار جاهز (محلول/غير محلول):
-    بلا أزرار عدد جاهزة عشوائية (5/10/15/20 من get_question_count_keyboard) لأن العدد
-    الحقيقي محدَّد فعلياً بالمستند نفسه وتم رصده تلقائياً (راجع classify_subject +
-    handlers/files.py.show_question_count_screen) - فقط زر تعديل يدوي (لو بدا الرصد غير
-    دقيق) وزر بدء الاستخراج مباشرة بالعدد المرصود. selected_count غير مستخدم مباشرة هنا
-    (السعر/العدد المعروضان فوق هذا الكيبورد بنص الشاشة نفسه) لكنه مُمرَّر لتوحيد التوقيع
-    مع get_question_count_keyboard ولإتاحة أي تخصيص مستقبلي بالأزرار بحسب العدد الحالي.
-    """
+    """Review the detected or corrected count; require a count before extraction."""
     kb = [
-        [types.InlineKeyboardButton(text="🚀 حوّل الاختبار إلى أتمتة", callback_data="qcount_start")],
+        [types.InlineKeyboardButton(text="✏️ تعديل عدد الأسئلة", callback_data="qcount_custom")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
+    if selected_count > 0:
+        kb.insert(0, [types.InlineKeyboardButton(
+            text=f"🚀 ابدأ استخراج {selected_count} سؤال", callback_data="qcount_start",
+        )])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
