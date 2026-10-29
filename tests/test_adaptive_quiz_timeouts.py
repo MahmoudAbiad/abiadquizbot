@@ -17,12 +17,29 @@ import test_generation_regressions as regressions
 class QuizBudgetTests(unittest.IsolatedAsyncioTestCase):
     def test_limits_scale_with_pages_and_output_and_have_caps(self):
         for pages, questions, expected in [
-            (1, 10, (50, 150)), (5, 10, (90, 270)),
-            (15, 10, (190, 570)), (1, 30, (90, 270)),
+            (1, 10, (120, 240)), (2, 10, (150, 300)), (5, 10, (150, 300)),
+            (6, 10, (180, 360)), (15, 10, (180, 360)),
+            (16, 10, (240, 480)), (35, 10, (240, 480)), (36, 10, (300, 600)),
+            (1, 11, (180, 360)), (1, 30, (180, 360)),
+            (1, 31, (240, 480)), (1, 60, (240, 480)), (1, 61, (300, 600)),
             (150, 120, (300, 600)),
         ]:
             with self.subTest(pages=pages, questions=questions):
                 self.assertEqual(tb.quiz_timeout_limits(pages, questions), expected)
+
+    def test_math_and_question_floors_take_maximum_instead_of_adding(self):
+        for pages, questions, expected in [
+            (1,10,(180,360)), (5,10,(180,360)),
+            (6,10,(240,480)), (15,10,(240,480)),
+            (1,20,(180,360)), (1,40,(240,480)),
+            (1,120,(300,600)), (150,10,(300,600)),
+        ]:
+            with self.subTest(pages=pages, questions=questions):
+                self.assertEqual(tb.quiz_timeout_limits(pages,questions,is_math=True),expected)
+
+    async def test_math_budget_receives_the_larger_allowance(self):
+        async with tb.quiz_ai_budget(1,10,is_math=True) as budget:
+            self.assertEqual((budget.attempt_seconds,budget.total_seconds),(180,360))
 
     async def test_parallel_and_nested_work_share_deadline_and_metadata_stays_in_task(self):
         self.assertIsNone(tb.current_quiz_budget())
@@ -107,10 +124,15 @@ class RuntimeBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
-    async def test_small_quiz_caps_300_second_setting_at_50(self):
+    async def test_small_quiz_caps_300_second_setting_at_120(self):
         async with tb.quiz_ai_budget(1,10):
             self.assertIs(await self.execute(AIRequest(('source',))), self.result)
-        self.assertEqual(self.calls, [50])
+        self.assertEqual(self.calls, [120])
+
+    async def test_math_runtime_uses_calibrated_attempt_allowance(self):
+        async with tb.quiz_ai_budget(1,10,is_math=True):
+            await self.execute(AIRequest(('math source',)))
+        self.assertEqual(self.calls,[180])
 
     async def test_lower_configured_timeout_and_explicit_override_are_respected(self):
         self.settings.get_ai_request_timeout.return_value = 30
@@ -154,6 +176,25 @@ class RuntimeBudgetTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TimeoutRefundTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generation_and_ready_math_exam_both_pass_math_to_budget(self):
+        observed=[]
+        async def generate(**kwargs):
+            budget=tb.current_quiz_budget()
+            observed.append((budget.attempt_seconds,budget.total_seconds))
+            return None
+        env=load_functions('services/quiz_service.py', {'execute_quiz_generation_workflow'},
+            **vars(C), asyncio=asyncio,
+            _HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(1),
+            get_file_quizzes=AsyncMock(return_value=[]),
+            resolve_generation_question_type_text=lambda *a:None,
+            resolve_quiz_extraction_instruction=lambda *a:None,
+            determine_execution_mode=lambda *a,**k:'Standard', generate_quiz_smart=generate)
+        for subject in [C.SUBJECT_MATH,C.SUBJECT_QUIZ_UNSOLVED]:
+            await env['execute_quiz_generation_workflow'](1,dict(
+                input_type='text',pure_text='source',subject_type=subject,
+                content_subject_type=C.SUBJECT_MATH,items_count=1),10,None)
+        self.assertEqual(observed,[(180,360),(180,360)])
+
     async def test_deadline_refunds_once_retains_upload_and_restores_review(self):
         fixture = regressions.DebitTests()
         fn = fixture.make()
