@@ -37,6 +37,11 @@ class GeminiFileSession:
         return uploaded
 
     async def aclose(self):
+        from services.ai.time_budget import quiz_cleanup_deadline
+        async with quiz_cleanup_deadline():
+            await self._close_uploaded()
+
+    async def _close_uploaded(self):
         uploaded, self._uploaded = list(self._uploaded.values()), {}
         if not uploaded:
             return

@@ -1314,7 +1314,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         finally:
             heartbeat_task.cancel()
 
-        if error_code == "extraction_count_mismatch":
+        if error_code in ("extraction_count_mismatch", "ai_timeout"):
             if charged_this_attempt:
                 await refund_user_on_failure(call.from_user.id, data)
                 charged_this_attempt = False
@@ -1323,11 +1323,18 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             preserve_upload = True
             await state.set_state(QuizState.waiting_for_count)
             actual_count = (generation_meta or {}).get("extracted_count", 0)
-            await status_msg.edit_text(
-                f"⚠️ تمكّنا من استخراج {actual_count} سؤال من أصل {count} معتمداً.\n"
-                "لم نبدأ كويزاً ناقصاً، وتم إرجاع نقاطك. "
-                "تحقق من الاختبار وعدّل العدد أو أعد المحاولة."
-            )
+            if error_code == "ai_timeout":
+                await status_msg.edit_text(
+                    "⏳ استغرقت خدمة توليد الأسئلة وقتاً أطول من المهلة المخصصة لطلبك.\n"
+                    "أوقفنا المحاولة وأرجعنا نقاطك. ملفك محفوظ؛ يمكنك إعادة المحاولة "
+                    "أو تقليل عدد الأسئلة."
+                )
+            else:
+                await status_msg.edit_text(
+                    f"⚠️ تمكّنا من استخراج {actual_count} سؤال من أصل {count} معتمداً.\n"
+                    "لم نبدأ كويزاً ناقصاً، وتم إرجاع نقاطك. "
+                    "تحقق من الاختبار وعدّل العدد أو أعد المحاولة."
+                )
             await _render_question_count_screen(
                 call.bot, call.message.chat.id, None, state, target_for_send=call.message,
             )

@@ -324,13 +324,15 @@ class GoogleAdapter:
             # Preserve the last processing milestone on failure/timeout. Cleanup
             # emits its own events rather than hiding where the request stalled.
             begin_cleanup()
-            for name in uploaded:
-                try:
-                    await asyncio.wait_for(client.aio.files.delete(name=name), timeout=5)
-                except Exception:
-                    pass
-            await client.aio.aclose()
-            client.close()
+            from services.ai.time_budget import quiz_cleanup_deadline
+            async with quiz_cleanup_deadline():
+                for name in uploaded:
+                    try:
+                        await asyncio.wait_for(client.aio.files.delete(name=name), timeout=5)
+                    except Exception:
+                        pass
+                await client.aio.aclose()
+                client.close()
 
 
 # To implement a different protocol, add one adapter and register it here.
