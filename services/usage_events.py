@@ -3,6 +3,9 @@ import re
 
 EVENT_LABELS = {
     "bot_start": "▶️ تشغيل البوت",
+    "consent_prompted": "📜 عرض طلب الموافقة على الشروط",
+    "consent_accepted": "✅ الموافقة على الشروط",
+    "consent_declined": "❌ رفض شروط الاستخدام",
     "content_uploaded": "📤 رفع محتوى/ملف",
     "quiz_generation_requested": "🧮 طلب توليد كويز",
     "quiz_generated": "🆕 توليد كويز جديد",

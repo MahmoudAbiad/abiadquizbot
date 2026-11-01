@@ -58,6 +58,7 @@ async def _decide(call: types.CallbackQuery, decision: str) -> None:
     try:
         tv, pv = await svc.current_versions()
         from helpers.supabase_helper import supabase
+        from helpers.supabase_helper.analytics import log_usage_event
         try:
             result = await supabase.rpc("record_consent", {
                 "p_user_id": user_id,
@@ -72,6 +73,12 @@ async def _decide(call: types.CallbackQuery, decision: str) -> None:
 
         row = result.data[0] if isinstance(result.data, list) and result.data else result.data
         changed = bool((row or {}).get("changed"))
+        if changed:
+            await log_usage_event(
+                user_id,
+                f"consent_{decision}",
+                {"terms_version": tv, "privacy_version": pv},
+            )
 
         if decision == "accepted":
             await svc.remember_accepted(user_id, tv, pv)

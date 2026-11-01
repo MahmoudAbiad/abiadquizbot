@@ -330,7 +330,13 @@ class ConsentMiddleware(BaseMiddleware):
             logger.error("Could not build consent prompt for user %s: %s", user.id, exc, exc_info=True)
             await self._notify(event, user.id, "⚠️ تعذّر تجهيز رسالة الموافقة حالياً، حاول مجدداً بعد قليل.", None)
             return None
-        await self._notify(event, user.id, prompt_text, build_consent_keyboard())
+        await self._notify(
+            event,
+            user.id,
+            prompt_text,
+            build_consent_keyboard(),
+            activity_state=state,
+        )
         return None
 
     @staticmethod
@@ -340,7 +346,7 @@ class ConsentMiddleware(BaseMiddleware):
         except Exception:
             return False
 
-    async def _notify(self, event: Any, user_id: int, text: str, markup) -> None:
+    async def _notify(self, event: Any, user_id: int, text: str, markup, activity_state=None) -> None:
         """رسالة واحدة كل _NOTICE_TTL ثانية لكل مستخدم؛ الباقي يُتجاهل بصمت."""
         if user_id in self._notices:
             if isinstance(event, CallbackQuery):
@@ -350,11 +356,17 @@ class ConsentMiddleware(BaseMiddleware):
                     pass
             return
         self._notices[user_id] = True
+        sent = False
         try:
             if isinstance(event, CallbackQuery):
                 await event.answer("📜 يلزم الموافقة على الشروط أولاً.")
                 await event.message.answer(text, parse_mode="HTML", reply_markup=markup)
             else:
                 await event.answer(text, parse_mode="HTML", reply_markup=markup)
+            sent = True
         except (TelegramBadRequest, TelegramForbiddenError):
             logger.warning("Could not deliver consent prompt to Telegram user")
+
+        if sent and activity_state is not None:
+            from helpers.supabase_helper.analytics import log_usage_event
+            await log_usage_event(user_id, "consent_prompted", {"consent_state": activity_state})
