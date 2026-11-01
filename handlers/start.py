@@ -20,6 +20,7 @@ from helpers.student_ui import UPLOAD_TEXT, HELP_TEXT, HOME_TEXT, welcome_text a
 from helpers.supabase_helper.gifts import gift_balances, redeem as redeem_gift_code
 from services.gift_links import gift_code_from_start
 from services.gift_presentation import expiry_text, remaining_expiry_text
+from services.legal_consent import consent_prompt, has_current_consent, mark_prompted, save_decision
 
 logger = get_logger(__name__)
 router = Router()
@@ -37,7 +38,7 @@ router.message.filter(F.chat.type == "private")
 # مع الإحالات ولا الروابط العميقة، وتُسجَّل فقط ضمن حدث bot_start بدون أي تغيير على منطق التسجيل.
 ALLOWED_START_SOURCES = {"website"}
 
-async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, args_payload: str):
+async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, args_payload: str, telegram_user=None, is_new_override=None):
     """الماكينة المسؤولة عن تحميل وتشغيل الكويز القادم من الروابط العميقة بأمان"""
     actual_quiz_id = None
     shared = None
@@ -63,32 +64,40 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
                 actual_quiz_id = fav_res.data[0]["quiz_id"]
             
     if shared and actual_quiz_id:
+        account = telegram_user or target_msg.from_user
         # 🆕 لو المستخدم جديد كلياً فهو انضم عبر هذا الرابط المشترك: نمرّر المصدر والكويز
         # ليُخزَّنا ذرياً مع إنشاء الحساب (لا أثر على المستخدمين الحاليين).
         link_user_info = await check_or_add_user(
-            target_msg.from_user.id,
-            target_msg.from_user.username or "Unknown",
-            target_msg.from_user.first_name,
-            target_msg.from_user.last_name or "Unknown",
+            account.id,
+            account.username or "Unknown",
+            account.first_name,
+            account.last_name or "Unknown",
             None,
             join_source="shared_link",
             join_quiz_id=str(actual_quiz_id),
         )
-        is_new_via_link = link_user_info.get("status") == "new"
+        is_new_via_link = (is_new_override if is_new_override is not None else link_user_info.get("status") == "new")
         quiz_title = shared.get('title') or shared.get('source_title') or 'كويز مشترك'
 
-        spawn(log_usage_event(target_msg.from_user.id, "shared_link_opened", {
+        spawn(log_usage_event(account.id, "shared_link_opened", {
             "payload_type": "share" if args_payload.startswith("share_") else "quiz",
             "quiz_id": str(actual_quiz_id),
             "is_new_user": is_new_via_link,
         }))
+
+        if not await has_current_consent(account.id):
+            await mark_prompted(account.id)
+            await state.update_data(legal_start_payload=args_payload, legal_is_new_user=link_user_info.get("status") == "new")
+            body, keyboard = await consent_prompt(link_user_info.get("status") == "new")
+            await target_msg.answer(body, parse_mode="HTML", reply_markup=keyboard)
+            return
 
         await target_msg.answer(f"🚀 جاري تحميل الاختبار المشترك: <b>{safe_title(quiz_title)}</b>...", parse_mode="HTML")
         from handlers.runner import launch_keyboard
         from services.runner_core import build_questions
         try:
             build_questions(shared["quiz_data"])
-            game_keyboard = launch_keyboard(actual_quiz_id, target_msg.from_user.id)
+            game_keyboard = launch_keyboard(actual_quiz_id, account.id)
             if game_keyboard:
                 await target_msg.answer("🏃 هذا الاختبار متاح أيضاً كلعبة ركض:", reply_markup=game_keyboard)
         except ValueError:
@@ -103,25 +112,33 @@ async def launch_deep_linked_quiz(target_msg: types.Message, state: FSMContext, 
         await target_msg.answer("❌ عذراً، هذا الرابط منتهي الصلاحية أو لم يعد موجوداً في قاعدة البيانات.")
 
 
-async def redeem_linked_gift(msg: types.Message, payload: str):
+async def redeem_linked_gift(msg: types.Message, payload: str, state: Optional[FSMContext] = None, telegram_user=None):
     """Redeem directly from /start without touching an existing quiz/FSM state."""
     code = gift_code_from_start(payload)
     if code is None:
         await msg.answer("❌ رابط الهدية غير صالح. اطلب رابطاً جديداً من القناة.")
         return
 
+    account = telegram_user or msg.from_user
     user_info = await check_or_add_user(
-        msg.from_user.id,
-        msg.from_user.username or "Unknown",
-        msg.from_user.first_name,
-        msg.from_user.last_name or "Unknown",
+        account.id,
+        account.username or "Unknown",
+        account.first_name,
+        account.last_name or "Unknown",
         None,
     )
     if user_info.get("status") == "error":
         await msg.answer("تعذر الوصول إلى حسابك حالياً. افتح رابط الهدية مجدداً لاحقاً.")
         return
+    if not await has_current_consent(account.id):
+        if state:
+            await state.update_data(legal_start_payload=payload, legal_is_new_user=user_info.get("status") == "new")
+        await mark_prompted(account.id)
+        body, keyboard = await consent_prompt(user_info.get("status") == "new")
+        await msg.answer(body, parse_mode="HTML", reply_markup=keyboard)
+        return
 
-    result = await redeem_gift_code(msg.from_user.id, code)
+    result = await redeem_gift_code(account.id, code)
     errors = {
         "invalid": "الكود غير موجود.",
         "expired": "انتهت مهلة شحن هذا الكود.",
@@ -131,13 +148,13 @@ async def redeem_linked_gift(msg: types.Message, payload: str):
         "missing_user": "تعذر تجهيز حسابك. أرسل /start ثم افتح الرابط مجدداً.",
     }
     if result.get("status") != "ok":
-        spawn(log_usage_event(msg.from_user.id, "gift_code_rejected", {
+        spawn(log_usage_event(account.id, "gift_code_rejected", {
             "reason": result.get("status", "unknown"), "source": "deep_link",
         }))
         await msg.answer("❌ " + errors.get(result.get("status"), "تعذر الشحن. حاول مجدداً."))
         return
 
-    spawn(log_usage_event(msg.from_user.id, "gift_code_redeemed", {
+    spawn(log_usage_event(account.id, "gift_code_redeemed", {
         "points": result["points"], "source": "deep_link",
     }))
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -163,7 +180,7 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         
         # Links are available to new and existing users, without clearing quiz state.
         if command.args and command.args.startswith("gift_"):
-            await redeem_linked_gift(msg, command.args)
+            await redeem_linked_gift(msg, command.args, state)
             return
 
         # حماية التدفق: التحقق من وجود كويز معلق قادم من رابط عميق
@@ -203,6 +220,14 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             bot_start_meta["source"] = start_source
         spawn(log_usage_event(msg.from_user.id, "bot_start", bot_start_meta))
         
+        # Consent is version-aware and required before any normal start experience.
+        if not await has_current_consent(msg.from_user.id):
+            await mark_prompted(msg.from_user.id)
+            await state.update_data(legal_start_payload=command.args or None, legal_is_new_user=status == "new")
+            body, keyboard = await consent_prompt(status == "new")
+            await msg.answer(body, parse_mode="HTML", reply_markup=keyboard)
+            return
+
         # 🆕 (2026-08-28) إلغاء دليل الـ5 خطوات نهائياً بناءً على طلب صريح من المستخدم:
         # لا نفع حقيقي كان يُضاف من الشرح المطوّل - استبدلناه برسالة ترحيب من سطرين
         # فقط + زر إجراء واحد بارز يقود مباشرة لصلب الاستخدام (إرسال ملف). الضغط على
@@ -213,13 +238,13 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         # المحذوف الآن بالكامل - راجع docs/HISTORY_LOG.md لتفاصيل الإزالة).
         if status == "new":
             intro_text = (
-                "👋 <b>أهلاً بك في أبيض منشئ الكويزات</b>\n\n"
+                "👋 <b>أهلاً بك في أبيض · منشئ اختبارات ذكي</b>\n\n"
                 "حوّل ملفاتك وصورك ونصوصك إلى أسئلة تفاعلية للمراجعة.\n"
                 f"🎁 رصيد هديتك: <b>{gift_points:g} نقطة</b>.\n\n"
                 "ابدأ بإرسال محتواك، وراجع التكلفة قبل تأكيد التوليد."
             )
             start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="📝 إنشاء أول كويز", callback_data="new_user_send_now")],
+                [types.InlineKeyboardButton(text="📝 إنشاء أول اختبار", callback_data="new_user_send_now")],
                 [types.InlineKeyboardButton(text="🎁 صلاحية هديتي", callback_data="gift:list:0")]
             ])
 
@@ -245,6 +270,82 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
         )
 
 # ==================== معالجات تأكيد/إلغاء دهس الكويزات النشطة ====================
+
+@router.callback_query(F.data.startswith("legal_consent:"))
+async def handle_legal_consent(call: types.CallbackQuery, state: FSMContext):
+    action = call.data.split(":")
+    user_id = call.from_user.id
+    if len(action) < 2:
+        await call.answer("تعذر قراءة اختيارك. أرسل /start مجدداً.", show_alert=True)
+        return
+
+    if call.data not in {"legal_consent:accept:new", "legal_consent:accept:returning", "legal_consent:decline"}:
+        await call.answer("اختيار غير صالح. أرسل /start مجدداً.", show_alert=True)
+        return
+    decision = "accepted" if action[1] == "accept" else "declined"
+    try:
+        await save_decision(user_id, decision)
+    except Exception:
+        logger.exception("Could not save legal consent for user %s", user_id)
+        await call.answer("تعذر حفظ اختيارك حالياً. حاول مجدداً بعد قليل.", show_alert=True)
+        return
+
+    await call.answer()
+    if decision == "declined":
+        await call.message.edit_text(
+            "لم تتم الموافقة. لا يمكن متابعة استخدام البوت قبل الموافقة على سياسة الخصوصية وشروط الاستخدام."
+        )
+        await state.update_data(legal_start_payload=None)
+        return
+
+    saved = await state.get_data()
+    payload = saved.get("legal_start_payload")
+    await state.update_data(legal_start_payload=None, legal_is_new_user=False)
+    try:
+        await call.message.edit_text("✅ تم تسجيل موافقتك.")
+    except TelegramBadRequest:
+        pass
+
+    if payload and payload.startswith("gift_"):
+        await redeem_linked_gift(call.message, payload, state, telegram_user=call.from_user)
+        return
+    if payload and (payload.startswith("share_") or payload.startswith("quiz_")):
+        await launch_deep_linked_quiz(call.message, state, payload, telegram_user=call.from_user, is_new_override=saved.get("legal_is_new_user"))
+        return
+
+    if len(action) > 2 and action[2] == "new":
+        account = await supabase.table("users").select("free_points,paid_points").eq("user_id", user_id).limit(1).execute()
+        gifts = await gift_balances([user_id])
+        gift_points = gifts.get(user_id, 0)
+        intro_text = (
+            "👋 <b>أهلاً بك في أبيض · منشئ اختبارات ذكي</b>\n\n"
+            "حوّل ملفاتك وصورك ونصوصك إلى أسئلة تفاعلية للمراجعة.\n"
+            f"🎁 رصيد هديتك: <b>{gift_points:g} نقطة</b>.\n\n"
+            "ابدأ بإرسال محتواك، وراجع التكلفة قبل تأكيد التوليد."
+        )
+        start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="📝 إنشاء أول اختبار", callback_data="new_user_send_now")],
+            [types.InlineKeyboardButton(text="🎁 صلاحية هديتي", callback_data="gift:list:0")]
+        ])
+        await call.message.answer(intro_text, parse_mode="HTML", reply_markup=start_kb)
+    else:
+        account = await supabase.table("users").select("free_points,paid_points").eq("user_id", user_id).limit(1).execute()
+        if not account.data:
+            await call.message.answer("✅ تم حفظ موافقتك. أرسل /start للمتابعة.")
+            return
+        row = account.data[0]
+        gifts = await gift_balances([user_id])
+        gift_points = gifts.get(user_id, 0)
+        free_points = float(row.get("free_points") or 0)
+        paid_points = float(row.get("paid_points") or 0)
+        points = free_points + paid_points + gift_points
+        welcome = build_welcome_text(points, free_points, gift_points, paid_points)
+        bot_info = await bot.get_me()
+        await call.message.answer(
+            welcome, parse_mode="HTML",
+            reply_markup=await get_main_menu_keyboard(bot_info.username, user_id),
+        )
+
 
 @router.callback_query(F.data == "deep_link_overwrite_confirm")
 async def handle_deep_link_overwrite_confirm(call: types.CallbackQuery, state: FSMContext):
