@@ -1402,6 +1402,12 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
                 await refund_user_on_failure(call.from_user.id, data)
                 charged_this_attempt = False
                 refunded_this_attempt = True
+            _track_quiz_generation_failure(
+                call.from_user.id, data, error_code,
+                refund_status="refunded" if refunded_this_attempt else "not_charged",
+                cost=cost, requested_count=count, items_count=items, mode=mode,
+                generation_meta=generation_meta,
+            )
             await _clear_quiz_charge_markers(state)
             preserve_upload = True
             await state.set_state(QuizState.waiting_for_count)
