@@ -216,12 +216,11 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             intro_text = (
                 "👋 <b>أهلاً بك في أبيض · منشئ اختبارات ذكي</b>\n\n"
                 "حوّل ملفاتك وصورك ونصوصك إلى أسئلة تفاعلية للمراجعة.\n"
-                f"🎁 رصيد هديتك: <b>{gift_points:g} نقطة</b>.\n\n"
+                "🎁 أُضيفت هديتك الترحيبية تلقائياً إلى رصيدك.\n\n"
                 "ابدأ بإرسال محتواك، وراجع التكلفة قبل تأكيد التوليد."
             )
             start_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="📝 إنشاء أول اختبار", callback_data="new_user_send_now")],
-                [types.InlineKeyboardButton(text="🎁 صلاحية هديتي", callback_data="gift:list:0")]
+                [types.InlineKeyboardButton(text="📝 إنشاء أول اختبار", callback_data="new_user_send_now")]
             ])
 
             await msg.answer(intro_text, parse_mode="HTML", reply_markup=start_kb)
@@ -274,6 +273,7 @@ async def ack_new_user_start(call: types.CallbackQuery):
         await call.message.edit_text(
             UPLOAD_TEXT,
             parse_mode="HTML",
+            reply_markup=_student_info_keyboard(),
         )
         spawn(log_usage_event(call.from_user.id, "start_cta_acknowledged"))
     except Exception as e:
@@ -286,7 +286,7 @@ def _student_info_keyboard():
     from constants import WEBAPP_PUBLIC_BASE_URL
     rows = []
     if WEBAPP_PUBLIC_BASE_URL:
-        rows.append([types.InlineKeyboardButton(text="📤 رفع ملف كبير أو محاضرة", callback_data="upload_open:all")])
+        rows.append([types.InlineKeyboardButton(text="📤 رفع المحتوى من هنا", callback_data="upload_open:all")])
     rows.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="student_home"),
                  types.InlineKeyboardButton(text="💬 الدعم", url=SUPPORT_BOT_URL)])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
