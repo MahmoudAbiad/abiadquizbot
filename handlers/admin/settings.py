@@ -12,6 +12,8 @@ from keyboards import (
     get_admin_settings_general_keyboard,
     get_cancel_keyboard,
     get_admin_dashboard_keyboard,
+    get_admin_legal_documents_keyboard,
+    get_admin_legal_bump_confirm_keyboard,
 )
 from helpers.settings_helper import (
     get_app_settings,
@@ -25,6 +27,11 @@ from helpers.settings_helper import (
     format_setting_value,
 )
 from logger import get_logger
+from services.legal_consent import (
+    DOCUMENT_LABELS,
+    bump_document_version,
+    current_documents,
+)
 from .dashboard import AdminState, IsAdminFilter, safe_edit_text
 
 logger = get_logger(__name__)
@@ -39,6 +46,74 @@ router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
 
 
+
+async def _render_legal_documents_menu(event, notice: str = ""):
+    versions, _ = await current_documents()
+    text = (
+        "📜 <b>نسخ الشروط والخصوصية</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"شروط الاستخدام: النسخة <code>{versions['terms']}</code>\n"
+        f"سياسة الخصوصية: النسخة <code>{versions['privacy']}</code>\n\n"
+        "انشر تحديث الوثيقة على abiad.me أولاً، ثم ارفع رقم نسختها من هنا. "
+        "سيطلب البوت موافقة مستخدمي النسخة السابقة عند تفاعلهم التالي."
+    )
+    if notice:
+        text = notice + "\n\n" + text
+    if isinstance(event, types.CallbackQuery):
+        await safe_edit_text(event.message, text, reply_markup=get_admin_legal_documents_keyboard(versions))
+        await event.answer()
+    else:
+        await event.answer(text, parse_mode="HTML", reply_markup=get_admin_legal_documents_keyboard(versions))
+
+
+@router.callback_query(F.data == "admin_legal_documents")
+async def open_legal_documents_menu(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _render_legal_documents_menu(call)
+
+
+@router.callback_query(F.data.startswith("admin_legal_bump:"))
+async def confirm_legal_document_bump(call: types.CallbackQuery):
+    document_type = call.data.split(":", 1)[1]
+    if document_type not in DOCUMENT_LABELS:
+        await call.answer("❌ نوع الوثيقة غير معروف.", show_alert=True)
+        return
+    versions, _ = await current_documents()
+    current_version = versions[document_type]
+    label = DOCUMENT_LABELS[document_type]
+    text = (
+        f"⚠️ <b>رفع نسخة {label}</b>\n\n"
+        f"النسخة الحالية: <code>{current_version}</code>\n"
+        f"النسخة الجديدة: <code>{current_version + 1}</code>\n\n"
+        "بعد التأكيد، سيُطلب من المستخدمين الذين وافقوا على النسخة الحالية "
+        "قبول النسخة الجديدة عند تفاعلهم التالي. تأكد أن الصفحة المحدّثة منشورة على abiad.me."
+    )
+    await safe_edit_text(
+        call.message, text,
+        reply_markup=get_admin_legal_bump_confirm_keyboard(document_type),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("admin_legal_bump_confirm:"))
+async def bump_legal_document(call: types.CallbackQuery):
+    document_type = call.data.split(":", 1)[1]
+    if document_type not in DOCUMENT_LABELS:
+        await call.answer("❌ نوع الوثيقة غير معروف.", show_alert=True)
+        return
+    try:
+        new_version = await bump_document_version(document_type)
+    except Exception:
+        logger.exception("Could not increment legal document version for %s", document_type)
+        await call.answer("❌ تعذر رفع النسخة. حاول مجدداً.", show_alert=True)
+        return
+    label = DOCUMENT_LABELS[document_type]
+    await _render_legal_documents_menu(
+        call,
+        notice=f"✅ رُفعت نسخة {label} إلى <code>{new_version}</code>.",
+    )
+
+
 @router.callback_query(F.data == "admin_settings_general")
 async def open_settings_general_menu(call: types.CallbackQuery, state: FSMContext):
     """قسم الإعدادات العامة: نقطة الدخول الموحدة لكل إعدادات النظام والإدارة التقنية."""
@@ -51,7 +126,8 @@ async def open_settings_general_menu(call: types.CallbackQuery, state: FSMContex
         "🧩 <b>مفاتيح التحكم:</b> تشغيل/إيقاف ميزات محددة\n"
         "🤖 <b>الذكاء الاصطناعي:</b> الموديلات وسجل التوليد\n"
         "🏆 <b>إدارة التحديات:</b> المحتوى والفروع والاختبارات\n"
-        "🏰 <b>إعدادات هجوم الأرض:</b> المهل، الإشعارات والحد اليومي"
+        "🏰 <b>إعدادات هجوم الأرض:</b> المهل، الإشعارات والحد اليومي\n"
+        "📜 <b>نسخ الشروط والخصوصية:</b> طلب موافقة جديدة بعد تحديث الوثائق"
     )
     await safe_edit_text(call.message, text, reply_markup=get_admin_settings_general_keyboard())
     try:

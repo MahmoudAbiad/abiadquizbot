@@ -40,7 +40,8 @@ from handlers import (
     gifts_router,
 )
 from handlers.session_navigation import router as session_navigation_router
-from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware, GroupQuizOnlyMiddleware, LegalConsentMiddleware
+from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware, GroupQuizOnlyMiddleware
+from services.consent import ConsentMiddleware
 from services.mistake_practice import PracticeCallbackGuard
 
 # تهيئة Sentry للتتبع
@@ -83,13 +84,16 @@ def main():
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
     dp.callback_query.middleware(PracticeCallbackGuard())
     dp.callback_query.middleware(UsageCallbackMiddleware())
-    dp.message.middleware(LegalConsentMiddleware())
-    dp.callback_query.middleware(LegalConsentMiddleware())
+    consent_gate = ConsentMiddleware()
+    dp.message.middleware(consent_gate)
+    dp.callback_query.middleware(consent_gate)
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
+    from handlers.consent import router as consent_router
     from handlers.runner import router as runner_router
     from handlers.settings import router as settings_router
     dp.include_routers(
+        consent_router,
         settings_router,
         runner_router,
         session_navigation_router,

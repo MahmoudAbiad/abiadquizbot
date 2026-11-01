@@ -1,11 +1,13 @@
 """Shared version-aware legal consent flow for Telegram users."""
-from aiogram import types
-
 from helpers.supabase_helper import supabase
 
 TERMS_URL = "https://abiad.me/terms-of-service.html"
 PRIVACY_URL = "https://abiad.me/privacy-policy.html"
 CURRENT_VERSIONS = {"terms": 1, "privacy": 1}
+DOCUMENT_LABELS = {
+    "terms": "شروط الاستخدام",
+    "privacy": "سياسة الخصوصية",
+}
 
 
 async def current_documents():
@@ -60,29 +62,23 @@ async def save_decision(user_id: int, decision: str):
     return result.data
 
 
-async def consent_prompt(is_new_user: bool):
-    _, documents = await current_documents()
-    terms = documents["terms"]
-    privacy = documents["privacy"]
-    if is_new_user:
-        body = (
-            "📜 <b>قبل أن تبدأ</b>\n\n"
-            "لاستخدام أبيض، منشئ اختبارات ذكي، يرجى الاطلاع على سياسة الخصوصية "
-            "وشروط الاستخدام والموافقة عليهما للمتابعة."
-        )
-    else:
-        body = (
-            "📜 <b>لمتابعة استخدام البوت</b>\n\n"
-            "يرجى الاطلاع على سياسة الخصوصية وشروط الاستخدام والموافقة عليهما "
-            "لمتابعة استخدام أبيض."
-        )
-    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="سياسة الخصوصية", url=privacy["url"]),
-         types.InlineKeyboardButton(text="شروط الاستخدام", url=terms["url"])],
-        [types.InlineKeyboardButton(
-            text="✅ أوافق",
-            callback_data=f"legal_consent:accept:{'new' if is_new_user else 'returning'}",
-        ),
-         types.InlineKeyboardButton(text="❌ لا أوافق", callback_data="legal_consent:decline")],
-    ])
-    return body, keyboard
+
+
+async def bump_document_version(document_type: str) -> int:
+    if document_type not in DOCUMENT_LABELS:
+        raise ValueError("Unsupported legal document type")
+    result = await supabase.rpc(
+        "bump_legal_document_version",
+        {"p_document_type": document_type},
+    ).execute()
+    value = result.data
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        value = value.get("bump_legal_document_version")
+    new_version = int(value)
+    # The settings helper has a short local cache; refresh this process immediately
+    # so the admin who bumped a version sees the new prompt behavior right away.
+    from helpers.settings_helper import get_app_settings
+    await get_app_settings(force_refresh=True)
+    return new_version

@@ -812,6 +812,7 @@ def get_admin_settings_general_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="🎟 أكواد الهدايا", callback_data="ag:home:0")],
         [types.InlineKeyboardButton(text="🏆 إدارة التحديات", callback_data="admin_challenges")],
         [types.InlineKeyboardButton(text="🏰 إعدادات هجوم الأرض", callback_data="admin_challenge_cooldown")],
+        [types.InlineKeyboardButton(text="📜 نسخ الشروط والخصوصية", callback_data="admin_legal_documents")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -834,6 +835,32 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
     kb.append([types.InlineKeyboardButton(text="🔙 رجوع للإعدادات العامة", callback_data="admin_settings_general")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+
+
+
+
+def get_admin_legal_documents_keyboard(versions: dict) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text=f"📈 رفع نسخة شروط الاستخدام · {versions['terms']}",
+            callback_data="admin_legal_bump:terms",
+        )],
+        [types.InlineKeyboardButton(
+            text=f"📈 رفع نسخة سياسة الخصوصية · {versions['privacy']}",
+            callback_data="admin_legal_bump:privacy",
+        )],
+        [types.InlineKeyboardButton(text="🔙 رجوع للإعدادات العامة", callback_data="admin_settings_general")],
+    ])
+
+
+def get_admin_legal_bump_confirm_keyboard(document_type: str) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text="✅ تأكيد رفع النسخة",
+            callback_data=f"admin_legal_bump_confirm:{document_type}",
+        )],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_legal_documents")],
+    ])
 
 # ==================== 🆕 AI Models Control Panel Keyboards ====================
 
