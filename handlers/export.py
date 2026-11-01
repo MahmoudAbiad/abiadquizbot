@@ -57,8 +57,25 @@ logger = get_logger(__name__)
 router = Router()
 
 MSG_NO_QUESTIONS = "❌ لا يوجد كويز متاح للتصدير حالياً."
-MSG_GENERATING = "⏳ جارٍ تجهيز ملفك. سنرسله هنا عند الانتهاء؛ لا تحتاج لإعادة الطلب."
 MSG_FAILED = "تعذّر تجهيز الملف الآن. الكويز ما زال متاحاً؛ أعد المحاولة من خيارات التحميل بعد قليل."
+
+
+def _estimate_export_seconds(questions: List[dict], fmt: str) -> int:
+    """A rough local-work estimate; remote queue and upload time remain variable."""
+    count = len(questions)
+    math_count = sum(bool(q.get("is_math") or q.get("math_expression")) for q in questions if isinstance(q, dict))
+    per_question = {"xlsx": 0.8, "docx": 1.0, "pdf": 1.8}.get(fmt, 1.5)
+    estimate = 6 + count * per_question + math_count * (1.5 if fmt == "pdf" else 0.7)
+    return max(10, min(180, int(5 * round(estimate / 5))))
+
+
+def _export_waiting_text(elapsed: float, estimate: int) -> str:
+    remaining = estimate - int(elapsed)
+    if remaining > 0:
+        return f"⏳ جارٍ تجهيز ملفك. الوقت المتوقع المتبقي: نحو {remaining} ثانية."
+    if elapsed < estimate * 2:
+        return "⏳ استغرق تجهيز الملف وقتاً أطول من المتوقع، وما زلنا نعمل عليه."
+    return "⏳ ما زلنا نجهّز الملف. سنرسله هنا فور اكتماله؛ لا تحتاج لإعادة الطلب."
 
 _FORMAT_RE = re.compile(r"^export_(docx|pdf|xlsx)([st]?)_([sma])$")
 _STYLE_RE = re.compile(r"^export_style_([sma])$")
@@ -88,26 +105,42 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
     # Reserve synchronously before the first await to prevent duplicate admission.
     _PENDING_EXPORT_USERS.add(user_id)
     status = None
+    heartbeat_task = None
     file_bytes = document = None
     try:
         await _safe_answer(call)
-        status = await call.message.answer("⏳ تم تسجيل طلبك في طابور التصدير؛ يبدأ التجهيز عند توفر الدور.")
+        estimate = _estimate_export_seconds(questions, fmt)
+        started = asyncio.get_running_loop().time()
+        status = await call.message.answer(_export_waiting_text(0, estimate))
+
+        async def _export_heartbeat() -> None:
+            last_text = _export_waiting_text(0, estimate)
+            while True:
+                await asyncio.sleep(5)
+                text = _export_waiting_text(asyncio.get_running_loop().time() - started, estimate)
+                if text == last_text:
+                    continue
+                try:
+                    await status.edit_text(text)
+                    last_text = text
+                except Exception as exc:
+                    retry_after = getattr(exc, "retry_after", None)
+                    if isinstance(retry_after, (int, float)) and retry_after > 0:
+                        await asyncio.sleep(min(float(retry_after), 30))
+
+        heartbeat_task = asyncio.create_task(_export_heartbeat())
         style = STYLE_CODE_TO_NAME.get(style_code, "simple")
         async with EXPORT_SLOT:
             if fmt == "xlsx":
                 # Math workbooks render panels locally; share the same resource
                 # gates and cancellation protection as other rendered exports.
-                await status.edit_text(MSG_GENERATING)
                 async with HEAVY_PROCESSING_SEMAPHORE:
                     async with RENDER_SEMAPHORE:
                         file_bytes = await _build_export(build_quiz_xlsx, title, questions, style, include_answers)
-            elif offload.ENABLED:
-                await status.edit_text(MSG_GENERATING)
             if fmt != "xlsx":
                 file_bytes = await offload.remote_build_quiz(fmt, title, questions, style, include_answers)
             if file_bytes is None:
                 async with HEAVY_PROCESSING_SEMAPHORE:
-                    await status.edit_text(MSG_GENERATING)
                     async with RENDER_SEMAPHORE:
                         builder = build_quiz_docx if fmt == "docx" else build_quiz_pdf
                         file_bytes = await _build_export(builder, title, questions, style, include_answers)
@@ -117,12 +150,17 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
             document = BufferedInputFile(file_bytes, filename=filename)
             await call.message.answer_document(document=document, caption=f"📄 نسخة {version} جاهزة.")
             document = file_bytes = None
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
             await status.delete()
         spawn(log_usage_event(user_id, "quiz_exported", {
             "format": fmt, "style": style, "title": title,
             "include_answers": include_answers,
         }))
     except ExportError as e:
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
         if status:
             try:
                 await status.edit_text(f"❌ {e}")
@@ -130,12 +168,18 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
                 pass
     except Exception as e:
         log_error(logger, f"Error generating export ({fmt}/{style_code}): {e}", exception=e)
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
         if status:
             try:
                 await status.edit_text(MSG_FAILED)
             except TelegramBadRequest:
                 pass
     finally:
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
         document = file_bytes = None
         _PENDING_EXPORT_USERS.discard(user_id)
         release_memory_to_os()

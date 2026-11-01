@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, Mock
 
 def load_functions():
     tree = ast.parse(Path('handlers/export.py').read_text())
-    nodes = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name in ('_generate_and_send', '_build_export')]
+    nodes = [n for n in tree.body if (isinstance(n, ast.AsyncFunctionDef) and n.name in ('_generate_and_send', '_build_export'))
+             or (isinstance(n, ast.FunctionDef) and n.name in ('_estimate_export_seconds', '_export_waiting_text'))]
     # Annotations use app types; strip them for this isolated handler test.
     for node in nodes:
         node.returns = None
@@ -34,6 +35,15 @@ def call(user):
 
 
 class QueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_estimate_and_waiting_wording_follow_export_size_and_elapsed_time(self):
+        ns = load_functions()
+        quick = ns['_estimate_export_seconds']([{'question': 'q'}], 'xlsx')
+        slow = ns['_estimate_export_seconds']([{'is_math': True} for _ in range(30)], 'pdf')
+        self.assertLess(quick, slow)
+        self.assertIn('المتبقي', ns['_export_waiting_text'](0, quick))
+        self.assertIn('أطول من المتوقع', ns['_export_waiting_text'](quick + 1, quick))
+        self.assertIn('سنرسله هنا', ns['_export_waiting_text'](quick * 2, quick))
+
     async def test_excel_stays_local_and_preserves_student_variant(self):
         ns = load_functions()
         ns['offload'].ENABLED = True
