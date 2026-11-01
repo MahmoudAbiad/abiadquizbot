@@ -116,18 +116,22 @@ def build_insufficient_balance_text(user_info: Dict[str, Any], required: float) 
 
 
 async def log_insufficient_balance_event(
-    user_id: int, action: str, required: float, balance: float, user_info: Dict[str, Any]
+    user_id: int, action: str, required: float, balance: float, user_info: Dict[str, Any],
+    rejection_stage: Optional[str] = None,
 ) -> None:
     """🆕 تتبع تحليلي موحّد لحدث "insufficient_balance_blocked" - كان مكرراً بصياغتين
     شبه متطابقتين بين المسار المباشر ومسار رفع الويب. يُستدعى دائماً عبر
     asyncio.create_task(...) من طرف المستدعي (Fire-and-forget) للحفاظ على نفس السلوك
     الأصلي بعدم انتظار اكتمال التسجيل قبل إتمام الرد على الطالب."""
     deficit = max(0.0, required - balance)
-    await log_usage_event(user_id, "insufficient_balance_blocked", {
+    metadata = {
         "action": action, "required_points": required, "current_balance": balance,
         "deficit_points": deficit, "free_points": float(user_info.get("free_points") or 0),
         "paid_points": float(user_info.get("paid_points") or 0),
-    })
+    }
+    if rejection_stage:
+        metadata["rejection_stage"] = rejection_stage
+    await log_usage_event(user_id, "insufficient_balance_blocked", metadata)
 
 
 async def log_audio_uploaded_event(user_id: int, duration_minutes: int, cost: float, source: str) -> None:
