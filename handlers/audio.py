@@ -35,7 +35,7 @@ from helpers.gemini_helper import get_last_generation_metadata
 from services.ai_audit import build_audio_audit_metadata
 from config import QuizState, bot
 from constants import (
-    ADMIN_CONTACT, MAX_AUDIO_WEB_UPLOAD_SIZE,
+    ADMIN_CONTACT, MAX_AUDIO_DURATION_MINUTES, MAX_AUDIO_WEB_UPLOAD_SIZE,
     MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
     MSG_REDIRECT_TO_WEB_UPLOAD,
 )
@@ -63,6 +63,7 @@ from services.flow_state import build_state_for_chat
 from handlers.files import ask_question_count
 from services.export_service import build_document_docx, build_document_pdf, build_export_filename
 from services import offload
+from services.usage_tracking import track_upload_rejection
 from helpers.supabase_helper import (
     log_usage_event, refund_user_points_split, update_user_stats,
 )
@@ -135,6 +136,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     الرسالة نفسها لرسائل audio - قابلة للتعارض مع محتوى الملف الحقيقي، خلافاً لرسائل
     voice التي يقيس تيليجرام مدتها بنفسه وقت التسجيل). التسعير يُحتسب دائماً من القيمة
     الأكبر بين المُعلنة والفعلية تفادياً لأي دفع أقل من التكلفة الحقيقية."""
+    failure_stage = "preflight"
     current_state = await state.get_state()
     if await offer_transition(state, message.from_user.id, message.chat.id, message_action(message, "audio")):
         return
@@ -162,6 +164,10 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     media = message.voice or message.audio
     file_size = media.file_size or 0
     if file_size > MAX_AUDIO_FILE_SIZE:
+        track_upload_rejection(
+            message.from_user.id, "audio", "size_exceeded", "telegram",
+            file_size_bytes=file_size, max_size_bytes=MAX_AUDIO_FILE_SIZE,
+        )
         # 🆕 بدل رفض جاف بلا بديل: نوجّه الطالب لصفحة رفع الصوت الكبير (حتى 250MB)
         # الموجودة أصلاً - هذا الحجم يتجاوز حد تحميل تيليجرام المباشر (Bot API) نفسه.
         keyboard = get_web_upload_redirect_keyboard("audio")
@@ -192,6 +198,7 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     )
 
     try:
+        failure_stage = "telegram_download"
         await bot.download(media, destination=destination)
 
         # 🆕 قياس المدة الفعلية + دمجها مع المُعلَنة + حساب الدقائق + التحقق من السقف
@@ -199,11 +206,16 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
         # مكررة هون وبـ process_web_uploaded_audio أدناه). راجع AI-NOTE بجانب
         # MAX_AUDIO_DURATION_MINUTES بـ constants.py لشرح سبب اختيار 4 ساعات تحديداً
         # (مرتبط بحد توكنز إخراج Gemini).
+        failure_stage = "duration_validation"
         cost_result: AudioCostResult = await evaluate_audio_cost(destination, reported_duration_seconds)
         duration_minutes = cost_result.duration_minutes
         cost = cost_result.cost
 
         if cost_result.exceeds_cap:
+            track_upload_rejection(
+                message.from_user.id, "audio", "duration_limit_exceeded", "telegram",
+                duration_minutes=duration_minutes, max_duration_minutes=MAX_AUDIO_DURATION_MINUTES,
+            )
             await state.set_state(None)
             safe_file_cleanup(destination)
             try:
@@ -247,6 +259,10 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
             reply_markup=get_audio_confirm_keyboard(),
         )
     except Exception as exc:
+        track_upload_rejection(
+            message.from_user.id, "audio", "preparation_failed", "telegram",
+            failure_stage=failure_stage, exception_type=type(exc).__name__,
+        )
         log_error(logger, f"Audio handling failed (pre-confirm stage): {exc}", exception=exc)
         await state.set_state(None)
         safe_file_cleanup(destination)
@@ -687,6 +703,7 @@ async def process_web_uploaded_audio(
 
     current_state = await state.get_state()
     if current_state in (QuizState.processing_file_quiz, QuizState.processing_web_file):
+        track_upload_rejection(user_id, "audio", "session_busy", "web_upload")
         await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
         await delete_audio_temp(object_path)
         return
@@ -694,6 +711,7 @@ async def process_web_uploaded_audio(
             "user_id": user_id, "chat_id": chat_id, "object_path": object_path, "declared_file_name": declared_file_name}):
         return
     if current_state == QuizState.processing_audio:
+        track_upload_rejection(user_id, "audio", "session_busy", "web_upload")
         await bot.send_message(chat_id, "⏳ لديك محاضرة صوتية أخرى قيد المعالجة حالياً؛ يرجى انتظار انتهائها.")
         await delete_audio_temp(object_path)
         return
@@ -719,6 +737,7 @@ async def process_web_uploaded_audio(
     destination = os.path.join(DOWNLOADS_DIR, f"audio_web_{user_id}_{uuid.uuid4().hex}{extension}")
 
     status_msg = None
+    failure_stage = "download"
 
     try:
         status_msg = await bot.send_message(
@@ -734,6 +753,10 @@ async def process_web_uploaded_audio(
             object_path, destination, max_size_bytes=MAX_AUDIO_WEB_UPLOAD_SIZE
         )
         if not downloaded:
+            track_upload_rejection(
+                user_id, "audio", "download_failed_or_size_exceeded", "web_upload",
+                max_size_bytes=MAX_AUDIO_WEB_UPLOAD_SIZE,
+            )
             await state.set_state(None)
             safe_file_cleanup(destination)
             await status_msg.edit_text("❌ تعذر تحميل الملف المرفوع أو أنه يتجاوز الحجم المسموح، يرجى إعادة المحاولة من البوت.")
@@ -742,8 +765,10 @@ async def process_web_uploaded_audio(
 
         # 🆕 نفس دالة evaluate_audio_cost المستخدمة بـ handle_audio_message أعلاه (بلا
         # reported_duration_seconds - لا توجد مدة مُعلَنة من تيليجرام بمسار الويب أصلاً).
+        failure_stage = "duration_validation"
         cost_result: AudioCostResult = await evaluate_audio_cost(destination)
         if cost_result.probed_seconds is None:
+            track_upload_rejection(user_id, "audio", "duration_unreadable", "web_upload")
             # مسار الويب لا يملك مدة موثوقة من Telegram؛ التسعير كدقيقة واحدة عند
             # فشل القياس قد يسمح بملف طويل جداً بتكلفة غير صحيحة. نرفضه بدل التخمين.
             log_error(logger, f"Could not probe duration for web-uploaded audio '{destination}' - rejecting upload.")
@@ -765,6 +790,10 @@ async def process_web_uploaded_audio(
         # 🆕 سقف مدة فعلية - نفس المنطق المطبَّق بالمسار المباشر بـ handle_audio_message،
         # وأهم هون تحديداً لأن حد الحجم بهالمسار (250MB) أعلى بكثير وما بيعكس المدة الفعلية.
         if cost_result.exceeds_cap:
+            track_upload_rejection(
+                user_id, "audio", "duration_limit_exceeded", "web_upload",
+                duration_minutes=duration_minutes, max_duration_minutes=MAX_AUDIO_DURATION_MINUTES,
+            )
             await state.set_state(None)
             safe_file_cleanup(destination)
             await delete_audio_temp(object_path)
@@ -836,6 +865,10 @@ async def process_web_uploaded_audio(
         await state.set_state(None)
         raise
     except Exception as exc:
+        track_upload_rejection(
+            user_id, "audio", "preparation_failed", "web_upload",
+            failure_stage=failure_stage, exception_type=type(exc).__name__,
+        )
         log_error(logger, f"Web-uploaded audio preparation failed: {exc}", exception=exc)
         safe_file_cleanup(destination)
         await delete_audio_temp(object_path)

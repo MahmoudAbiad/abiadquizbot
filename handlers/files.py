@@ -52,6 +52,7 @@ from helpers.supabase_helper import (
     reward_referrer_if_eligible, get_classification_lock, submit_classification_vote,
     has_user_voted_on_classification, is_feature_enabled,
 )
+from services.usage_tracking import track_upload_rejection
 from helpers.r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, safe_title, short_token_to_hash
 from validators import validate_file_size, validate_question_count
@@ -237,6 +238,10 @@ async def process_album_background(message: types.Message, state: FSMContext):
                 
         if not photos: return
         if len(photos) > MAX_ALBUM_IMAGES:
+            track_upload_rejection(
+                message.from_user.id, "image", "item_count_exceeded", "telegram",
+                item_count=len(photos), max_item_count=MAX_ALBUM_IMAGES,
+            )
             # 🆕 هاد سقف تيليجرام نفسه للألبوم (media group)، مش رقم اخترناه - نوجّه
             # الطالب لصفحة رفع ألبوم كبير (حتى 50 صورة سوا) بدل رفض جاف بلا بديل.
             keyboard = get_web_upload_redirect_keyboard("images")
@@ -251,6 +256,7 @@ async def process_album_background(message: types.Message, state: FSMContext):
             
         file_paths, err = await download_photos_service(message.from_user.id, photos)
         if err:
+            track_upload_rejection(message.from_user.id, "image", "download_failed", "telegram")
             await message.answer(err)
             return
         if not file_paths: return
@@ -261,6 +267,10 @@ async def process_album_background(message: types.Message, state: FSMContext):
         
         await _finalize_media_processing(message, state, file_paths, title, len(file_paths), is_album, file_hash, content_source="images")
     except Exception as exc:
+        track_upload_rejection(
+            message.from_user.id, "image", "processing_failed", "telegram",
+            failure_stage="album_processing", exception_type=type(exc).__name__,
+        )
         log_error(logger, f"Album background processing failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
@@ -686,6 +696,7 @@ async def _finalize_media_processing(
     كالمعتاد بلا أي تغيير بالسلوك الحالي.
     """
     resolved_user_id = user_id if user_id is not None else (message.from_user.id if message.from_user else None)
+    failure_stage = "media_finalization"
     try:
         content_type = "album" if is_album else ("photo" if len(file_paths) == 1 and file_paths[0].lower().endswith((".jpg", ".jpeg", ".png")) else "document")
         spawn(log_usage_event(resolved_user_id, "content_uploaded", {
@@ -728,6 +739,11 @@ async def _finalize_media_processing(
         await ask_question_count(message, state, SUCCESS_MEDIA_RECEIVED)
     except Exception as exc:
         for path in file_paths: safe_file_cleanup(path)
+        if resolved_user_id is not None:
+            track_upload_rejection(
+                resolved_user_id, content_source or "document", "processing_failed", input_channel,
+                item_count=items, failure_stage=failure_stage, exception_type=type(exc).__name__,
+            )
         log_error(logger, f"Finalize media failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
 
@@ -738,6 +754,8 @@ async def _finalize_media_processing(
 async def handle_media(message: types.Message, state: FSMContext) -> None:
     destination = None
     transferred = False
+    media_type = "image" if message.photo else "document"
+    failure_stage = "preflight"
     try:
         current_state = await state.get_state()
         if await offer_transition(state, message.from_user.id, message.chat.id, message_action(message, "media")):
@@ -746,6 +764,7 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
             # 🩹 طلب توليد فعلي قيد التنفيذ عند Gemini حالياً (بعد ضغط "ابدأ التوليد") - لازم
             # نرفض أي ملف جديد بدل حذف/استبدال الطلب الحالي، وإلا بنحذف الملف يلي عم يُرفع
             # فعلياً لـ Gemini بهالّحظة ونفشّل التوليد بالكامل (راجع handle_count_start).
+            track_upload_rejection(message.from_user.id, media_type, "session_busy", "telegram")
             await message.answer("⏳ في طلب توليد كويز قيد المعالجة حالياً؛ يرجى الانتظار حتى ينتهي قبل إرسال ملف جديد.")
             return
 
@@ -768,13 +787,20 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                     spawn(process_album_background(message, state))
                 return
             else:
+                failure_stage = "telegram_download"
                 file_paths, err = await download_photos_service(message.from_user.id, [current])
-                if err or not file_paths: return
+                if err or not file_paths:
+                    track_upload_rejection(message.from_user.id, "image", "download_failed", "telegram")
+                    return
                 file_hash = await asyncio.to_thread(compute_combined_hash, file_paths)
                 await _finalize_media_processing(message, state, file_paths, "كويز من صورة", 1, False, file_hash, content_source="images")
         else:
             valid, error = validate_file_size(message.document.file_size, "document")
             if not valid:
+                track_upload_rejection(
+                    message.from_user.id, "document", "size_exceeded", "telegram",
+                    file_size_bytes=message.document.file_size, max_size_bytes=MAX_DOC_SIZE,
+                )
                 # 🆕 بدل رفض جاف بلا بديل: نوجّه الطالب لصفحة رفع الملفات الكبيرة
                 # (حتى 150 صفحة/100MB) لو مُهيّأة، لأن هذا الحجم يتجاوز أصلاً حد
                 # تحميل تيليجرام المباشر (Bot API) وليس رقماً اخترناه نحن.
@@ -788,15 +814,23 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 else:
                     await message.answer(error)
                 return
+            failure_stage = "file_type_validation"
             extension = supported_extension(message.document.file_name, DOCUMENT_EXTENSIONS)
             title = os.path.splitext(message.document.file_name)[0]
             destination = os.path.join(DOWNLOADS_DIR, f"{message.from_user.id}_{uuid.uuid4().hex}{extension}")
+            failure_stage = "telegram_download"
             await bot.download(message.document, destination=destination)
             
+            failure_stage = "content_validation"
             items = await asyncio.to_thread(validate_document, destination)
             if destination.lower().endswith(".pdf"):
+                failure_stage = "page_validation"
                 items = await asyncio.to_thread(get_pdf_page_count_sync, destination)
                 if items > MAX_SUPER_PAGES:
+                    track_upload_rejection(
+                        message.from_user.id, "document", "page_limit_exceeded", "telegram",
+                        page_count=items, max_page_count=MAX_SUPER_PAGES,
+                    )
                     await message.answer(f"❌ الحد الأقصى لمعالجة ملفات PDF هو {MAX_SUPER_PAGES} صفحة.")
                     safe_file_cleanup(destination)
                     return
@@ -809,6 +843,16 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
             transferred = True
 
     except Exception as exc:
+        reason = {
+            "file_type_validation": "unsupported_type",
+            "content_validation": "invalid_content",
+            "page_validation": "page_count_failed",
+            "telegram_download": "download_failed",
+        }.get(failure_stage, "processing_failed")
+        track_upload_rejection(
+            message.from_user.id, media_type, reason, "telegram",
+            failure_stage=failure_stage, exception_type=type(exc).__name__,
+        )
         log_error(logger, f"Media handling failed: {exc}", exception=exc)
         await message.answer("❌ حدث خطأ غير متوقع أثناء معالجة الوسائط.")
     finally:
@@ -824,9 +868,11 @@ async def handle_pure_text(message: types.Message, state: FSMContext) -> None:
         return
 
     if len(text) < 30:
+        track_upload_rejection(message.from_user.id, "text", "text_too_short", "telegram", text_length=len(text), max_text_length=30)
         await message.answer("⚠️ النص قصير جداً؛ أرسل 30 حرفاً على الأقل لضمان دقة الأسئلة.")
         return
     if len(text) > MAX_TEXT_INPUT_SIZE:
+        track_upload_rejection(message.from_user.id, "text", "text_too_long", "telegram", text_length=len(text), max_text_length=MAX_TEXT_INPUT_SIZE)
         await message.answer(f"❌ الحد الأقصى للنص المباشر هو {MAX_TEXT_INPUT_SIZE} حرفاً.")
         return
 
@@ -1518,8 +1564,12 @@ async def _notify_admin_safe(text: str) -> None:
 
 # ==================== 🆕 رفع ملف/ألبوم صور كبير عبر صفحة الويب (Mini App) ====================
 
-async def _reject_web_upload(chat_id: int, state: FSMContext, status_msg: Optional[types.Message], text: str) -> None:
+async def _reject_web_upload(
+    chat_id: int, state: FSMContext, status_msg: Optional[types.Message], text: str,
+    *, user_id: int, media_type: str, reason: str, **metadata,
+) -> None:
     """تنظيف موحّد عند رفض/فشل طلب رفع ويب (ملف أو صور): فكّ القفل وعرض رسالة الخطأ."""
+    track_upload_rejection(user_id, media_type, reason, "web_upload", **metadata)
     await state.set_state(None)
     if status_msg:
         try:
@@ -1555,12 +1605,14 @@ async def process_web_uploaded_file(
             "user_id": user_id, "chat_id": chat_id, "object_path": object_path, "declared_file_name": declared_file_name}):
         return
     if current_state == QuizState.processing_web_file:
+        track_upload_rejection(user_id, "document", "session_busy", "web_upload")
         await bot.send_message(chat_id, "⏳ لديك ملف آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
         await delete_file_temp(object_path)
         return
     if current_state == QuizState.processing_file_quiz:
         # 🩹 نفس إصلاح handle_media: طلب توليد فعلي قيد التنفيذ عند Gemini حالياً - لازم نرفض
         # هذا الرفع الجديد بدل حذف/استبدال ملفات الطلب الجاري معالجته فعلياً.
+        track_upload_rejection(user_id, "document", "session_busy", "web_upload")
         await bot.send_message(chat_id, "⏳ في طلب توليد كويز قيد المعالجة حالياً؛ يرجى الانتظار حتى ينتهي قبل رفع ملف جديد.")
         await delete_file_temp(object_path)
         return
@@ -1577,6 +1629,7 @@ async def process_web_uploaded_file(
     destination = os.path.join(DOWNLOADS_DIR, f"file_web_{user_id}_{uuid.uuid4().hex}{extension}")
 
     status_msg = None
+    failure_stage = "download"
 
 
     try:
@@ -1586,17 +1639,26 @@ async def process_web_uploaded_file(
         downloaded = await download_file_temp_to_file(object_path, destination, max_size_bytes=MAX_FILE_WEB_UPLOAD_SIZE)
         if not downloaded:
             await delete_file_temp(object_path)
-            await _reject_web_upload(chat_id, state, status_msg, "❌ تعذر تحميل الملف المرفوع أو أنه يتجاوز الحجم المسموح، يرجى إعادة المحاولة من البوت.")
+            await _reject_web_upload(
+                chat_id, state, status_msg,
+                "❌ تعذر تحميل الملف المرفوع أو أنه يتجاوز الحجم المسموح، يرجى إعادة المحاولة من البوت.",
+                user_id=user_id, media_type="document", reason="download_failed_or_size_exceeded",
+                max_size_bytes=MAX_FILE_WEB_UPLOAD_SIZE,
+            )
             return
 
+        failure_stage = "content_validation"
         items = await asyncio.to_thread(validate_document, destination)
         if destination.lower().endswith(".pdf"):
+            failure_stage = "page_validation"
             if items > MAX_FILE_WEB_UPLOAD_PAGES:
                 safe_file_cleanup(destination)
                 await delete_file_temp(object_path)
                 await _reject_web_upload(
                     chat_id, state, status_msg,
                     f"❌ الحد الأقصى لمعالجة ملفات PDF عبر صفحة الويب هو {MAX_FILE_WEB_UPLOAD_PAGES} صفحة.",
+                    user_id=user_id, media_type="document", reason="page_limit_exceeded",
+                    page_count=items, max_page_count=MAX_FILE_WEB_UPLOAD_PAGES,
                 )
                 return
 
@@ -1620,7 +1682,12 @@ async def process_web_uploaded_file(
         log_error(logger, f"Web-uploaded file preparation failed: {exc}", exception=exc)
         safe_file_cleanup(destination)
         await delete_file_temp(object_path)
-        await _reject_web_upload(chat_id, state, status_msg, "❌ حدث خطأ غير متوقع أثناء تجهيز الملف.")
+        reason = "invalid_content" if failure_stage == "content_validation" else "processing_failed"
+        await _reject_web_upload(
+            chat_id, state, status_msg, "❌ حدث خطأ غير متوقع أثناء تجهيز الملف.",
+            user_id=user_id, media_type="document", reason=reason,
+            failure_stage=failure_stage, exception_type=type(exc).__name__,
+        )
 
 
 @user_locked(web_kind="images")
@@ -1645,12 +1712,14 @@ async def process_web_uploaded_images(
             "user_id": user_id, "chat_id": chat_id, "object_paths": object_paths}):
         return
     if current_state == QuizState.processing_web_file:
+        track_upload_rejection(user_id, "image", "session_busy", "web_upload")
         await bot.send_message(chat_id, "⏳ لديك طلب آخر قيد المعالجة حالياً؛ يرجى انتظار انتهائه.")
         await delete_file_temp_batch(object_paths)
         return
     if current_state == QuizState.processing_file_quiz:
         # 🩹 نفس إصلاح handle_media: طلب توليد فعلي قيد التنفيذ عند Gemini حالياً - لازم نرفض
         # هذا الرفع الجديد بدل حذف/استبدال ملفات الطلب الجاري معالجته فعلياً.
+        track_upload_rejection(user_id, "image", "session_busy", "web_upload")
         await bot.send_message(chat_id, "⏳ في طلب توليد كويز قيد المعالجة حالياً؛ يرجى الانتظار حتى ينتهي قبل رفع ألبوم جديد.")
         await delete_file_temp_batch(object_paths)
         return
@@ -1669,11 +1738,14 @@ async def process_web_uploaded_images(
 
     local_paths: List[str] = []
     total_downloaded = 0
+    failure_reason = "processing_failed"
+    failure_stage = "image_count_validation"
     try:
         status_msg = await bot.send_message(
             chat_id, f"📥 <b>تم استلام {len(object_paths)} صورة، جارٍ تجهيزها...</b>", parse_mode="HTML",
         )
         if not object_paths or len(object_paths) > MAX_IMAGE_WEB_UPLOAD_COUNT:
+            failure_reason = "item_count_exceeded"
             raise ValueError("عدد الصور يتجاوز الحد المسموح")
         for index, object_path in enumerate(object_paths):
             ext = os.path.splitext(object_path)[1] or ".jpg"
@@ -1681,15 +1753,20 @@ async def process_web_uploaded_images(
             local_paths.append(destination)
             remaining = MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE - total_downloaded
             if remaining <= 0:
+                failure_reason = "total_size_exceeded"
                 raise ValueError("الحجم الإجمالي للصور يتجاوز 100 ميغابايت")
+            failure_stage = "image_download"
             downloaded = await download_file_temp_to_file(
                 object_path, destination, max_size_bytes=min(MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE, remaining)
             )
             if not downloaded:
+                failure_reason = "download_failed_or_size_exceeded"
                 raise ValueError("تعذر تحميل إحدى الصور أو تجاوزت الحجم المسموح")
             total_downloaded += os.path.getsize(destination)
             if total_downloaded > MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE:
+                failure_reason = "total_size_exceeded"
                 raise ValueError("الحجم الإجمالي للصور يتجاوز 100 ميغابايت")
+            failure_stage = "image_validation"
             await asyncio.to_thread(validate_image, destination)
 
         await delete_file_temp_batch(object_paths)
@@ -1715,7 +1792,14 @@ async def process_web_uploaded_images(
         for path in local_paths:
             safe_file_cleanup(path)
         await delete_file_temp_batch(object_paths)
-        await _reject_web_upload(chat_id, state, status_msg, "❌ حدث خطأ غير متوقع أثناء تجهيز الصور.")
+        if failure_reason == "processing_failed" and isinstance(exc, ValueError):
+            failure_reason = "invalid_image_count_or_content"
+        await _reject_web_upload(
+            chat_id, state, status_msg, "❌ حدث خطأ غير متوقع أثناء تجهيز الصور.",
+            user_id=user_id, media_type="image", reason=failure_reason,
+            item_count=len(object_paths), max_item_count=MAX_IMAGE_WEB_UPLOAD_COUNT,
+            failure_stage=failure_stage, exception_type=type(exc).__name__,
+        )
 
 
 files_router = router

@@ -172,6 +172,14 @@ function clearError() {
   statusText.textContent = "";
 }
 
+function reportUploadFailure(mediaType, reason, details = {}) {
+  fetch("/api/upload-failure", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ init_data: tg.initData, media_type: mediaType, reason, ...details }),
+  }).catch(() => {});
+}
+
 // 🆕 رفع ملف واحد مباشرة إلى Cloudflare R2 عبر رابط موقّع (presigned PUT) - طلب
 // واحد بدون تجزئة/استئناف، كافٍ تماماً لحدودنا الحالية (100MB مستند / 15MB صورة).
 function uploadToPresignedUrl(file, uploadUrl, onProgress) {
@@ -184,10 +192,17 @@ function uploadToPresignedUrl(file, uploadUrl, onProgress) {
     };
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed with status ${xhr.status}`));
+      else {
+        const error = new Error("Upload failed");
+        error.uploadReason = "transfer_http_error";
+        error.statusCode = xhr.status;
+        reject(error);
+      }
     };
     xhr.onerror = function () {
-      reject(new Error("Network error during upload"));
+      const error = new Error("Network error during upload");
+      error.uploadReason = "transfer_network_error";
+      reject(error);
     };
     xhr.send(file);
   });
@@ -200,6 +215,7 @@ async function handleDocument(file) {
 
   // 🆕 فحص فوري لحجم الملف قبل أي اتصال شبكة - دفاع أول (العميل)
   if (file.size > MAX_DOC_SIZE_BYTES) {
+    reportUploadFailure("document", "client_size_limit", { file_size_bytes: file.size, max_size_bytes: MAX_DOC_SIZE_BYTES });
     showError("❌ حجم الملف أكبر من الحد المسموح (100 ميغابايت). يرجى اختيار ملف أصغر.");
     return;
   }
@@ -250,6 +266,10 @@ async function handleDocument(file) {
     }
   } catch (e) {
     console.error(e);
+    reportUploadFailure("document", e.uploadReason || "web_request_failed", {
+      file_size_bytes: file.size,
+      ...(e.statusCode ? { status_code: e.statusCode } : {}),
+    });
     showError("❌ انقطع الرفع أو حدث خطأ غير متوقع. تحقق من اتصالك وحاول مجدداً.");
   }
 }
@@ -265,11 +285,13 @@ async function handleImages(files) {
 
 
   if (files.length > MAX_IMAGE_COUNT) {
+    reportUploadFailure("image", "client_count_limit", { item_count: files.length, max_item_count: MAX_IMAGE_COUNT });
     showError(`❌ العدد الأقصى ${MAX_IMAGE_COUNT} صورة سوا. اخترت ${files.length}، يرجى تقليل العدد.`);
     return;
   }
   const oversized = files.find((f) => f.size > MAX_IMAGE_SIZE_BYTES);
   if (oversized) {
+    reportUploadFailure("image", "client_size_limit", { file_size_bytes: oversized.size, max_size_bytes: MAX_IMAGE_SIZE_BYTES });
     showError(`❌ الصورة "${oversized.name}" أكبر من 15 ميغابايت. يرجى استبدالها.`);
     return;
   }
@@ -333,6 +355,10 @@ async function handleImages(files) {
         return target.object_path;
       } catch (error) {
         console.error(error);
+        reportUploadFailure("image", error.uploadReason || "transfer_network_error", {
+          file_size_bytes: file.size,
+          ...(error.statusCode ? { status_code: error.statusCode } : {}),
+        });
         listItems[index].classList.add("error");
         throw error;
       }

@@ -777,10 +777,18 @@ async def handle_poll_answer(poll_answer: types.PollAnswer, state: FSMContext):
             answered = dict(current_data.get("answered_questions") or {})
             if str(index) in answered:
                 return
+            is_first_answer = not answered
             selected_opt = int(poll_answer.option_ids[0])
             answered[str(index)] = selected_opt
             await state.update_data(answered_questions=answered,
                 score=current_data.get('score', 0) + int(selected_opt == correct_opt))
+            if is_first_answer:
+                spawn(log_usage_event(poll_answer.user.id, "quiz_answering_started", {
+                    "quiz_id": current_data.get("quiz_id"),
+                    "origin": current_data.get("quiz_origin", "unknown"),
+                    "attempt_id": current_data.get("attempt_id"),
+                    "question_index": index,
+                }))
         finally:
             await lock.release()
     except Exception as e:

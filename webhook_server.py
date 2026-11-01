@@ -7,7 +7,7 @@ import os
 import hmac
 import asyncio
 from task_utils import spawn
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from fastapi import FastAPI, Request, HTTPException
 from services.runner_static import RunnerAwareStaticFiles
 from pydantic import BaseModel
@@ -35,6 +35,7 @@ from telegram_webapp_auth import verify_telegram_init_data
 from services.redis_reliability import complete_once
 from services.webhook_queue import WebhookQueue
 from services.upload_validation import cleanup_stale_downloads, supported_extension, DOCUMENT_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS
+from services.usage_tracking import track_upload_rejection
 import re
 
 
@@ -409,6 +410,8 @@ async def _enforce_upload_rate_limit(user_id: int, bucket: str, max_requests: in
     from services.maintenance import maintenance_notice
     notice = await maintenance_notice(user_id)
     if notice:
+        media_type = "image" if bucket.startswith("images_") else "audio" if bucket.startswith("audio_") else "document"
+        track_upload_rejection(user_id, media_type, "maintenance_block", "web_upload")
         raise HTTPException(status_code=503, detail=notice)
     key = f"upload_rl:{bucket}:{user_id}"
     try:
@@ -416,6 +419,8 @@ async def _enforce_upload_rate_limit(user_id: int, bucket: str, max_requests: in
         if current == 1:
             await redis_client.expire(key, window_seconds)
         if current > max_requests:
+            media_type = "image" if bucket.startswith("images_") else "audio" if bucket.startswith("audio_") else "document"
+            track_upload_rejection(user_id, media_type, "rate_limited", "web_upload")
             raise HTTPException(status_code=429, detail="طلبات كثيرة جداً، يرجى الانتظار قليلاً قبل إعادة المحاولة.")
     except HTTPException:
         raise
@@ -429,6 +434,50 @@ async def _enforce_audio_upload_rate_limit(user_id: int, bucket: str) -> None:
     """نظير رقيق فوق _enforce_upload_rate_limit بثوابت الصوت تحديداً - أُبقيَ عليه
     بنفس الاسم لعدم تغيير أي استدعاء موجود مسبقاً."""
     await _enforce_upload_rate_limit(user_id, bucket, AUDIO_UPLOAD_RATE_LIMIT_MAX_REQUESTS, AUDIO_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
+
+
+class UploadFailureReport(BaseModel):
+    init_data: str
+    media_type: Literal["audio", "document", "image", "images"]
+    reason: Literal["transfer_network_error", "transfer_http_error", "web_request_failed", "client_size_limit", "client_count_limit"]
+    file_size_bytes: Optional[int] = None
+    max_size_bytes: Optional[int] = None
+    item_count: Optional[int] = None
+    max_item_count: Optional[int] = None
+    status_code: Optional[int] = None
+
+
+@app.post("/api/upload-failure")
+async def report_upload_failure(payload: UploadFailureReport):
+    """Record browser-side validation or direct-to-R2 transfer failures.
+
+    Telegram initData is verified before attributing the event to a user. The
+    endpoint accepts fixed reason/type values and never receives file names or
+    contents.
+    """
+    ok, user = verify_telegram_init_data(
+        payload.init_data, bot.token, max_age_seconds=FILE_UPLOAD_INIT_DATA_MAX_AGE_SECONDS,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=403, detail="جلسة غير صالحة.")
+
+    user_id = user.get("id")
+    await _enforce_upload_rate_limit(
+        user_id, "client_failure", 20, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
+    )
+    track_upload_rejection(
+        user_id,
+        payload.media_type,
+        payload.reason,
+        "web_client",
+        file_size_bytes=payload.file_size_bytes,
+        max_size_bytes=payload.max_size_bytes,
+        item_count=payload.item_count,
+        max_item_count=payload.max_item_count,
+        failure_stage="browser_upload",
+        exception_type=(f"http_{payload.status_code}" if payload.status_code is not None else None),
+    )
+    return {"ok": True}
 
 
 class AudioUploadInitRequest(BaseModel):
@@ -450,9 +499,11 @@ async def _ensure_upload_session_available(user_id, upload_type):
     state = build_state_for_chat(user_id, user_id)
     lock = UserLock(redis_client, user_id)
     if not await lock.acquire():
+        track_upload_rejection(user_id, upload_type, "session_busy", "web_upload")
         raise HTTPException(status_code=409, detail="طلبك قيد المعالجة. حاول بعد قليل.")
     try:
         if await active_quiz(state):
+            track_upload_rejection(user_id, upload_type, "active_quiz", "web_upload")
             await offer_transition(state, user_id, user_id, {"kind": "upload", "type": upload_type})
             raise HTTPException(status_code=409, detail="لديك اختبار جارٍ. ارجع إلى محادثة البوت واختر متابعة الاختبار أو إنهاءه ثم الرفع. لم يبدأ إرسال الملف.")
     finally:
@@ -480,11 +531,24 @@ async def audio_upload_init(payload: AudioUploadInitRequest):
 
     # 🆕 دفاع ثانٍ من طرف السيرفر - لا نثق بفحص الحجم من طرف المتصفح وحده
     if payload.file_size <= 0 or payload.file_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
+        track_upload_rejection(user_id, "audio", "size_exceeded", "web_upload", file_size_bytes=payload.file_size, max_size_bytes=MAX_AUDIO_WEB_UPLOAD_SIZE)
         raise HTTPException(status_code=413, detail="حجم الملف يتجاوز الحد المسموح (250 ميغابايت).")
-    ext = _upload_extension(payload.file_name, AUDIO_EXTENSIONS)
+    try:
+        ext = _upload_extension(payload.file_name, AUDIO_EXTENSIONS)
+    except HTTPException:
+        track_upload_rejection(user_id, "audio", "unsupported_type", "web_upload")
+        raise
 
-    upload_target = await create_audio_upload_target(user_id, ext)
+    try:
+        upload_target = await create_audio_upload_target(user_id, ext)
+    except Exception as exc:
+        track_upload_rejection(
+            user_id, "audio", "upload_session_failed", "web_upload",
+            failure_stage="storage_session_creation", exception_type=type(exc).__name__,
+        )
+        raise
     if not upload_target or not upload_target.get("path"):
+        track_upload_rejection(user_id, "audio", "upload_session_unavailable", "web_upload")
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
     return {
@@ -514,6 +578,7 @@ async def audio_upload_complete(payload: AudioUploadCompleteRequest):
 
     # 🆕 تحقق أمني: المسار لازم يبدأ بمعرف نفس المستخدم (منع استخدام object_path لمستخدم آخر)
     if not payload.object_path.startswith(f"{user_id}/"):
+        track_upload_rejection(user_id, "audio", "invalid_upload_reference", "web_upload")
         raise HTTPException(status_code=403, detail="غير مسموح.")
 
     # 🆕 دفاع أول (الأهم): تحقق من الحجم الفعلي للملف المرفوع فعلياً عبر TUS مباشرة
@@ -521,12 +586,18 @@ async def audio_upload_complete(payload: AudioUploadCompleteRequest):
     # أصلاً عبر سيرفرنا). يُرفض الملف ويُحذف فوراً لو تجاوز الحد أو تعذّر التحقق
     # من حجمه (متساهل=رفض، وليس العكس، لأننا لا نستطيع التأكد أنه آمن).
     if not re.fullmatch(r"[0-9]+/[0-9a-f]{32}\.[a-zA-Z0-9]+", payload.object_path):
+        track_upload_rejection(user_id, "audio", "invalid_upload_reference", "web_upload")
         raise HTTPException(status_code=400, detail="مسار الرفع غير صالح.")
-    _object_extension(payload.object_path, payload.file_name, AUDIO_EXTENSIONS)
+    try:
+        _object_extension(payload.object_path, payload.file_name, AUDIO_EXTENSIONS)
+    except HTTPException:
+        track_upload_rejection(user_id, "audio", "unsupported_type_or_mismatch", "web_upload")
+        raise
 
     async def start():
         actual_size = await get_audio_temp_object_size(payload.object_path)
         if actual_size is None or actual_size <= 0 or actual_size > MAX_AUDIO_WEB_UPLOAD_SIZE:
+            track_upload_rejection(user_id, "audio", "size_validation_failed", "web_upload", max_size_bytes=MAX_AUDIO_WEB_UPLOAD_SIZE)
             await delete_audio_temp(payload.object_path)
             raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
 
@@ -571,11 +642,24 @@ async def file_upload_init(payload: FileUploadInitRequest):
     await _ensure_upload_session_available(user_id, "document")
 
     if payload.file_size <= 0 or payload.file_size > MAX_FILE_WEB_UPLOAD_SIZE:
+        track_upload_rejection(user_id, "document", "size_exceeded", "web_upload", file_size_bytes=payload.file_size, max_size_bytes=MAX_FILE_WEB_UPLOAD_SIZE)
         raise HTTPException(status_code=413, detail="حجم الملف يتجاوز الحد المسموح (100 ميغابايت).")
-    ext = _upload_extension(payload.file_name, DOCUMENT_EXTENSIONS)
+    try:
+        ext = _upload_extension(payload.file_name, DOCUMENT_EXTENSIONS)
+    except HTTPException:
+        track_upload_rejection(user_id, "document", "unsupported_type", "web_upload")
+        raise
 
-    upload_target = await create_file_upload_target(user_id, ext)
+    try:
+        upload_target = await create_file_upload_target(user_id, ext)
+    except Exception as exc:
+        track_upload_rejection(
+            user_id, "document", "upload_session_failed", "web_upload",
+            failure_stage="storage_session_creation", exception_type=type(exc).__name__,
+        )
+        raise
     if not upload_target or not upload_target.get("path"):
+        track_upload_rejection(user_id, "document", "upload_session_unavailable", "web_upload")
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
     return {
@@ -597,15 +681,22 @@ async def file_upload_complete(payload: FileUploadCompleteRequest):
     await _enforce_upload_rate_limit(user_id, "file_complete", FILE_UPLOAD_RATE_LIMIT_MAX_REQUESTS, FILE_UPLOAD_RATE_LIMIT_WINDOW_SECONDS)
 
     if not payload.object_path.startswith(f"{user_id}/"):
+        track_upload_rejection(user_id, "document", "invalid_upload_reference", "web_upload")
         raise HTTPException(status_code=403, detail="غير مسموح.")
 
     if not re.fullmatch(r"[0-9]+/[0-9a-f]{32}\.[a-zA-Z0-9]+", payload.object_path):
+        track_upload_rejection(user_id, "document", "invalid_upload_reference", "web_upload")
         raise HTTPException(status_code=400, detail="مسار الرفع غير صالح.")
-    _object_extension(payload.object_path, payload.file_name, DOCUMENT_EXTENSIONS)
+    try:
+        _object_extension(payload.object_path, payload.file_name, DOCUMENT_EXTENSIONS)
+    except HTTPException:
+        track_upload_rejection(user_id, "document", "unsupported_type_or_mismatch", "web_upload")
+        raise
 
     async def start():
         actual_size = await get_file_temp_object_size(payload.object_path)
         if actual_size is None or actual_size <= 0 or actual_size > MAX_FILE_WEB_UPLOAD_SIZE:
+            track_upload_rejection(user_id, "document", "size_validation_failed", "web_upload", max_size_bytes=MAX_FILE_WEB_UPLOAD_SIZE)
             await delete_file_temp(payload.object_path)
             raise HTTPException(status_code=413, detail="حجم الملف المرفوع يتجاوز الحد المسموح أو تعذر التحقق منه.")
 
@@ -651,17 +742,34 @@ async def image_upload_init(payload: ImageUploadInitRequest):
 
     count = len(payload.file_sizes)
     if count <= 0 or count > MAX_IMAGE_WEB_UPLOAD_COUNT:
+        track_upload_rejection(user_id, "image", "item_count_exceeded", "web_upload", item_count=count, max_item_count=MAX_IMAGE_WEB_UPLOAD_COUNT)
         raise HTTPException(status_code=413, detail=f"عدد الصور يجب أن يكون بين 1 و{MAX_IMAGE_WEB_UPLOAD_COUNT}.")
     if any(size <= 0 or size > MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE for size in payload.file_sizes):
+        track_upload_rejection(user_id, "image", "size_exceeded", "web_upload", max_size_bytes=MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE)
         raise HTTPException(status_code=413, detail="حجم إحدى الصور يتجاوز الحد المسموح لكل صورة (15 ميغابايت).")
 
     if sum(payload.file_sizes) > MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE:
+        track_upload_rejection(user_id, "image", "total_size_exceeded", "web_upload", file_size_bytes=sum(payload.file_sizes), max_size_bytes=MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE)
         raise HTTPException(status_code=413, detail="الحجم الإجمالي للصور يتجاوز 100 ميغابايت.")
     if len(payload.file_names) != count:
+        track_upload_rejection(user_id, "image", "missing_file_names", "web_upload", item_count=count)
         raise HTTPException(status_code=400, detail="يرجى تحديد اسم كل صورة.")
-    extensions = [_upload_extension(name, IMAGE_EXTENSIONS) for name in payload.file_names]
-    targets = await create_image_upload_targets(user_id, extensions)
+    try:
+        extensions = [_upload_extension(name, IMAGE_EXTENSIONS) for name in payload.file_names]
+    except HTTPException:
+        track_upload_rejection(user_id, "image", "unsupported_type", "web_upload")
+        raise
+    try:
+        targets = await create_image_upload_targets(user_id, extensions)
+    except Exception as exc:
+        track_upload_rejection(
+            user_id, "image", "upload_session_failed", "web_upload",
+            failure_stage="storage_session_creation", exception_type=type(exc).__name__,
+            item_count=count,
+        )
+        raise
     if not targets:
+        track_upload_rejection(user_id, "image", "upload_session_unavailable", "web_upload")
         raise HTTPException(status_code=500, detail="تعذر تجهيز جلسة الرفع، حاول مجدداً بعد قليل.")
 
     return {
@@ -684,29 +792,40 @@ async def image_upload_complete(payload: ImageUploadCompleteRequest):
 
     object_paths = payload.object_paths
     if not object_paths or len(object_paths) > MAX_IMAGE_WEB_UPLOAD_COUNT:
+        track_upload_rejection(user_id, "image", "item_count_exceeded", "web_upload", item_count=len(object_paths), max_item_count=MAX_IMAGE_WEB_UPLOAD_COUNT)
         raise HTTPException(status_code=413, detail=f"عدد الصور يجب أن يكون بين 1 و{MAX_IMAGE_WEB_UPLOAD_COUNT}.")
     if any(not path.startswith(f"{user_id}/") for path in object_paths):
+        track_upload_rejection(user_id, "image", "invalid_upload_reference", "web_upload")
         raise HTTPException(status_code=403, detail="غير مسموح.")
 
     if len(set(object_paths)) != len(object_paths):
+        track_upload_rejection(user_id, "image", "duplicate_upload_reference", "web_upload")
         raise HTTPException(status_code=400, detail="لا يمكن تكرار الصورة ضمن الدفعة.")
     if any(not re.fullmatch(r"[0-9]+/[0-9a-f]{32}/[0-9]+\.[a-zA-Z0-9]+", path) for path in object_paths):
+        track_upload_rejection(user_id, "image", "invalid_upload_reference", "web_upload")
         raise HTTPException(status_code=400, detail="مسار الرفع غير صالح.")
     sessions = {path.rsplit('/', 1)[0] for path in object_paths}
     if len(sessions) != 1:
+        track_upload_rejection(user_id, "image", "multiple_upload_sessions", "web_upload")
         raise HTTPException(status_code=400, detail="الصور يجب أن تنتمي إلى جلسة رفع واحدة.")
     for path in object_paths:
-        _upload_extension(path, IMAGE_EXTENSIONS)
+        try:
+            _upload_extension(path, IMAGE_EXTENSIONS)
+        except HTTPException:
+            track_upload_rejection(user_id, "image", "unsupported_type", "web_upload")
+            raise
 
     async def start():
         total = 0
         for object_path in object_paths:
             actual_size = await get_file_temp_object_size(object_path)
             if actual_size is None or actual_size <= 0 or actual_size > MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE:
+                track_upload_rejection(user_id, "image", "size_validation_failed", "web_upload", max_size_bytes=MAX_IMAGE_WEB_UPLOAD_SIZE_PER_IMAGE)
                 await delete_file_temp_batch(object_paths)
                 raise HTTPException(status_code=413, detail="حجم إحدى الصور يتجاوز الحد المسموح أو تعذر التحقق منه.")
             total += actual_size
         if total > MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE:
+            track_upload_rejection(user_id, "image", "total_size_exceeded", "web_upload", file_size_bytes=total, max_size_bytes=MAX_IMAGE_WEB_UPLOAD_TOTAL_SIZE)
             await delete_file_temp_batch(object_paths)
             raise HTTPException(status_code=413, detail="الحجم الإجمالي للصور يتجاوز 100 ميغابايت.")
         spawn(process_web_uploaded_images(user_id=user_id, chat_id=user_id, object_paths=object_paths))
