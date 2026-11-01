@@ -144,24 +144,29 @@ async def get_consent_state(user_id: int) -> str:
 
 # ==================== واجهة الرسائل ====================
 
+def _policy_links() -> str:
+    return f'<a href="{PRIVACY_URL}">سياسة الخصوصية</a> و<a href="{TERMS_URL}">شروط الخدمة</a>'
+
+
 def build_consent_text(state: str) -> str:
+    policy_links = _policy_links()
     if state == STATE_UPDATE:
         return (
             "📜 <b>تحديث على شروطنا</b>\n\n"
-            "حدّثنا شروط الخصوصية وسياسة الخدمة.\n"
-            "اطّلع عليهما من الزرّين أدناه، ثم اضغط «أوافق» لمتابعة استخدام البوت."
+            f"حدّثنا {policy_links}.\n"
+            "اطّلع عليهما بالضغط على اسميهما، ثم اضغط «أوافق» لمتابعة استخدام البوت."
         )
     return (
         "📜 <b>قبل أن نبدأ</b>\n\n"
-        "لاستخدام <b>أبيض منشئ الكويزات</b> يجب الموافقة على شروط الخصوصية وسياسة الخدمة.\n"
-        "اطّلع عليهما من الزرّين أدناه، ثم اضغط «أوافق» للمتابعة."
+        f"لاستخدام <b>أبيض منشئ الكويزات</b> يجب الموافقة على {policy_links}.\n"
+        "اطّلع عليهما بالضغط على اسميهما، ثم اضغط «أوافق» للمتابعة."
     )
 
 
 def build_declined_text() -> str:
     return (
         "تم تسجيل اختيارك.\n\n"
-        "لا يمكننا تشغيل البوت دون الموافقة على شروط الخصوصية وسياسة الخدمة. "
+        f"لا يمكننا تشغيل البوت دون الموافقة على {_policy_links()}. "
         "إذا غيّرت رأيك اضغط «أوافق» في أي وقت."
     )
 
@@ -174,15 +179,10 @@ def build_accepted_text() -> str:
 
 
 def build_consent_keyboard(include_decline: bool = True) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="🔒 شروط الخصوصية", url=PRIVACY_URL)],
-        [InlineKeyboardButton(text="📄 سياسة الخدمة", url=TERMS_URL)],
-    ]
     decision_row = [InlineKeyboardButton(text="✅ أوافق", callback_data=CONSENT_ACCEPT)]
     if include_decline:
         decision_row.append(InlineKeyboardButton(text="❌ لا أوافق", callback_data=CONSENT_DECLINE))
-    rows.append(decision_row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(inline_keyboard=[decision_row])
 
 
 # ==================== استئناف الرابط العميق ====================
