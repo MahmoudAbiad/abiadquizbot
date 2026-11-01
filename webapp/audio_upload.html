@@ -122,12 +122,21 @@ function showError(msg) {
   tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error");
 }
 
+function reportUploadFailure(reason, details = {}) {
+  fetch("/api/upload-failure", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ init_data: tg.initData, media_type: "audio", reason, ...details }),
+  }).catch(() => {});
+}
+
 async function handleFile(file) {
   statusText.classList.remove("error-text");
   statusText.textContent = "";
 
   // 🆕 فحص فوري لحجم الملف قبل أي اتصال شبكة - دفاع أول (العميل)
   if (file.size > MAX_SIZE_BYTES) {
+    reportUploadFailure("client_size_limit", { file_size_bytes: file.size, max_size_bytes: MAX_SIZE_BYTES });
     showError("❌ حجم الملف أكبر من الحد المسموح (250 ميغابايت). يرجى اختيار ملف أصغر.");
     return;
   }
@@ -175,11 +184,16 @@ async function handleFile(file) {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve();
         } else {
-          reject(new Error(`Upload failed with status ${xhr.status}`));
+          const error = new Error("Upload failed");
+          error.uploadReason = "transfer_http_error";
+          error.statusCode = xhr.status;
+          reject(error);
         }
       };
       xhr.onerror = function () {
-        reject(new Error("Network error during upload"));
+        const error = new Error("Network error during upload");
+        error.uploadReason = "transfer_network_error";
+        reject(error);
       };
       xhr.send(file);
     });
@@ -209,6 +223,10 @@ async function handleFile(file) {
     }
   } catch (e) {
     console.error(e);
+    reportUploadFailure(e.uploadReason || "web_request_failed", {
+      file_size_bytes: file.size,
+      ...(e.statusCode ? { status_code: e.statusCode } : {}),
+    });
     showError("❌ انقطع الرفع أو حدث خطأ غير متوقع. تحقق من اتصالك وحاول مجدداً.");
   }
 }
