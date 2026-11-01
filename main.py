@@ -40,9 +40,8 @@ from handlers import (
     gifts_router,
 )
 from handlers.session_navigation import router as session_navigation_router
-from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware, GroupQuizOnlyMiddleware
+from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware, GroupQuizOnlyMiddleware, LegalConsentMiddleware
 from services.mistake_practice import PracticeCallbackGuard
-from middlewares.legal_consent import LegalConsentMiddleware
 
 # تهيئة Sentry للتتبع
 SENTRY_DSN = os.getenv("SENTRY_DSN")
