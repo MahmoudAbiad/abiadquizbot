@@ -24,8 +24,8 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 
-PRIVACY_URL = "https://abiad.me/privacy-policy.html?v=5"
-TERMS_URL = "https://abiad.me/terms-of-service.html?v=5"
+PRIVACY_URL = "https://abiad.me/privacy-policy.html?v=6"
+TERMS_URL = "https://abiad.me/terms-of-service.html?v=6"
 
 CONSENT_ACCEPT = "consent:accept"
 CONSENT_DECLINE = "consent:decline"
