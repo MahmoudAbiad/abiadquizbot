@@ -535,7 +535,7 @@ async def show_user_activity_page(call: types.CallbackQuery):
         for index, row in enumerate(activity["rows"], start=(page - 1) * 8 + 1):
             if kind == "e":
                 label = _format_event_label(row["event_type"], row.get("metadata"))
-                detail = _activity_event_detail(row.get("metadata"))
+                detail = _activity_event_detail(row.get("metadata"), row.get("event_type"))
                 stamp = row["created_at"]
             else:
                 source = html.escape(str(SOURCE_LABELS.get(row.get("source_type"), row.get("source_type") or "غير معروف")))
@@ -572,15 +572,23 @@ async def show_user_activity_page(call: types.CallbackQuery):
         await call.message.answer("تعذر تحميل صفحة النشاط. حاول مجدداً.")
 
 
-def _activity_event_detail(metadata):
+def _activity_event_detail(metadata, event_type=None):
     """Bounded useful facts, never raw metadata, tokens or gift codes."""
     if not isinstance(metadata, dict):
         return ""
-    labels = [("questions", "أسئلة"), ("questions_generated", "أسئلة مولّدة"),
-              ("requested_count", "المطلوب"), ("round", "جولة"), ("score", "صحيحة"),
-              ("points", "نقاط"), ("cost", "التكلفة"), ("format", "الصيغة"),
-              ("content_type", "المحتوى"), ("media_type", "نوع المحتوى"),
-              ("input_channel", "المصدر"), ("reason", "السبب")]
+    if event_type == "insufficient_balance_blocked":
+        labels = [("action", "العملية"), ("required_points", "المطلوب"),
+                  ("current_balance", "الرصيد"), ("rejection_stage", "مرحلة الرفض")]
+    elif event_type == "quiz_generation_failed":
+        labels = [("failure_reason", "السبب"), ("refund_status", "استرجاع النقاط"),
+                  ("failure_stage", "المرحلة"), ("cost", "التكلفة"),
+                  ("requested_count", "عدد الأسئلة")]
+    else:
+        labels = [("questions", "أسئلة"), ("questions_generated", "أسئلة مولّدة"),
+                  ("requested_count", "المطلوب"), ("round", "جولة"), ("score", "صحيحة"),
+                  ("points", "نقاط"), ("cost", "التكلفة"), ("format", "الصيغة"),
+                  ("content_type", "المحتوى"), ("media_type", "نوع المحتوى"),
+                  ("input_channel", "المصدر"), ("reason", "السبب")]
     parts = []
     for key, label in labels:
         value = metadata.get(key)

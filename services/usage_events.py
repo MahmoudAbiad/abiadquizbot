@@ -9,6 +9,7 @@ EVENT_LABELS = {
     "content_uploaded": "📤 رفع محتوى/ملف",
     "upload_rejected": "❌ رفض رفع محتوى",
     "quiz_generation_requested": "🧮 طلب توليد كويز",
+    "quiz_generation_failed": "❌ فشل توليد الاختبار",
     "quiz_generated": "🆕 توليد كويز جديد",
     "cached_quiz_used": "♻️ استخدام كويز مخزن",
     "quiz_started": "🚀 بدء الاختبار وعرض الأسئلة",

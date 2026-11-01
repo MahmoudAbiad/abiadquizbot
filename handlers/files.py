@@ -1148,6 +1148,44 @@ async def process_count_invalid(message: types.Message) -> None:
     )
 
 
+def _track_quiz_generation_failure(
+    user_id: int,
+    data: Dict[str, Any],
+    reason: str,
+    *,
+    refund_status: str,
+    cost: Optional[float] = None,
+    requested_count: Optional[int] = None,
+    items_count: Optional[int] = None,
+    mode: Optional[str] = None,
+    failure_stage: str = "generation",
+    exception_type: Optional[str] = None,
+    generation_meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record a structured generation failure without logging source content."""
+    generation_meta = generation_meta if isinstance(generation_meta, dict) else {}
+    metadata = {
+        "failure_reason": str(reason)[:64],
+        "refund_status": str(refund_status)[:24],
+        "failure_stage": str(failure_stage)[:32],
+        "requested_count": requested_count,
+        "items_count": items_count,
+        "cost": cost,
+        "business_mode": mode,
+        "question_type": data.get("question_type"),
+        "quiz_extraction_mode": data.get("quiz_extraction_mode"),
+        "content_source": data.get("content_source"),
+        "input_channel": data.get("input_channel"),
+        "ai_provider": generation_meta.get("provider"),
+        "ai_model": generation_meta.get("model"),
+        "generation_seconds": generation_meta.get("duration_seconds"),
+        "exception_type": exception_type,
+    }
+    spawn(log_usage_event(user_id, "quiz_generation_failed", {
+        key: value for key, value in metadata.items() if value is not None
+    }))
+
+
 @router.callback_query(QuizState.waiting_for_count, F.data == "qcount_start")
 async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> None:
     """
@@ -1320,6 +1358,12 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
                 await refund_user_on_failure(call.from_user.id, data)
                 charged_this_attempt = False
                 refunded_this_attempt = True
+            _track_quiz_generation_failure(
+                call.from_user.id, data, "unreadable_office",
+                refund_status="refunded" if refunded_this_attempt else "not_charged",
+                cost=cost, requested_count=count, items_count=items, mode=mode,
+                failure_stage="content_extraction", generation_meta=generation_meta,
+            )
             await _clear_quiz_charge_markers(state)
             await state.set_state(None)
             await status_msg.edit_text("⚠️ <b>تعذر استخراج نص مفيد من المستند!</b> يرجى التأكد من أنه يحتوي على نصوص وليس صوراً. تم إرجاع نقاطك.", parse_mode="HTML")
@@ -1329,6 +1373,12 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
                 await refund_user_on_failure(call.from_user.id, data)
                 charged_this_attempt = False
                 refunded_this_attempt = True
+            _track_quiz_generation_failure(
+                call.from_user.id, data, error_code or "empty_generation_result",
+                refund_status="refunded" if refunded_this_attempt else "not_charged",
+                cost=cost, requested_count=count, items_count=items, mode=mode,
+                failure_stage="ai_generation", generation_meta=generation_meta,
+            )
             await _clear_quiz_charge_markers(state)
             await state.set_state(None)
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
@@ -1412,6 +1462,13 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await refund_user_on_failure(call.from_user.id, data)
             charged_this_attempt = False
             refunded_this_attempt = True
+        _track_quiz_generation_failure(
+            call.from_user.id, data, "unusable_upload",
+            refund_status="refunded" if refunded_this_attempt else "not_charged",
+            cost=data.get("debited_cost"), requested_count=data.get("requested_count"),
+            items_count=data.get("items_count"), mode=data.get("execution_mode"),
+            failure_stage="input_validation", exception_type=type(exc).__name__,
+        )
         await _clear_quiz_charge_markers(state)
         await state.set_state(None)
         money_note = "تم إرجاع نقاطك." if refunded_this_attempt else "لم يتم خصم أي نقاط."
@@ -1431,6 +1488,14 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await refund_user_on_failure(call.from_user.id, data)
             charged_this_attempt = False
             refunded_this_attempt = True
+        if not quiz_ready:
+            _track_quiz_generation_failure(
+                call.from_user.id, data, "unexpected_error",
+                refund_status="refunded" if refunded_this_attempt else "not_charged",
+                cost=data.get("debited_cost"), requested_count=data.get("requested_count"),
+                items_count=data.get("items_count"), mode=data.get("execution_mode"),
+                failure_stage="generation_or_persistence", exception_type=type(exc).__name__,
+            )
         await _clear_quiz_charge_markers(state)
         await state.set_state(None)
         # 🩹 الرسالة تطابق ما حصل فعلاً (بدل رسالة "تعذر عرض النتيجة" لكل الحالات):

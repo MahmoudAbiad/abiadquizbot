@@ -44,7 +44,7 @@ from keyboards import (
     get_audio_action_keyboard, get_document_export_keyboard, get_audio_confirm_keyboard,
     get_web_upload_redirect_keyboard,
 )
-from logger import get_logger, log_error, log_info
+from logger import get_logger, log_error, log_info, log_warning
 from services.audio_duration_service import format_duration_cap_exceeded_text
 from services.audio_flow_service import (
     DOWNLOADS_DIR,
@@ -308,6 +308,10 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         user_info = await get_or_create_audio_user(call.from_user)
         balance, _ = compute_balance_and_deficit(user_info, cost)
         if balance < cost:
+            spawn(log_insufficient_balance_event(
+                call.from_user.id, "audio_transcription", cost, balance, user_info,
+                rejection_stage="confirmation_balance_check",
+            ))
             await state.set_state(None)
             safe_file_cleanup(destination)
             if object_path:
@@ -327,6 +331,16 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             safe_file_cleanup(destination)
             if object_path:
                 await delete_audio_temp(object_path)
+            try:
+                latest_user_info = await get_or_create_audio_user(call.from_user)
+                latest_balance, _ = compute_balance_and_deficit(latest_user_info, cost)
+            except Exception as balance_exc:
+                log_warning(logger, f"Could not refresh balance after rejected audio debit: {balance_exc}")
+                latest_user_info, latest_balance = user_info, balance
+            spawn(log_insufficient_balance_event(
+                call.from_user.id, "audio_transcription", cost, latest_balance,
+                latest_user_info, rejection_stage="atomic_debit",
+            ))
             await call.message.edit_text(
                 "⚠️ <b>حصل تعارض بسيط برصيدك أثناء المعالجة.</b> يرجى إعادة رفع الملف من جديد.",
                 parse_mode="HTML",
