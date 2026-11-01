@@ -579,7 +579,8 @@ def _activity_event_detail(metadata):
     labels = [("questions", "أسئلة"), ("questions_generated", "أسئلة مولّدة"),
               ("requested_count", "المطلوب"), ("round", "جولة"), ("score", "صحيحة"),
               ("points", "نقاط"), ("cost", "التكلفة"), ("format", "الصيغة"),
-              ("content_type", "المحتوى"), ("input_channel", "المصدر"), ("reason", "السبب")]
+              ("content_type", "المحتوى"), ("media_type", "نوع المحتوى"),
+              ("input_channel", "المصدر"), ("reason", "السبب")]
     parts = []
     for key, label in labels:
         value = metadata.get(key)
