@@ -57,6 +57,8 @@ from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanu
 from validators import validate_file_size, validate_question_count
 from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS, InvalidUploadError
 from services.redis_reliability import UserLock, user_locked
+from services.generation_eta import GenerationEta, build_processing_text, estimate_generation_eta
+from services.generation_heartbeat import run_processing_heartbeat
 
 # استيراد الخدمات الجديدة
 from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
@@ -143,29 +145,14 @@ def _missing_upload_paths(data: Dict[str, Any]) -> List[str]:
     return [path for path in paths if not os.path.exists(path)]
 
 
-async def _run_processing_heartbeat(status_msg: types.Message, interval_seconds: int = 20) -> None:
-    """🩹 يحدّث رسالة "جاري المعالجة" دورياً بوقت منقضي واضح طول مدة انتظار Gemini
-    (يمكن تطول جداً وقت الازدحام - راجع التعليق بمكان الاستدعاء). يُنهى فوراً عبر
-    asyncio.CancelledError بمجرد ما يخلص التوليد (finally بمكان الاستدعاء) - لا داعي
-    لأي شرط خروج آخر. أي فشل بالتعديل (رسالة محذوفة، rate limit...) غير حرج وتم تجاهله."""
-    elapsed = 0
-    try:
-        while True:
-            await asyncio.sleep(interval_seconds)
-            elapsed += interval_seconds
-            minutes = elapsed // 60
-            seconds = elapsed % 60
-            time_label = f"{minutes} دقيقة و{seconds} ثانية" if minutes else f"{seconds} ثانية"
-            try:
-                await status_msg.edit_text(
-                    f"🤖 لسا عم نعالج المستند ونولّد الأسئلة... ({time_label})\n"
-                    "الذكاء الاصطناعي مزدحم شوي حالياً، بس طلبك قيد التنفيذ فعلياً - ما في داعي "
-                    "لإعادة إرسال نفس الملف."
-                )
-            except Exception:
-                pass
-    except asyncio.CancelledError:
-        pass
+async def _run_processing_heartbeat(status_msg: types.Message, eta: Optional[GenerationEta] = None) -> None:
+    """🩹 يحدّث رسالة "جاري المعالجة" دورياً طول مدة انتظار الذكاء الاصطناعي (قد تطول جداً وقت
+    الازدحام). مع تقدير زمني (eta، راجع services/generation_eta.py): كل 5 ثوانٍ مع عدّ تنازلي، ثم
+    كل 15 ثانية بعد تجاوز الوقت المعتاد؛ بلا تقدير: النص العام القديم كل 20 ثانية. القواعد التفصيلية
+    (تخطّي النص المكرر، انتظار retry_after من تيليجرام) بـ services/generation_heartbeat.py. يُنهى فوراً
+    عبر asyncio.CancelledError بمجرد ما يخلص التوليد (finally بمكان الاستدعاء)."""
+    await run_processing_heartbeat(status_msg, eta)
+
 
 async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> None:
     if user_info.get("status") == "renewed":
@@ -1297,7 +1284,17 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         except Exception:
             pass
 
-        status_msg = await call.message.answer(MSG_PROCESSING)
+        # 🆕 رسالة الانتظار بتقدير زمني (services/generation_eta.py). تجميلي بحت: أي فشل بالتقدير يُبقي
+        # النص القديم (MSG_PROCESSING ثم نص النبضة العام) ولا يؤثر على التوليد أو الخصم أو الاسترجاع.
+        eta = None
+        initial_text = MSG_PROCESSING
+        try:
+            eta = estimate_generation_eta(data, items, count, mode, is_album=is_album)
+            initial_text = build_processing_text(0, eta)
+        except Exception as exc:
+            eta = None
+            log_warning(logger, f"Generation ETA unavailable, using the generic waiting message: {exc}")
+        status_msg = await call.message.answer(initial_text)
 
         # (ملاحظة: قفل processing_file_quiz صار يُفعَّل فوراً بأول الدالة فوق - راجع
         # التعليق هناك - قبل أي await بطيء، وليس هون بعد الخصم والحذف والإرسال).
@@ -1308,9 +1305,11 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # الملف الموصوف فوق). heartbeat خفيف هون بيحدّث نفس الرسالة كل ~20 ثانية بوقت
         # منقضي واضح، بلا أي تأثير على منطق التوليد نفسه - يُلغى تلقائياً بمجرد انتهاء
         # execute_quiz_generation_workflow (نجاحاً أو فشلاً) عبر finally.
-        heartbeat_task = asyncio.create_task(_run_processing_heartbeat(status_msg))
+        heartbeat_task = asyncio.create_task(_run_processing_heartbeat(status_msg, eta))
         try:
-            quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
+            # status_message=None عمداً: أنيميشن helpers/gemini_helper/loading.py كان يكتب على نفس الرسالة
+            # ويمحو التوقيت خلال 3 ثوانٍ؛ النبضة أعلاه هي المحرّك الوحيد الآن (docs/generation-eta-policy.md).
+            quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(call.from_user.id, data, count, None)
         finally:
             heartbeat_task.cancel()
 
