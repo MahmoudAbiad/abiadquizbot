@@ -17,15 +17,15 @@ from typing import Any, Awaitable, Callable, Dict, Tuple
 
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from cachetools import TTLCache
 
 from logger import get_logger
 
 logger = get_logger(__name__)
 
-PRIVACY_URL = "https://abiad.me/privacy-policy.html"
-TERMS_URL = "https://abiad.me/terms-of-service.html"
+PRIVACY_URL = "https://abiad.me/privacy-policy.html?v=5"
+TERMS_URL = "https://abiad.me/terms-of-service.html?v=5"
 
 CONSENT_ACCEPT = "consent:accept"
 CONSENT_DECLINE = "consent:decline"
@@ -353,8 +353,8 @@ class ConsentMiddleware(BaseMiddleware):
         try:
             if isinstance(event, CallbackQuery):
                 await event.answer("📜 يلزم الموافقة على الشروط أولاً.")
-                await event.message.answer(text, parse_mode="HTML", reply_markup=markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
+                await event.message.answer(text, parse_mode="HTML", reply_markup=markup)
             else:
-                await event.answer(text, parse_mode="HTML", reply_markup=markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
+                await event.answer(text, parse_mode="HTML", reply_markup=markup)
         except (TelegramBadRequest, TelegramForbiddenError):
             logger.warning("Could not deliver consent prompt to Telegram user")

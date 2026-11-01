@@ -4,7 +4,6 @@
 
 from aiogram import F, Router, types
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import LinkPreviewOptions
 
 from logger import get_logger
 from services import consent as svc
@@ -26,18 +25,18 @@ async def consent_decline(call: types.CallbackQuery):
 
 async def _edit_or_send(call: types.CallbackQuery, text: str, markup) -> None:
     try:
-        await call.message.edit_text(text, parse_mode="HTML", reply_markup=markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc).lower():
             return
         logger.warning("Could not edit consent message: %s", exc)
         try:
-            await call.message.answer(text, parse_mode="HTML", reply_markup=markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
+            await call.message.answer(text, parse_mode="HTML", reply_markup=markup)
         except TelegramBadRequest:
             pass
     except (AttributeError, TypeError):
         try:
-            await call.bot.send_message(call.from_user.id, text, parse_mode="HTML", reply_markup=markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
+            await call.bot.send_message(call.from_user.id, text, parse_mode="HTML", reply_markup=markup)
         except TelegramBadRequest:
             pass
 
