@@ -129,6 +129,11 @@ BURST_GAP_SECONDS = 6
 # بيسبقها دايماً، فالنبضة ما بتتدخّل إلا لو العملية انقطعت (إعادة تشغيل) - وقتها بتعيد
 # تشغيل المنفّذ ويكمّل من `questions_sent`.
 BURST_RECOVERY_SECONDS = 45
+# وقت قصير لتصريف تحديثات poll_answer الموجودة قيد المعالجة قبل أخذ الترتيب النهائي.
+# هذا مهم خصوصاً عند انتهاء المؤقّت تلقائياً: إغلاق الـpoll والـpoll_answer قد يصلان
+# عبر مسارين مستقلين، فلا نريد نشر ترتيب ناقص.
+POLL_ANSWER_DRAIN_SECONDS = 1.5
+POLL_ANSWER_LATE_DELIVERY_GRACE_SECONDS = 15
 _BURST_RUNNING: set = set()
 
 # آخر poll مفتوح لكل جلسة (chat_id + message_id) - `bot.stop_poll` بحاجة
@@ -1428,6 +1433,10 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             text = "🏁 انتهت الأسئلة. الاستفتاءات المرسلة ضلّت مفتوحة، أي حدا لسا يقدر يجاوب عليها."
         needs_manual_suffix = False
     else:
+        # إغلاق الـpoll تلقائياً وتحديث poll_answer قد يصلان عبر مسارين مستقلين.
+        # ننتظر فترة قصيرة قبل قراءة الترتيب حتى لا ننشر نتيجة ناقصة عندما يصوّت
+        # الطالب قرب لحظة انتهاء المؤقّت (ينطبق على المؤقّت وغير المؤقّت).
+        await asyncio.sleep(POLL_ANSWER_DRAIN_SECONDS)
         top_n = max(GROUP_TOP_N_MIN, min(GROUP_TOP_N_MAX, int(session.get("top_n") or GROUP_TOP_N_MAX)))
         rows = await get_leaderboard(session_id, limit=top_n)
         show_names = session.get("show_names", True)  # True لو العمود لسا مش مضاف (fail-open نفس نمط باقي الإعدادات بالمشروع)
@@ -1473,7 +1482,13 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             text = "\n".join(lines)
         needs_manual_suffix = True
         try:
-            await redis_client.set(f"{_FINISHED_SESSION_PREFIX}{session_id}", "1", ex=_FINISHED_SESSION_TTL)
+            await redis_client.set(
+            f"{_FINISHED_SESSION_PREFIX}{session_id}",
+            # قيمة الـmarker هي وقت الإنهاء، مش مجرد "1"، حتى يقدر
+            # handler يميّز update متأخر عن تصويت جديد بعد فترة السماح.
+            str(int(time.time() * 1000)),
+            ex=_FINISHED_SESSION_TTL,
+        )
         except Exception as e:
             log_error(logger, f"Redis error setting finished marker for session {session_id}: {e}")
     if manual and needs_manual_suffix:
@@ -1527,8 +1542,20 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
         return
 
     try:
-        if await redis_client.exists(f"{_FINISHED_SESSION_PREFIX}{info['session_id']}"):
-            return
+        finished_raw = await redis_client.get(f"{_FINISHED_SESSION_PREFIX}{info['session_id']}")
+        if finished_raw:
+            # الـwebhook queue عندها عدة workers، لذلك ممكن poll_answer يكون
+            # وصل لتيليجرام قبل الإنهاء لكنه يدخل الـhandler بعده. ما نضيّع
+            # هالإجابة: نسمح فقط بالتأخير القصير الخاص بتسليم الـupdate.
+            try:
+                finished_at_ms = int(finished_raw)
+            except (TypeError, ValueError):
+                finished_at_ms = 0
+            if not finished_at_ms or (
+                int(time.time() * 1000) - finished_at_ms
+                > POLL_ANSWER_LATE_DELIVERY_GRACE_SECONDS * 1000
+            ):
+                return
     except Exception as e:
         log_error(logger, f"Redis error checking finished marker: {e}")
 

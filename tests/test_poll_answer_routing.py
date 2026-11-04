@@ -26,6 +26,7 @@ class PollAnswerRoutingTests(unittest.IsolatedAsyncioTestCase):
             json=json,
             time=types.SimpleNamespace(time=lambda: 100),
             _FINISHED_SESSION_PREFIX="gq:finished:",
+            POLL_ANSWER_LATE_DELIVERY_GRACE_SECONDS=15,
             record_answer=self.record,
             bump_participant=self.bump,
             logger=Mock(),
@@ -92,20 +93,39 @@ class PollAnswerRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.bump.assert_awaited_once()
 
-    async def test_answer_after_final_ranking_is_ignored(self):
-        self.db.get.return_value = json.dumps({
+    async def test_delayed_answer_after_finish_marker_is_still_recorded(self):
+        info = {
             "session_id": "group-session",
             "is_group": True,
-            "has_timer": False,
+            "has_timer": True,
             "track_answers": True,
-            "user_id": 99,
+            "correct_option_id": 1,
+            "question_index": 2,
+            "sent_at_ms": 99000,
+        }
+        self.db.get.side_effect = [
+            json.dumps(info),
+            str(100000),
+        ]
+        await self.handler(self.poll)
+        self.record.assert_awaited_once()
+        self.bump.assert_awaited_once()
+
+    async def test_answer_after_finish_grace_is_ignored(self):
+        info = {
+            "session_id": "group-session",
+            "is_group": True,
+            "has_timer": True,
+            "track_answers": True,
             "correct_option_id": 1,
             "question_index": 2,
             "sent_at_ms": 90000,
-        })
-        self.db.exists.return_value = 1
+        }
+        self.db.get.side_effect = [
+            json.dumps(info),
+            str(100000 - 16000),
+        ]
         await self.handler(self.poll)
-        self.db.exists.assert_awaited_once_with("gq:finished:group-session")
         self.record.assert_not_awaited()
         self.bump.assert_not_awaited()
 
