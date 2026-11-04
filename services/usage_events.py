@@ -110,6 +110,121 @@ EVENT_LABELS.update({
 })
 
 
+# Only errors in this allow-list may be collapsed in the admin dashboard.
+# Unexpected application/service failures must remain one row per occurrence so
+# their order, traceback and user impact can be investigated accurately.
+EXPECTED_ERROR_CATEGORIES = {
+    "stale_callback": {
+        "label": "زر Telegram قديم",
+        "expected": True,
+        "aggregate": True,
+        "resolution": "ignored_safely",
+        "markers": ("query is too old", "query id is invalid"),
+    },
+    "chat_migrated": {
+        "label": "انتقال المجموعة إلى Supergroup",
+        "expected": True,
+        "aggregate": True,
+        "resolution": "migrated_automatically",
+        "markers": (
+            "group has been migrated to a supergroup",
+            "migrated to a supergroup",
+            "telegrammigratetochat",
+            "migrate_to_chat_id",
+        ),
+    },
+}
+
+
+def classify_error_metadata(metadata):
+    """Classify an error without treating every repeated error as aggregatable."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    stored_category = metadata.get("category")
+    if stored_category in EXPECTED_ERROR_CATEGORIES:
+        category = EXPECTED_ERROR_CATEGORIES[stored_category]
+        return {
+            "category": stored_category,
+            "label": category["label"],
+            "expected": category["expected"],
+            "aggregate": category["aggregate"],
+            "resolution": category["resolution"],
+        }
+
+    searchable = "\n".join(
+        str(metadata.get(key) or "")
+        for key in ("message", "error_type", "traceback", "context")
+    ).lower()
+    for category_name, category in EXPECTED_ERROR_CATEGORIES.items():
+        if any(marker in searchable for marker in category["markers"]):
+            return {
+                "category": category_name,
+                "label": category["label"],
+                "expected": category["expected"],
+                "aggregate": category["aggregate"],
+                "resolution": category["resolution"],
+            }
+
+    return {
+        "category": "unknown",
+        "label": "خطأ غير مصنف",
+        "expected": False,
+        "aggregate": False,
+        "resolution": "needs_review",
+    }
+
+
+def aggregate_expected_errors(errors):
+    """Collapse repeated allow-listed expected errors, preserving all others."""
+    passthrough = []
+    buckets = {}
+    for original in errors or []:
+        row = dict(original)
+        metadata = dict(row.get("metadata") or {})
+        classification = classify_error_metadata(metadata)
+        metadata.update({
+            "category": classification["category"],
+            "category_label": classification["label"],
+            "expected": classification["expected"],
+            "aggregate": classification["aggregate"],
+            "resolution": classification["resolution"],
+        })
+        row["metadata"] = metadata
+        if not classification["aggregate"]:
+            passthrough.append(row)
+            continue
+        buckets.setdefault(classification["category"], []).append(row)
+
+    collapsed = []
+    for category, rows in buckets.items():
+        if len(rows) == 1:
+            collapsed.extend(rows)
+            continue
+        # The query is ordered newest first; keep the newest row as the
+        # representative and expose the span/count instead of hiding it.
+        representative = dict(rows[0])
+        metadata = dict(representative["metadata"])
+        user_ids = {row.get("user_id") for row in rows if row.get("user_id") is not None}
+        metadata.update({
+            "aggregated": True,
+            "occurrence_count": len(rows),
+            "affected_user_count": len(user_ids),
+            "oldest_seen": rows[-1].get("created_at"),
+            "latest_seen": rows[0].get("created_at"),
+            "category": category,
+        })
+        representative["metadata"] = metadata
+        representative["user_id"] = None
+        representative["user"] = {
+            "first_name": "عدة مستخدمين",
+            "last_name": "",
+            "username": "Unknown",
+        }
+        collapsed.append(representative)
+
+    combined = passthrough + collapsed
+    return sorted(combined, key=lambda row: row.get("created_at") or "", reverse=True)
+
+
 def callback_event(data):
     if not isinstance(data, str):
         return None

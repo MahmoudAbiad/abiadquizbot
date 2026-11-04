@@ -341,17 +341,42 @@ async def show_recent_errors(call: types.CallbackQuery):
         for idx, err in enumerate(page_items, start=start + 1):
             meta = err.get("metadata") or {}
             user = err.get("user") or {}
+            is_aggregated = bool(meta.get("aggregated"))
             username_str = f"@{user['username']}" if user.get("username") and user['username'] != "Unknown" else "بدون يوزر"
             name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "بدون اسم"
             msg = (meta.get("message") or "غير معروف")[:150]
-            tag = "🔴 غير معالج" if meta.get("unhandled") else "🟡 معالج"
+            if meta.get("expected"):
+                tag = f"🔵 متوقع · {meta.get('category_label', 'تم التعامل معه تلقائياً')}"
+            elif meta.get("unhandled"):
+                tag = "🔴 غير ملتقط"
+            else:
+                tag = "🟠 مُلتقط فقط — لا يعني نجاح العملية"
+
+            if is_aggregated:
+                name = "عدة مستخدمين"
+                username_str = ""
+                user_id = "—"
+                count = meta.get("occurrence_count", 0)
+                affected = meta.get("affected_user_count", 0)
+                tag += f" · {count} مرة / {affected} مستخدمين"
+            else:
+                user_id = err.get("user_id")
 
             report_lines.append(
-                f"<b>{idx}. {name}</b> ({username_str}) — 🆔 <code>{err.get('user_id')}</code>\n"
+                f"<b>{html.escape(name)}</b> {('(' + html.escape(username_str) + ')' if username_str else '')} — 🆔 <code>{user_id}</code>\n"
                 f" ┣ {tag} {('· ' + meta['error_type']) if meta.get('error_type') else ''}\n"
                 f" ┣ 🕒 <code>{err.get('time_str')}</code>\n"
-                f" ┗ 📝 <code>{msg}</code>\n"
+                f" ┗ 📝 <code>{html.escape(msg)}</code>\n"
             )
+            if meta.get("unhandled"):
+                response = meta.get("user_response")
+                if response:
+                    delivery = "تم إرساله" if meta.get("user_response_delivered") else "تعذر تأكيد إرساله"
+                    report_lines.append(
+                        f" ┗ 👤 إشعار المستخدم ({delivery}): <code>{html.escape(str(response)[:300])}</code>\n"
+                    )
+                else:
+                    report_lines.append(" ┗ 👤 إشعار المستخدم: <code>غير مسجل في هذا السجل القديم</code>\n")
 
         # 🆕 زر "السابق" (نحو الأخطاء الأقدم) يظهر دائماً بعد الصفحة الأولى، وزر
         # "التالي" (نحو الأخطاء الأحدث) يظهر فقط بعد التنقل للخلف - أي عندما لا
@@ -371,7 +396,9 @@ async def show_recent_errors(call: types.CallbackQuery):
 
         text = (
             f"🐞 <b>آخر الأخطاء التي واجهها الطلاب (آخر 7 أيام)</b>\n"
-            f"إجمالي الأخطاء: <code>{total}</code> | صفحة {page}/{total_pages}\n"
+            f"السجلات الفردية والمتوقعة المجمعة: <code>{total}</code> | صفحة {page}/{total_pages}\n"
+            "🔵 المتوقع يُجمع فقط إذا كان ضمن قائمة أخطاء Telegram المعروفة. "
+            "🟠 مُلتقط لا يعني أن العملية نجحت.\n"
             f"───────────────────\n\n" +
             "\n".join(report_lines)
         )

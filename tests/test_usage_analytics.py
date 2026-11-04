@@ -12,10 +12,45 @@ from unittest.mock import AsyncMock, Mock, patch
 from aiogram import types
 from cachetools import TTLCache
 from reliability_support import load_functions
-from services.usage_events import EVENT_LABELS, CALLBACK_EVENTS, CALLBACK_PATTERNS, callback_event, event_page
+from services.usage_events import (
+    EVENT_LABELS, CALLBACK_EVENTS, CALLBACK_PATTERNS, callback_event, event_page,
+    aggregate_expected_errors, classify_error_metadata,
+)
 
 
 class TaxonomyTests(unittest.TestCase):
+    def test_only_allowlisted_expected_errors_are_aggregated(self):
+        stale = classify_error_metadata({"message": "query is too old"})
+        self.assertTrue(stale["expected"])
+        self.assertTrue(stale["aggregate"])
+
+        bug = classify_error_metadata({
+            "message": "Unable to serialize unknown type: Default",
+        })
+        self.assertFalse(bug["expected"])
+        self.assertFalse(bug["aggregate"])
+
+        rows = [
+            {"user_id": 11, "created_at": "2026-11-04T10:02:00+00:00",
+             "metadata": {"message": "query is too old"}},
+            {"user_id": 12, "created_at": "2026-11-04T10:01:00+00:00",
+             "metadata": {"message": "query ID is invalid"}},
+            {"user_id": 13, "created_at": "2026-11-04T10:00:00+00:00",
+             "metadata": {"message": "Unable to serialize unknown type: Default"}},
+            {"user_id": 14, "created_at": "2026-11-04T09:59:00+00:00",
+             "metadata": {"message": "Unable to serialize unknown type: Default"}},
+        ]
+        result = aggregate_expected_errors(rows)
+        self.assertEqual(len(result), 3)
+        expected = next(row for row in result if row["metadata"].get("aggregated"))
+        self.assertEqual(expected["metadata"]["category"], "stale_callback")
+        self.assertEqual(expected["metadata"]["occurrence_count"], 2)
+        self.assertEqual(expected["metadata"]["affected_user_count"], 2)
+        self.assertEqual(
+            sum("Unable to serialize" in row["metadata"].get("message", "") for row in result),
+            2,
+        )
+
     def test_changed_and_legacy_buttons_have_explicit_meaning(self):
         token = 'a' * 16
         mid = 'b' * 32

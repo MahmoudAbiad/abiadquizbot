@@ -23,6 +23,7 @@ from .classification import (
     _get_file_hashes_for_quiz_ids,
     _cleanup_classification_for_hashes,
 )
+from services.usage_events import aggregate_expected_errors
 
 # ==================== Usage Analytics & Tracking (Fixed & Complete) ====================
 
@@ -62,7 +63,8 @@ async def log_usage_event(user_id: int, event_type: str, metadata: Optional[Dict
 # 1️⃣.5 تسجيل الأخطاء التي يواجهها الطالب فعلياً (خطأ = حدث بنوع 'error_occurred')
 async def log_error_event(user_id: int, error_message: str, exception: Optional[Exception] = None,
                            update_type: Optional[str] = None, context: Optional[str] = None,
-                           unhandled: bool = False) -> None:
+                           unhandled: bool = False, user_response: Optional[str] = None,
+                           user_response_delivered: Optional[bool] = None) -> None:
     """
     تسجيل خطأ واجهه طالب فعلياً أثناء استخدام البوت، كحدث تحليلات عادي بجدول usage_events
     (event_type='error_occurred') — بنفس آلية log_usage_event تماماً (صامتة عند الفشل،
@@ -90,8 +92,24 @@ async def log_error_event(user_id: int, error_message: str, exception: Optional[
         "context": (context or "")[:200] if context else None,
         "unhandled": unhandled,
     }
+    if user_response:
+        metadata["user_response"] = user_response[:500]
+    if user_response_delivered is not None:
+        metadata["user_response_delivered"] = bool(user_response_delivered)
     if tb_str:
         metadata["traceback"] = tb_str
+
+    # Store the allow-listed expected-error classification with new rows. The
+    # dashboard still classifies historical rows when they lack these fields.
+    from services.usage_events import classify_error_metadata
+    classification = classify_error_metadata(metadata)
+    metadata.update({
+        "category": classification["category"],
+        "category_label": classification["label"],
+        "expected": classification["expected"],
+        "aggregate": classification["aggregate"],
+        "resolution": classification["resolution"],
+    })
 
     await log_usage_event(user_id, "error_occurred", metadata)
 
@@ -464,7 +482,7 @@ async def admin_get_recent_errors(limit: int = 20, days: int = 7) -> List[Dict[s
             e["user"] = users_map.get(e.get("user_id"), {})
             e["time_str"] = format_syria_time(e.get("created_at"), fmt="%I:%M %p (%Y-%m-%d)")
 
-        return errors
+        return aggregate_expected_errors(errors)
     except Exception as e:
         log_error(logger, f"Error fetching recent errors: {e}")
         return []

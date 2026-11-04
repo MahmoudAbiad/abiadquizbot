@@ -16,6 +16,8 @@ from error_context import set_error_context, reset_error_context
 
 logger = get_logger(__name__)
 
+_UNHANDLED_CALLBACK_NOTICE = "⚠️ حدث خطأ غير متوقع، الرجاء المحاولة مجدداً."
+_UNHANDLED_MESSAGE_NOTICE = "⚠️ عذراً، حدث خطأ غير متوقع أثناء تنفيذ طلبك. الرجاء المحاولة مرة أخرى."
 
 _STALE_CALLBACK_QUERY_MARKERS = (
     "query is too old",
@@ -146,6 +148,20 @@ class ErrorTrackingMiddleware(BaseMiddleware):
                 )
                 return None
             logger.error(f"Unhandled exception while processing update {event.update_id}: {e}", exc_info=True)
+            # 🩹 محاولة عدم ترك الطالب بدون أي رد إطلاقاً (بدل التجاهل الصامت)
+            user_response = None
+            user_response_delivered = False
+            try:
+                if isinstance(tg_event, CallbackQuery):
+                    user_response = _UNHANDLED_CALLBACK_NOTICE
+                    await tg_event.answer(user_response, show_alert=True)
+                    user_response_delivered = True
+                elif isinstance(tg_event, Message):
+                    user_response = _UNHANDLED_MESSAGE_NOTICE
+                    await tg_event.answer(user_response)
+                    user_response_delivered = True
+            except Exception:
+                pass
             if user_id and user_id != ADMIN_ID:
                 try:
                     from helpers.supabase_helper import log_error_event
@@ -156,17 +172,11 @@ class ErrorTrackingMiddleware(BaseMiddleware):
                         update_type=update_type,
                         context=context_snippet,
                         unhandled=True,
+                        user_response=user_response,
+                        user_response_delivered=user_response_delivered,
                     ))
                 except Exception:
                     pass
-            # 🩹 محاولة عدم ترك الطالب بدون أي رد إطلاقاً (بدل التجاهل الصامت)
-            try:
-                if isinstance(tg_event, CallbackQuery):
-                    await tg_event.answer("⚠️ حدث خطأ غير متوقع، الرجاء المحاولة مجدداً.", show_alert=True)
-                elif isinstance(tg_event, Message):
-                    await tg_event.answer("⚠️ عذراً، حدث خطأ غير متوقع أثناء تنفيذ طلبك. الرجاء المحاولة مرة أخرى.")
-            except Exception:
-                pass
             # The durable queue must see failures instead of acknowledging a lost update.
             raise
         finally:
