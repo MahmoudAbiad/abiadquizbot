@@ -128,6 +128,13 @@ BURST_GAP_SECONDS = 6
 BURST_RECOVERY_SECONDS = 45
 _BURST_RUNNING: set = set()
 
+# علامة "الترتيب النهائي اننشر" لكل جلسة (قيمتها وقت النشر) - بتمنع الإجابات المتأخرة من تغيير
+# الترتيب المنشور وتلويث إحصائيات الأدمن. TTL = عمر سجل `poll:{id}` بـ Redis.
+# ⚠️ لازم تكون معرّفة هون على مستوى الملف: غيابها كان بيرمي NameError ببلع صامت
+# (try/except) فتتعطّل الحماية بلا ما ينتبه حدا.
+_FINISHED_SESSION_PREFIX = "gq:finished:"
+_FINISHED_SESSION_TTL = 7200
+
 # آخر poll مفتوح لكل جلسة (chat_id + message_id) - `bot.stop_poll` بحاجة
 # message_id مش poll_id، وهاد مش مخزَّن بجدول group_quiz_sessions أصلاً (ولا
 # داعي لعمود دائم إله، عمره الفعلي = عمر السؤال المفتوح). TTL أطول شوي من
@@ -1435,6 +1442,8 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
         raise SkipHandler()
 
     if not raw:
+        # تشخيص مؤقّت (GQ_ANS): غياب سجل Redis إما إجابة فردية قديمة أو سجل جماعي انتهى/ضاع.
+        logger.info("GQ_ANS no_redis_record poll=%s user=%s", poll_answer.poll_id, getattr(poll_answer.user, "id", None))
         raise SkipHandler()
     try:
         info = json.loads(raw)
@@ -1444,7 +1453,15 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
     if info.get("is_group") is not True or not info.get("session_id"):
         raise SkipHandler()
 
+    # تشخيص مؤقّت (GQ_ANS): وصل صوت على استفتاء جماعي (يعني التحديث وصل لمعالجنا فعلاً).
+    logger.info(
+        "GQ_ANS received session=%s q=%s user=%s options=%s has_timer=%s track=%s",
+        info.get("session_id"), info.get("question_index"), getattr(poll_answer.user, "id", None),
+        list(poll_answer.option_ids or []), info.get("has_timer"), info.get("track_answers"),
+    )
+
     if not (info.get("has_timer") or info.get("track_answers")):
+        logger.info("GQ_ANS skipped reason=no_tracking_flag session=%s", info.get("session_id"))
         # سجلات استفتاءات قديمة (قبل إضافة track_answers) بلا مؤقّت: نفس السلوك
         # السابق (بلا تتبّع). الجلسات التنافسية الجديدة بتحمل track_answers=True
         # فبتنتتبّع حتى بدون مؤقّت.
@@ -1452,6 +1469,7 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
 
     try:
         if await redis_client.exists(f"{_FINISHED_SESSION_PREFIX}{info['session_id']}"):
+            logger.info("GQ_ANS skipped reason=after_final_ranking session=%s", info.get("session_id"))
             return
     except Exception as e:
         log_error(logger, f"Redis error checking finished marker: {e}")
@@ -1479,6 +1497,7 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
         )
         # `record_answer` بترجع False لو الصف موجود أصلاً (قيد الـ unique) - يعني
         # هاي محاولة تانية لنفس السؤال، فما منحدّث النقاط مرتين.
+        logger.info("GQ_ANS recorded=%s session=%s q=%s user=%s", inserted, info["session_id"], question_index, user.id)
         if inserted:
             await bump_participant(
                 session_id=info["session_id"],
