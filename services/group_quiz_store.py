@@ -32,6 +32,100 @@ ACTIVE_STATUSES = ("waiting", "active")
 _QUESTIONS_CACHE_PREFIX = "gq:questions:"
 _QUESTIONS_CACHE_TTL = 10800  # 3 ساعات - أطول من أي جلسة واقعية
 _ABANDONED_WAITING_TIMEOUT_SECONDS = 600  # 10 دقايق - راجع get_open_session_for_chat
+_CHAT_MIGRATION_PREFIX = "chat_migration:"
+_CHAT_MIGRATION_TTL = 30 * 24 * 60 * 60
+
+
+def _decode_chat_id(raw: Any) -> Optional[int]:
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+async def resolve_chat_id(chat_id: int) -> int:
+    """Resolve a Telegram group ID that was replaced during group migration."""
+    current = int(chat_id)
+    try:
+        raw = await redis_client.get(f"{_CHAT_MIGRATION_PREFIX}{current}")
+        resolved = _decode_chat_id(raw)
+        if resolved is not None:
+            return resolved
+    except Exception as e:
+        log_error(logger, f"Error resolving migrated chat id {current}: {e}")
+    return current
+
+
+async def migrate_chat_id(old_chat_id: int, new_chat_id: int) -> bool:
+    """Persist Telegram's group->supergroup ID replacement.
+
+    The Redis alias makes the current request and future reads recover immediately;
+    the database updates keep memberships and quiz sessions on the new ID after a
+    restart. Existing rows at the new ID win if Telegram has already delivered a
+    membership update concurrently.
+    """
+    old_chat_id, new_chat_id = int(old_chat_id), int(new_chat_id)
+    if old_chat_id == new_chat_id:
+        return True
+
+    try:
+        await redis_client.set(
+            f"{_CHAT_MIGRATION_PREFIX}{old_chat_id}",
+            str(new_chat_id),
+            ex=_CHAT_MIGRATION_TTL,
+        )
+    except Exception as e:
+        log_error(logger, f"Error caching migrated chat id {old_chat_id}->{new_chat_id}: {e}")
+
+    try:
+        await supabase.table("group_quiz_sessions").update({"chat_id": new_chat_id}).eq(
+            "chat_id", old_chat_id
+        ).execute()
+    except Exception as e:
+        log_error(logger, f"Error migrating quiz sessions {old_chat_id}->{new_chat_id}: {e}")
+
+    try:
+        old_res = (await supabase.table("bot_chat_memberships").select("*")
+                   .eq("chat_id", old_chat_id).limit(1).execute())
+        if old_res.data:
+            new_res = (await supabase.table("bot_chat_memberships").select("chat_id")
+                       .eq("chat_id", new_chat_id).limit(1).execute())
+            if new_res.data:
+                await supabase.table("bot_chat_memberships").delete().eq(
+                    "chat_id", old_chat_id
+                ).execute()
+            else:
+                await supabase.table("bot_chat_memberships").update({"chat_id": new_chat_id}).eq(
+                    "chat_id", old_chat_id
+                ).execute()
+    except Exception as e:
+        log_error(logger, f"Error migrating chat membership {old_chat_id}->{new_chat_id}: {e}")
+
+    # The lock journal is optional during rolling deployments. If present, move
+    # its key too so a later unlock can still restore the original permissions.
+    try:
+        old_lock = (await supabase.table("group_quiz_chat_locks").select("chat_id,session_id")
+                    .eq("chat_id", old_chat_id).limit(1).execute())
+        if old_lock.data:
+            new_lock = (await supabase.table("group_quiz_chat_locks").select("chat_id,session_id")
+                        .eq("chat_id", new_chat_id).limit(1).execute())
+            if new_lock.data and new_lock.data[0].get("session_id") == old_lock.data[0].get("session_id"):
+                await supabase.table("group_quiz_chat_locks").delete().eq(
+                    "chat_id", old_chat_id
+                ).execute()
+            elif not new_lock.data:
+                await supabase.table("group_quiz_chat_locks").update({"chat_id": new_chat_id}).eq(
+                    "chat_id", old_chat_id
+                ).execute()
+    except Exception as e:
+        # Older deployments may not have the optional lock table yet.
+        logger.warning("Could not migrate optional quiz lock %s->%s: %s", old_chat_id, new_chat_id, e)
+
+    return True
 
 
 # ==================== الجلسات ====================
@@ -50,6 +144,7 @@ async def create_session(
     فيه الأدمن، مش يروح لمكان افتراضي بالغروب.
     """
     try:
+        chat_id = await resolve_chat_id(chat_id)
         fields: Dict[str, Any] = {
             "quiz_id": quiz_id,
             "chat_id": chat_id,
@@ -87,6 +182,7 @@ async def get_open_session_for_chat(chat_id: int) -> Optional[Dict[str, Any]]:
     الأبسط والأسرع تنفيذاً (البديل: تنظيف دوري/TTL فعلي، مؤجّل).
     """
     try:
+        chat_id = await resolve_chat_id(chat_id)
         res = (await supabase.table("group_quiz_sessions").select("*")
                .eq("chat_id", chat_id).in_("status", list(ACTIVE_STATUSES))
                .order("created_at", desc=True).limit(1).execute())
@@ -358,6 +454,7 @@ async def upsert_chat_membership(
     عدّل الصلاحيات أو طرد البوت.
     """
     try:
+        chat_id = await resolve_chat_id(chat_id)
         payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "chat_type": chat_type,
@@ -377,6 +474,7 @@ async def upsert_chat_membership(
 
 async def get_chat_membership(chat_id: int) -> Optional[Dict[str, Any]]:
     try:
+        chat_id = await resolve_chat_id(chat_id)
         res = (await supabase.table("bot_chat_memberships").select("*")
                .eq("chat_id", chat_id).limit(1).execute())
         return res.data[0] if res.data else None

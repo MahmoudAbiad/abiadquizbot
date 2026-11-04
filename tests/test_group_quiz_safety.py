@@ -330,10 +330,39 @@ class FreshAdminTests(unittest.IsolatedAsyncioTestCase):
             redis_client=redis, bot=bot, _CACHE_PREFIX='chat_admin:', CACHE_TTL=300,
             GROUP_ANONYMOUS_BOT_ID=1087968824, ADMIN_STATUSES={'administrator','creator'},
             TelegramAPIError=APIError, TelegramBadRequest=APIError, TelegramForbiddenError=APIError,
-            log_error=Mock(), logger=Mock())
+            TelegramMigrateToChat=APIError, resolve_chat_id=AsyncMock(side_effect=lambda chat: chat),
+            migrate_chat_id=AsyncMock(), log_error=Mock(), log_info=Mock(), logger=Mock())
         self.assertFalse(await env['is_group_admin'](CHAT, 42, fresh=True))
         redis.get.assert_not_awaited()
         bot.get_chat_member.assert_awaited_once_with(CHAT, 42)
+
+    async def test_group_migration_retries_with_new_chat_id(self):
+        class APIError(Exception):
+            pass
+
+        class MigrationError(APIError):
+            def __init__(self, new_chat_id):
+                self.migrate_to_chat_id = new_chat_id
+
+        new_chat_id = -100987654321
+        redis = Mock(get=AsyncMock(return_value=None), set=AsyncMock())
+        bot = Mock(get_chat_member=AsyncMock(side_effect=[
+            MigrationError(new_chat_id),
+            types.SimpleNamespace(status='administrator'),
+        ]))
+        migrate = AsyncMock()
+        env = load_functions('services/group_permissions.py', {'is_group_admin', '_cache_key', '_decode_cached'},
+            redis_client=redis, bot=bot, _CACHE_PREFIX='chat_admin:', CACHE_TTL=300,
+            GROUP_ANONYMOUS_BOT_ID=1087968824, ADMIN_STATUSES={'administrator','creator'},
+            TelegramAPIError=APIError, TelegramBadRequest=APIError, TelegramForbiddenError=APIError,
+            TelegramMigrateToChat=MigrationError, resolve_chat_id=AsyncMock(side_effect=lambda chat: chat),
+            migrate_chat_id=migrate, log_error=Mock(), log_info=Mock(), logger=Mock())
+
+        self.assertTrue(await env['is_group_admin'](CHAT, 42, fresh=True))
+        migrate.assert_awaited_once_with(CHAT, new_chat_id)
+        self.assertEqual(bot.get_chat_member.await_args_list[0].args, (CHAT, 42))
+        self.assertEqual(bot.get_chat_member.await_args_list[1].args, (new_chat_id, 42))
+        redis.set.assert_awaited_once_with(f'chat_admin:{new_chat_id}:42', '1', ex=300)
 
 
 class GroupLaunchTests(unittest.IsolatedAsyncioTestCase):
