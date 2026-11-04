@@ -7,6 +7,7 @@ import asyncio
 from task_utils import spawn
 from typing import Any, Awaitable, Callable, Dict, Optional, Set
 from aiogram import BaseMiddleware
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Update, Message, CallbackQuery
 from cachetools import TTLCache
 from logger import get_logger
@@ -14,6 +15,20 @@ from config import ADMIN_ID
 from error_context import set_error_context, reset_error_context
 
 logger = get_logger(__name__)
+
+
+_STALE_CALLBACK_QUERY_MARKERS = (
+    "query is too old",
+    "query id is invalid",
+)
+
+
+def _is_stale_callback_query_error(exc: BaseException) -> bool:
+    """Return whether Telegram has already expired/consumed a callback query."""
+    if not isinstance(exc, TelegramBadRequest):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _STALE_CALLBACK_QUERY_MARKERS)
 
 
 
@@ -118,6 +133,18 @@ class ErrorTrackingMiddleware(BaseMiddleware):
         try:
             return await handler(event, data)
         except Exception as e:
+            # Callback queries have a short acknowledgement window. A late or
+            # duplicate callback cannot be answered anymore; retrying
+            # answerCallbackQuery only produces another failure. The action may
+            # already have completed, so treat this as stale input rather than
+            # recording an unhandled bot failure.
+            if isinstance(tg_event, CallbackQuery) and _is_stale_callback_query_error(e):
+                logger.warning(
+                    "Ignoring stale Telegram callback query %s for user %s",
+                    getattr(tg_event, "data", None),
+                    user_id,
+                )
+                return None
             logger.error(f"Unhandled exception while processing update {event.update_id}: {e}", exc_info=True)
             if user_id and user_id != ADMIN_ID:
                 try:
@@ -252,7 +279,16 @@ class ThrottlingMiddleware(BaseMiddleware):
             if user_id in self.cache:
                 # نكتفي بإظهار تنبيه لضغطات الأزرار (CallbackQuery) لأنه يظهر كإشعار مؤقت ولا يغرق المحادثة
                 if isinstance(event, CallbackQuery):
-                    await event.answer("⚠️ الرجاء الانتظار...", show_alert=True)
+                    try:
+                        await event.answer("⚠️ الرجاء الانتظار...", show_alert=True)
+                    except TelegramBadRequest as exc:
+                        if not _is_stale_callback_query_error(exc):
+                            raise
+                        logger.warning(
+                            "Ignoring stale throttled callback query %s for user %s",
+                            getattr(event, "data", None),
+                            user_id,
+                        )
                 
                 # بالنسبة للرسائل العادية (Message)، ننهي العملية بصمت (Silent Return) لحماية البوت من الحظر (429)
                 logger.warning(f"Spam detected and blocked silently for user: {user_id}")
