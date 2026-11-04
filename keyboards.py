@@ -1199,6 +1199,15 @@ def get_group_pacing_keyboard(session_id: str, timer_enabled: bool) -> types.Inl
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def get_group_certificates_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
+    """Final optional setup step for commemorative certificates."""
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🎓 تفعيل شهادات الأوائل", callback_data=f"gqcr:{session_id}:1")],
+        [types.InlineKeyboardButton(text="🚫 بدون شهادات", callback_data=f"gqcr:{session_id}:0")],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{session_id}")],
+    ])
+
+
 def get_group_question_control_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
     """كيبورد كل سؤال جماعي - زر واحد بس (مش لكل سؤال أزرار تنقّل، الإرسال تلقائي
     بالكامل حسب القرار المعماري رقم 3 بالخطة). يظهر تحت كل poll طول الجلسة."""

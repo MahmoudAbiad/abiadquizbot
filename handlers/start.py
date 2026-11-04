@@ -160,6 +160,10 @@ async def start(msg: types.Message, command: CommandObject, state: FSMContext):
             from handlers.group_quiz import resume_group_setup
             await resume_group_setup(msg, command.args)
             return
+        if command.args and command.args.startswith("gqcert_"):
+            from handlers.certificates import resume_group_certificate
+            await resume_group_certificate(msg, command.args)
+            return
         bot_info = await bot.get_me()
         
         # Links are available to new and existing users, without clearing quiz state.

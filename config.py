@@ -32,6 +32,7 @@ class QuizState(StatesGroup):
     waiting_for_limit_decision = State()
     waiting_for_custom_name = State()       # استقبال الاسم المخصص
     waiting_for_new_section_title = State() # استقبال اسم القسم الجديد
+    waiting_for_certificate_name = State()  # استقبال الاسم المخصص للشهادة
     waiting_for_quiz_feedback = State()     # 🆕 استقبال ملاحظات وشكاوى الطلاب بنهاية الاختبار
     waiting_for_question_edit_choice = State()  # اختيار نوع تعديل السؤال أثناء الحل
     waiting_for_question_edit_text = State()    # استقبال نص السؤال المعدّل

@@ -36,6 +36,7 @@ from handlers import (
     audio_router,
     quiz_delete_router,
     group_quiz_router,
+    certificates_router,
     payments_router,
     gifts_router,
 )
@@ -101,6 +102,7 @@ def main():
         # (معالج poll_answer العام هناك بيوقف الانتشار) - راجع handlers/group_quiz.py
         challenge_game_router,
         challenge_live_router,  # ⚔️ المواجهات المباشرة (lv:*) - مستقل عن cg:*
+        certificates_router,
         group_quiz_router,
         payments_router,  # 💳 أزرار الشحن الذاتي (pay:*) - راجع handlers/payments.py
         gifts_router,

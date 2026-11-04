@@ -170,6 +170,19 @@ async def get_session(session_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+async def get_quiz_title(quiz_id: str) -> str:
+    """Fetch the human title once when a finished session needs a certificate."""
+    try:
+        res = (await supabase.table("quizzes").select("source_title")
+               .eq("id", quiz_id).limit(1).execute())
+        if res.data:
+            row = res.data[0]
+            return str(row.get("source_title") or "كويز جماعي")[:160]
+    except Exception as e:
+        log_error(logger, f"Error loading quiz title {quiz_id}: {e}")
+    return "كويز جماعي"
+
+
 async def get_open_session_for_chat(chat_id: int) -> Optional[Dict[str, Any]]:
     """يرجّع أي جلسة لسا مفتوحة (waiting أو active) بهالغروب - منمنع جلستين بنفس
     الوقت بنفس الغروب (تداخل أسئلة + مضاعفة استهلاك rate limit).
@@ -385,6 +398,7 @@ async def bump_participant(
     user_id: int,
     username: Optional[str],
     first_name: Optional[str],
+    last_name: Optional[str],
     is_correct: bool,
     answer_time_ms: int,
 ) -> None:
@@ -405,6 +419,7 @@ async def bump_participant(
             "user_id": user_id,
             "username": username,
             "first_name": first_name,
+            "last_name": last_name,
             "score": int((row or {}).get("score", 0)) + (1 if is_correct else 0),
             "correct_count": int((row or {}).get("correct_count", 0)) + (1 if is_correct else 0),
             "total_answer_time_ms": int((row or {}).get("total_answer_time_ms", 0)) + max(0, int(answer_time_ms)),

@@ -52,6 +52,7 @@ from config import bot, redis_client
 from keyboards import (
     get_group_anonymity_keyboard,
     get_group_channel_picker_keyboard,
+    get_group_certificates_keyboard,
     get_group_names_privacy_keyboard,
     get_group_pacing_keyboard,
     get_group_question_control_keyboard,
@@ -75,6 +76,7 @@ from services.group_quiz_store import (
     get_due_sessions,
     get_leaderboard,
     get_open_session_for_chat,
+    get_quiz_title,
     get_session,
     get_session_questions,
     list_postable_channels,
@@ -84,6 +86,7 @@ from services.group_quiz_store import (
     update_session,
     upsert_chat_membership,
 )
+from services.group_certificate_delivery import create_certificate_claim
 from services.group_quiz_lock import acquire_quiz_lock, restore_quiz_lock, recover_quiz_locks, quiz_lock_schema_ready
 from services.quiz_engine import send_quiz_poll
 from task_utils import spawn
@@ -685,50 +688,97 @@ async def choose_group_pacing(call: types.CallbackQuery):
         if session.get("lock_chat") and not await _ensure_group_lock_permission(call, session):
             return
 
-        start_fields = {
+        setup_fields = {
             "pacing_mode": pacing_mode,
             "question_interval_seconds": interval,
-            "status": "active",
-            "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "next_question_due_at": _utc_iso(120),
         }
         if not session.get("poll_is_anonymous") and await _is_channel_chat(int(session["chat_id"])):
             # شبكة أمان أخيرة (جلسة قناة قديمة غير مجهولة): تيليجرام ما بتسمح بغير المجهول بالقنوات.
-            start_fields["poll_is_anonymous"] = True
-        updated = await start_waiting_session(session_id, start_fields)
+            setup_fields["poll_is_anonymous"] = True
+        updated = await update_session(session_id, setup_fields)
         if not updated:
             await call.answer("❌ تعذّر بدء الجلسة", show_alert=True)
             return
 
-        if updated.get("lock_chat"):
-            try:
-                await acquire_quiz_lock(updated)
-            except Exception:
-                await claim_session_cancel(session_id)
-                await restore_quiz_lock(session_id, int(updated["chat_id"]))
-                await call.message.edit_text("❌ تعذر تفعيل قفل المجموعة بأمان. تحقق أن البوت مشرف ولديه صلاحية تقييد الأعضاء، ثم أعد الإعداد.")
-                return
-        # Never overwrite a concurrent finish. Heartbeat resumes after a crash.
-        updated = await activate_session_due(session_id)
-        if not updated:
-            await restore_quiz_lock(session_id, int(session["chat_id"]))
-            return
-        if pacing_mode == "burst":
-            total = int(updated.get("total_questions") or 0)
-            minutes = max(1, -(-(total * BURST_GAP_SECONDS) // 60))
+        if not updated.get("poll_is_anonymous") and not await _is_channel_chat(int(updated["chat_id"])):
             await call.message.edit_text(
-                f"🚀 انطلقت الجلسة! كل الأسئلة ({total}) رح تنبعت دفعة وحدة، بفاصل {BURST_GAP_SECONDS} ثواني "
-                f"بين كل سؤال والتاني (حوالي {minutes} دقيقة) لتفادي حدود تيليجرام.\nبالتوفيق للجميع 🎯"
+                "🎓 بدك نصدر شهادات رمزية للأوائل بعد انتهاء الكويز؟\n"
+                "رح يقدر كل فائز يستلم الشهادة كصورة وPDF، ويعدّل الاسم الظاهر عليها قبل الإصدار.",
+                reply_markup=get_group_certificates_keyboard(session_id),
             )
-            log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} (burst)")
-            spawn(run_burst_session(session_id), name=f"gq_burst_{session_id}")
             return
-        label = "فور انتهاء مؤقّت كل سؤال" if pacing_mode == "chain_to_timer" else f"كل {interval} ثانية"
-        await call.message.edit_text(f"🚀 انطلقت الجلسة! الأسئلة بتوصل {label}.\nبالتوفيق للجميع 🎯")
-        log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} ({pacing_mode})")
-        await send_next_group_question(updated)
+
+        await _activate_configured_group_session(call, updated)
     except Exception as e:
         log_error(logger, f"Error in choose_group_pacing: {e}", exception=e)
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
+
+
+async def _activate_configured_group_session(call: types.CallbackQuery, session: Dict[str, Any]) -> None:
+    """Start a waiting session after all optional setup screens are complete."""
+    session_id = str(session["id"])
+    pacing_mode = session.get("pacing_mode")
+    interval = session.get("question_interval_seconds")
+    start_fields = {
+        "status": "active",
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "next_question_due_at": _utc_iso(120),
+    }
+    updated = await start_waiting_session(session_id, start_fields)
+    if not updated:
+        await call.answer("❌ تعذّر بدء الجلسة", show_alert=True)
+        return
+
+    if updated.get("lock_chat"):
+        try:
+            await acquire_quiz_lock(updated)
+        except Exception:
+            await claim_session_cancel(session_id)
+            await restore_quiz_lock(session_id, int(updated["chat_id"]))
+            await call.message.edit_text("❌ تعذر تفعيل قفل المجموعة بأمان. تحقق أن البوت مشرف ولديه صلاحية تقييد الأعضاء، ثم أعد الإعداد.")
+            return
+    # Never overwrite a concurrent finish. Heartbeat resumes after a crash.
+    updated = await activate_session_due(session_id)
+    if not updated:
+        await restore_quiz_lock(session_id, int(session["chat_id"]))
+        return
+    if pacing_mode == "burst":
+        total = int(updated.get("total_questions") or 0)
+        minutes = max(1, -(-(total * BURST_GAP_SECONDS) // 60))
+        await call.message.edit_text(
+            f"🚀 انطلقت الجلسة! كل الأسئلة ({total}) رح تنبعت دفعة وحدة، بفاصل {BURST_GAP_SECONDS} ثواني "
+            f"بين كل سؤال والتاني (حوالي {minutes} دقيقة) لتفادي حدود تيليجرام.\nبالتوفيق للجميع 🎯"
+        )
+        log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} (burst)")
+        spawn(run_burst_session(session_id), name=f"gq_burst_{session_id}")
+        return
+    label = "فور انتهاء مؤقّت كل سؤال" if pacing_mode == "chain_to_timer" else f"كل {interval} ثانية"
+    await call.message.edit_text(f"🚀 انطلقت الجلسة! الأسئلة بتوصل {label}.\nبالتوفيق للجميع 🎯")
+    log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} ({pacing_mode})")
+    await send_next_group_question(updated)
+
+
+@router.callback_query(F.data.startswith("gqcr:"))
+async def choose_group_certificates(call: types.CallbackQuery):
+    try:
+        _, session_id, raw_enabled = call.data.split(":", 2)
+        session = await _guard_config_callback(call, session_id)
+        if not session:
+            return
+        if raw_enabled not in {"0", "1"} or session.get("poll_is_anonymous") or await _is_channel_chat(int(session["chat_id"])):
+            await call.answer("❌ الشهادات متاحة للكويزات التنافسية داخل الغروبات فقط.", show_alert=True)
+            return
+        updated = await update_session(session_id, {"certificates_enabled": raw_enabled == "1"})
+        if not updated:
+            await call.answer("❌ تعذّر حفظ إعداد الشهادات.", show_alert=True)
+            return
+        await _activate_configured_group_session(call, updated)
+    except Exception as e:
+        log_error(logger, f"Error in choose_group_certificates: {e}", exception=e)
     finally:
         try:
             await call.answer()
@@ -1361,6 +1411,7 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             # aiogram بترمي BadRequest بهالحالة، مش خطأ حقيقي.
             log_error(logger, f"stop_poll failed for session {session_id} (likely already closed): {e}")
 
+    certificate_keyboard = None
     if session.get("poll_is_anonymous"):
         # ما في ولا صف بـ group_quiz_participants أصلاً بهالوضع (تيليجرام ما
         # بيبعت poll_answer للاستفتاءات المجهولة) - رسالة صريحة بدل ما توحي
@@ -1387,12 +1438,36 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             lines = [f"🏁 <b>انتهت الجلسة! الترتيب النهائي (أول {top_n}):</b>", ""]
             for i, r in enumerate(rows):
                 if show_names:
-                    raw_who = r.get("first_name") or (f"@{r['username']}" if r.get("username") else str(r["user_id"]))
+                    raw_who = " ".join(part for part in (r.get("first_name"), r.get("last_name")) if part).strip()
+                    raw_who = raw_who or (f"@{r['username']}" if r.get("username") else str(r["user_id"]))
                     who = html.escape(raw_who)
                 else:
                     who = f"لاعب {i + 1}"
                 rank = medals[i] if i < len(medals) else f"{i + 1}."
                 lines.append(f"{rank} {who} — {r.get('score', 0)} نقطة")
+            if session.get("certificates_enabled"):
+                try:
+                    bot_username = await _get_bot_username()
+                    quiz_title = await get_quiz_title(str(session["quiz_id"]))
+                    certificate_buttons = []
+                    for i, row in enumerate(rows):
+                        token = await create_certificate_claim(
+                            session_id=session_id,
+                            user_id=int(row["user_id"]),
+                            rank=i + 1,
+                            score=int(row.get("score") or 0),
+                            total_questions=int(session.get("total_questions") or 0),
+                            quiz_title=quiz_title,
+                        )
+                        certificate_buttons.append([types.InlineKeyboardButton(
+                            text=f"📜 شهادة المركز {i + 1}",
+                            url=f"https://t.me/{bot_username}?start=gqcert_{token}",
+                        )])
+                    if certificate_buttons:
+                        certificate_keyboard = types.InlineKeyboardMarkup(inline_keyboard=certificate_buttons)
+                        lines += ["", "🎓 الشهادات الرمزية للأوائل:"]
+                except Exception as e:
+                    log_error(logger, f"Could not prepare group certificates for {session_id}: {e}", exception=e)
             if not session.get("question_timer_seconds"):
                 lines += ["", "<i>الاستفتاءات ضلّت مفتوحة، بس الإجابات بعد هالترتيب ما بتنحسب.</i>"]
             text = "\n".join(lines)
@@ -1409,6 +1484,7 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             chat_id=int(session["chat_id"]),
             text=text,
             parse_mode="HTML",
+            reply_markup=certificate_keyboard,
             message_thread_id=session.get("message_thread_id"),
         ),
         what=f"send leaderboard (session {session_id})",
@@ -1485,6 +1561,7 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
                 user_id=user.id,
                 username=user.username,
                 first_name=user.first_name,
+                last_name=user.last_name,
                 is_correct=is_correct,
                 answer_time_ms=answer_time_ms,
             )

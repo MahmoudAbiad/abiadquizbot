@@ -18,6 +18,7 @@ from handlers.export import export_router
 from handlers.audio import audio_router
 from handlers.quiz_delete import router as quiz_delete_router
 from handlers.group_quiz import group_quiz_router
+from handlers.certificates import router as certificates_router
 from handlers.payments import router as payments_router
 
 __all__ = [
@@ -36,5 +37,6 @@ __all__ = [
     "audio_router",
     "quiz_delete_router",
     "group_quiz_router",
+    "certificates_router",
     "payments_router",
 ]
