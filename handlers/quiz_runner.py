@@ -136,6 +136,11 @@ async def show_menu_after_first_quiz(call: types.CallbackQuery) -> None:
 
 @user_locked()
 async def start_loaded_quiz(msg_or_call: Union[types.Message, types.CallbackQuery], state: FSMContext, quiz_data: list, source_title: str, origin: str = "shared", quiz_id: Optional[str] = "") -> None:
+    await _start_loaded_quiz(msg_or_call, state, quiz_data, source_title, origin, quiz_id)
+
+
+async def _start_loaded_quiz(msg_or_call, state, quiz_data, source_title, origin="shared", quiz_id=""):
+    """Start a validated quiz. Caller must already hold the user's intake lock."""
     user_id = msg_or_call.from_user.id
     from handlers.session_navigation import offer_transition
     chat_id = msg_or_call.message.chat.id if isinstance(msg_or_call, types.CallbackQuery) else msg_or_call.chat.id

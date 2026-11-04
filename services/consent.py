@@ -31,7 +31,8 @@ CONSENT_ACCEPT = "consent:accept"
 CONSENT_DECLINE = "consent:decline"
 
 STATE_OK = "ok"              # وافق على النسخة الحالية
-STATE_NEW = "new"            # لم يقرر بعد (أو لم تُعرض له الرسالة)
+STATE_NEW = "new"            # مستخدم جديد لم يوافق بعد
+STATE_RETURNING = "returning"  # مستخدم عائد لم يوافق بعد
 STATE_UPDATE = "update"      # وافق سابقاً على نسخة أقدم
 STATE_DECLINED = "declined"  # رفض
 
@@ -121,19 +122,25 @@ async def get_consent_state(user_id: int) -> str:
         .execute()
     )
     rows = result.data or []
-    if not rows:
-        state = STATE_NEW
-    else:
-        row = rows[0]
-        if row.get("status") == "accepted":
-            if int(row.get("terms_version") or 0) >= tv and int(row.get("privacy_version") or 0) >= pv:
-                state = STATE_OK
-            else:
-                state = STATE_UPDATE
-        elif row.get("status") == "declined":
-            state = STATE_DECLINED
+    row = rows[0] if rows else None
+    saved_terms = int((row or {}).get("terms_version") or 0)
+    saved_privacy = int((row or {}).get("privacy_version") or 0)
+    if (0 < saved_terms < tv) or (0 < saved_privacy < pv):
+        state = STATE_UPDATE
+    elif row and row.get("status") == "accepted":
+        if saved_terms >= tv and saved_privacy >= pv:
+            state = STATE_OK
         else:
-            state = STATE_NEW
+            state = STATE_UPDATE
+    elif row and row.get("status") == "declined":
+        state = STATE_DECLINED
+    else:
+        # Consent is checked before user creation. Distinguish returning
+        # accounts from people starting the bot for the first time.
+        existing = await supabase.table("users").select("user_id").eq(
+            "user_id", user_id
+        ).limit(1).execute()
+        state = STATE_RETURNING if existing.data else STATE_NEW
 
     if state == STATE_OK:
         await remember_accepted(user_id, tv, pv)
@@ -145,20 +152,56 @@ async def get_consent_state(user_id: int) -> str:
 # ==================== واجهة الرسائل ====================
 
 def _policy_links() -> str:
-    return f'<a href="{PRIVACY_URL}">سياسة الخصوصية</a> و<a href="{TERMS_URL}">شروط الخدمة</a>'
+    return f'<a href="{PRIVACY_URL}">سياسة الخصوصية</a> و<a href="{TERMS_URL}">شروط الاستخدام</a>'
 
 
-def build_consent_text(state: str) -> str:
+async def get_updated_documents(user_id: int):
+    """Return documents whose saved consent versions are older than the current versions."""
+    tv, pv = await current_versions()
+    from helpers.supabase_helper import supabase
+    result = await (
+        supabase.table("user_consents")
+        .select("terms_version,privacy_version")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return []
+    row = result.data[0]
+    saved = {
+        "terms": int(row.get("terms_version") or 0),
+        "privacy": int(row.get("privacy_version") or 0),
+    }
+    current = {"terms": tv, "privacy": pv}
+    return [name for name in ("terms", "privacy") if 0 < saved[name] < current[name]]
+
+
+async def build_consent_text(state: str, user_id: int = None) -> str:
     policy_links = _policy_links()
-    if state == STATE_UPDATE:
+    if state == STATE_UPDATE and user_id is not None:
+        updated = await get_updated_documents(user_id)
+        labels = {"terms": "شروط الاستخدام", "privacy": "سياسة الخصوصية"}
+        if updated:
+            heading = "تحديث على " + " و".join(labels[name] for name in updated)
+            urls = {"terms": TERMS_URL, "privacy": PRIVACY_URL}
+            updated_links = " و".join(
+                f'<a href="{urls[name]}">{labels[name]}</a>' for name in updated
+            )
+            return (
+                f"📜 <b>{heading}</b>\n\n"
+                f"حدّثنا {updated_links}.\n"
+                "اطّلع على النسخة المحدّثة، ثم اضغط «أوافق» لمتابعة استخدام البوت."
+            )
+    if state == STATE_NEW:
         return (
-            "📜 <b>تحديث على شروطنا</b>\n\n"
-            f"حدّثنا {policy_links}.\n"
-            "اطّلع عليهما بالضغط على اسميهما، ثم اضغط «أوافق» لمتابعة استخدام البوت."
+            "📜 <b>قبل أن تبدأ</b>\n\n"
+            f"لاستخدام <b>أبيض منشئ اختبارات ذكي</b> يجب الموافقة على {policy_links}.\n"
+            "اطّلع عليهما بالضغط على اسميهما، ثم اضغط «أوافق» للمتابعة."
         )
     return (
-        "📜 <b>قبل أن نبدأ</b>\n\n"
-        f"لاستخدام <b>أبيض منشئ الكويزات</b> يجب الموافقة على {policy_links}.\n"
+        "📜 <b>لمتابعة استخدام البوت</b>\n\n"
+        f"يرجى الموافقة على {policy_links} لمتابعة استخدام أبيض.\n"
         "اطّلع عليهما بالضغط على اسميهما، ثم اضغط «أوافق» للمتابعة."
     )
 
@@ -166,7 +209,7 @@ def build_consent_text(state: str) -> str:
 def build_declined_text() -> str:
     return (
         "تم تسجيل اختيارك.\n\n"
-        f"لا يمكننا تشغيل البوت دون الموافقة على {_policy_links()}. "
+        f"لا يمكن متابعة استخدام البوت دون الموافقة على {_policy_links()}. "
         "إذا غيّرت رأيك اضغط «أوافق» في أي وقت."
     )
 
@@ -174,7 +217,7 @@ def build_declined_text() -> str:
 def build_accepted_text() -> str:
     return (
         "✅ <b>شكراً لك، تمت الموافقة.</b>\n\n"
-        "أرسل ملفك أو نصك أو صورك لإنشاء كويز، أو اكتب /start لعرض القائمة الرئيسية."
+        "أرسل ملفك أو نصك أو صورك لإنشاء اختبار، أو اكتب /start لعرض القائمة الرئيسية."
     )
 
 
@@ -281,10 +324,16 @@ class ConsentMiddleware(BaseMiddleware):
         if user.id not in self._notices and await self._first_prompt(user.id):
             from task_utils import spawn
             spawn(_mark_prompted(user.id))
+        try:
+            prompt_text = await build_consent_text(state, user.id)
+        except Exception as exc:
+            logger.error("Could not build consent prompt for user %s: %s", user.id, exc, exc_info=True)
+            await self._notify(event, user.id, "⚠️ تعذّر تجهيز رسالة الموافقة حالياً، حاول مجدداً بعد قليل.", None)
+            return None
         await self._notify(
             event,
             user.id,
-            build_consent_text(state),
+            prompt_text,
             build_consent_keyboard(),
             activity_state=state,
         )

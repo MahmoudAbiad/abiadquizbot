@@ -43,6 +43,22 @@ class OptionLayoutTests(unittest.TestCase):
         self.assertGreater(len(positions), 4)
         self.assertEqual(len({x for x, _, _ in positions}), 1)
 
+    def test_unwrapped_math_inequalities_and_sequence_domain_are_normalized(self):
+        self.assertEqual(renderer._auto_wrap_bare_latex(r'u_n \ge 2'), r'$u_n \geq 2$')
+        self.assertEqual(renderer._auto_wrap_bare_latex(r'(u_n)_{n \ge 0}'), r'$(u_n)_{n \geq 0}$')
+
+    def test_unwrapped_math_is_detected_beside_explicit_math_without_changing_prose(self):
+        line = r"لتكن المتتالية (u_n)_{n \ge 0}، حيث $u_0=\frac{1}{2}$."
+        wrapped = renderer._auto_wrap_bare_latex(line)
+        self.assertIn(r'$(u_n)_{n \geq 0}$', wrapped)
+        self.assertIn(r'$u_0=\frac{1}{2}$', wrapped)
+        self.assertEqual(renderer._auto_wrap_bare_latex('اختيار صحيح للمتتالية'), 'اختيار صحيح للمتتالية')
+
+    def test_unwrapped_inequality_renders_in_math_notation(self):
+        positions, _ = self.render([r'u_n \ge 2', 'خياران', 'خيار ثالث', 'رابع'])
+        self.assertEqual(len(positions), 4)
+        self.assertIn(r'$u_n \geq 2$', [text for _, _, text in positions])
+
     def test_short_math_fits_and_wide_unbroken_math_stays_stacked(self):
         positions, _ = self.render([r'$x^2$', r'$\frac{1}{2}$', '$-1$', '$2$'])
         self.assertEqual(len({x for x, _, _ in positions}), 2)

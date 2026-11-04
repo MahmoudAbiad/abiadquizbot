@@ -74,6 +74,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime._pointers.clear()
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
+        # Patch the flag boundary without importing a real Supabase client.
+        self.stack.enter_context(patch.dict(sys.modules, {"helpers.supabase_helper":
+            types.SimpleNamespace(is_feature_enabled=AsyncMock(return_value=False))}))
         self.stack.enter_context(patch.dict(os.environ, {"TEST_AI_KEYS": "key-a,key-b"}))
         self.provider_rows = {"custom": provider()}
         self.model_rows = [model()]
@@ -82,6 +85,29 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.adapter = types.SimpleNamespace(capabilities={"text", "image"},
             generate=AsyncMock(return_value=AIResult("ok", total_tokens=12)))
         self.stack.enter_context(patch.dict(runtime.ADAPTERS, {"openai_compatible": self.adapter}))
+
+    async def test_detection_medium_survives_failover_and_leaves_generation_unchanged(self):
+        self.provider_rows["other"] = provider("other")
+        self.model_rows.append(model("other"))
+        self.adapter.generate.side_effect = [ProviderError(500), ProviderError(500), AIResult("ok")]
+        await runtime.execute(AIRequest(("file",), reasoning_effort="low"), slot="detection", timeout=1)
+        self.assertEqual(len(self.adapter.generate.await_args_list), 3)
+        self.assertTrue(all(call.args[3].reasoning_effort == "medium"
+                            for call in self.adapter.generate.await_args_list))
+        self.adapter.generate.side_effect = None
+        await runtime.execute(AIRequest(("generate",)), timeout=1)
+        self.assertIsNone(self.adapter.generate.await_args.args[3].reasoning_effort)
+
+    async def test_admin_levels_apply_to_detection_cascade_and_fast_text_independently(self):
+        from helpers import settings_helper as sh
+        settings = {"ai_detection_thinking": 1, "ai_generation_thinking": 3}
+        with patch.object(sh, "get_app_settings", AsyncMock(side_effect=lambda: settings)):
+            for slot, expected in (("detection", "low"), ("cascade", "high"), ("groq_fast", "high")):
+                await runtime.execute(AIRequest(("content",)), slot=slot, timeout=1)
+                self.assertEqual(self.adapter.generate.await_args.args[3].reasoning_effort, expected)
+            settings["ai_generation_thinking"] = 0
+            await runtime.execute(AIRequest(("content",), reasoning_effort="high"), timeout=1)
+            self.assertIsNone(self.adapter.generate.await_args.args[3].reasoning_effort)
 
     async def test_custom_provider_runs_without_gemini_and_records_real_identity(self):
         result = await runtime.execute(AIRequest(("hello",)), timeout=1)
@@ -166,8 +192,56 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_vertex_exclusion_uses_transport_not_provider_name(self):
         self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
         self.model_rows = [model("cloud")]
-        result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
+        with patch("helpers.supabase_helper.is_feature_enabled",
+                   AsyncMock(return_value=False)) as flag:
+            result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
         self.assertIsNone(result)
+        flag.assert_awaited_once_with("vertex_parallel_enabled", default=False)
+
+    async def test_admin_flag_enables_vertex_on_previously_excluded_batch(self):
+        self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
+        self.model_rows = [model("cloud")]
+        with patch.dict(os.environ, {
+            "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
+            "GOOGLE_VERTEX_PROJECT": "example",
+        }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
+            "helpers.supabase_helper.is_feature_enabled",
+            AsyncMock(return_value=True),
+        ) as flag:
+            result = await runtime.execute(AIRequest(("hi",)), timeout=1, exclude_vertex=True)
+        self.assertEqual(result.text, "ok")
+        self.adapter.generate.assert_awaited_once()
+        self.assertEqual(_last_model_used_var.get()["provider"], "cloud")
+        flag.assert_awaited_once_with("vertex_parallel_enabled", default=False)
+
+    async def test_vertex_batch_toggle_stays_off_if_flag_read_fails(self):
+        self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
+        self.model_rows = [model("cloud")]
+        with patch.dict(os.environ, {
+            "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
+            "GOOGLE_VERTEX_PROJECT": "example",
+        }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
+            "helpers.supabase_helper.is_feature_enabled",
+            AsyncMock(side_effect=RuntimeError("unavailable")),
+        ):
+            self.assertIsNone(await runtime.execute(AIRequest(("hi",)), timeout=1,
+                                                     exclude_vertex=True))
+        self.adapter.generate.assert_not_awaited()
+
+    async def test_regular_vertex_call_does_not_depend_on_multi_part_switch(self):
+        self.provider_rows = {"cloud": provider("cloud", transport="vertex", base_url=None, api_keys_env=None)}
+        self.model_rows = [model("cloud")]
+        with patch.dict(os.environ, {
+            "GOOGLE_VERTEX_SA_KEY_JSON": '{"project_id":"example"}',
+            "GOOGLE_VERTEX_PROJECT": "example",
+        }), patch.dict(runtime.ADAPTERS, {"vertex": self.adapter}), patch(
+            "helpers.supabase_helper.is_feature_enabled",
+            AsyncMock(return_value=False),
+        ) as flag:
+            result = await runtime.execute(AIRequest(("hi",)), timeout=1,
+                                           exclude_vertex=False)
+        self.assertEqual(result.text, "ok")
+        flag.assert_not_awaited()
 
     async def test_image_batch_failure_waits_for_other_requests(self):
         finished = []
@@ -212,6 +286,14 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ChatAdapter().capabilities_for(config), {'text', 'image'})
         with self.assertRaises(ValueError):
             await ChatAdapter().generate(config, 'key', '@cf/model', AIRequest((Attachment('image/png', data=b'x'),)))
+
+    async def test_openrouter_detection_sends_medium_only_when_requested(self):
+        config = provider_preset('openrouter')
+        _, body = await self.capture_named_request(config,
+            AIRequest(('material',), Answer, reasoning_effort="medium"))
+        self.assertEqual(body['reasoning'], {'effort': 'medium'})
+        _, body = await self.capture_named_request(config, AIRequest(('material',), Answer))
+        self.assertNotIn('reasoning', body)
 
     async def test_openrouter_requires_json_support_only_for_structured_requests(self):
         config = provider_preset('openrouter')

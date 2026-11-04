@@ -74,7 +74,7 @@ async def _prefetch_math_quiz_images(quiz_id: str, quiz_data: List[Dict[str, Any
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
-def determine_execution_mode(items: int, questions: int, cached: bool = False, is_album: bool = False) -> str:
+def determine_execution_mode(items: int, questions: int, cached: bool = False, is_album: bool = False, content_source: Optional[str] = None) -> str:
     """تحديد وضع التنفيذ - 🆕 صار مطابقاً تماماً لشرط التنفيذ الفعلي بـ
     gemini_helper.generate_quiz_smart (is_super_pdf/is_super_images بالضبط)، بدل عتبة
     صفحات موحّدة وهمية كانت تُطبَّق حتى على الصور:
@@ -90,8 +90,10 @@ def determine_execution_mode(items: int, questions: int, cached: bool = False, i
       مسار مختلف)."""
     if cached: return "Cached"
     if is_album:
-        return "Super-Images" if items > MAX_ALBUM_IMAGES else "Standard"
-    if items > MAX_LIMIT_PAGES: return "Super-PDF"
+        return ("Super-Images" if items > MAX_ALBUM_IMAGES else
+                "Over-Limit" if questions > MAX_STANDARD_QUESTIONS else "Standard")
+    if items > MAX_LIMIT_PAGES:
+        return "Super-Text" if content_source in ("telegram_text", "audio_transcript", "docx", "pptx", "txt") else "Super-PDF"
     if items > MAX_STANDARD_PAGES or questions > MAX_STANDARD_QUESTIONS: return "Over-Limit"
     return "Standard"
 
@@ -99,6 +101,7 @@ MODE_LABELS_AR = {
     "Standard": "⚡ عادي",
     "Over-Limit": "📈 موسّع",
     "Super-PDF": "🚀 معالجة فائقة (PDF كبير)",
+    "Super-Text": "🚀 معالجة فائقة (نص طويل)",
     "Super-Images": "🚀 معالجة فائقة (ألبوم صور كبير)",
     "Cached": "🗃️ من الكاش",
 }
@@ -143,32 +146,17 @@ def build_transparency_text(
     return "\n".join(lines)
 
 def normalize_quiz_option_count(quiz_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Enforce exactly four options while preserving the model's marked correct answer.
-
-    A ready-made exam can contain five choices. Keep the correct choice and the
-    first OPTION_COUNT - 1 incorrect choices (i.e. discard the last incorrect
-    choice), preserving their original order. The normal shuffle happens later
-    and updates correct_option_id again.
-
-    Fail closed if there are too few choices or the answer index is invalid:
-    guessing a correct answer or inventing a distractor would be misleading.
-    """
+    """Validate original exam choices without inventing or deleting options."""
     for question_number, question in enumerate(quiz_data, start=1):
         options = question.get("options")
         correct_index = question.get("correct_option_id")
-        if not isinstance(options, list) or len(options) < OPTION_COUNT:
-            raise ValueError(f"Question {question_number}: expected at least {OPTION_COUNT} options")
+        if not isinstance(options, list) or len(options) < 2:
+            raise ValueError(f"Question {question_number}: expected at least 2 options")
         if type(correct_index) is not int or not 0 <= correct_index < len(options):
             raise ValueError(f"Question {question_number}: invalid correct option index")
         if any(not isinstance(option, str) or not option.strip() for option in options):
             raise ValueError(f"Question {question_number}: empty or invalid option")
 
-        if len(options) > OPTION_COUNT:
-            kept = [i for i in range(len(options)) if i != correct_index][:OPTION_COUNT - 1]
-            kept.append(correct_index)
-            kept.sort()
-            question["options"] = [options[i] for i in kept]
-            question["correct_option_id"] = kept.index(correct_index)
 
     return quiz_data
 
@@ -255,7 +243,7 @@ def build_question_type_label(
     for value, label in QUESTION_TYPE_OPTIONS.get(subject_type, []):
         if value == question_type:
             return label
-    return "🔀 متنوع (بدون تخصيص)"
+    return "📚 أسئلة شاملة عن الدرس"
 
 
 def resolve_quiz_extraction_instruction(subject_type: str, extraction_mode: Optional[str]) -> Optional[str]:
@@ -425,31 +413,57 @@ async def execute_quiz_generation_workflow(
                                        else resolve_quiz_extraction_instruction(subject_type, quiz_extraction_mode))
 
         # 3. استدعى محرك AI
-        quiz_data = await generate_quiz_smart(
-            file_paths=file_paths if is_media else None,
-            pure_text=pure_text if not is_media else None,
-            count=count,
-            skip_cache=True,
-            file_hash=file_hash,
-            status_message=status_message,
-            previous_questions=previous_questions if previous_questions else None,
-            is_math_mode=is_math_mode,
-            english_mode=english_mode,
-            content_language=content_language,
-            difficulty=difficulty,
-            question_type=question_type,
-            custom_question_type_text=custom_question_type_text,
-            quiz_extraction_instruction=quiz_extraction_instruction,
-        )
+        batch_enabled = determine_execution_mode(
+            int(data.get("items_count") or 1), count,
+            is_album=bool(data.get("is_album")),
+            content_source=data.get("content_source"),
+        ) != "Standard"
+        from services.ai.time_budget import quiz_ai_budget, QuizAITimeout
+        try:
+            async with quiz_ai_budget(
+                int(data.get("items_count") or 1), count, is_math=is_math_mode,
+            ) as budget:
+                quiz_data = await generate_quiz_smart(
+                    file_paths=file_paths if is_media else None,
+                    pure_text=pure_text if not is_media else None,
+                    count=count,
+                    skip_cache=True,
+                    file_hash=file_hash,
+                    generation_user_id=user_id,
+                    batch_enabled=batch_enabled,
+                    status_message=status_message,
+                    previous_questions=previous_questions if previous_questions else None,
+                    is_math_mode=is_math_mode,
+                    english_mode=english_mode,
+                    content_language=content_language,
+                    difficulty=difficulty,
+                    question_type=question_type,
+                    custom_question_type_text=custom_question_type_text,
+                    quiz_extraction_instruction=quiz_extraction_instruction,
+                )
+                # Some generation helpers turn provider errors into None.
+                # An expired shared deadline must still reach the refund UI.
+                if budget.remaining() <= 0:
+                    raise QuizAITimeout("Quiz AI deadline exceeded")
+        except QuizAITimeout:
+            log_warning(logger, "QUIZ_AI_DEADLINE_EXCEEDED")
+            return None, None, "ai_timeout", None
 
         if not quiz_data:
             return None, None, "ai_failed", None
 
-        # Five-choice fallback applies ONLY when extracting an existing exam
-        # (quiz_solved / quiz_unsolved). Other generated quiz types retain their
-        # existing validation and are never modified by this extraction-specific
-        # safeguard. Run before shuffle, persistence, image rendering and polls.
-        if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        if quiz_extraction_instruction:
+            # The reviewed count governs extraction, routing and billing alike.
+            # Never pad a short source or persist a silently incomplete exam.
+            if len(quiz_data) < count:
+                metadata = dict(get_last_generation_metadata() or {})
+                metadata.update(requested_count=count, extracted_count=len(quiz_data))
+                return None, None, "extraction_count_mismatch", metadata
+            quiz_data = quiz_data[:count]
+
+        # Validate extracted choices before persistence, rendering and polls.
+        if (subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+                and question_type != QUESTION_TYPE_SIMILAR_MATH):
             try:
                 quiz_data = normalize_quiz_option_count(quiz_data)
             except ValueError as exc:
@@ -480,7 +494,8 @@ async def execute_quiz_generation_workflow(
 
         # 3.5 خلط ترتيب الخيارات لتفادي انحياز الذكاء الاصطناعي لوضع
         #     الإجابة الصحيحة دائماً في نفس الموضع (غالباً الخيار الأول)
-        quiz_data = shuffle_quiz_options(quiz_data)
+        if not quiz_extraction_instruction:
+            quiz_data = shuffle_quiz_options(quiz_data)
 
         # 3.6 تعليم كل سؤال بنمط الكويز المصوّر LaTeX ليتحول التنفيذ لاحقاً
         #     (services/quiz_engine.py) لمسار الصورة + Poll الحروف بدل النص العادي

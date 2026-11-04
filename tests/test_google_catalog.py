@@ -227,7 +227,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SECRET-KEY", str(result))
         fake.aio.aclose.assert_awaited_once()
 
-    async def test_thinking_low_is_3_8_specific_and_consistent_with_adapter(self):
+    async def test_thinking_medium_is_consistent_with_adapter(self):
         from google.genai import types as google_types
         from services.ai.adapters import GoogleAdapter
         from services.ai.contracts import AIRequest
@@ -235,7 +235,7 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(PROBE_TIMEOUT, 24.0)
         fast = classification_config("gemini-3.8-flash", schema, google_types)
         normal = classification_config("gemma-4-31b-it", schema, google_types)
-        self.assertEqual(str(fast.thinking_config.thinking_level).split(".")[-1].upper(), "LOW")
+        self.assertEqual(str(fast.thinking_config.thinking_level).split(".")[-1].upper(), "MEDIUM")
         self.assertIsNone(normal.thinking_config)
 
         fake = Mock()
@@ -246,10 +246,10 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         with patch("google.genai.Client", return_value=fake):
             result = await GoogleAdapter().generate(
                 {"transport": "gemini"}, "KEY", "gemini-3.8-flash",
-                AIRequest(("مسألة رياضيات",), schema))
+                AIRequest(("مسألة رياضيات",), schema, reasoning_effort="medium"))
         self.assertEqual(result.parsed.subject, "math")
         adapter_config = fake.aio.models.generate_content.await_args.kwargs["config"]
-        self.assertEqual(str(adapter_config.thinking_config.thinking_level).split(".")[-1].upper(), "LOW")
+        self.assertEqual(str(adapter_config.thinking_config.thinking_level).split(".")[-1].upper(), "MEDIUM")
         fake.aio.aclose.assert_awaited_once()
         fake.close.assert_called_once()
 

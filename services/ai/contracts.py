@@ -39,6 +39,17 @@ class AIRequest:
     allow_image_sampling: bool = False
     # Trusted task instructions; never place uploaded student content here.
     system_instruction: str | None = None
+    # Only populated by extended/super PDF batches; ordinary requests are unchanged.
+    file_session: Any | None = None
+    # Extended two-part PDFs start on the same configured model/credential,
+    # then each request independently follows the normal cascade on failure.
+    preferred_attempt: tuple[str, str, int] | None = None
+    # Never upload an expanded PDF through the Gemini Files API.
+    inline_only: bool = False
+    # Only explicit extraction EOF may contain a valid empty questions array.
+    allow_empty_questions: bool = False
+    # Task policy, translated to the provider's supported wire format.
+    reasoning_effort: str | None = None
 
     @property
     def capabilities(self):
@@ -55,6 +66,8 @@ class AIResult:
     total_tokens: int = 0
     truncated: bool = False
     sampled: bool = False
+    # Fixed provider completion code for diagnostics; never raw output text.
+    finish_reason: str | None = None
 
     @property
     def usage(self):

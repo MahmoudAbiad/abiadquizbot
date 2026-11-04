@@ -56,8 +56,10 @@ from services.usage_tracking import track_upload_rejection
 from helpers.r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, safe_title, short_token_to_hash
 from validators import validate_file_size, validate_question_count
-from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, InvalidUploadError
+from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS, InvalidUploadError
 from services.redis_reliability import UserLock, user_locked
+from services.generation_eta import GenerationEta, build_processing_text, estimate_generation_eta
+from services.generation_heartbeat import run_processing_heartbeat
 
 # استيراد الخدمات الجديدة
 from services.file_service import compute_combined_hash, download_photos_service, extract_office_text_if_needed
@@ -68,10 +70,13 @@ from services.quiz_service import (
 )
 from services.flow_state import build_state_for_chat  # 🆕 نفس بناء FSMContext اليدوي المستخدم لرفع الصوت عبر الويب
 from services.wallet_errors import WalletDebitError, WALLET_DEBIT_ERROR_TEXT
-from handlers.quiz_runner import start_loaded_quiz
+from handlers.quiz_runner import start_loaded_quiz, _start_loaded_quiz
+from services.excel_import import ExcelImportError, read_quiz_xlsx
 
 logger = get_logger(__name__)
 router = Router()
+# Uploads, photos and free text generate quizzes only in private chats.
+router.message.filter(F.chat.type == "private")
 DOWNLOADS_DIR = "downloads"
 
 
@@ -141,29 +146,14 @@ def _missing_upload_paths(data: Dict[str, Any]) -> List[str]:
     return [path for path in paths if not os.path.exists(path)]
 
 
-async def _run_processing_heartbeat(status_msg: types.Message, interval_seconds: int = 20) -> None:
-    """🩹 يحدّث رسالة "جاري المعالجة" دورياً بوقت منقضي واضح طول مدة انتظار Gemini
-    (يمكن تطول جداً وقت الازدحام - راجع التعليق بمكان الاستدعاء). يُنهى فوراً عبر
-    asyncio.CancelledError بمجرد ما يخلص التوليد (finally بمكان الاستدعاء) - لا داعي
-    لأي شرط خروج آخر. أي فشل بالتعديل (رسالة محذوفة، rate limit...) غير حرج وتم تجاهله."""
-    elapsed = 0
-    try:
-        while True:
-            await asyncio.sleep(interval_seconds)
-            elapsed += interval_seconds
-            minutes = elapsed // 60
-            seconds = elapsed % 60
-            time_label = f"{minutes} دقيقة و{seconds} ثانية" if minutes else f"{seconds} ثانية"
-            try:
-                await status_msg.edit_text(
-                    f"🤖 لسا عم نعالج المستند ونولّد الأسئلة... ({time_label})\n"
-                    "الذكاء الاصطناعي مزدحم شوي حالياً، بس طلبك قيد التنفيذ فعلياً - ما في داعي "
-                    "لإعادة إرسال نفس الملف."
-                )
-            except Exception:
-                pass
-    except asyncio.CancelledError:
-        pass
+async def _run_processing_heartbeat(status_msg: types.Message, eta: Optional[GenerationEta] = None) -> None:
+    """🩹 يحدّث رسالة "جاري المعالجة" دورياً طول مدة انتظار الذكاء الاصطناعي (قد تطول جداً وقت
+    الازدحام). مع تقدير زمني (eta، راجع services/generation_eta.py): كل 5 ثوانٍ مع عدّ تنازلي، ثم
+    كل 15 ثانية بعد تجاوز الوقت المعتاد؛ بلا تقدير: النص العام القديم كل 20 ثانية. القواعد التفصيلية
+    (تخطّي النص المكرر، انتظار retry_after من تيليجرام) بـ services/generation_heartbeat.py. يُنهى فوراً
+    عبر asyncio.CancelledError بمجرد ما يخلص التوليد (finally بمكان الاستدعاء)."""
+    await run_processing_heartbeat(status_msg, eta)
+
 
 async def _renewal_notice(message: types.Message, user_info: Dict[str, Any]) -> None:
     if user_info.get("status") == "renewed":
@@ -275,10 +265,7 @@ async def process_album_background(message: types.Message, state: FSMContext):
         await message.answer("❌ حدث خطأ غير متوقع أثناء تجميع الألبوم.")
 
 DEFAULT_COUNT_SUGGESTIONS = [5, 10, 15, 20]
-# 🆕 يُستخدم فقط كشبكة أمان لو تعذّر على classify_subject رصد عدد تقريبي فعلي لأسئلة
-# اختبار جاهز (quiz_solved/quiz_unsolved) - راجع detected_question_count بالأسفل. ليس
-# قيمة مقترحة تُعرض للطالب كخيار عادي كباقي DEFAULT_COUNT_SUGGESTIONS.
-DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK = 10
+
 
 
 async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[int], state: FSMContext, target_for_send: Optional[types.Message] = None) -> None:
@@ -293,13 +280,21 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     data = await state.get_data()
     items = int(data.get("items_count") or 1)
     is_album = bool(data.get("is_album"))
-    selected_count = int(data.get("selected_question_count") or DEFAULT_COUNT_SUGGESTIONS[1])
+    ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
+    selected_count = int(data.get("selected_question_count") or (0 if ready_exam else DEFAULT_COUNT_SUGGESTIONS[1]))
     count_prompt_text = data.get(
         "count_prompt_text",
         "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟",
     )
 
-    mode = determine_execution_mode(items, selected_count, is_album=is_album)
+    if ready_exam:
+        count_prompt_text = (MSG_QUIZ_DETECTED_COUNT_TEMPLATE.format(count=selected_count)
+                             if selected_count else "تعذر تحديد عدد الأسئلة تلقائياً. اضغط «تعديل عدد الأسئلة» وأدخل العدد الموجود في اختبارك.")
+        notice = data.get("quiz_detection_notice")
+        if notice:
+            count_prompt_text = f"{notice}\n\n{count_prompt_text}"
+
+    mode = determine_execution_mode(items, selected_count, is_album=is_album, content_source=data.get("content_source"))
     cost = await calculate_quiz_points_cost(items, selected_count, is_album)
     difficulty = data.get("difficulty", DIFFICULTY_MEDIUM)
     question_type_label = build_question_type_label(
@@ -308,11 +303,11 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         extraction_mode=data.get("quiz_extraction_mode"),
     )
 
-    ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
     heading = "✅ مراجعة العدد والتكلفة" if ready_exam else "3 من 3 · مراجعة وتوليد"
     text = f"<b>{heading}</b>\n\n{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
-    text += "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك."
-    if mode in ("Super-PDF", "Super-Images"):
+    text += ("\n\nالتكلفة محسوبة على العدد المعتمد أعلاه. يمكنك تعديله قبل بدء الاستخراج."
+             if ready_exam else "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك.")
+    if mode in ("Super-PDF", "Super-Images", "Super-Text"):
         text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
     # 🆕 اختبار جاهز (محلول/غير محلول): لا معنى لأزرار عدد جاهزة عشوائية (5/10/15/20) هنا -
@@ -323,6 +318,9 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         keyboard = get_quiz_detected_count_keyboard(selected_count)
     else:
         keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
+
+    if ready_exam and not selected_count:
+        text = f"<b>{heading}</b>\n\n{count_prompt_text}"
 
     if message_id:
         try:
@@ -349,17 +347,13 @@ async def show_question_count_screen(reply_target: types.Message, state: FSMCont
     التوليد بضغطة واحدة أخيرة، بدل شاشتين منفصلتين كما كان سابقاً). count_prompt_text
     مخزَّن مسبقاً بالحالة (وُضع هناك من ask_question_count عند نقطة الدخول الأصلية).
 
-    🆕 اختبار جاهز (محلول/غير محلول): لا نسأل الطالب "كم سؤالاً تريد؟" (لا معنى له - عدد
-    الأسئلة محدَّد فعلياً بالمستند نفسه وليس اختياراً حراً). بدلاً من ذلك نستخدم العدد
-    التقريبي المرصود آلياً (detected_question_count، وُضع بالحالة من classify_subject عبر
-    handlers/files.py.ask_question_count) كعدد افتراضي مباشر لحساب التكلفة، ونعرض نص
-    "رصدنا ما يقارب N سؤال" بدل نص السؤال المعتاد - راجع get_quiz_detected_count_keyboard
-    بـ keyboards.py للكيبورد المصاحب (بدون أزرار عدد جاهزة).
+    للاختبار الجاهز نبدأ بالعدد المكتشف، ونحافظ على تصحيح المستخدم عند مراجعة الشاشة.
+    إذا تعذّر العدّ التلقائي، يبقى البدء معطلاً حتى يدخل المستخدم عدداً صالحاً.
     """
     data = await state.get_data()
     subject_type = data.get("subject_type")
     if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH:
-        detected_count = int(data.get("detected_question_count") or DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK)
+        detected_count = int(data.get("selected_question_count") or data.get("detected_question_count") or 0)
         notice = data.get("quiz_detection_notice")
         count_text = MSG_QUIZ_DETECTED_COUNT_TEMPLATE.format(count=detected_count)
         await state.update_data(
@@ -416,27 +410,18 @@ async def _proceed_to_quiz_solved_screen(reply_target: types.Message, state: FSM
 
 
 async def _proceed_to_quiz_unsolved_screen(reply_target: types.Message, state: FSMContext, edit: bool = True) -> None:
-    """
-    🆕 اختبار غير محلول: لا تخيير إطلاقاً (لا توجد إجابات أصلاً لاعتمادها) - ينتقل الطالب
-    مباشرة لشاشة تأكيد خصم النقاط (شاشة عدد الأسئلة)، مع حفظ رسالة التنويه بأن الحل سيكون
-    بالذكاء الاصطناعي لتُدمج هناك بنص العدد المرصود وتكلفته. مستخرجة كدالة مستقلة لنفس سبب
-    _proceed_to_quiz_solved_screen أعلاه (راجعها).
-    """
+    """Offer extraction or new generation for every unsolved subject."""
     data = await state.get_data()
-    if data.get("content_subject_type") == SUBJECT_MATH:
-        await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
-        text = "🗂️ <b>هذا المحتوى اختبار رياضيات جاهز بلا إجابات مرفقة.</b>\n\nاختر استخراج أسئلته وحلّها، أو إنشاء مسائل جديدة بنفس النمط."
-        keyboard = get_quiz_extraction_choice_keyboard(is_math=True, solved=False)
-        if edit:
-            await reply_target.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
-        else:
-            await reply_target.answer(text, parse_mode="HTML", reply_markup=keyboard)
-        return
-    await state.update_data(
-        quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE,
-        quiz_detection_notice=MSG_QUIZ_UNSOLVED_DETECTED,
-    )
-    await show_question_count_screen(reply_target, state, edit=edit)
+    await state.update_data(quiz_detection_notice=None)
+    await state.set_state(QuizState.waiting_for_quiz_extraction_choice)
+    text = ("🗂️ <b>وجدنا أسئلة جاهزة بلا إجابات مرفقة.</b>\n\n"
+            "نحوّل الأسئلة المؤتمتة والتقليدية القابلة للتحويل إلى أتمتة. نستبعد الإنشاء والمهمات المفتوحة الواسعة. اختر أجوبة الذكاء الاصطناعي أو توليد أسئلة جديدة من المحتوى.")
+    keyboard = get_quiz_extraction_choice_keyboard(
+        is_math=data.get("content_subject_type") == SUBJECT_MATH, solved=False)
+    if edit:
+        await reply_target.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await reply_target.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def ask_question_count(
@@ -568,9 +553,10 @@ async def ask_question_count(
         # فور معرفته، بغض النظر عن مسار الشاشات اللاحق (تخيير محلول/انتقال مباشر لغير
         # محلول) - كلاهما ينتهي عند show_question_count_screen التي تقرأه لاحقاً بدل
         # سؤال الطالب "كم سؤالاً تريد؟" بأزرار عدد عشوائية (راجع التعليق هناك).
-        detected_count = classification.question_count or DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
-        detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
-        await state.update_data(detected_question_count=detected_count)
+        detected_count = classification.question_count
+        if detected_count is not None:
+            detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
+        await state.update_data(detected_question_count=detected_count, selected_question_count=detected_count)
 
         # 🆕 اختبار جاهز بمادة إنجليزي/فرنسي (content_subject - راجع services/subject_classifier.py):
         # نعرض شاشة اختيار "مترجمة/بدون ترجمة" أولاً (نفس شاشة المواد العادية بالأسفل)
@@ -775,9 +761,11 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 
         ensure_directory_exists(DOWNLOADS_DIR)
 
-        if message.photo:
-            photo = message.photo[-1]
-            current = {"file_id": photo.file_id, "file_unique_id": photo.file_unique_id, "file_size": photo.file_size}
+        document_extension = os.path.splitext(message.document.file_name or "")[1].lower() if message.document else ""
+        if message.photo or document_extension in TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS:
+            photo = message.photo[-1] if message.photo else message.document
+            current = {"file_id": photo.file_id, "file_unique_id": photo.file_unique_id, "file_size": photo.file_size,
+                       "extension": ".jpg" if message.photo else document_extension}
             if message.media_group_id:
                 group_id = message.media_group_id
                 await redis_client.rpush(f"album_list:{group_id}", json.dumps(current))
@@ -791,6 +779,8 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                 file_paths, err = await download_photos_service(message.from_user.id, [current])
                 if err or not file_paths:
                     track_upload_rejection(message.from_user.id, "image", "download_failed", "telegram")
+                    if err:
+                        await message.answer(err)
                     return
                 file_hash = await asyncio.to_thread(compute_combined_hash, file_paths)
                 await _finalize_media_processing(message, state, file_paths, "كويز من صورة", 1, False, file_hash, content_source="images")
@@ -815,11 +805,19 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
                     await message.answer(error)
                 return
             failure_stage = "file_type_validation"
-            extension = supported_extension(message.document.file_name, DOCUMENT_EXTENSIONS)
+            if document_extension == ".xls":
+                track_upload_rejection(message.from_user.id, "document", "unsupported_type", "telegram")
+                await message.answer("❌ احفظ ملف Excel بصيغة .xlsx ثم أعد إرساله للبوت.")
+                return
+            extension = supported_extension(message.document.file_name, DOCUMENT_EXTENSIONS | {".xlsx"})
             title = os.path.splitext(message.document.file_name)[0]
             destination = os.path.join(DOWNLOADS_DIR, f"{message.from_user.id}_{uuid.uuid4().hex}{extension}")
             failure_stage = "telegram_download"
             await bot.download(message.document, destination=destination)
+
+            if extension == ".xlsx":
+                await _import_excel_quiz(message, state, destination, title)
+                return
             
             failure_stage = "content_validation"
             items = await asyncio.to_thread(validate_document, destination)
@@ -842,6 +840,8 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
 
             transferred = True
 
+    except ExcelImportError as exc:
+        await message.answer(f"❌ {exc}", parse_mode=None)
     except Exception as exc:
         reason = {
             "file_type_validation": "unsupported_type",
@@ -858,6 +858,14 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
     finally:
         if destination and not transferred:
             safe_file_cleanup(destination)
+
+
+async def _import_excel_quiz(message, state, path, title):
+    # handle_media owns the user lock; do not reacquire start_loaded_quiz's lock.
+    title, questions = await asyncio.to_thread(read_quiz_xlsx, path, title)
+    await state.set_data({"input_type": "excel", "content_source": "xlsx", "input_channel": "telegram"})
+    await message.answer(f"✅ تم استيراد {len(questions)} سؤالاً من Excel مع الإجابات. سيبدأ الكويز الآن، دون خصم نقاط.")
+    await _start_loaded_quiz(message, state, questions, title, origin="excel_import")
 
 @router.message(StateFilter(None, QuizState.answering_quiz), F.text, ~F.text.startswith("/"), F.text != ".")
 @user_locked()
@@ -956,6 +964,25 @@ async def _apply_quiz_extraction_choice(call: types.CallbackQuery, state: FSMCon
         return
     await state.update_data(quiz_extraction_mode=extraction_mode, question_type=QUESTION_TYPE_GENERAL, custom_question_type_text=None)
     await show_question_count_screen(call.message, state, edit=True)
+
+@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_generate_new")
+async def handle_quiz_generate_new(call: types.CallbackQuery, state: FSMContext) -> None:
+    """Reuse detection and suggestions, but start ordinary generation, not extraction."""
+    data = await state.get_data()
+    if data.get("subject_type") not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        await call.answer()
+        return
+    await state.update_data(
+        subject_type=data.get("content_subject_type") or SUBJECT_OTHER,
+        quiz_extraction_mode=None, quiz_detection_notice=None,
+        question_type=QUESTION_TYPE_GENERAL, custom_question_type_text=None,
+        difficulty=DIFFICULTY_MEDIUM, detected_question_count=None,
+        selected_question_count=None, review_count_to_restore=None,
+        count_prompt_text="📝 كم سؤالاً جديداً تريد توليده من هذا المحتوى؟",
+    )
+    await _show_quiz_options_screen(call.message, state, edit=True)
+    await call.answer()
+
 
 @router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_generate_similar_math")
 async def handle_quiz_generate_similar_math(call: types.CallbackQuery, state: FSMContext) -> None:
@@ -1073,6 +1100,11 @@ async def handle_cache_no(call: types.CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(QuizState.waiting_for_count, F.data.startswith("qcount_pick_"))
 async def handle_count_pick(call: types.CallbackQuery, state: FSMContext) -> None:
     """اختيار عدد من الأزرار السريعة (toggle) - يحدّث نفس الشاشة (سعر + زر البدء) فوراً."""
+    data = await state.get_data()
+    if (data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+            and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
+        await call.answer("عدد أسئلة الاختبار يُحدّد تلقائياً من محتواه.")
+        return
     try:
         count = int(call.data.replace("qcount_pick_", "", 1))
         valid, error = validate_question_count(count)
@@ -1283,7 +1315,7 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
                 return
 
         cost = await calculate_quiz_points_cost(items, count, is_album)
-        mode = determine_execution_mode(items, count, is_album=is_album)
+        mode = determine_execution_mode(items, count, is_album=is_album, content_source=data.get("content_source"))
         user_info = await _current_user(call.message, call.from_user)
 
         deduction = None
@@ -1336,7 +1368,17 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         except Exception:
             pass
 
-        status_msg = await call.message.answer(MSG_PROCESSING)
+        # 🆕 رسالة الانتظار بتقدير زمني (services/generation_eta.py). تجميلي بحت: أي فشل بالتقدير يُبقي
+        # النص القديم (MSG_PROCESSING ثم نص النبضة العام) ولا يؤثر على التوليد أو الخصم أو الاسترجاع.
+        eta = None
+        initial_text = MSG_PROCESSING
+        try:
+            eta = estimate_generation_eta(data, items, count, mode, is_album=is_album)
+            initial_text = build_processing_text(0, eta)
+        except Exception as exc:
+            eta = None
+            log_warning(logger, f"Generation ETA unavailable, using the generic waiting message: {exc}")
+        status_msg = await call.message.answer(initial_text)
 
         # (ملاحظة: قفل processing_file_quiz صار يُفعَّل فوراً بأول الدالة فوق - راجع
         # التعليق هناك - قبل أي await بطيء، وليس هون بعد الخصم والحذف والإرسال).
@@ -1347,11 +1389,45 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # الملف الموصوف فوق). heartbeat خفيف هون بيحدّث نفس الرسالة كل ~20 ثانية بوقت
         # منقضي واضح، بلا أي تأثير على منطق التوليد نفسه - يُلغى تلقائياً بمجرد انتهاء
         # execute_quiz_generation_workflow (نجاحاً أو فشلاً) عبر finally.
-        heartbeat_task = asyncio.create_task(_run_processing_heartbeat(status_msg))
+        heartbeat_task = asyncio.create_task(_run_processing_heartbeat(status_msg, eta))
         try:
-            quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(call.from_user.id, data, count, status_msg)
+            # status_message=None عمداً: أنيميشن helpers/gemini_helper/loading.py كان يكتب على نفس الرسالة
+            # ويمحو التوقيت خلال 3 ثوانٍ؛ النبضة أعلاه هي المحرّك الوحيد الآن (docs/generation-eta-policy.md).
+            quiz_data, new_quiz_id, error_code, generation_meta = await execute_quiz_generation_workflow(call.from_user.id, data, count, None)
         finally:
             heartbeat_task.cancel()
+
+        if error_code in ("extraction_count_mismatch", "ai_timeout"):
+            if charged_this_attempt:
+                await refund_user_on_failure(call.from_user.id, data)
+                charged_this_attempt = False
+                refunded_this_attempt = True
+            _track_quiz_generation_failure(
+                call.from_user.id, data, error_code,
+                refund_status="refunded" if refunded_this_attempt else "not_charged",
+                cost=cost, requested_count=count, items_count=items, mode=mode,
+                generation_meta=generation_meta,
+            )
+            await _clear_quiz_charge_markers(state)
+            preserve_upload = True
+            await state.set_state(QuizState.waiting_for_count)
+            actual_count = (generation_meta or {}).get("extracted_count", 0)
+            if error_code == "ai_timeout":
+                await status_msg.edit_text(
+                    "⏳ استغرقت خدمة توليد الأسئلة وقتاً أطول من المهلة المخصصة لطلبك.\n"
+                    "أوقفنا المحاولة وأرجعنا نقاطك. ملفك محفوظ؛ يمكنك إعادة المحاولة "
+                    "أو تقليل عدد الأسئلة."
+                )
+            else:
+                await status_msg.edit_text(
+                    f"⚠️ تمكّنا من استخراج {actual_count} سؤال من أصل {count} معتمداً.\n"
+                    "لم نبدأ كويزاً ناقصاً، وتم إرجاع نقاطك. "
+                    "تحقق من الاختبار وعدّل العدد أو أعد المحاولة."
+                )
+            await _render_question_count_screen(
+                call.bot, call.message.chat.id, None, state, target_for_send=call.message,
+            )
+            return
 
         if error_code == "unreadable_office":
             if charged_this_attempt:
@@ -1449,6 +1525,14 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
         # لأي خطأ UI/Telegram لاحق أن يحوّل نجاحاً فعلياً إلى refund خاطئ.
         charged_this_attempt = False
         await _clear_quiz_charge_markers(state)
+
+        if (data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+                and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
+            await call.message.answer(
+                f"✅ أصبح الاختبار جاهزاً: {len(quiz_data)} سؤال اختيار من متعدد.\n"
+                "يشمل الأسئلة الأصلية المؤتمتة والتقليدية التي أمكن تحويلها؛ "
+                "ولا يشمل الإنشاء أو المهمات المفتوحة التي لا يحافظ تحويلها على المهارة."
+            )
 
         # Generation already owns UserLock; do not try to acquire it twice.
         await start_loaded_quiz.__wrapped__(call, state, quiz_data, data.get("source_title", "كويز"), origin="file" if data.get("input_type") == "media" else "text", quiz_id=new_quiz_id)

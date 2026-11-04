@@ -28,10 +28,16 @@ MODULE: صلاحية "أدمن/مالك الغروب" - بوابة بدء وإد
 
 from typing import Any, Optional
 
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+)
 
 from config import bot, redis_client
 from logger import get_logger, log_error
+from services.group_quiz_store import migrate_chat_id, resolve_chat_id
 
 logger = get_logger(__name__)
 
@@ -62,7 +68,7 @@ def _decode_cached(raw: Any) -> bool:
     return str(raw) == "1"
 
 
-async def is_group_admin(chat_id: int, user_id: Optional[int]) -> bool:
+async def is_group_admin(chat_id: int, user_id: Optional[int], *, fresh: bool = False) -> bool:
     """يتحقق إذا كان `user_id` أدمن أو مالك بالغروب `chat_id`.
 
     fail-closed: أي غموض (مستخدم مجهول، خطأ شبكة، البوت مطرود من الغروب)
@@ -74,35 +80,57 @@ async def is_group_admin(chat_id: int, user_id: Optional[int]) -> bool:
     if user_id == GROUP_ANONYMOUS_BOT_ID:
         return False
 
+    chat_id = await resolve_chat_id(chat_id)
     key = _cache_key(chat_id, user_id)
 
     # 1) الكاش أولاً - أي عطل بـ Redis ما بيمنع الفحص، منكمل لتيليجرام مباشرة.
     try:
-        cached = await redis_client.get(key)
-        if cached is not None:
+        cached = None if fresh else await redis_client.get(key)
+        if cached is not None and not fresh:
             return _decode_cached(cached)
     except Exception as e:
         log_error(logger, f"Redis error reading admin cache for {chat_id}:{user_id} (falling back to Telegram): {e}")
 
     # 2) المصدر الحقيقي: تيليجرام.
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        # `member.status` بـ aiogram 3 هو ChatMemberStatus (str enum)، فالمقارنة
-        # مع نصوص عادية شغّالة بلا تحويل.
-        result = str(member.status) in ADMIN_STATUSES
-    except (TelegramBadRequest, TelegramForbiddenError) as e:
-        # إجابة نهائية فعلياً من تيليجرام: المستخدم مش بالغروب، أو الغروب غير
-        # صالح، أو البوت مطرود/محظور. منخزّنها بالكاش عادي.
-        log_error(logger, f"Telegram rejected get_chat_member({chat_id}, {user_id}): {e}")
-        result = False
-    except TelegramAPIError as e:
-        # عطل عابر (شبكة/rate limit/خطأ سيرفر) - منرفض هالمرة **بلا تخزين**،
-        # حتى ما نقفل الصلاحية على المعلّم 5 دقايق كاملة بسبب ومضة واحدة.
-        log_error(logger, f"Transient Telegram error on get_chat_member({chat_id}, {user_id}): {e}")
-        return False
-    except Exception as e:
-        log_error(logger, f"Unexpected error on get_chat_member({chat_id}, {user_id}): {e}")
-        return False
+    result = False
+    for attempt in range(2):
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            # `member.status` بـ aiogram 3 هو ChatMemberStatus (str enum)، فالمقارنة
+            # مع نصوص عادية شغّالة بلا تحويل.
+            result = str(member.status) in ADMIN_STATUSES
+            break
+        except TelegramMigrateToChat as e:
+            migrated_chat_id = int(e.migrate_to_chat_id)
+            if attempt:
+                logger.warning(
+                    "Telegram returned repeated chat migration %s->%s while checking user %s",
+                    chat_id, migrated_chat_id, user_id,
+                )
+                return False
+            try:
+                await migrate_chat_id(chat_id, migrated_chat_id)
+            except Exception as migration_error:
+                logger.warning(
+                    "Could not persist Telegram chat migration %s->%s: %s",
+                    chat_id, migrated_chat_id, migration_error,
+                )
+            chat_id = await resolve_chat_id(migrated_chat_id)
+            key = _cache_key(chat_id, user_id)
+        except (TelegramBadRequest, TelegramForbiddenError) as e:
+            # إجابة نهائية فعلياً من تيليجرام: المستخدم مش بالغروب، أو الغروب غير
+            # صالح، أو البوت مطرود/محظور. منخزّنها بالكاش عادي.
+            log_error(logger, f"Telegram rejected get_chat_member({chat_id}, {user_id}): {e}")
+            result = False
+            break
+        except TelegramAPIError as e:
+            # عطل عابر (شبكة/rate limit/خطأ سيرفر) - منرفض هالمرة **بلا تخزين**،
+            # حتى ما نقفل الصلاحية على المعلّم 5 دقايق كاملة بسبب ومضة واحدة.
+            log_error(logger, f"Transient Telegram error on get_chat_member({chat_id}, {user_id}): {e}")
+            return False
+        except Exception as e:
+            log_error(logger, f"Unexpected error on get_chat_member({chat_id}, {user_id}): {e}")
+            return False
 
     # 3) تخزين النتيجة (إيجابية كانت أو سلبية) لتقليل نداءات تيليجرام.
     try:

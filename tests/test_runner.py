@@ -54,6 +54,16 @@ class CoreTests(unittest.TestCase):
         with patch.dict(os.environ,env,clear=True):self.assertTrue(enabled())
         for change in [{'RENDER_GIT_BRANCH':'master'},{'SUPABASE_URL':'https://prod.supabase.co'},{'RUNNER_TEST_SUPABASE_REF':''},{'RUNNER_ENABLED':'0'}]:
             with patch.dict(os.environ,{**env,**change},clear=True):self.assertFalse(enabled())
+    def test_production_requires_explicit_readiness_and_verified_identity(self):
+        env={'RUNNER_ENABLED':'1','APP_BRANCH':'master','SUPABASE_URL':'https://pqawoanhbgvdtbdhnbod.supabase.co',
+             'RUNNER_PRODUCTION_READY':'1','RUNNER_PRODUCTION_SUPABASE_REF':'pqawoanhbgvdtbdhnbod'}
+        with patch.dict(os.environ,env,clear=True):self.assertTrue(enabled())
+        for change in [{'RUNNER_PRODUCTION_READY':'0'},{'RUNNER_PRODUCTION_READY':''},
+                       {'RUNNER_PRODUCTION_SUPABASE_REF':'testref'},{'APP_BRANCH':'test'},
+                       {'SUPABASE_URL':'https://testref.supabase.co'},{'SUPABASE_URL':'http://pqawoanhbgvdtbdhnbod.supabase.co'},
+                       {'RUNNER_ENABLED':'0'}]:
+            with patch.dict(os.environ,{**env,**change},clear=True):self.assertFalse(enabled())
+
     def test_legacy_schema_tolerates_missing_or_invalid_time(self):
         spec=importlib.util.spec_from_file_location('runner_schema','helpers/gemini_helper/schemas.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
         for value in [None,'bad',True,-10,10000,float('inf')]:

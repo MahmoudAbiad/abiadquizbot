@@ -183,6 +183,41 @@ class ErrorCodeTests(APITests):
         self.row['issued_at']=None
         with self.assertRaises(HTTPException) as err:await api.answer(self.request(option_id=1))
         self.assertEqual(err.exception.status_code,422);self.assertEqual(self.row['version'],0)
+    async def test_admin_switch_blocks_admission_but_preserves_owned_round(self):
+        real = self.patches[1]
+        real.stop()
+        redis = types.SimpleNamespace(incr=AsyncMock(return_value=1), expire=AsyncMock())
+        cfg = types.SimpleNamespace(bot=types.SimpleNamespace(token='t'), redis_client=redis, ADMIN_ID=99)
+        try:
+            with patch.object(api, 'enabled', return_value=True), patch.dict(sys.modules, {'config':cfg}), \
+                 patch.object(api, 'verify_telegram_init_data', return_value=(True, {'id':7})), \
+                 patch.object(api, 'accepting_new_rounds', new=AsyncMock(return_value=False)):
+                req = self.request(option_id=1)
+                req.init_data = 'auth_date=1'
+                with self.assertRaises(HTTPException) as err:
+                    await api.start(req)
+                self.assertEqual(self.code(err), 'runner_disabled')
+                self.assertEqual(self.row['status'], 'running')
+                self.assertEqual(len(self.db.rows['runner_rounds']), 1)
+                await api.question(req)
+                await api.ready(req)
+                result = await api.answer(req)
+                self.assertIn('version', result)
+                await api.finish(req)
+                with patch.object(api, 'verify_telegram_init_data', return_value=(True, {'id':8})):
+                    with self.assertRaises(HTTPException) as err:
+                        await api.question(req)
+                self.assertEqual(err.exception.status_code, 404)
+                self.row['expires_at'] = '2000-01-01T00:00:00+00:00'
+                with self.assertRaises(HTTPException) as err:
+                    await api.identity(req, existing_round=True)
+                self.assertEqual(err.exception.status_code, 410)
+                self.row['expires_at'] = (datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()
+                with patch.object(api, 'accepting_new_rounds', new=AsyncMock(return_value=True)):
+                    self.assertEqual(await api.identity(req), 7)
+        finally:
+            real.start()
+
     async def test_auth_and_rate_limit_codes(self):
         real=self.patches[1];real.stop()
         try:

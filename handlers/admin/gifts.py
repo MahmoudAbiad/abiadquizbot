@@ -12,6 +12,7 @@ from helpers.supabase_helper._client import supabase
 from helpers.supabase_helper.gifts import new_code, create_code, list_gifts
 from services.gift_presentation import parse_expiry, expiry_text, gift_text
 from services.gift_campaigns import campaign_report, campaign_report_buttons
+from services.gift_links import build_gift_link
 from services.redis_reliability import user_locked
 from .dashboard import IsAdminFilter, safe_edit_text
 
@@ -177,7 +178,7 @@ async def confirm(call,state:FSMContext):
         return
     row=await create_code(draft)
     await state.clear()
-    await safe_edit_text(call.message,'✅ تم إنشاء الكود\n\n'+code_text(row),reply_markup=kb([('تفاصيل الكود',f"ag:view:{row['id']}")],[('الأكواد','ag:home:0')]))
+    await safe_edit_text(call.message,'✅ تم إنشاء الكود\n\n'+code_text(row),reply_markup=kb([('🔗 رابط الشحن التلقائي',f"ag:link:{row['id']}")],[('تفاصيل الكود',f"ag:view:{row['id']}")],[('الأكواد','ag:home:0')]))
     await call.answer()
 
 
@@ -190,7 +191,7 @@ async def view(call):
         return
     c=response.data[0]
     ready = 'archived_at' in c
-    buttons = [[('👥 المستفيدون',f'ag:users:{code_id}:0')]]
+    buttons = [[('🔗 رابط الشحن التلقائي',f'ag:link:{code_id}')], [('👥 المستفيدون',f'ag:users:{code_id}:0')]]
     if c.get('archived_at'):
         buttons.append([('↩️ استعادة من الأرشيف', f'ag:action:restore:{code_id}')])
     elif not c.get('gifts_revoked_at'):
@@ -205,6 +206,39 @@ async def view(call):
         buttons.append([('🗑 حذف الكود غير المستخدم', f'ag:action:delete:{code_id}')])
     buttons.append([('🔙 الأكواد','ag:home:0')])
     await safe_edit_text(call.message,code_text(c)+'\n\nإيقاف الكود وأرشفته يمنعان الشحن الجديد؛ الهدايا المشحونة تبقى بصلاحيتها.\nإلغاء هدايا الكود للجميع يلغي المتبقي منها، ولا يمس أرصدة أخرى.',reply_markup=kb(*buttons))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith('ag:link:'))
+async def gift_link(call):
+    """Display and copy a channel-ready URL; never redeem it as the admin."""
+    code_id = call.data.split(':')[-1]
+    result = await supabase.table('gift_codes').select('*').eq('id', code_id).limit(1).execute()
+    if not result.data:
+        await call.answer('الكود غير موجود أو تم حذفه.', show_alert=True)
+        return
+    c = result.data[0]
+    me = await call.bot.get_me()
+    try:
+        link = build_gift_link(me.username, c['code'])
+    except ValueError:
+        await call.answer('هذا الكود غير مناسب لرابط تيليغرام. يمكنك شحنه يدوياً.', show_alert=True)
+        return
+    buttons = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text='📋 نسخ رابط الشحن', copy_text=types.CopyTextButton(text=link))],
+        [types.InlineKeyboardButton(text='🔙 تفاصيل الكود', callback_data=f"ag:view:{code_id}")],
+    ])
+    note = ('\n\n⚠️ الكود موقوف أو مؤرشف حالياً؛ الرابط لن يشحن نقاطاً حتى يُفعّل.'
+            if not c.get('enabled', True) or c.get('archived_at') or c.get('gifts_revoked_at') else '')
+    await safe_edit_text(
+        call.message,
+        code_text(c) + '\n\n🔗 <b>رابط الاسترداد التلقائي:</b>\n<code>' + escape(link) +
+        '</code>\n\nانسخ الرابط، ثم ضعه في زر رابط ضمن منشور القناة. '
+        'عند فتحه في محادثة البوت، تُشحن الهدية تلقائياً إن كانت صالحة. '
+        'قد يطلب تيليغرام من الطالب الضغط على Start أولاً. '
+        'الرابط قابل للمشاركة خارج القناة أيضاً.' + note,
+        reply_markup=buttons,
+    )
     await call.answer()
 
 

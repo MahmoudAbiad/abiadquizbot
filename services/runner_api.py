@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from typing import Literal
 from services.runner_core import enabled, verify_launch, build_questions, answer_transition
 from services.quiz_timing import question_key, valid_time
+from services.runner_availability import accepting_new_rounds
 from telegram_webapp_auth import verify_telegram_init_data
 
 router = APIRouter(prefix='/api/runner')
@@ -93,9 +94,9 @@ def db():
     return supabase
 
 
-async def identity(payload, cost='read'):
+async def identity(payload, cost='read', *, existing_round=False):
     if not enabled():
-        raise fail(503, 'اللعبة لم تُفعّل على بيئة الاختبار بعد.', 'auth')
+        raise fail(503, 'اللعبة غير متاحة حالياً.', 'auth')
     from config import bot, redis_client
     ok, user = verify_telegram_init_data(payload.init_data, bot.token, max_age_seconds=7200)
     if not ok:
@@ -114,6 +115,11 @@ async def identity(payload, cost='read'):
         raise HTTPException(503, 'تعذر التحقق من الجلسة. حاول لاحقاً.')
     if count > (4 if cost == 'start' else 2 if cost == 'ai' else 90):
         raise fail(429, 'طلبات كثيرة؛ انتظر قليلاً.', 'rate_limited')
+    if existing_round:
+        # Validate ownership, quiz binding and expiry even while admission is off.
+        await round_row(payload, uid)
+    elif not await accepting_new_rounds():
+        raise fail(503, 'بدء جولات جديدة موقوف حالياً.', 'runner_disabled')
     return uid
 
 
@@ -272,7 +278,7 @@ async def equip(payload: EquipRequest):
 
 @router.post('/track')
 async def begin_track(payload: TrackRequest):
-    uid = await identity(payload)
+    uid = await identity(payload, existing_round=True)
     await access(payload, uid)
     row = await round_row(payload, uid)
     from config import bot
@@ -287,7 +293,7 @@ async def begin_track(payload: TrackRequest):
 
 @router.post('/coins')
 async def claim_coins(payload: CoinsRequest):
-    uid = await identity(payload)
+    uid = await identity(payload, existing_round=True)
     # A saved claim stays retryable after an answer/finish, until the round expires.
     # Ownership and expiry are checked again inside the credit transaction.
     await round_row(payload, uid)
@@ -304,7 +310,7 @@ async def claim_coins(payload: CoinsRequest):
 
 @router.post('/question')
 async def question(payload: RoundRequest):
-    uid = await identity(payload)
+    uid = await identity(payload, existing_round=True)
     await access(payload, uid)
     row = await round_row(payload, uid)
     if row['status'] != 'running':
@@ -340,7 +346,7 @@ def remaining_seconds(q, issued_at):
 @router.post('/ready')
 async def ready(payload: RoundRequest):
     """Idempotently start the clock after the browser has decoded required images."""
-    uid = await identity(payload)
+    uid = await identity(payload, existing_round=True)
     await access(payload, uid)
     row = await round_row(payload, uid)
     if row['status'] != 'running':
@@ -364,7 +370,7 @@ async def ready(payload: RoundRequest):
 
 @router.post('/answer')
 async def answer(payload: RoundRequest):
-    uid = await identity(payload)
+    uid = await identity(payload, existing_round=True)
     await access(payload, uid)
     row = await round_row(payload, uid)
     # Retry after network loss returns the already committed result.
@@ -390,7 +396,7 @@ async def answer(payload: RoundRequest):
 
 @router.post('/finish')
 async def finish(payload: RoundRequest):
-    uid = await identity(payload)
+    uid = await identity(payload, existing_round=True)
     row = await round_row(payload, uid)
     await db().table('runner_rounds').update({'status':'abandoned','finished_at':datetime.now(timezone.utc).isoformat()}).eq('id',row['id']).eq('status','running').execute()
     return {'score':row['score']}

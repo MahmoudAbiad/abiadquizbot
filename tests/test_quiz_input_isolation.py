@@ -6,7 +6,7 @@ import os
 import types
 import typing
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import BaseModel, Field
 
@@ -80,6 +80,21 @@ class QuizInputIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.message.answer = AsyncMock(return_value=self.message)
         self.message.edit_text = AsyncMock()
 
+    async def test_english_lesson_and_english_exam_both_show_translation_choice(self):
+        schema = self.classifier['SubjectClassification']
+        for subject in ('english', 'quiz_solved', 'quiz_unsolved'):
+            with self.subTest(subject=subject):
+                self.classifier['_classify_media'].return_value = schema(
+                    subject=subject, content_subject='english', question_count=10,
+                    suggested_types=['مفردات الدرس', 'فهم المقروء'])
+                state = State()
+                self.message.edit_text.reset_mock()
+                await self.finalize(state, file_hash='english-' + subject)
+                self.assertEqual(state.current, 'translation')
+                self.assertEqual(self.message.edit_text.await_args.args[0],
+                                 constants.MSG_ENGLISH_CONTENT_DETECTED)
+                self.env['_show_quiz_options_screen'].assert_not_awaited()
+
     def completed(self):
         return State({'pure_text': 'Old English lesson about grammar and verbs.',
             'file_hash': 'previous-document', 'cached_office_text': 'Old office document',
@@ -109,6 +124,16 @@ class QuizInputIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(key, first.data)
         self.assertEqual(second.data['input_channel'], 'web_upload')
         self.assertEqual(self.classifier['_classify_media'].await_count, 1)
+
+    async def test_changing_detection_effort_does_not_reuse_previous_cached_estimate(self):
+        effort = AsyncMock(return_value="medium")
+        with patch('helpers.settings_helper.get_ai_thinking_level', effort):
+            await self.finalize(State())
+            await self.finalize(State())
+            self.assertEqual(self.classifier['_classify_media'].await_count, 1)
+            effort.return_value = "high"
+            await self.finalize(State())
+            self.assertEqual(self.classifier['_classify_media'].await_count, 2)
 
     async def test_new_pdf_ignores_old_cache_version(self):
         self.cache['subject_classify:v2:new-pdf'] = json.dumps({'subject': 'english'})
@@ -190,7 +215,8 @@ class QuizInputIsolationTests(unittest.IsolatedAsyncioTestCase):
         deps = {**self.env, '_HEAVY_PROCESSING_SEMAPHORE': asyncio.Semaphore(1),
                 'generate_quiz_smart': AsyncMock(return_value=None),
                 'resolve_generation_question_type_text': Mock(return_value=None),
-                'resolve_quiz_extraction_instruction': Mock(return_value=None)}
+                'resolve_quiz_extraction_instruction': Mock(return_value=None),
+                'determine_execution_mode': lambda *args, **kw: 'Standard'}
         generation = load_functions('services/quiz_service.py', {'execute_quiz_generation_workflow'}, **deps)
         await generation['execute_quiz_generation_workflow'](101, state.data, 5, self.message)
         sent = deps['generate_quiz_smart'].await_args.kwargs

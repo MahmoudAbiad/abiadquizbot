@@ -110,7 +110,13 @@ async def offer_transition(state, user_id, chat_id, action):
 
 def message_action(message, kind):
     return {"kind": kind, "album": message.media_group_id,
-            "messages": [message.model_dump(mode="json", exclude_none=True)]}
+            # Aiogram uses Default sentinel objects for unset nested options
+            # (for example LinkPreviewOptions).  They are not JSON serializable;
+            # keeping only fields received from Telegram preserves the message
+            # needed for replay without persisting those SDK defaults.
+            "messages": [message.model_dump(
+                mode="json", exclude_none=True, exclude_unset=True
+            )]}
 
 
 async def show_upload(chat_id, kind="all"):

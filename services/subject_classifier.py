@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
 # v2 could associate a retained text input with a newly uploaded file's hash.
 # Ignore those temporary results without deleting votes, locks or saved quizzes.
-_CLASSIFY_CACHE_PREFIX = "subject_classify:v3:"
+_CLASSIFY_CACHE_PREFIX = "subject_classify:v7:"
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
 _VALID_SUBJECTS = {
@@ -77,7 +77,7 @@ class SubjectClassification(BaseModel):
     question_count: Optional[int] = Field(
         default=None,
         description=(
-            "approximate count of actual questions found in the document; only set when "
+            "count of actual convertible questions counted in the document, not a guess; only set when "
             "subject is quiz_solved or quiz_unsolved, otherwise null"
         ),
     )
@@ -96,13 +96,22 @@ class SubjectClassification(BaseModel):
     )
 
 
-async def _get_cached_classification(file_hash: Optional[str]) -> Optional[SubjectClassification]:
+class SubjectClassificationResponse(SubjectClassification):
+    """Require the academic subject on the wire; tolerate legacy cached snapshots separately."""
+    content_subject: Literal["math", "english", "french", "other"] = Field(
+        description="REQUIRED academic subject, independent of exam format. English language lessons with reading, vocabulary or comprehension are english even when the passage is about science."
+    )
+
+
+async def _get_cached_classification(file_hash: Optional[str], *, thinking_level=None) -> Optional[SubjectClassification]:
     """يرجع نتيجة تصنيف محفوظة سابقاً لنفس file_hash إن وُجدت، وإلا None بصمت (أي خطأ
     اتصال بـ Redis لا يوقف تدفق التصنيف العادي - فشل آمن دائماً)."""
     if not file_hash:
         return None
     try:
-        cached_raw = await redis_client.get(f"{_CLASSIFY_CACHE_PREFIX}{file_hash}")
+        from helpers.settings_helper import get_ai_thinking_level
+        effort = thinking_level or await get_ai_thinking_level("detection")
+        cached_raw = await redis_client.get(f"{_CLASSIFY_CACHE_PREFIX}{effort or 'auto'}:{file_hash}")
         if cached_raw:
             return SubjectClassification.model_validate_json(cached_raw)
     except Exception as exc:
@@ -110,12 +119,14 @@ async def _get_cached_classification(file_hash: Optional[str]) -> Optional[Subje
     return None
 
 
-async def _store_cached_classification(file_hash: Optional[str], result: SubjectClassification) -> None:
+async def _store_cached_classification(file_hash: Optional[str], result: SubjectClassification, *, thinking_level=None) -> None:
     if not file_hash:
         return
     try:
+        from helpers.settings_helper import get_ai_thinking_level
+        effort = thinking_level or await get_ai_thinking_level("detection")
         await redis_client.set(
-            f"{_CLASSIFY_CACHE_PREFIX}{file_hash}", result.model_dump_json(), ex=CLASSIFY_CACHE_TTL_SECONDS,
+            f"{_CLASSIFY_CACHE_PREFIX}{effort or 'auto'}:{file_hash}", result.model_dump_json(), ex=CLASSIFY_CACHE_TTL_SECONDS,
         )
     except Exception as exc:
         log_warning(logger, f"[subject_classifier] Cache store failed for {file_hash}: {exc}")
@@ -134,9 +145,12 @@ def _normalize(result: Optional[SubjectClassification]) -> SubjectClassification
     if subject not in _VALID_SUBJECTS:
         log_warning(logger, f"[subject_classifier] Unexpected subject value '{subject}', defaulting to 'other'")
         subject = SUBJECT_OTHER
+    # Academic subject remains authoritative for ordinary teaching material.
+    academic_subject = result.content_subject
+    if (subject not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+            and academic_subject in (SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH)):
+        subject = academic_subject
     suggested = [s.strip() for s in (result.suggested_types or []) if s and s.strip()][:4]
-    if subject != SUBJECT_OTHER:
-        suggested = []
 
     # 🆕 question_count منطقي فقط لاختبار جاهز (محلول/غير محلول) - لأي مادة أخرى يبقى null
     # حتى لو أرجع النموذج قيمة عن طريق الخطأ. القيمة المُرجَعة تُقيَّد ضمن نفس مجال العدد
@@ -194,7 +208,7 @@ async def _dispatch_classification(*, contents=None, paths=None):
     from services.ai.runtime import execute
     parts = (tuple(Attachment.from_path(path) for path in paths)
              if paths else tuple(contents or []))
-    result = await execute(AIRequest(parts, SubjectClassification, allow_image_sampling=True,
+    result = await execute(AIRequest(parts, SubjectClassificationResponse, allow_image_sampling=True,
                                      system_instruction=SYSTEM_PROMPT_CLASSIFY_SUBJECT),
                            slot="detection", mode="detection",
                            timeout=MATH_DETECTION_TIMEOUT)
@@ -210,7 +224,7 @@ async def _dispatch_classification(*, contents=None, paths=None):
         async for batch in page_batches(paths):
             prompt = (SYSTEM_PROMPT_CLASSIFY_SUBJECT +
                       "\nThese pages belong to one document. Count only questions STARTING on these pages.")
-            result = await execute(AIRequest(tuple(batch), SubjectClassification, allow_image_sampling=True,
+            result = await execute(AIRequest(tuple(batch), SubjectClassificationResponse, allow_image_sampling=True,
                                              system_instruction=prompt),
                 slot="detection", mode="detection", timeout=MATH_DETECTION_TIMEOUT)
             if result:
@@ -273,15 +287,17 @@ async def classify_subject(
     if locked is not None:
         try:
             result = SubjectClassification.model_validate(locked["classification_data"])
-            logger.info("SUBJECT_CLASSIFICATION source=community_lock subject=%s", result.subject)
+            logger.info("SUBJECT_CLASSIFICATION source=community_lock subject=%s content_subject=%s", result.subject, result.content_subject)
             return result
         except Exception as exc:
             log_warning(logger, f"[subject_classifier] Failed to parse locked classification for {file_hash}: {exc}")
             # لا نمنع التدفق العادي لو كانت بيانات التثبيت تالفة لأي سبب - نكمل كالمعتاد (فشل آمن)
 
-    cached = await _get_cached_classification(file_hash)
+    from helpers.settings_helper import get_ai_thinking_level
+    thinking_level = await get_ai_thinking_level("detection") or "auto"
+    cached = await _get_cached_classification(file_hash, thinking_level=thinking_level)
     if cached is not None:
-        logger.info("SUBJECT_CLASSIFICATION source=redis subject=%s", cached.subject)
+        logger.info("SUBJECT_CLASSIFICATION source=redis subject=%s content_subject=%s", cached.subject, cached.content_subject)
         return cached
     try:
         # Explicit media takes precedence even for pre-existing dirty FSM data.
@@ -297,7 +313,10 @@ async def classify_subject(
     except Exception as exc:
         log_warning(logger, f"[subject_classifier] Unexpected error during classification, defaulting to 'other': {exc}")
         return _fallback()
-    await _store_cached_classification(file_hash, result)
-    logger.info("SUBJECT_CLASSIFICATION source=%s subject=%s", source, result.subject)
+    # If an admin changes policy during the request, do not label its result
+    # with a different effort. A later upload will be classified afresh.
+    if (await get_ai_thinking_level("detection") or "auto") == thinking_level:
+        await _store_cached_classification(file_hash, result, thinking_level=thinking_level)
+    logger.info("SUBJECT_CLASSIFICATION source=%s subject=%s content_subject=%s", source, result.subject, result.content_subject)
     return result
 

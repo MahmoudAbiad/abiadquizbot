@@ -57,13 +57,13 @@ def _type_display_label(data: dict) -> str:
             pass
         return "مخصص"
     if question_type == QUESTION_TYPE_GENERAL:
-        return "🔀 متنوع"
+        return "📚 أسئلة شاملة عن الدرس"
     from constants import QUESTION_TYPE_OPTIONS
     for subj_options in QUESTION_TYPE_OPTIONS.values():
         for value, label in subj_options:
             if value == question_type:
                 return label
-    return "🔀 متنوع"
+    return "📚 أسئلة شاملة عن الدرس"
 
 
 async def _render_type_screen(target: types.Message, state: FSMContext, edit: bool) -> None:

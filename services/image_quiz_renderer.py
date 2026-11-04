@@ -160,16 +160,54 @@ _BARE_LATEX_COMMAND_RE = re.compile(
     r"Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|"
     r"pm|times|cdot|infty|approx|equiv|leq|geq|neq)\b"
 )
+_BARE_INEQUALITY_RE = re.compile(
+    r"(?<![\w$])(?P<lhs>[A-Za-z](?:_\{?[A-Za-z0-9]+\}?)?)\s*"
+    r"(?P<op>\\geq?|\\leq?|\\neq|>=|<=|>|<)\s*"
+    r"(?P<rhs>-?\d+(?:\.\d+)?)(?![\w$])"
+)
+_BARE_SEQUENCE_DOMAIN_RE = re.compile(
+    r"(?<![\w$])\([A-Za-z](?:_\{?[A-Za-z0-9]+\}?)?\)_\{"
+    r"[A-Za-z]\s*(?:\\geq?|\\leq?|\\in)\s*"
+    r"(?:-?\d+|\\mathbb\{[A-Za-z]+\})\}(?![\w$])"
+)
+
+
+def _wrap_bare_math_segment(segment: str) -> str:
+    """Wrap common unmarked math spans and normalize OCR/model aliases."""
+    def wrap(match):
+        expression = re.sub(r"\\ge(?!q)", r"\\geq", match.group(0))
+        expression = re.sub(r"\\le(?!q)", r"\\leq", expression)
+        return f"${expression}$"
+
+    segment = _BARE_SEQUENCE_DOMAIN_RE.sub(wrap, segment)
+    parts = re.split(r"(\$[^$]+\$)", segment)
+    normalized = []
+    for part in parts:
+        if part.startswith("$") and part.endswith("$"):
+            normalized.append(part)
+            continue
+        part = _BARE_INEQUALITY_RE.sub(wrap, part)
+        # Keep the legacy fallback for standalone commands (e.g. bare \\lambda),
+        # while leaving the just-wrapped expressions intact.
+        subparts = re.split(r"(\$[^$]+\$)", part)
+        normalized.extend(
+            subpart if subpart.startswith("$") and subpart.endswith("$")
+            else _BARE_LATEX_COMMAND_RE.sub(lambda m: f"${m.group(0)}$", subpart)
+            for subpart in subparts
+        )
+    return "".join(normalized)
 
 
 def _auto_wrap_bare_latex(line: str) -> str:
-    """لو السطر خالٍ من $ إطلاقاً لكن فيه أمر LaTeX بسيط معروف كتبه النموذج بدون تغليف -
-    نلفّه تلقائياً بـ $ $ ليدخل مسار mathtext الطبيعي (ويُرسم كرمز رياضي صحيح) بدل ما يُرسم
-    حرفياً كنص خام. لا يلمس السطر إطلاقاً لو فيه $ أصلاً (تحكّم الكاتب بحدود الرياضيات بنفسه
-    عن قصد عندها، فلا داعي للتدخل)."""
-    if "$" in line:
-        return line
-    return _BARE_LATEX_COMMAND_RE.sub(lambda m: f"${m.group(0)}$", line)
+    """Wrap obvious unmarked math, including spans next to already marked math.
+
+    Only non-math segments are inspected so explicit ``$...$`` authored by the
+    generator remains untouched. This covers common OCR/model output such as
+    ``u_n \\ge 2`` and ``(u_n)_{n \\ge 0}`` without rewriting prose.
+    """
+    parts = re.split(r"(\$[^$]+\$)", line)
+    return "".join(part if part.startswith("$") and part.endswith("$")
+                   else _wrap_bare_math_segment(part) for part in parts)
 
 _MATH_PARSER = MathTextParser("agg")
 _FONT_CACHE: Dict[Any, fm.FontProperties] = {}

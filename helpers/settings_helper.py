@@ -10,6 +10,7 @@ app_settings في سوبا بيس، بدلاً من قيم ثابتة في const
 """
 
 import time
+import math
 from typing import Dict, Optional
 
 from logger import get_logger, log_error
@@ -43,7 +44,37 @@ _DEFAULTS: Dict[str, float] = {
     "quiz_overage_rate": 1.5,
     # 🆕 مهلة كل محاولة توليد (مفتاح × موديل) بالثواني - كانت AI_REQUEST_TIMEOUT ثابتاً بالكود.
     "ai_request_timeout": float(AI_REQUEST_TIMEOUT),
+    # Enum codes keep compatibility with app_settings' numeric value column.
+    "ai_detection_thinking": 2.0,
+    "ai_generation_thinking": 0.0,
 }
+
+AI_THINKING_LEVELS = {"auto": 0, "low": 1, "medium": 2, "high": 3}
+AI_THINKING_LABELS = {"auto": "تلقائي", "low": "منخفض", "medium": "متوسط", "high": "مرتفع"}
+AI_THINKING_SETTINGS = {
+    "detection": "ai_detection_thinking",
+    "generation": "ai_generation_thinking",
+}
+
+
+def thinking_level_from_settings(settings, task):
+    key = AI_THINKING_SETTINGS[task]
+    value = settings.get(key, _DEFAULTS[key])
+    return next((level for level, code in AI_THINKING_LEVELS.items() if value == code),
+                "medium" if task == "detection" else "auto")
+
+
+async def get_ai_thinking_level(task):
+    settings = await get_app_settings()
+    level = thinking_level_from_settings(settings, task)
+    return None if level == "auto" else level
+
+
+async def update_ai_thinking_level(task, level):
+    if task not in AI_THINKING_SETTINGS or level not in AI_THINKING_LEVELS:
+        return False
+    result = await update_app_setting(AI_THINKING_SETTINGS[task], AI_THINKING_LEVELS[level])
+    return result is not None
 
 # تسميات عرض للوحة الإدارة (تُستخدم في الرسائل والأزرار).
 SETTING_LABELS: Dict[str, str] = {
@@ -81,7 +112,7 @@ SETTING_MAX_VALUES: Dict[str, float] = {
 
 # إعدادات الذكاء الاصطناعي: تُعرض بلوحة "التحكم بالذكاء الاصطناعي" لا بلوحة النقاط،
 # ويرجع الأدمن لتلك اللوحة بعد التعديل.
-AI_SETTING_KEYS = frozenset({"ai_request_timeout"})
+AI_SETTING_KEYS = frozenset({"ai_request_timeout", *AI_THINKING_SETTINGS.values()})
 
 # 🩹 عتبة تصنيف المادة إعداد خاص بميزة "رسالة التحقق المجتمعي من التصنيف"
 # (classification_vote_prompt بـ constants.FEATURE_FLAGS_REGISTRY) وليست إعداد نقاط -
@@ -129,9 +160,8 @@ async def get_app_settings(force_refresh: bool = False) -> Dict[str, float]:
     if not force_refresh and _cache and (now - _cache_timestamp) < SETTINGS_CACHE_TTL_SECONDS:
         return _cache
 
-    from helpers.supabase_helper import supabase  # استيراد متأخر لتفادي أي دورة استيراد
-
     try:
+        from helpers.supabase_helper import supabase  # استيراد متأخر لتفادي أي دورة استيراد
         response = await supabase.table("app_settings").select("key, value").execute()
         if response.data:
             fresh = {row["key"]: float(row["value"]) for row in response.data}
@@ -157,16 +187,27 @@ async def update_app_setting(key: str, value: float) -> Optional[float]:
     عند الفشل (مفتاح غير معروف، قيمة سالبة، أو خطأ اتصال)."""
     if key not in _DEFAULTS:
         return None
-    if value is None or value < 0:
+    if value is None or not math.isfinite(value) or value < 0:
+        return None
+    if key in AI_THINKING_SETTINGS.values() and value not in AI_THINKING_LEVELS.values():
         return None
 
     from helpers.supabase_helper import supabase
 
     try:
-        rpc_response = await supabase.rpc("update_app_setting_atomic", {
-            "setting_key": key,
-            "setting_value": float(value),
-        }).execute()
+        if key in AI_THINKING_SETTINGS.values():
+            # New settings create their own rows on first save; no migration or
+            # wider write permissions are needed. Only the server uses this client.
+            from datetime import datetime, timezone
+            rpc_response = await supabase.table("app_settings").upsert({
+                "key": key, "value": float(value),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }, on_conflict="key").execute()
+        else:
+            rpc_response = await supabase.rpc("update_app_setting_atomic", {
+                "setting_key": key,
+                "setting_value": float(value),
+            }).execute()
 
         if rpc_response.data:
             row = rpc_response.data[0] if isinstance(rpc_response.data, list) else rpc_response.data

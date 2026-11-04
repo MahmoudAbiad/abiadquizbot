@@ -216,21 +216,22 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
         env=load_functions('services/quiz_service.py',{'execute_quiz_generation_workflow','normalize_quiz_option_count'},
             asyncio=asyncio,os=os,OPTION_COUNT=4,_HEAVY_PROCESSING_SEMAPHORE=asyncio.Semaphore(2),
             get_file_quizzes=AsyncMock(return_value=[]), SUBJECT_OTHER='other',SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
-            SUBJECT_MATH='math',SUBJECT_ENGLISH='english',SUBJECT_FRENCH='french',QUESTION_TYPE_GENERAL='general',DIFFICULTY_MEDIUM='medium',
+            SUBJECT_MATH='math',SUBJECT_ENGLISH='english',SUBJECT_FRENCH='french',QUESTION_TYPE_GENERAL='general',QUESTION_TYPE_SIMILAR_MATH='similar_math',DIFFICULTY_MEDIUM='medium',
             resolve_generation_question_type_text=lambda *a:None,resolve_quiz_extraction_instruction=lambda *a:None,
             generate_quiz_smart=AsyncMock(return_value=[{'question':'ok','options':['a','b','c','d','e'],'correct_option_id':4}]),get_last_generation_metadata=lambda:None,
+            determine_execution_mode=lambda *args, **kw: 'Standard',
             log_ai_generation=AsyncMock(),spawn=spawn,shuffle_quiz_options=lambda x:x,save_file_quiz_multiple=save,build_question_type_label=lambda *a,**k:'label')
         results=await asyncio.gather(*(env['execute_quiz_generation_workflow'](user,{'input_type':'text','file_hash':'same','pure_text':'text','subject_type':'solved'},5,None) for user in [1,2]))
         self.assertEqual([r[1] for r in results],['quiz-1','quiz-2'])
-        self.assertEqual(results[0][0][0]['options'], ['a','b','c','e'])
-        self.assertEqual(results[0][0][0]['correct_option_id'], 3)
+        self.assertEqual(results[0][0][0]['options'], ['a','b','c','d','e'])
+        self.assertEqual(results[0][0][0]['correct_option_id'], 4)
         self.assertEqual(env['get_file_quizzes'].await_count,2)  # No post-insert ID guessing.
 
 
 
     async def test_ready_made_fallback_applies_to_unsolved_but_not_other_quizzes(self):
         def spawn(coro): coro.close()
-        for subject_type, expected_options in (('unsolved', ['a', 'b', 'c', 'e']),
+        for subject_type, expected_options in (('unsolved', ['a', 'b', 'c', 'd', 'e']),
                                                ('other', ['a', 'b', 'c', 'd', 'e'])):
             with self.subTest(subject_type=subject_type):
                 generated = [{'question': 'Q', 'options': ['a', 'b', 'c', 'd', 'e'],
@@ -243,10 +244,12 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
                     SUBJECT_OTHER='other', SUBJECT_QUIZ_SOLVED='solved',
                     SUBJECT_QUIZ_UNSOLVED='unsolved', SUBJECT_MATH='math',
                     SUBJECT_ENGLISH='english', SUBJECT_FRENCH='french',
-                    QUESTION_TYPE_GENERAL='general', DIFFICULTY_MEDIUM='medium',
+                    QUESTION_TYPE_GENERAL='general',QUESTION_TYPE_SIMILAR_MATH='similar_math', DIFFICULTY_MEDIUM='medium',
                     resolve_generation_question_type_text=lambda *args: None,
-                    resolve_quiz_extraction_instruction=lambda *args: None,
+                    resolve_quiz_extraction_instruction=lambda subject, mode: 'convert' if subject == 'unsolved' else None,
+                    MAX_QUESTIONS_TO_GENERATE=120,
                     generate_quiz_smart=AsyncMock(return_value=generated),
+                    determine_execution_mode=lambda *args, **kw: 'Standard',
                     get_last_generation_metadata=lambda: None, spawn=spawn,
                     log_ai_generation=AsyncMock(), shuffle_quiz_options=lambda data: data,
                 )
@@ -256,30 +259,32 @@ class QuizIDTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(error, '')
                 self.assertEqual(quiz[0]['options'], expected_options)
+                self.assertEqual(env['generate_quiz_smart'].await_args.kwargs['count'],
+                                 1)
                 self.assertEqual(quiz[0]['options'][quiz[0]['correct_option_id']], 'e')
 
 
 class QuizOptionNormalizationTests(unittest.TestCase):
-    """Ready-made five-choice exams must keep the correct answer and only four options."""
+    """Ready-made exams preserve every original choice and reject malformed answers."""
 
     def setUp(self):
         self.normalize = load_functions(
             'services/quiz_service.py', {'normalize_quiz_option_count'}, OPTION_COUNT=4
         )['normalize_quiz_option_count']
 
-    def test_fifth_wrong_option_is_removed(self):
+    def test_fifth_wrong_option_is_preserved(self):
         question = {'question': 'Q', 'options': ['A', 'B', 'C', 'D', 'E'],
                     'correct_option_id': 1, 'hint': 'original hint'}
         result = self.normalize([question])
-        self.assertEqual(result[0]['options'], ['A', 'B', 'C', 'D'])
+        self.assertEqual(result[0]['options'], ['A', 'B', 'C', 'D', 'E'])
         self.assertEqual(result[0]['correct_option_id'], 1)
         self.assertEqual(result[0]['hint'], 'original hint')
 
-    def test_fifth_option_is_correct_so_fourth_wrong_is_removed(self):
+    def test_fifth_correct_option_is_preserved(self):
         result = self.normalize([{'options': ['A', 'B', 'C', 'D', 'E'],
                                   'correct_option_id': 4}])[0]
-        self.assertEqual(result['options'], ['A', 'B', 'C', 'E'])
-        self.assertEqual(result['correct_option_id'], 3)
+        self.assertEqual(result['options'], ['A', 'B', 'C', 'D', 'E'])
+        self.assertEqual(result['correct_option_id'], 4)
 
     def test_correct_answer_survives_subsequent_shuffle(self):
         shuffle = load_functions(
@@ -289,14 +294,14 @@ class QuizOptionNormalizationTests(unittest.TestCase):
         question = {'options': ['A', 'B', 'C', 'D', 'E'], 'correct_option_id': 4}
         self.normalize([question])
         shuffle(question)
-        self.assertEqual(len(question['options']), 4)
+        self.assertEqual(len(question['options']), 5)
         self.assertEqual(question['options'][question['correct_option_id']], 'E')
 
     def test_more_than_five_options_still_keep_correct_answer(self):
         result = self.normalize([{'options': ['A', 'B', 'C', 'D', 'E', 'F'],
                                   'correct_option_id': 5}])[0]
-        self.assertEqual(result['options'], ['A', 'B', 'C', 'F'])
-        self.assertEqual(result['correct_option_id'], 3)
+        self.assertEqual(result['options'], ['A', 'B', 'C', 'D', 'E', 'F'])
+        self.assertEqual(result['correct_option_id'], 5)
 
     def test_four_options_remain_unchanged_and_are_idempotent(self):
         question = {'options': ['A', 'B', 'C', 'D'], 'correct_option_id': 3}
@@ -305,7 +310,7 @@ class QuizOptionNormalizationTests(unittest.TestCase):
 
     def test_reject_too_few_choices_or_unreliable_answer_index(self):
         invalid_questions = [
-            {'options': ['A', 'B', 'C'], 'correct_option_id': 1},
+            {'options': ['A'], 'correct_option_id': 0},
             {'options': ['A', 'B', 'C', 'D', 'E'], 'correct_option_id': 5},
             {'options': ['A', '', 'C', 'D'], 'correct_option_id': 1},
             {'options': ['A', 'B', 'C', 'D'], 'correct_option_id': None},

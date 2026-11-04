@@ -137,6 +137,7 @@ async def set_bot_commands(bot_instance: Bot):
             types.BotCommand(command="start", description="🏠 الرئيسية والرصيد"),
             types.BotCommand(command="favorites", description="⭐ اختباراتي المحفوظة"),
             types.BotCommand(command="wallet", description="💰 رصيدي وهداياي"),
+            types.BotCommand(command="settings", description="⚙️ الإعدادات والإشعارات"),
             types.BotCommand(command="help", description="❓ طريقة الاستخدام"),
             types.BotCommand(command="channel", description="📢 قناة التحديثات والأخبار"),
             types.BotCommand(command="support", description="💬 التواصل مع الدعم الفني"),
@@ -148,6 +149,7 @@ async def set_bot_commands(bot_instance: Bot):
         # بفلتر chat.type على مستوى الراوتر (راجع handlers/start.py وhandlers/favorites.py)
         # - هاد التعديل هون تجميلي بالكامل (إخفاء القائمة من الغروب)، وما بيغني عنه.
         await bot_instance.set_my_commands(student_commands, scope=types.BotCommandScopeAllPrivateChats())
+        await bot_instance.set_chat_menu_button(menu_button=types.MenuButtonCommands())
         # مسح أي قائمة قديمة كانت مخزَّنة بـ Default قبل هالتعديل (وإلا بتضل ظاهرة
         # بالغروبات القديمة لحد ما تيليجرام يحدّثها لحاله - قد يتأخر).
         await bot_instance.set_my_commands([], scope=types.BotCommandScopeDefault())
@@ -158,6 +160,7 @@ async def set_bot_commands(bot_instance: Bot):
                 types.BotCommand(command="start", description="🏠 الرئيسية والرصيد"),
                 types.BotCommand(command="favorites", description="⭐ اختباراتي المحفوظة"),
                 types.BotCommand(command="wallet", description="💰 رصيدي وهداياي"),
+                types.BotCommand(command="settings", description="⚙️ الإعدادات والإشعارات"),
                 types.BotCommand(command="help", description="❓ طريقة الاستخدام"),
                 types.BotCommand(command="admin", description="⚙️ لوحة تحكم الإدارة"),
                 types.BotCommand(command="charge", description="💰 شحن نقاط لطالب"),

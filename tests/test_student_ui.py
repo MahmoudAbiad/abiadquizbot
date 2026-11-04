@@ -215,8 +215,8 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
         for favorite in ('', favorite_id):
             formats = env['get_export_format_keyboard']('a', favorite)
             actions = callbacks(formats)
-            downloads = [a for a in actions if re.match(r'^(fav_)?export_(pdf|docx)', a)]
-            self.assertEqual(len(downloads), 4)
+            downloads = [a for a in actions if re.match(r'^(fav_)?export_(pdf|docx|xlsx)', a)]
+            self.assertEqual(len(downloads), 6)
             self.assertEqual(actions[-1], f'fav_export_back_{favorite}' if favorite else 'export_back')
             styles = env['get_export_style_keyboard'](favorite)
             self.assertEqual(callbacks(styles)[-1], f'fav_details_{favorite}' if favorite else 'export_close')

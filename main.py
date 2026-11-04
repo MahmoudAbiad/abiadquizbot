@@ -40,9 +40,9 @@ from handlers import (
     gifts_router,
 )
 from handlers.session_navigation import router as session_navigation_router
-from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware
-from services.mistake_practice import PracticeCallbackGuard
+from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware, GroupQuizOnlyMiddleware
 from services.consent import ConsentMiddleware
+from services.mistake_practice import PracticeCallbackGuard
 
 # تهيئة Sentry للتتبع
 SENTRY_DSN = os.getenv("SENTRY_DSN")
@@ -74,24 +74,27 @@ def main():
     # كل خطأ يواجهه الطالب فعلياً بلوحة تحليلات الأدمن. يجب تسجيله كـ outer middleware
     # (أول شيء يشتغل وآخر شيء يلف حوله) ليغطي أي استثناء يحدث بأي مرحلة لاحقة، بما فيها
     # ThrottlingMiddleware نفسها.
+    # Keep groups quiz-only before maintenance/error middleware can send notices.
+    dp.update.outer_middleware(GroupQuizOnlyMiddleware())
     dp.update.outer_middleware(ErrorTrackingMiddleware())
     dp.update.outer_middleware(MaintenanceMiddleware())
 
     # 1. تفعيل الحماية من التكرار (Rate Limiting)
     dp.message.middleware(ThrottlingMiddleware(limit=1.2))
-    # بوابة شروط الاستخدام على الرسائل والأزرار بالخاص
-    consent_gate = ConsentMiddleware()
-    dp.message.middleware(consent_gate)
     dp.callback_query.middleware(ThrottlingMiddleware(limit=0.8))
-    dp.callback_query.middleware(consent_gate)
     dp.callback_query.middleware(PracticeCallbackGuard())
     dp.callback_query.middleware(UsageCallbackMiddleware())
+    consent_gate = ConsentMiddleware()
+    dp.message.middleware(consent_gate)
+    dp.callback_query.middleware(consent_gate)
     
     # 2. تسجيل الـ Routers المحدثة بالترتيب الصحيح
-    from handlers.runner import router as runner_router
     from handlers.consent import router as consent_router
+    from handlers.runner import router as runner_router
+    from handlers.settings import router as settings_router
     dp.include_routers(
         consent_router,
+        settings_router,
         runner_router,
         session_navigation_router,
         # 🆕 لازم يسبق start_router (يلتقط /start gq_ بالغروب) وquiz_runner_router
@@ -166,6 +169,8 @@ def main():
                 spawn(pending_cleanup_loop())
                 from services.gift_campaigns import gift_campaign_loop
                 spawn(gift_campaign_loop())
+                from services.daily_renewal import daily_renewal_loop
+                spawn(daily_renewal_loop())
                 await dp.start_polling(bot)
                 
             except Exception as e:

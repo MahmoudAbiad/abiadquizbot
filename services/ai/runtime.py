@@ -4,13 +4,15 @@ import hashlib
 import os
 import time
 import uuid
+from collections import Counter
 
 from helpers.ai_models_helper import get_enabled_models
 from helpers.ai_providers_helper import get_providers
 from logger import get_logger
-from services.ai.adapters import ADAPTERS, ProviderError
+from services.ai.adapters import ADAPTERS, ProviderError, AIResponseDiagnosticError
 from services.ai.provider_presets import chat_service
 from services.ai.rate_limits import RateLimitInfo, decide_cooldown
+from services.ai.diagnostics import run_attempt
 
 logger = get_logger(__name__)
 _blocked = {}
@@ -40,7 +42,50 @@ def _free_pool_identity(provider, credentials):
     return provider["id"], fingerprint
 
 
+async def choose_parallel_preference(request, *, slot="cascade"):
+    """Pick one eligible model/key for the first attempts of two parallel parts.
+
+    Read-only selection: normal runtime.execute still checks live cooldowns,
+    credentials and capabilities and performs the full cascade on failures.
+    """
+    providers = await get_providers()
+    models = await get_enabled_models(slot)
+    for entry in models:
+        provider = providers.get(entry["provider"])
+        if not provider or not provider["is_enabled"]:
+            continue
+        adapter = ADAPTERS.get(provider["transport"])
+        if adapter is None:
+            continue
+        capabilities = (adapter.capabilities_for(provider) if hasattr(adapter, "capabilities_for")
+                        else adapter.capabilities)
+        if not request.capabilities <= (set(entry["capabilities"]) & capabilities):
+            continue
+        if (hasattr(adapter, "supports_request") and
+                not adapter.supports_request(provider, entry["model_name"], request)):
+            continue
+        credentials = credentials_for(provider)
+        if not credentials:
+            continue
+        if (chat_service(provider.get("base_url") or "") == "openrouter"
+                and entry["model_name"].endswith(":free")):
+            shared = _shared_blocked.get(_free_pool_identity(provider, credentials))
+            if shared and shared[0] > time.monotonic():
+                continue
+        start = _pointers.get(provider["id"], 0) % len(credentials)
+        for offset in range(len(credentials)):
+            index = (start + offset) % len(credentials)
+            if _blocked.get(_attempt_identity(provider, credentials[index], entry["model_name"]), 0) <= time.monotonic():
+                return (provider["id"], entry["model_name"], index)
+    return None
+
+
 async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regular", timeout=None):
+    from dataclasses import replace
+    from helpers.settings_helper import get_ai_thinking_level
+    task = "detection" if slot == "detection" or mode == "detection" else "generation"
+    # Resolve once for this cascade: fallback attempts keep the same policy.
+    request = replace(request, reasoning_effort=await get_ai_thinking_level(task))
     # All generation/extraction/streaming paths use this boundary and QuizResponse.
     if request.schema is not None and request.schema.__name__ == "QuizResponse":
         from dataclasses import replace
@@ -49,14 +94,40 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     from helpers.settings_helper import get_ai_request_timeout
     from services.ai.state import _last_model_used_var, _last_token_usage_var
     timeout = timeout if timeout is not None else await get_ai_request_timeout()
+    from services.ai.time_budget import current_quiz_budget, QuizAITimeout
+    budget = current_quiz_budget()
+    if budget is not None:
+        timeout = min(timeout, budget.attempt_seconds)
     request_id = uuid.uuid4().hex[:12]
     request_start = time.monotonic()
     providers = await get_providers()
     models = await get_enabled_models(slot)
+    # Only the historical multi-part/batch exclusion is configurable.
+    # Missing DB flag or transient read errors must preserve the old policy.
+    allow_vertex_for_parts = False
+    if exclude_vertex:
+        try:
+            from helpers.supabase_helper import is_feature_enabled
+            allow_vertex_for_parts = await is_feature_enabled(
+                "vertex_parallel_enabled", default=False,
+            )
+        except Exception:
+            logger.warning("VERTEX_PARALLEL_FLAG_READ_FAILED; keeping Vertex excluded")
+    # Sticky model/key only within a multi-batch PDF session. Regular callers
+    # retain the configured order and round-robin rotation unchanged.
+    session = getattr(request, "file_session", None)
+    preferred = getattr(request, "preferred_attempt", None) or getattr(session, "preferred", None)
+    indexed_models = list(enumerate(models, start=1))
+    if preferred is not None:
+        indexed_models.sort(key=lambda item: 0 if (
+            item[1]["provider"], item[1]["model_name"]
+        ) == preferred[:2] else 1)
     failed_attempts = 0
+    failure_breakdown = Counter()
     logger.info(
-        "AI_REQUEST_START request_id=%s slot=%s mode=%s capabilities=%s models=%d timeout_s=%s",
+        "AI_REQUEST_START request_id=%s slot=%s mode=%s capabilities=%s models=%d timeout_s=%s budget_remaining_s=%s",
         request_id, slot, mode, sorted(request.capabilities), len(models), timeout,
+        round(budget.remaining(), 2) if budget else None,
     )
     now = time.monotonic()
     for key, until in list(_blocked.items()):
@@ -68,13 +139,13 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     for key in list(_pointers):
         if key not in providers:
             _pointers.pop(key, None)
-    for rank, entry in enumerate(models, start=1):
+    for rank, entry in indexed_models:
         provider = providers.get(entry["provider"])
         if not provider or not provider["is_enabled"]:
             logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=provider_disabled_or_missing",
                         request_id, slot, entry["provider"], entry["model_name"])
             continue
-        if exclude_vertex and provider["transport"] == "vertex":
+        if exclude_vertex and not allow_vertex_for_parts and provider["transport"] == "vertex":
             logger.info("AI_MODEL_SKIPPED request_id=%s slot=%s provider=%s model=%s reason=vertex_excluded",
                         request_id, slot, provider["id"], entry["model_name"])
             continue
@@ -118,6 +189,9 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                 )
                 continue
         start = _pointers.get(provider["id"], 0) % len(credentials)
+        if (preferred is not None and (provider["id"], entry["model_name"]) == preferred[:2]
+                and isinstance(preferred[2], int) and 0 <= preferred[2] < len(credentials)):
+            start = preferred[2]
         _pointers[provider["id"]] = (start + 1) % len(credentials)
         for offset in range(len(credentials)):
             index = (start + offset) % len(credentials)
@@ -129,16 +203,27 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                     request_id, slot, provider["id"], entry["model_name"], index, round(remaining),
                 )
                 continue
+            attempt_timeout = timeout
+            if budget is not None:
+                remaining_seconds = budget.remaining()
+                if remaining_seconds <= 0:
+                    raise QuizAITimeout("Quiz AI deadline exceeded")
+                attempt_timeout = min(timeout, remaining_seconds)
             started = time.monotonic()
             logger.info(
-                "AI_ATTEMPT_START request_id=%s slot=%s provider=%s model=%s credential_index=%d rank=%d/%d",
+                "AI_ATTEMPT_START request_id=%s slot=%s provider=%s model=%s credential_index=%d rank=%d/%d thinking=%s",
                 request_id, slot, provider["id"], entry["model_name"], index, rank, len(models),
+                request.reasoning_effort or "auto",
             )
             try:
-                result = await asyncio.wait_for(
+                result = await run_attempt(
                     adapter.generate(provider, credentials[index], entry["model_name"], request),
-                    timeout=timeout,
+                    timeout=attempt_timeout,
+                    request_id=request_id, slot=slot, provider=provider["id"],
+                    model=entry["model_name"], credential_index=index,
                 )
+                if session is not None:
+                    session.preferred = (provider["id"], entry["model_name"], index)
                 _last_model_used_var.set({"provider": provider["id"], "model": entry["model_name"],
                                           "key_index": index, "cascade_rank": rank,
                                           "cascade_total": len(models), "mode": mode})
@@ -167,7 +252,7 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
             except Exception as exc:
                 failed_attempts += 1
                 status = getattr(exc, "status", None)
-                if status is None:
+                if type(status) is not int:
                     status = getattr(exc, "code", None)
                 status = status if type(status) is int else None
                 reason = (exc.reason if isinstance(exc, ProviderError) else
@@ -176,10 +261,48 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                           "request_error")
                 retry_after_s = exc.retry_after_s if isinstance(exc, ProviderError) else None
                 reset_after_s = exc.reset_after_s if isinstance(exc, ProviderError) else None
+                # Batch-only Gemini SDK quota details can distinguish RPM from
+                # daily quota. Keep ordinary generation fallback behavior intact.
+                if (status == 429 and reason == "request_error"
+                        and getattr(request, "file_session", None) is not None
+                        and provider["transport"] == "gemini"):
+                    hint = str(exc).casefold()[:4096]  # inspect only; never log raw text
+                    if any(tag in hint for tag in (
+                            "perday", "per_day", "requests/day", "daily quota", "daily limit")):
+                        reason = "daily_quota"
+                    elif any(tag in hint for tag in (
+                            "perminute", "per_minute", "requests/min", "minute limit")):
+                        reason = "minute_rate_limit"
+                # Provider and adapter diagnostics are constrained to fixed
+                # machine-readable codes. Do not log raw SDK errors or output.
+                response_detail = (
+                    exc.detail if isinstance(exc, AIResponseDiagnosticError)
+                    else "other_validation_error" if reason == "invalid_response"
+                    else "not_applicable"
+                )
+                finish_reason = (
+                    exc.finish_reason if isinstance(exc, AIResponseDiagnosticError) else None
+                )
+                response_chars = (
+                    exc.response_chars if isinstance(exc, AIResponseDiagnosticError) else None
+                )
+                output_tokens = (
+                    exc.output_tokens if isinstance(exc, AIResponseDiagnosticError) else None
+                )
+                thoughts_tokens = (
+                    exc.thoughts_tokens if isinstance(exc, AIResponseDiagnosticError) else None
+                )
+                failure_breakdown[(reason, response_detail)] += 1
                 cooldown = decide_cooldown(
                     status, RateLimitInfo(reason, retry_after_s, reset_after_s),
                     is_openrouter_free=is_openrouter_free,
                 )
+                if (provider["transport"] == "gemini" and reason == "daily_quota"
+                        and getattr(request, "file_session", None) is not None
+                        and reset_after_s is None and retry_after_s is None):
+                    # Do not assume another vendor's UTC quota reset for Gemini.
+                    from services.ai.rate_limits import Cooldown
+                    cooldown = Cooldown(86400, "model_credential", "conservative_daily")
                 until = time.monotonic() + cooldown.seconds
                 if cooldown.scope == "openrouter_free_models" and pool_identity is not None:
                     _shared_blocked[pool_identity] = (until, reason)
@@ -189,21 +312,32 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
                 logger.warning(
                     "AI_ATTEMPT_FAILED request_id=%s slot=%s provider=%s model=%s credential_index=%d "
                     "rank=%d/%d elapsed_ms=%d error_type=%s status=%s reason=%s "
+                    "response_detail=%s finish_reason=%s response_chars=%s "
+                    "output_tokens=%s thoughts_tokens=%s "
                     "retry_after_s=%s reset_after_s=%s cooldown_s=%d "
                     "cooldown_scope=%s cooldown_basis=%s",
                     request_id, slot, provider["id"], entry["model_name"], index, rank, len(models),
                     round((time.monotonic() - started) * 1000),
-                    type(exc).__name__, status, reason, retry_after_s, reset_after_s,
+                    type(exc).__name__, status, reason, response_detail,
+                    finish_reason, response_chars, output_tokens, thoughts_tokens,
+                    retry_after_s, reset_after_s,
                     cooldown.seconds, cooldown.scope, cooldown.basis,
                 )
                 if cooldown.scope == "openrouter_free_models":
                     # Other OpenRouter keys under this provider share the same free quota.
                     # Do not burn another request against a known account-wide limit.
                     break
+                if budget is not None and reason == "timeout":
+                    # Slow model responses rarely improve by switching API keys.
+                    # Preserve the remaining quiz allowance for the next model.
+                    break
     logger.warning(
-        "AI_REQUEST_FAILED request_id=%s slot=%s capabilities=%s elapsed_ms=%d failed_attempts=%d reason=no_eligible_success",
+        "AI_REQUEST_FAILED request_id=%s slot=%s capabilities=%s elapsed_ms=%d "
+        "failed_attempts=%d reason=no_eligible_success diagnostics=%s",
         request_id, slot, sorted(request.capabilities),
         round((time.monotonic() - request_start) * 1000), failed_attempts,
+        [{"reason": reason, "detail": detail, "count": count} for
+         (reason, detail), count in failure_breakdown.most_common(8)],
     )
     return None
 

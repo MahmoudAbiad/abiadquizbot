@@ -6,6 +6,7 @@ from constants import (
     BTN_TRANSLATE_YES_FRENCH, BTN_TRANSLATE_NO_FRENCH,
     BTN_QUIZ_EXTRACT_AS_IS, BTN_QUIZ_EXTRACT_AI_SOLVE,
     QUESTION_TYPE_OPTIONS, QUESTION_TYPE_GENERAL, QUESTION_TYPE_CUSTOM,
+    QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH,
     DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE, DIFFICULTY_LABELS_AR,
     BTN_QUESTION_TYPE_GENERAL, BTN_QUESTION_TYPE_CUSTOM, BTN_BACK_TO_TYPE_SCREEN,
     SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH,
@@ -48,6 +49,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
             [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
             [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu", style="primary")],
             [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
+            [types.InlineKeyboardButton(text="⚙️ الإعدادات", callback_data="student_settings")],
             [
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
@@ -104,7 +106,7 @@ def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMark
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
-    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF)، مع الحفاظ على الستايل المختار،
+    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF أو Excel)، مع الحفاظ على الستايل المختار،
     تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
     prefix = "fav_export_" if favorite_id else "export_"
     suffix = f"_{favorite_id}" if favorite_id else ""
@@ -114,6 +116,10 @@ def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> 
             types.InlineKeyboardButton(text=f"📕 PDF — {label}", callback_data=f"{prefix}pdf{variant}_{style_code}{suffix}"),
             types.InlineKeyboardButton(text=f"📄 Word — {label}", callback_data=f"{prefix}docx{variant}_{style_code}{suffix}"),
         ])
+    kb.append([
+        types.InlineKeyboardButton(text=f"📊 Excel — {label}", callback_data=f"{prefix}xlsx{variant}_{style_code}{suffix}")
+        for variant, label in (("s", "نسخة الطالب"), ("t", "نسخة الأستاذ"))
+    ])
     kb.append([types.InlineKeyboardButton(text="🔙 تغيير التنسيق",
         callback_data=f"fav_export_back_{favorite_id}" if favorite_id else "export_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -251,32 +257,31 @@ def get_question_count_keyboard(
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_detected_count_keyboard(selected_count: int) -> types.InlineKeyboardMarkup:
-    """
-    🆕 كيبورد شاشة تأكيد عدد الأسئلة عندما subject_type = اختبار جاهز (محلول/غير محلول):
-    بلا أزرار عدد جاهزة عشوائية (5/10/15/20 من get_question_count_keyboard) لأن العدد
-    الحقيقي محدَّد فعلياً بالمستند نفسه وتم رصده تلقائياً (راجع classify_subject +
-    handlers/files.py.show_question_count_screen) - فقط زر تعديل يدوي (لو بدا الرصد غير
-    دقيق) وزر بدء الاستخراج مباشرة بالعدد المرصود. selected_count غير مستخدم مباشرة هنا
-    (السعر/العدد المعروضان فوق هذا الكيبورد بنص الشاشة نفسه) لكنه مُمرَّر لتوحيد التوقيع
-    مع get_question_count_keyboard ولإتاحة أي تخصيص مستقبلي بالأزرار بحسب العدد الحالي.
-    """
+    """Review the detected or corrected count; require a count before extraction."""
     kb = [
-        [types.InlineKeyboardButton(text="✏️ تعديل العدد يدوياً", callback_data="qcount_custom")],
-        [types.InlineKeyboardButton(text="🚀 ابدأ الاستخراج", callback_data="qcount_start")],
+        [types.InlineKeyboardButton(text="✏️ تعديل عدد الأسئلة", callback_data="qcount_custom")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
+    if selected_count > 0:
+        kb.insert(0, [types.InlineKeyboardButton(
+            text=f"🚀 ابدأ استخراج {selected_count} سؤال", callback_data="qcount_start",
+        )])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_type: str) -> types.InlineKeyboardMarkup:
     """
     🆕 المرحلة الأولى من شاشة الخيارات (نوع الأسئلة فقط - بدون صعوبة بنفس الشاشة لتقليل
-    الازدحام البصري). اختيار أي نوع (أو "متنوع") ينقل تلقائياً لمرحلة الصعوبة - لا حاجة
+    الازدحام البصري). اختيار أي نوع (أو الشمول) ينقل تلقائياً لمرحلة الصعوبة - لا حاجة
     لزر "متابعة" منفصل.
     """
     kb = []
 
-    if subject_type in (SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH):
+    if suggested_types:
+        type_options = [(f"other_{i}", label) for i, label in enumerate(suggested_types[:4])]
+        if subject_type == SUBJECT_MATH:
+            type_options.append((QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH))
+    elif subject_type in (SUBJECT_MATH, SUBJECT_ENGLISH, SUBJECT_FRENCH):
         type_options = list(QUESTION_TYPE_OPTIONS.get(subject_type, []))
     else:
         # 🆕 اقتراحات AI الديناميكية للمواد غير المصنّفة
@@ -298,7 +303,7 @@ def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_ty
     # (general_test) من القائمة الجاهزة أعلاه يؤدي نفس الغرض بالضبط - عرض الاثنين معاً
     # كان يبدو كخيارين متطابقين مربكين بصرياً. باقي المواد (رياضيات/أخرى) لا تملك خياراً
     # مكافئاً بنفس المعنى ضمن قوائمها، فيبقى الزر العمومي ضرورياً لها.
-    if subject_type not in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
+    if suggested_types or subject_type not in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
         kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
     kb.append([types.InlineKeyboardButton(text=custom_text, callback_data="qtype_custom")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
@@ -369,6 +374,7 @@ def get_quiz_extraction_choice_keyboard(is_math: bool = False, solved: bool = Tr
         [types.InlineKeyboardButton(text=BTN_QUIZ_EXTRACT_AI_SOLVE, callback_data="quiz_extract_ai_solve")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
+    kb.insert(-1, [types.InlineKeyboardButton(text="✨ توليد أسئلة جديدة من المحتوى", callback_data="quiz_generate_new")])
     if not solved:
         kb = [row for row in kb if row[0].callback_data != "quiz_extract_as_is"]
     if is_math:
@@ -452,7 +458,7 @@ async def get_multiple_quizzes_keyboard(
         qt = q.get("question_type") or "general"
         if qt not in seen_types:
             seen_types.add(qt)
-            distinct_types.append((qt, q.get("question_type_label") or "🔀 متنوع"))
+            distinct_types.append((qt, q.get("question_type_label") or "📚 أسئلة شاملة عن الدرس"))
     if len(distinct_types) > 1:
         row = [types.InlineKeyboardButton(
             text=("✅ الكل" if filter_type == "all" else "الكل"), callback_data="cachefilter_type_all"
@@ -490,7 +496,7 @@ async def get_multiple_quizzes_keyboard(
         is_math = bool(q.get('is_math_quiz')) or (q_count > 0 and bool(quiz_data[0].get('is_math')))
         icon = "📐" if is_math else "📝"
         # 🆕 تفاصيل النوع + الصعوبة بجانب كل كويز مخزّن (بدل عرضها كوحدة متجانسة كسابقاً)
-        type_label = q.get("question_type_label") or "🔀 متنوع"
+        type_label = q.get("question_type_label") or "📚 أسئلة شاملة عن الدرس"
         diff_label = DIFFICULTY_LABELS_AR.get(q.get("difficulty") or "medium", "🟡 متوسط")
         # 🩹 سعر هذا الكويز تحديداً (وليس سعراً عاماً موحّداً) بناءً على عدد أسئلته الفعلي
         # 🆕 calculate_cached_points_cost صارت async (تقرأ معدّلي التسعير من إعدادات
@@ -788,6 +794,9 @@ def get_admin_users_menu_keyboard() -> types.InlineKeyboardMarkup:
     kb = [
         [types.InlineKeyboardButton(text="🔍 البحث عن مستخدم", callback_data="admin_search_prompt")],
         [types.InlineKeyboardButton(text="👥 استعراض الطلاب", callback_data="admin_users_page_1")],
+        [types.InlineKeyboardButton(text="📭 تعذر وصول إشعار التجديد", callback_data="admin_renewal_failures:all:0")],
+        [types.InlineKeyboardButton(text="🚫 حظروا البوت", callback_data="admin_renewal_failures:blocked:0")],
+        [types.InlineKeyboardButton(text="📊 آخر تقرير تجديد", callback_data="admin_renewal_report")],
         [types.InlineKeyboardButton(text="📥 تصدير الكل كـ CSV", callback_data="admin_export_users")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
@@ -803,6 +812,7 @@ def get_admin_settings_general_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="🎟 أكواد الهدايا", callback_data="ag:home:0")],
         [types.InlineKeyboardButton(text="🏆 إدارة التحديات", callback_data="admin_challenges")],
         [types.InlineKeyboardButton(text="🏰 إعدادات هجوم الأرض", callback_data="admin_challenge_cooldown")],
+        [types.InlineKeyboardButton(text="📜 نسخ الشروط والخصوصية", callback_data="admin_legal_documents")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
@@ -826,9 +836,36 @@ def get_admin_settings_keyboard(settings: dict, labels: dict) -> types.InlineKey
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
+
+
+
+def get_admin_legal_documents_keyboard(versions: dict) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text=f"📈 رفع نسخة شروط الاستخدام · {versions['terms']}",
+            callback_data="admin_legal_bump:terms",
+        )],
+        [types.InlineKeyboardButton(
+            text=f"📈 رفع نسخة سياسة الخصوصية · {versions['privacy']}",
+            callback_data="admin_legal_bump:privacy",
+        )],
+        [types.InlineKeyboardButton(text="🔙 رجوع للإعدادات العامة", callback_data="admin_settings_general")],
+    ])
+
+
+def get_admin_legal_bump_confirm_keyboard(document_type: str) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text="✅ تأكيد رفع النسخة",
+            callback_data=f"admin_legal_bump_confirm:{document_type}",
+        )],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data="admin_legal_documents")],
+    ])
+
 # ==================== 🆕 AI Models Control Panel Keyboards ====================
 
-def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboardMarkup:
+def get_ai_control_keyboard(request_timeout: float = None, vertex_parallel_enabled: bool = False,
+                            detection_thinking: str = "medium", generation_thinking: str = "auto") -> types.InlineKeyboardMarkup:
     """اللوحة الرئيسية للتحكم بالذكاء الاصطناعي: نقطة الدخول لكل الأقسام الفرعية
     (سلسلة التوليد، موديل الفحص السريع، موديل Groq السريع، سجل التوليد).
     ملاحظة: إعدادات النقاط ما عادت هون - انتقلت لقسم "الإعدادات العامة" المستقل
@@ -839,8 +876,20 @@ def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboa
         [types.InlineKeyboardButton(text="🧠 سلسلة توليد الأسئلة (Cascade)", callback_data="admin_ai_slot_cascade")],
         [types.InlineKeyboardButton(text="🔍 موديل فحص المحتوى السريع", callback_data="admin_ai_slot_detection")],
         [types.InlineKeyboardButton(text="⚡ المسار النصي السريع", callback_data="admin_ai_slot_groq_fast")],
+        [types.InlineKeyboardButton(
+            text=("✅ Vertex في المعالجة متعددة الأجزاء: مفعّل" if vertex_parallel_enabled
+                  else "🚫 Vertex في المعالجة متعددة الأجزاء: معطّل"),
+            callback_data="admin_ai_vertex_parallel_toggle",
+        )],
         [types.InlineKeyboardButton(text="📊 سجل توليد الكويزات (الوقت + الموديل)", callback_data="admin_quiz_gen_log")],
     ]
+    from helpers.settings_helper import AI_THINKING_LABELS
+    kb.extend([
+        [types.InlineKeyboardButton(
+            text=f"🔍 تفكير الفحص: {AI_THINKING_LABELS[detection_thinking]}", callback_data="ait:open:detection")],
+        [types.InlineKeyboardButton(
+            text=f"🧠 تفكير التوليد: {AI_THINKING_LABELS[generation_thinking]}", callback_data="ait:open:generation")],
+    ])
     if request_timeout is not None:
         from helpers.settings_helper import format_setting_value
         kb.append([types.InlineKeyboardButton(
@@ -849,6 +898,16 @@ def get_ai_control_keyboard(request_timeout: float = None) -> types.InlineKeyboa
         )])
     kb.append([types.InlineKeyboardButton(text="🔙 الإعدادات العامة", callback_data="admin_settings_general")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_ai_thinking_keyboard(task: str, current: str) -> types.InlineKeyboardMarkup:
+    from helpers.settings_helper import AI_THINKING_LABELS
+    rows = [[types.InlineKeyboardButton(
+        text=f"{'✅ ' if level == current else ''}{label}",
+        callback_data=f"ait:set:{task}:{level}",
+    )] for level, label in AI_THINKING_LABELS.items()]
+    rows.append([types.InlineKeyboardButton(text="🔙 التحكم بالذكاء الاصطناعي", callback_data="admin_ai_menu")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_ai_slot_keyboard(slot: str, models: list) -> types.InlineKeyboardMarkup:

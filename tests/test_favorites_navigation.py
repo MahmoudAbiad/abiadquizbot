@@ -151,4 +151,5 @@ class Navigation(unittest.IsolatedAsyncioTestCase):
         self.assertIn('fav_details_'+fid,actions(kb))
         env['get_favorite_quiz'].assert_awaited_with(42,fid)
 
-unittest.main()
+if __name__ == "__main__":
+    unittest.main()

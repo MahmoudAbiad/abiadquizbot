@@ -4,6 +4,7 @@ from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from services.runner_core import enabled, sign_launch, build_questions
 from services.runner_static import RUNNER_ASSET_VERSION
+from services.runner_availability import accepting_new_rounds
 
 router = Router()
 router.callback_query.filter(F.message.chat.type == 'private')
@@ -21,8 +22,8 @@ def launch_keyboard(quiz_id, user_id):
 
 @router.callback_query(F.data.startswith('runner:'))
 async def launch(call: types.CallbackQuery, state: FSMContext):
-    if not enabled():
-        await call.answer('اللعبة لم تُفعّل على بيئة الاختبار بعد.',show_alert=True)
+    if not await accepting_new_rounds():
+        await call.answer('بدء جولات جديدة موقوف حالياً.',show_alert=True)
         return
     # Serialize centralization of legacy text quizzes using the existing user lock.
     await _launch_locked(call, state)
@@ -37,6 +38,9 @@ async def _launch_locked(call, state):
     from helpers.supabase_helper import supabase
     from services.quiz_permissions import can_manage_quiz
     from helpers.supabase_helper.quiz_cache import save_file_quiz_multiple
+    if not await accepting_new_rounds():
+        await call.answer('بدء جولات جديدة موقوف حالياً.', show_alert=True)
+        return
     uid = call.from_user.id
     try:
         target = call.data.split(':',1)[1]

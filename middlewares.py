@@ -7,6 +7,7 @@ import asyncio
 from task_utils import spawn
 from typing import Any, Awaitable, Callable, Dict, Optional, Set
 from aiogram import BaseMiddleware
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Update, Message, CallbackQuery
 from cachetools import TTLCache
 from logger import get_logger
@@ -14,6 +15,75 @@ from config import ADMIN_ID
 from error_context import set_error_context, reset_error_context
 
 logger = get_logger(__name__)
+
+_UNHANDLED_CALLBACK_NOTICE = "⚠️ حدث خطأ غير متوقع، الرجاء المحاولة مجدداً."
+_UNHANDLED_MESSAGE_NOTICE = "⚠️ عذراً، حدث خطأ غير متوقع أثناء تنفيذ طلبك. الرجاء المحاولة مرة أخرى."
+
+_STALE_CALLBACK_QUERY_MARKERS = (
+    "query is too old",
+    "query id is invalid",
+)
+
+
+def _is_stale_callback_query_error(exc: BaseException) -> bool:
+    """Return whether Telegram has already expired/consumed a callback query."""
+    if not isinstance(exc, TelegramBadRequest):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _STALE_CALLBACK_QUERY_MARKERS)
+
+
+
+class GroupQuizOnlyMiddleware(BaseMiddleware):
+    """Ignore unrelated group traffic before maintenance, FSM and quiz handlers.
+
+    Group quiz launch commands and group-quiz buttons still work; poll votes,
+    poll closures and membership events pass through unchanged.
+    """
+
+    _GROUP_TYPES = {"group", "supergroup"}
+    _GROUP_QUIZ_CALLBACK_PREFIXES = (
+        "gql:", "gqa:", "gqn:", "gqk:", "gqt:", "gqp:", "gqc:", "gqe:",
+        "gqg:", "gqgr:", "gqchl:", "gqchr:", "gqchp:",
+    )
+
+    @staticmethod
+    def _is_group_quiz_launch(message: Message) -> bool:
+        text = (getattr(message, "text", None) or "").strip()
+        command, separator, payload = text.partition(" ")
+        if not separator or not payload.strip():
+            return False
+        command = command.split("@", 1)[0].lower()
+        payload = payload.strip()
+        if command == "/groupquiz":
+            return True
+        return command == "/start" and payload.startswith("gq_") and bool(payload[3:].strip())
+
+    async def __call__(self, handler, event: Update, data: Dict[str, Any]) -> Any:
+        # Telegram group messages must not enter generic student handlers.
+        # Keep only the two explicit group-quiz launch entry points.
+        message = getattr(event, "message", None) or getattr(event, "edited_message", None)
+        if message is not None and getattr(getattr(message, "chat", None), "type", None) in self._GROUP_TYPES:
+            if getattr(event, "edited_message", None) is not None:
+                return None
+            if not self._is_group_quiz_launch(message):
+                return None
+
+        # Stale unrelated inline buttons can otherwise trigger personal menus
+        # and error messages inside a group. Answer silently to clear spinner.
+        callback = getattr(event, "callback_query", None)
+        if callback is not None:
+            callback_chat = getattr(getattr(callback, "message", None), "chat", None)
+            if getattr(callback_chat, "type", None) in self._GROUP_TYPES:
+                callback_data = getattr(callback, "data", None) or ""
+                if not callback_data.startswith(self._GROUP_QUIZ_CALLBACK_PREFIXES):
+                    try:
+                        await callback.answer()
+                    except Exception:
+                        logger.warning("Could not acknowledge ignored group callback")
+                    return None
+
+        return await handler(event, data)
 
 
 class ErrorTrackingMiddleware(BaseMiddleware):
@@ -65,7 +135,33 @@ class ErrorTrackingMiddleware(BaseMiddleware):
         try:
             return await handler(event, data)
         except Exception as e:
+            # Callback queries have a short acknowledgement window. A late or
+            # duplicate callback cannot be answered anymore; retrying
+            # answerCallbackQuery only produces another failure. The action may
+            # already have completed, so treat this as stale input rather than
+            # recording an unhandled bot failure.
+            if isinstance(tg_event, CallbackQuery) and _is_stale_callback_query_error(e):
+                logger.warning(
+                    "Ignoring stale Telegram callback query %s for user %s",
+                    getattr(tg_event, "data", None),
+                    user_id,
+                )
+                return None
             logger.error(f"Unhandled exception while processing update {event.update_id}: {e}", exc_info=True)
+            # 🩹 محاولة عدم ترك الطالب بدون أي رد إطلاقاً (بدل التجاهل الصامت)
+            user_response = None
+            user_response_delivered = False
+            try:
+                if isinstance(tg_event, CallbackQuery):
+                    user_response = _UNHANDLED_CALLBACK_NOTICE
+                    await tg_event.answer(user_response, show_alert=True)
+                    user_response_delivered = True
+                elif isinstance(tg_event, Message):
+                    user_response = _UNHANDLED_MESSAGE_NOTICE
+                    await tg_event.answer(user_response)
+                    user_response_delivered = True
+            except Exception:
+                pass
             if user_id and user_id != ADMIN_ID:
                 try:
                     from helpers.supabase_helper import log_error_event
@@ -76,17 +172,11 @@ class ErrorTrackingMiddleware(BaseMiddleware):
                         update_type=update_type,
                         context=context_snippet,
                         unhandled=True,
+                        user_response=user_response,
+                        user_response_delivered=user_response_delivered,
                     ))
                 except Exception:
                     pass
-            # 🩹 محاولة عدم ترك الطالب بدون أي رد إطلاقاً (بدل التجاهل الصامت)
-            try:
-                if isinstance(tg_event, CallbackQuery):
-                    await tg_event.answer("⚠️ حدث خطأ غير متوقع، الرجاء المحاولة مجدداً.", show_alert=True)
-                elif isinstance(tg_event, Message):
-                    await tg_event.answer("⚠️ عذراً، حدث خطأ غير متوقع أثناء تنفيذ طلبك. الرجاء المحاولة مرة أخرى.")
-            except Exception:
-                pass
             # The durable queue must see failures instead of acknowledging a lost update.
             raise
         finally:
@@ -124,6 +214,14 @@ class MaintenanceMiddleware(BaseMiddleware):
         user = getattr(tg_event, "from_user", None) or getattr(tg_event, "user", None)
         # Keep Telegram membership/service notifications operational.
         if event.event_type in {"my_chat_member", "chat_member", "poll"}:
+            return await handler(event, data)
+        # Group administrators must be able to end a quiz and release its lock
+        # during maintenance. The handler still checks live administrator rights.
+        if (event.event_type == "callback_query"
+                and isinstance(getattr(tg_event, "data", None), str)
+                and tg_event.data.startswith("gqe:")
+                and getattr(getattr(getattr(tg_event, "message", None), "chat", None), "type", None)
+                    in {"group", "supergroup", "channel"}):
             return await handler(event, data)
         notice = await maintenance_notice(user.id if user else None)
         if notice is None:
@@ -191,7 +289,16 @@ class ThrottlingMiddleware(BaseMiddleware):
             if user_id in self.cache:
                 # نكتفي بإظهار تنبيه لضغطات الأزرار (CallbackQuery) لأنه يظهر كإشعار مؤقت ولا يغرق المحادثة
                 if isinstance(event, CallbackQuery):
-                    await event.answer("⚠️ الرجاء الانتظار...", show_alert=True)
+                    try:
+                        await event.answer("⚠️ الرجاء الانتظار...", show_alert=True)
+                    except TelegramBadRequest as exc:
+                        if not _is_stale_callback_query_error(exc):
+                            raise
+                        logger.warning(
+                            "Ignoring stale throttled callback query %s for user %s",
+                            getattr(event, "data", None),
+                            user_id,
+                        )
                 
                 # بالنسبة للرسائل العادية (Message)، ننهي العملية بصمت (Silent Return) لحماية البوت من الحظر (429)
                 logger.warning(f"Spam detected and blocked silently for user: {user_id}")
@@ -207,4 +314,5 @@ class ThrottlingMiddleware(BaseMiddleware):
             if isinstance(event, (Message, CallbackQuery)):
                 self.cache.pop(event.from_user.id, None)
             raise
+
 

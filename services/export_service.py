@@ -183,6 +183,193 @@ def _letters_for(is_ar: bool) -> List[str]:
     return ARABIC_LETTERS if is_ar else ENGLISH_LETTERS
 
 
+def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
+                    style: str = DEFAULT_STYLE, include_answers: bool = True) -> bytes:
+    """Editable question bank. Student files never contain answer-key fields.
+
+    Mathematical quizzes open on a rendered preview sheet, while source cells
+    remain editable. All strings are literal Excel text.
+    """
+    import json
+    from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    if not questions:
+        raise ExportError("لا توجد أسئلة لتصديرها.")
+    option_count = max(len(q.get("options") or []) for q in questions)
+    if len(questions) > 1_048_575 or option_count > 16_370:
+        raise ExportError("حجم الكويز يتجاوز حدود ملف Excel.")
+
+    is_ar = detect_language(questions) == "ar"
+    math_preview = any(_is_math_question(q) or (
+        include_answers and _is_math_question(_answer_print_question(q, is_ar))
+    ) for q in questions)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "الأسئلة" if is_ar else "Questions"
+    info = wb.create_sheet("معلومات الاختبار" if is_ar else "Quiz Info")
+    accent = {STYLE_SIMPLE: "334155", STYLE_MODERN: "2563EB",
+              STYLE_ACADEMIC: "374151"}[normalize_style(style)]
+
+    def add_row(sheet, values):
+        # Setting data_type explicitly prevents Excel formulas in user/AI text.
+        # Reject oversized/invalid text rather than letting openpyxl truncate it.
+        row = sheet.max_row + 1 if sheet.cell(1, 1).value is not None else 1
+        for col, value in enumerate(values, 1):
+            cell = sheet.cell(row, col)
+            if isinstance(value, str):
+                if len(value) > 32767 or ILLEGAL_CHARACTERS_RE.search(value):
+                    raise ExportError("أحد النصوص طويل جداً أو يحتوي رموزاً غير صالحة لملف Excel.")
+                cell.value = value
+                cell.data_type = "s"
+            else:
+                cell.value = value
+
+    has_table = any(q.get("table") for q in questions)
+    has_matrices = any(q.get("matrices") for q in questions)
+    headers = (["رقم السؤال", "نص السؤال", "نوع السؤال"] if is_ar else
+               ["Question Number", "Question", "Question Type"])
+    headers += [f"الخيار {i}" if is_ar else f"Option {i}" for i in range(1, option_count + 1)]
+    headers += ["الدرجة" if is_ar else "Points"]
+    if has_table:
+        headers += ["الجدول (JSON)" if is_ar else "Table (JSON)"]
+    if has_matrices:
+        headers += ["المصفوفات (JSON)" if is_ar else "Matrices (JSON)"]
+    if include_answers:
+        headers += (["رقم الإجابة الصحيحة", "الإجابة الصحيحة", "الشرح"] if is_ar else
+                    ["Correct Option Number", "Correct Answer", "Explanation"])
+    add_row(ws, headers)
+    for number, q in enumerate(questions, 1):
+        options = q.get("options") or []
+        kind = q.get("type") or ("اختيار من متعدد" if is_ar else "Multiple choice")
+        values = [number, str(q.get("question") or ""), str(kind)]
+        values += [str(o) for o in options] + [""] * (option_count - len(options))
+        values += [q.get("points", 1)]
+        if has_table:
+            values += [json.dumps(q["table"], ensure_ascii=False) if q.get("table") else ""]
+        if has_matrices:
+            values += [json.dumps(q["matrices"], ensure_ascii=False) if q.get("matrices") else ""]
+        if include_answers:
+            try:
+                correct = int(q.get("correct_option_id"))
+            except (ValueError, TypeError):
+                correct = -1
+            valid = 0 <= correct < len(options)
+            values += [correct + 1 if valid else None,
+                       str(options[correct]) if valid else "", str(q.get("explanation") or "")]
+        add_row(ws, values)
+
+    metadata = ([
+        ["المعلومة", "القيمة"], ["عنوان الاختبار", title or "كويز"],
+        ["عدد الأسئلة", len(questions)], ["النسخة", "الأستاذ" if include_answers else "الطالب"],
+        ["المدة", "غير محددة"],
+        ["ملاحظات", "ترقيم الخيارات يبدأ من 1. الصيغ الرياضية محفوظة كنص قابل للتعديل."],
+    ] if is_ar else [
+        ["Field", "Value"], ["Quiz Title", title or "Quiz"],
+        ["Question Count", len(questions)], ["Version", "Teacher" if include_answers else "Student"],
+        ["Duration", "Not specified"],
+        ["Notes", "Option numbers start at 1. Math notation is preserved as editable text."],
+    ])
+    for values in metadata:
+        add_row(info, values)
+    for sheet in (ws, info):
+        sheet.sheet_view.rightToLeft = is_ar
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        for row in sheet:
+            for cell in row:
+                cell.alignment = Alignment(horizontal="right" if is_ar else "left",
+                                           vertical="top", wrap_text=True)
+                cell.font = Font(name="Calibri", size=11)
+        for cell in sheet[1]:
+            cell.fill = PatternFill("solid", fgColor=accent)
+            cell.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        sheet.row_dimensions[1].height = 30
+        for col in range(1, sheet.max_column + 1):
+            sheet.column_dimensions[get_column_letter(col)].width = 28
+        sheet.column_dimensions["B"].width = 65
+    if math_preview:
+        _add_xlsx_math_preview(wb, title, questions, is_ar, include_answers, accent)
+        note = ("افتح ورقة العرض الرياضي لقراءة المعادلات. النص الأصلي في ورقة الأسئلة قابل للتعديل؛ "
+                "الصور لا تتحدث عند تعديل الخلايا." if is_ar else
+                "Read equations in Math Preview. Source text in Questions remains editable; "
+                "images do not update when cells are edited.")
+        info.cell(6, 2, note)
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    return buf.getvalue()
+
+
+def _add_xlsx_math_preview(wb, title, questions, is_ar, include_answers, accent):
+    """Lay out bounded print panels across rows, without Excel row-height clipping."""
+    import math
+    from openpyxl.drawing.image import Image
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    sheet = wb.create_sheet("العرض الرياضي" if is_ar else "Math Preview", 0)
+    wb.active = 0
+    sheet.sheet_view.showGridLines = False
+    # Drawing anchors use a left-to-right canvas. Arabic is already shaped
+    # inside the PNG, so Excel must not mirror its placement.
+    sheet.sheet_view.rightToLeft = False
+    sheet.sheet_view.zoomScale = 85
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.page_setup.orientation = "portrait"
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    for col in range(1, 13):
+        sheet.column_dimensions[get_column_letter(col)].width = 11
+    sheet.merge_cells("A1:L1")
+    heading = sheet.cell(1, 1, title or ("كويز" if is_ar else "Quiz"))
+    heading.data_type = "s"
+    heading.font = Font(name="Calibri", size=18, bold=True, color="FFFFFF")
+    heading.fill = PatternFill("solid", fgColor=accent)
+    heading.alignment = Alignment(horizontal="right" if is_ar else "left", vertical="center", wrap_text=True)
+    sheet.row_dimensions[1].height = 40
+    sheet.merge_cells("A2:L2")
+    note = ("عرض للقراءة؛ النص القابل للتعديل موجود في ورقة الأسئلة." if is_ar else
+            "Reading preview; editable source text is in Questions.")
+    sheet.cell(2, 1, note).alignment = Alignment(horizontal="right" if is_ar else "left", wrap_text=True)
+    sheet.row_dimensions[2].height = 30
+    row = 4
+
+    def add_panels(question, label):
+        nonlocal row
+        for payload in iter_print_blocks(question, is_ar, label):
+            image = Image(io.BytesIO(payload))
+            scale = min(1, 950 / image.width)
+            image.width = round(image.width * scale)
+            image.height = round(image.height * scale)
+            # 15 points = 20 pixels at Excel's 96 DPI. Reserve all rows the
+            # image covers, including long questions split into multiple panels.
+            rows = math.ceil(image.height / 20) + 2
+            if row + rows > 1_048_576:
+                raise ExportError("العرض الرياضي يتجاوز حدود ملف Excel.")
+            sheet.add_image(image, f"A{row}")
+            for index in range(row, row + rows):
+                sheet.row_dimensions[index].height = 15
+            row += rows
+
+    for number, question in enumerate(questions, 1):
+        # Only the visible question/choices reach the student renderer.
+        visible = {key: question[key] for key in ("question", "options", "table", "matrices") if key in question}
+        try:
+            add_panels(visible, f"السؤال {number}" if is_ar else f"Question {number}")
+            if include_answers:
+                add_panels(_answer_print_question(question, is_ar),
+                           f"حل السؤال {number}" if is_ar else f"Solution {number}")
+        except ExportError:
+            raise
+        except Exception as exc:
+            raise ExportError(f"تعذّر تنسيق السؤال {number} في Excel؛ راجع المعادلات أو حجم الجدول.") from exc
+    sheet.print_area = f"A1:L{row - 1}"
+
+
 # ==================== DOCX ====================
 
 def _set_paragraph_rtl(paragraph, align_right: bool = True) -> None:
