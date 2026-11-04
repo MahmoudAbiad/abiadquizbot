@@ -119,6 +119,23 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(forwarded.bot,fake_bot)
         await fake_bot.session.close()
 
+    async def test_message_action_omits_aiogram_default_sentinels(self):
+        from aiogram import types as telegram_types
+        env = load_functions('handlers/session_navigation.py', {'message_action'})
+        message = telegram_types.Message.model_validate({
+            'message_id': 10,
+            'date': 1,
+            'chat': {'id': 7, 'type': 'private'},
+            'from': {'id': 7, 'is_bot': False, 'first_name': 'Student'},
+            'text': 'A long study text that has more than thirty letters',
+            'link_preview_options': {},
+        })
+
+        action = env['message_action'](message, 'text')
+        json.dumps(action)
+        self.assertEqual(action['messages'][0]['text'], message.text)
+        self.assertEqual(action['messages'][0]['link_preview_options'], {})
+
     async def test_warning_preserves_progress_and_has_three_choices(self):
         self.assertTrue(await self.offer())
         self.assertEqual(self.state.data['score'],1)
