@@ -1310,6 +1310,7 @@ async def send_next_group_question(session: Dict[str, Any]) -> bool:
                 # (مش عبر استعلام قاعدة بيانات إضافي بمعالج الإجابة) تفادياً
                 # لقراءة DB على كل جواب واصل.
                 "has_timer": bool(session.get("question_timer_seconds")),
+                "track_answers": not bool(session.get("poll_is_anonymous")),
             },
         ),
         what=f"send group question {idx} (session {session_id})",
@@ -1366,13 +1367,10 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
         # "لا يوجد أي إجابة مسجّلة" إنه محدا جاوب، بينما هو قرار مقصود بالإعداد.
         text = "🏁 خلصت الجلسة (نمط مجهول بالكامل - بلا نقاط ولا ترتيب فردي حسب الإعداد المُختار)."
         needs_manual_suffix = True
-    elif not session.get("question_timer_seconds"):
-        # جلسة بدون مؤقّت: الاستفتاءات مصممة تضل مفتوحة للأبد، وما في أي
-        # تتبّع/تسجيل إجابات لهالنوع أصلاً (قرار: صفر tracking - الاعتماد
-        # الكامل على تيليجرام نفسها). فمفيش ترتيب نهشره، بس لازم إشعار واضح
-        # إنه ما في أسئلة جديدة جايّة (بدل سكوت تام يوحي بخلل). الصياغة نفسها
-        # بتفرّق بين "خلصت كل الأسئلة طبيعياً" و"الأدمن قطعها يدوياً قبل
-        # ما تخلص" - القطع اليدوي مش بالضرورة يعني كل الأسئلة انبعثت.
+    elif session.get("pacing_mode") == "burst" and not session.get("question_timer_seconds"):
+        # burst بلا مؤقّت: الجلسة بتنتهي لحظة إرسال آخر سؤال (الطلاب لسا ما جاوبوا)،
+        # فنشر ترتيب هون بيكون مبكّر ومضلّل - منكتفي برسالة إنهاء الإرسال. الإجابات
+        # بتضل منتتبّعة (track_answers) وبتظهر بلوحة الأدمن.
         if manual:
             text = "⏹️ تم إيقاف إرسال الأسئلة يدوياً من قبل الأدمن. الاستفتاءات المرسلة ضلّت مفتوحة، أي حدا لسا يقدر يجاوب عليها."
         else:
@@ -1395,8 +1393,14 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
                     who = f"لاعب {i + 1}"
                 rank = medals[i] if i < len(medals) else f"{i + 1}."
                 lines.append(f"{rank} {who} — {r.get('score', 0)} نقطة")
+            if not session.get("question_timer_seconds"):
+                lines += ["", "<i>الاستفتاءات ضلّت مفتوحة، بس الإجابات بعد هالترتيب ما بتنحسب.</i>"]
             text = "\n".join(lines)
         needs_manual_suffix = True
+        try:
+            await redis_client.set(f"{_FINISHED_SESSION_PREFIX}{session_id}", "1", ex=_FINISHED_SESSION_TTL)
+        except Exception as e:
+            log_error(logger, f"Redis error setting finished marker for session {session_id}: {e}")
     if manual and needs_manual_suffix:
         text += "\n\n<i>(أُنهيت يدوياً من قبل الأدمن)</i>"
 
@@ -1440,12 +1444,17 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
     if info.get("is_group") is not True or not info.get("session_id"):
         raise SkipHandler()
 
-    if not info.get("has_timer"):
-        # جلسة بدون مؤقّت - بالتصميم ما منسجّل ولا منتتبّع (قرار: الاعتماد
-        # الكامل على واجهة تيليجرام نفسها لعرض الجواب الصح لكل طالب لحاله،
-        # بدون تخزين هوية أي حدا). هاد بيطبّق كمان على أي جواب متأخر يوصل
-        # حتى بعد أيام - نفس السلوك بالضبط، بلا حاجة لأي منطق تنظيف إضافي.
+    if not (info.get("has_timer") or info.get("track_answers")):
+        # سجلات استفتاءات قديمة (قبل إضافة track_answers) بلا مؤقّت: نفس السلوك
+        # السابق (بلا تتبّع). الجلسات التنافسية الجديدة بتحمل track_answers=True
+        # فبتنتتبّع حتى بدون مؤقّت.
         return
+
+    try:
+        if await redis_client.exists(f"{_FINISHED_SESSION_PREFIX}{info['session_id']}"):
+            return
+    except Exception as e:
+        log_error(logger, f"Redis error checking finished marker: {e}")
 
     # من هون وطالع: هاي إجابة على استفتاء جلسة جماعية عندها مؤقّت - مسؤوليتنا نحنا.
     try:
