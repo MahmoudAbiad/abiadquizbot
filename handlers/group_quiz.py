@@ -2247,7 +2247,14 @@ async def receive_cert_text(msg: types.Message, cert_wait: Dict[str, Any]):
             return
         await redis_client.delete(key)
         session = {**session, "cert_config": cfg}
-        text, kb = await _setup_screen_view(session, "cert", is_channel=False, note="✅ انحفظ.")
+        success_label = "اسم الاختبار" if field == "title" else "الجهة / المعلّم"
+        success_text = f"✅ تم حفظ {success_label} بنجاح."
+        try:
+            await msg.answer(success_text)
+        except Exception as e:
+            # نجاح الإشعار ليس شرطاً لعرض شاشة الإعدادات المحدّثة؛ الحفظ تم فعلاً.
+            log_error(logger, f"Error sending certificate save confirmation: {e}")
+        text, kb = await _setup_screen_view(session, "cert", is_channel=False)
         try:
             await bot.edit_message_text(chat_id=msg.chat.id, message_id=int(cert_wait["message_id"]), text=text,
                                         parse_mode="HTML", reply_markup=kb)

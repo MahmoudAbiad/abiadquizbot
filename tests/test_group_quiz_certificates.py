@@ -763,10 +763,12 @@ class ReceiveTextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_title_saved_and_screen_refreshed(self):
         env = self.build()
-        await env["receive_cert_text"](message("  اختبار الكيمياء 😀 "), WAIT_TITLE)
+        msg = message("  اختبار الكيمياء 😀 ")
+        await env["receive_cert_text"](msg, WAIT_TITLE)
         saved = env["update_session"].await_args.args[1]["cert_config"]
         self.assertEqual((saved["title"], saved["enabled"]), ("اختبار الكيمياء", True))
         env["_redis"].delete.assert_awaited()
+        self.assertIn("تم حفظ اسم الاختبار بنجاح", msg.answer.await_args.args[0])
         edit = env["_bot"].edit_message_text.await_args.kwargs
         self.assertEqual((edit["message_id"], edit["chat_id"]), (31, 1))
 
@@ -785,11 +787,23 @@ class ReceiveTextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_issuer_saved_and_dash_clears_it(self):
         env = self.build()
-        await env["receive_cert_text"](message("الأستاذ محمد"), WAIT_ISSUER)
+        msg = message("الأستاذ محمد")
+        await env["receive_cert_text"](msg, WAIT_ISSUER)
         self.assertEqual(env["update_session"].await_args.args[1]["cert_config"]["issuer"], "الأستاذ محمد")
+        self.assertIn("تم حفظ الجهة / المعلّم بنجاح", msg.answer.await_args.args[0])
         env = self.build(session(cert_config=cfg(issuer="قديم")))
-        await env["receive_cert_text"](message("-"), WAIT_ISSUER)
+        msg = message("-")
+        await env["receive_cert_text"](msg, WAIT_ISSUER)
         self.assertEqual(env["update_session"].await_args.args[1]["cert_config"]["issuer"], "")
+        self.assertIn("تم حفظ الجهة / المعلّم بنجاح", msg.answer.await_args.args[0])
+
+    async def test_confirmation_failure_does_not_hide_updated_screen(self):
+        env = self.build()
+        msg = message("الأستاذ محمد")
+        msg.answer.side_effect = RuntimeError("telegram unavailable")
+        await env["receive_cert_text"](msg, WAIT_ISSUER)
+        env["update_session"].assert_awaited_once()
+        env["_bot"].edit_message_text.assert_awaited_once()
 
     async def test_cancel_word_changes_nothing(self):
         env = self.build()
