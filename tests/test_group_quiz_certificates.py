@@ -100,7 +100,8 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(gc.apply_config_change(c, "r0")[0]["show_rank"])
         self.assertFalse(gc.apply_config_change(c, "sc0")[0]["show_score"])
         self.assertEqual(gc.apply_config_change(c, "n5")[0]["count"], 5)
-        for bad in ("", "x", "thpink", "n2", "n", "d2", "pv", "1 "):
+        self.assertEqual(gc.apply_config_change(c, "n10")[0]["count"], 10)
+        for bad in ("", "x", "thpink", "n2", "n", "n11", "d2", "pv", "1 "):
             self.assertIsNotNone(gc.apply_config_change(c, bad)[1], bad)
 
     def test_change_does_not_mutate_input(self):
@@ -146,8 +147,9 @@ class WinnersTests(unittest.TestCase):
         self.assertEqual([w["user_id"] for w in winners], [1])
 
     def test_count_and_top_n_both_limit(self):
-        rows = self.rows([(9, 1), (8, 1), (7, 1), (6, 1), (5, 1)])
+        rows = self.rows([(12, 1), (11, 1), (10, 1), (9, 1), (8, 1), (7, 1), (6, 1), (5, 1), (4, 1), (3, 1)])
         self.assertEqual(len(gc.select_winners(rows, cfg(count=5), 20)), 5)
+        self.assertEqual(len(gc.select_winners(rows, cfg(count=10), 20)), 10)
         self.assertEqual(len(gc.select_winners(rows, cfg(count=3), 20)), 3)
         self.assertEqual(len(gc.select_winners(rows, cfg(count=5), 2)), 2)
         self.assertEqual(len(gc.select_winners(rows, cfg(count=1), 20)), 1)

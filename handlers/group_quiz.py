@@ -818,7 +818,7 @@ async def cancel_group_setup(call: types.CallbackQuery):
 #   gqs:<sid>:o:<field>              فتح شاشة إعداد
 #   gqs:<sid>:s:<field>:<value>      حفظ قيمة ثم إعادة رسم نفس الشاشة
 #   field ∈ mode(c|a) · names(1|0) · top(1-20) · timer(0,15,30,45,60) · pace(c|b|f30|f60|f120|f300) · lock(1|0)
-#         · cert(1|0|th<لون>|d1|d0|r1|r0|sc1|sc0|n1|n3|n5|pv|te|ie)  ← شهادات التقدير (المرحلة ب)
+#         · cert(1|0|th<لون>|d1|d0|r1|r0|sc1|sc0|n1|n3|n5|n10|pv|te|ie)  ← شهادات التقدير (المرحلة ب)
 _SETUP_HEADER_PREFIX = "gq:setup_hdr:"
 _SETUP_HEADER_TTL = 3600
 _SETUP_FIELDS = ("mode", "names", "top", "timer", "pace", "lock", "cert")

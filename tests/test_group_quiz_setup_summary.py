@@ -31,7 +31,7 @@ def load_keyboards():
         GROUP_TIMER_PRESETS=[0, 15, 30, 45, 60], GROUP_INTERVAL_PRESETS=[30, 60, 120, 300],
         _CERT_THEME_BUTTONS=(("blue", "🔵 أزرق"), ("green", "🟢 أخضر"), ("gold", "🟡 ذهبي"),
                              ("purple", "🟣 بنفسجي"), ("red", "🔴 أحمر"), ("slate", "⚫ رمادي")),
-        _CERT_COUNT_CHOICES=(1, 3, 5),
+        _CERT_COUNT_CHOICES=(1, 3, 5, 10),
     )
 
 

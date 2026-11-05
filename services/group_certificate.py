@@ -19,7 +19,7 @@ GROUP_MAX_CHARS = 48
 
 DEFAULT_TITLE = "كويز"
 DEFAULT_THEME = "blue"
-COUNT_CHOICES = (1, 3, 5)
+COUNT_CHOICES = (1, 3, 5, 10)
 DEFAULT_COUNT = 3
 MIN_SCORE_FOR_CERT = 1          # لا شهادة لمن درجته صفر
 
