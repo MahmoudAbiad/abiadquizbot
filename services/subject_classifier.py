@@ -41,7 +41,8 @@ logger = get_logger(__name__)
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
 # v2 could associate a retained text input with a newly uploaded file's hash.
 # Ignore those temporary results without deleting votes, locks or saved quizzes.
-_CLASSIFY_CACHE_PREFIX = "subject_classify:v7:"
+# v8: v7 results cached under the "null if unsure" prompt made exam-count detection fail for the same file for a week; ignore them without touching votes/locks/quizzes.
+_CLASSIFY_CACHE_PREFIX = "subject_classify:v8:"
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
 _VALID_SUBJECTS = {
@@ -77,7 +78,8 @@ class SubjectClassification(BaseModel):
     question_count: Optional[int] = Field(
         default=None,
         description=(
-            "count of actual convertible questions counted in the document, not a guess; only set when "
+            "approximate count of the actual convertible questions in the document; give your best "
+            "reasonable estimate rather than null when an exact count is hard; only set when "
             "subject is quiz_solved or quiz_unsolved, otherwise null"
         ),
     )
