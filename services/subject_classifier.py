@@ -41,7 +41,8 @@ logger = get_logger(__name__)
 CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
 # v2 could associate a retained text input with a newly uploaded file's hash.
 # Ignore those temporary results without deleting votes, locks or saved quizzes.
-# v8: v7 results cached under the "null if unsure" prompt made exam-count detection fail for the same file for a week; ignore them without touching votes/locks/quizzes.
+# v8: v7 results cached under the "null if unsure" prompt made exam-count detection
+# fail for the same file for a week; ignore them without touching votes/locks/quizzes.
 _CLASSIFY_CACHE_PREFIX = "subject_classify:v8:"
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
