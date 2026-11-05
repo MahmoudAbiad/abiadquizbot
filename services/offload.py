@@ -296,6 +296,13 @@ async def remote_render_image(question: Dict[str, Any], idx: int, total: int, is
     )
 
 
+async def remote_render_certificate(payload: Dict[str, Any], *, allow_local_fallback=True) -> Optional[bytes]:
+    """PNG لشهادة تقدير من السيرفر الثاني، أو None => نفّذ محلياً."""
+    if not ENABLED:
+        return None
+    return await _call("/v1/render/certificate", payload, RENDER_READ_TIMEOUT, "png", allow_local_fallback=allow_local_fallback)
+
+
 async def remote_build_quiz(fmt: str, title: str, questions: List[Dict[str, Any]], style: str, include_answers: bool = True) -> Optional[bytes]:
     """ملف Word/PDF لكويز كامل، أو None => نفّذ محلياً. fmt: 'docx' | 'pdf'."""
     if fmt not in ("docx", "pdf") or not ENABLED:

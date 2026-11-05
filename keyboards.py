@@ -1199,6 +1199,126 @@ def get_group_pacing_keyboard(session_id: str, timer_enabled: bool) -> types.Inl
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# ==================== شاشة ملخّص إعدادات الكويز الجماعي (gqs:) ====================
+# بديل السلسلة القديمة gqa -> gqn -> gqk -> gqt -> gql -> gqp: شاشة ملخّص وحدة + قائمة
+# إعدادات. كل ضغطة إعداد بتنحفظ فوراً وبتنعاد نفس الشاشة. القواعد والتعارضات كلها
+# بـ handlers/group_quiz.py::_compute_setup_update (هون عرض أزرار بس).
+SETUP_DEFAULT_TOP_N = 5
+SETUP_DEFAULT_INTERVAL_SECONDS = 30
+
+
+def _setup_btn(text: str, session_id: str, tail: str) -> types.InlineKeyboardButton:
+    return types.InlineKeyboardButton(text=text, callback_data=f"gqs:{session_id}:{tail}")
+
+
+def _mark(label: str, selected: bool) -> str:
+    return f"✅ {label}" if selected else label
+
+
+def get_group_setup_summary_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [_setup_btn("🚀 ابدأ الاختبار", session_id, "go")],
+        [_setup_btn("⚙️ إعدادات الاختبار", session_id, "m")],
+        [types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{session_id}")],
+    ])
+
+
+def get_group_setup_menu_keyboard(
+    session_id: str, *, is_channel: bool = False, anonymous: bool = False, lock_available: bool = True,
+    cert_available: bool = False,
+) -> types.InlineKeyboardMarkup:
+    """قائمة الإعدادات. الأزرار الما إلها معنى بتنخفى: القنوات بلا نمط/قفل، والمجهول بلا أسماء/أوائل."""
+    rows = []
+    if not is_channel:
+        rows.append([_setup_btn("🎮 نمط الجلسة", session_id, "o:mode")])
+    if not anonymous:
+        rows.append([_setup_btn("👤 ظهور الأسماء", session_id, "o:names")])
+        rows.append([_setup_btn("🏅 عدد الأوائل", session_id, "o:top")])
+    rows.append([_setup_btn("⏱ المؤقّت الداخلي", session_id, "o:timer")])
+    rows.append([_setup_btn("⏳ إيقاع إرسال الأسئلة", session_id, "o:pace")])
+    if not is_channel and lock_available:
+        rows.append([_setup_btn("🔒 قفل رسائل المجموعة", session_id, "o:lock")])
+    if cert_available and not is_channel:
+        rows.append([_setup_btn("🎓 شهادات التقدير", session_id, "o:cert")])
+    rows.append([_setup_btn("🔙 رجوع للملخّص", session_id, "b")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _back_row(session_id: str) -> list:
+    return [_setup_btn("🔙 رجوع", session_id, "m")]
+
+
+def get_group_setup_mode_keyboard(session_id: str, *, anonymous: bool) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [_setup_btn(_mark("🏆 تنافسي (نقاط + ترتيب نهائي)", not anonymous), session_id, "s:mode:c")],
+        [_setup_btn(_mark("🙈 مجهول بالكامل (بلا نقاط ولا ترتيب)", anonymous), session_id, "s:mode:a")],
+        _back_row(session_id),
+    ])
+
+
+def get_group_setup_names_keyboard(session_id: str, *, show_names: bool) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [_setup_btn(_mark("👤 اعرض الأسماء بالترتيب", show_names), session_id, "s:names:1")],
+        [_setup_btn(_mark("🙈 إخفِ الأسماء (لاعب ١، لاعب ٢...)", not show_names), session_id, "s:names:0")],
+        _back_row(session_id),
+    ])
+
+
+def get_group_setup_top_keyboard(session_id: str, top_n: int) -> types.InlineKeyboardMarkup:
+    n = max(GROUP_TOP_N_MIN, min(GROUP_TOP_N_MAX, int(top_n)))
+    presets = [_setup_btn(_mark(str(v), v == n), session_id, f"s:top:{v}") for v in GROUP_TOP_N_PRESETS]
+    stepper = [
+        _setup_btn("➖", session_id, f"s:top:{max(GROUP_TOP_N_MIN, n - 1)}"),
+        _setup_btn(f"🏅 {n}", session_id, "noop"),
+        _setup_btn("➕", session_id, f"s:top:{min(GROUP_TOP_N_MAX, n + 1)}"),
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=[presets, stepper, _back_row(session_id)])
+
+
+def get_group_setup_timer_keyboard(session_id: str, timer_seconds: int) -> types.InlineKeyboardMarkup:
+    rows, row = [], []
+    for seconds in GROUP_TIMER_PRESETS:
+        label = "🚫 بدون مؤقّت" if seconds == 0 else f"⏱ {seconds} ثانية"
+        row.append(_setup_btn(_mark(label, seconds == int(timer_seconds or 0)), session_id, f"s:timer:{seconds}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(_back_row(session_id))
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_group_setup_pace_keyboard(
+    session_id: str, *, pace: str, timer_enabled: bool, lock: bool = False,
+) -> types.InlineKeyboardMarkup:
+    """`pace` ∈ c | b | f<ثواني>. «فور انتهاء المؤقّت» بس مع مؤقّت، و«دفعة واحدة» بس بلا مؤقّت وبلا قفل."""
+    rows = []
+    if timer_enabled:
+        rows.append([_setup_btn(_mark("⚡️ فور انتهاء مؤقّت السؤال", pace == "c"), session_id, "s:pace:c")])
+    elif not lock:
+        rows.append([_setup_btn(_mark("🚀 كل الأسئلة دفعة واحدة", pace == "b"), session_id, "s:pace:b")])
+    row = []
+    for seconds in GROUP_INTERVAL_PRESETS:
+        label = f"⏳ كل {seconds} ثانية" if seconds < 60 else f"⏳ كل {seconds // 60} دقيقة"
+        row.append(_setup_btn(_mark(label, pace == f"f{seconds}"), session_id, f"s:pace:f{seconds}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(_back_row(session_id))
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_group_setup_lock_keyboard(session_id: str, *, lock: bool) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [_setup_btn(_mark("🔓 بدون قفل (الافتراضي)", not lock), session_id, "s:lock:0")],
+        [_setup_btn(_mark("🔒 تفعيل القفل", lock), session_id, "s:lock:1")],
+        _back_row(session_id),
+    ])
+
+
 def get_group_question_control_keyboard(session_id: str) -> types.InlineKeyboardMarkup:
     """كيبورد كل سؤال جماعي - زر واحد بس (مش لكل سؤال أزرار تنقّل، الإرسال تلقائي
     بالكامل حسب القرار المعماري رقم 3 بالخطة). يظهر تحت كل poll طول الجلسة."""
@@ -1243,5 +1363,29 @@ def get_group_channel_picker_keyboard(
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+_CERT_THEME_BUTTONS = (
+    ("blue", "🔵 أزرق"), ("green", "🟢 أخضر"), ("gold", "🟡 ذهبي"),
+    ("purple", "🟣 بنفسجي"), ("red", "🔴 أحمر"), ("slate", "⚫ رمادي"),
+)
+_CERT_COUNT_CHOICES = (1, 3, 5)
 
 
+def get_group_setup_cert_keyboard(session_id: str, cfg: dict, *, enabled: bool) -> types.InlineKeyboardMarkup:
+    """شاشة إعداد الشهادات. `cfg` إعدادات مُطبَّعة (services.group_certificate.normalize_config).
+    الـ callbacks كلها gqs:<sid>:s:cert:<value> (ما في بادئة جديدة): 1/0 · th<لون> · d1/d0 · r1/r0 · sc1/sc0 · n<عدد>
+    + pv (معاينة) · te (تعديل اسم الاختبار) · ie (تعديل الجهة/المعلّم)."""
+    rows = [
+        [_setup_btn("✅ مفعّلة (اضغط للتعطيل)" if enabled else "☑️ تفعيل الشهادات", session_id, "s:cert:0" if enabled else "s:cert:1")],
+        [_setup_btn("✏️ اسم الاختبار", session_id, "s:cert:te"), _setup_btn("✍️ الجهة / المعلّم", session_id, "s:cert:ie")],
+    ]
+    themes = [_setup_btn(_mark(label, cfg.get("theme") == key), session_id, f"s:cert:th{key}") for key, label in _CERT_THEME_BUTTONS]
+    rows += [themes[:3], themes[3:]]
+    rows.append([
+        _setup_btn("📅 التاريخ: " + ("يظهر" if cfg.get("show_date") else "مخفي"), session_id, "s:cert:d0" if cfg.get("show_date") else "s:cert:d1"),
+        _setup_btn("🏅 المركز: " + ("يظهر" if cfg.get("show_rank") else "عام"), session_id, "s:cert:r0" if cfg.get("show_rank") else "s:cert:r1"),
+        _setup_btn("🔢 الدرجة: " + ("تظهر" if cfg.get("show_score") else "مخفية"), session_id, "s:cert:sc0" if cfg.get("show_score") else "s:cert:sc1"),
+    ])
+    rows.append([_setup_btn(_mark(f"أول {n}", cfg.get("count") == n), session_id, f"s:cert:n{n}") for n in _CERT_COUNT_CHOICES])
+    rows.append([_setup_btn("👁 معاينة الشهادة", session_id, "s:cert:pv")])
+    rows.append(_back_row(session_id))
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)

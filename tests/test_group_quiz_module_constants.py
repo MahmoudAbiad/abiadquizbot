@@ -18,6 +18,13 @@ class ModuleConstantsTests(unittest.TestCase):
         for name in ("_FINISHED_SESSION_PREFIX", "_FINISHED_SESSION_TTL"):
             self.assertIn(name, defined)
 
+    def test_setup_summary_constants_are_defined_at_module_level(self):
+        tree = ast.parse(SRC.read_text(encoding="utf-8"))
+        defined = {t.id for n in tree.body if isinstance(n, ast.Assign)
+                   for t in n.targets if isinstance(t, ast.Name)}
+        for name in ("_SETUP_HEADER_PREFIX", "_SETUP_HEADER_TTL", "_SETUP_FIELDS", "_SETUP_PACE_LABELS"):
+            self.assertIn(name, defined)
+
 
 if __name__ == "__main__":
     unittest.main()

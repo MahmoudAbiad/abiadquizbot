@@ -20,6 +20,7 @@ MODULE: طبقة الوصول لقاعدة البيانات الخاصة بجل�
 import asyncio
 import datetime
 import json
+import time
 from typing import Any, Dict, List, Optional
 
 from config import redis_client
@@ -380,6 +381,24 @@ async def record_answer(
         return False
 
 
+_CERT_SCHEMA_CACHE: Dict[str, Any] = {"ready": False, "until": 0.0}
+
+
+async def cert_schema_ready() -> bool:
+    """بوابة نشر: الشهادات تحتاج عمودين جديدين (cert_config / last_name). قبل تطبيق الـ migration
+    تبقى الميزة مخفية، ولا يُكتب last_name (حتى لا يفشل upsert النقاط)."""
+    if time.monotonic() < _CERT_SCHEMA_CACHE["until"]:
+        return bool(_CERT_SCHEMA_CACHE["ready"])
+    try:
+        await supabase.table("group_quiz_sessions").select("cert_config").limit(1).execute()
+        await supabase.table("group_quiz_participants").select("last_name").limit(1).execute()
+        ready = True
+    except Exception:
+        ready = False
+    _CERT_SCHEMA_CACHE.update(ready=ready, until=time.monotonic() + 60)
+    return ready
+
+
 async def bump_participant(
     session_id: str,
     user_id: int,
@@ -387,6 +406,7 @@ async def bump_participant(
     first_name: Optional[str],
     is_correct: bool,
     answer_time_ms: int,
+    last_name: Optional[str] = None,
 ) -> None:
     """يحدّث سطر المشارك (أو ينشئه لو أول إجابة إله بالجلسة).
 
@@ -409,6 +429,8 @@ async def bump_participant(
             "correct_count": int((row or {}).get("correct_count", 0)) + (1 if is_correct else 0),
             "total_answer_time_ms": int((row or {}).get("total_answer_time_ms", 0)) + max(0, int(answer_time_ms)),
         }
+        if last_name and await cert_schema_ready():
+            payload["last_name"] = last_name
         await supabase.table("group_quiz_participants").upsert(
             payload, on_conflict="session_id,user_id"
         ).execute()

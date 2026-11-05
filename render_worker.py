@@ -11,6 +11,7 @@ JSON داخل، bytes خارج. لذلك يحتاج متغيرين فقط على
 نقاط النهاية:
     GET/HEAD /health                    بلا مصادقة - لأداة الـ ping التي تبقيه مستيقظاً
     POST /v1/render/question-image      صورة PNG لسؤال رياضي
+    POST /v1/render/certificate         صورة PNG لشهادة تقدير (كويز جماعي)
     POST /v1/export/quiz                ملف Word/PDF لكويز
     POST /v1/export/document            ملف Word/PDF لنص حر
 المصادقة: ترويسة X-Worker-Secret (مقارنة ثابتة الزمن) - fail-closed لو السر غير مضبوط.
@@ -194,6 +195,11 @@ async def _run(request: Request, work: Callable[[Dict[str, Any]], Tuple[bytes, s
 @app.post("/v1/render/question-image")
 async def render_question_image_endpoint(request: Request):
     return await _run(request, core.render_image)
+
+
+@app.post("/v1/render/certificate")
+async def render_certificate_endpoint(request: Request):
+    return await _run(request, core.render_certificate)
 
 
 @app.post("/v1/export/quiz")

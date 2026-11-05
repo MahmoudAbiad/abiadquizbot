@@ -74,6 +74,16 @@ def render_image(payload: Dict[str, Any]) -> Tuple[bytes, str]:
     return render_question_image(question, idx, total, is_ar), MEDIA_TYPES["png"]
 
 
+def render_certificate(payload: Dict[str, Any]) -> Tuple[bytes, str]:
+    """يرسم شهادة تقدير (PNG) لطالب واحد. التحقق الكامل بـ certificate_renderer.validate_payload."""
+    from services.certificate_renderer import CertificateError, render_certificate as draw
+
+    try:
+        return draw(_require_dict(payload, "payload")), MEDIA_TYPES["png"]
+    except CertificateError as exc:
+        raise BadPayload(str(exc))
+
+
 def build_quiz(payload: Dict[str, Any]) -> Tuple[bytes, str]:
     """ملف Word/PDF لكويز كامل. ExportError تمر كما هي لتُحوَّل إلى 422 بطبقة HTTP."""
     from services.export_service import build_quiz_docx, build_quiz_pdf, normalize_style

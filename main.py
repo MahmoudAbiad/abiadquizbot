@@ -36,6 +36,7 @@ from handlers import (
     audio_router,
     quiz_delete_router,
     group_quiz_router,
+    group_quiz_cert_router,
     payments_router,
     gifts_router,
 )
@@ -102,6 +103,7 @@ def main():
         challenge_game_router,
         challenge_live_router,  # ⚔️ المواجهات المباشرة (lv:*) - مستقل عن cg:*
         group_quiz_router,
+        group_quiz_cert_router,  # 🎓 استقبال اسم الاختبار/الجهة للشهادات بخاص الأدمن
         payments_router,  # 💳 أزرار الشحن الذاتي (pay:*) - راجع handlers/payments.py
         gifts_router,
         start_router,

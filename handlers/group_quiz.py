@@ -5,7 +5,9 @@ MODULE: تشغيل الكويز ضمن الغروبات
 ==============================================================================
 يغطي:
 - بدء الجلسة من داخل الغروب (`/start gq_<share_id>` أو `/groupquiz <share_id>`).
-- شاشات الإعداد: نمط الأنونيميتي، إخفاء الأسماء، المؤقّت الداخلي، إيقاع الانتقال.
+- شاشة إعداد واحدة (`gqs:`): ملخّص بالإعدادات الحالية + زر «ابدأ» + قائمة إعدادات (نمط الجلسة،
+  ظهور الأسماء، عدد الأوائل، المؤقّت، إيقاع الإرسال، القفل). بديل السلسلة القديمة
+  `gqa/gqn/gqk/gqt/gql/gqp` (معالجاتها ضلّت للرسائل القديمة المعلّقة فقط). القواعد بـ `_compute_setup_update`.
 - `send_next_group_question()` - نقطة الإرسال الموحّدة (بدء الجلسة، النبضة
   الدورية، ومعالج إغلاق الـ poll كمسار تسريع اختياري - راجع الملاحظة تحت).
 - `@router.poll_answer()` نسخة الغروب + `@router.poll()` (اختياري، انظر تحت).
@@ -41,7 +43,7 @@ import html
 import json
 import secrets
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from aiogram import F, Router, types
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -50,20 +52,48 @@ from aiogram.filters import Command, CommandObject
 
 from config import bot, redis_client
 from keyboards import (
-    get_group_anonymity_keyboard,
     get_group_channel_picker_keyboard,
     get_group_names_privacy_keyboard,
     get_group_pacing_keyboard,
     get_group_question_control_keyboard,
     get_group_timer_keyboard,
     get_group_top_n_keyboard,
+    get_group_setup_cert_keyboard,
+    get_group_setup_lock_keyboard,
+    get_group_setup_menu_keyboard,
+    get_group_setup_mode_keyboard,
+    get_group_setup_names_keyboard,
+    get_group_setup_pace_keyboard,
+    get_group_setup_summary_keyboard,
+    get_group_setup_timer_keyboard,
+    get_group_setup_top_keyboard,
+    GROUP_TIMER_PRESETS,
+    GROUP_INTERVAL_PRESETS,
     GROUP_TOP_N_MIN,
     GROUP_TOP_N_MAX,
     GROUP_TOP_N_DEFAULT,
+    SETUP_DEFAULT_TOP_N,
+    SETUP_DEFAULT_INTERVAL_SECONDS,
 )
 from logger import get_logger, log_error, log_info
+from services.group_certificate import (
+    DEFAULT_TITLE as CERT_DEFAULT_TITLE,
+    ISSUER_MAX_CHARS as CERT_ISSUER_MAX_CHARS,
+    THEMES as CERT_THEMES,
+    TITLE_MAX_CHARS as CERT_TITLE_MAX_CHARS,
+    apply_config_change as cert_apply_change,
+    build_payload as cert_build_payload,
+    clean_text as cert_clean_text,
+    display_name as cert_display_name,
+    eligibility as cert_eligibility,
+    format_date as cert_format_date,
+    normalize_config as cert_normalize_config,
+    rank_label as cert_rank_label,
+    select_winners as cert_select_winners,
+)
 from services.group_permissions import invalidate_group_admin_cache, is_group_admin
 from services.group_quiz_store import (
+    cert_schema_ready as group_cert_schema_ready,
     start_waiting_session,
     activate_session_due,
     claim_question_slot,
@@ -259,43 +289,33 @@ async def _start_session_setup(
         await _safe_call(lambda: ui_msg.reply("❌ تعذّر إنشاء الجلسة حالياً، جرّب بعد شوي."), what="reply create-failed")
         return
 
-    # ⚠️ `source_title`/`title` نص حر من المستخدم ومنحطّه جوا parse_mode=HTML -
-    # لازم escape (نفس عائلة بق أسماء الطلاب بـ finish_group_session).
-    title = html.escape(shared.get("source_title") or shared.get("title") or "كويز")
-    dest_label = "📢 القناة" if is_channel else "👥 الغروب"
-    dest_line = f"{dest_label}: <b>{html.escape(dest_title)}</b>\n" if dest_title else ""
-    competitive_line = (
-        "🏆 <b>تنافسي</b>: نقاط وترتيب نهائي، بس أي عضو بالغروب يقدر يشوف \"من صوّت لمين\" "
-        "على كل سؤال (قيد من تيليجرام نفسها، مش قابل للتعطيل)."
-    )
-    if is_channel:
-        # قيد تيليجرام: استفتاءات القنوات مجهولة دايماً (ما بتقبل is_anonymous=False) -
-        # فما في خيار تنافسي هون. منثبّت المجهول بقاعدة البيانات ومنقفز لشاشة المؤقّت.
-        await update_session(str(session["id"]), {"poll_is_anonymous": True})
-        text = (
-            f"📚 <b>{title}</b>\n"
-            f"{dest_line}"
-            f"عدد الأسئلة: {len(questions)}\n\n"
-            "🙈 <b>القنوات بتدعم النمط المجهول فقط</b> (قيد من تيليجرام): بلا نقاط ولا ترتيب نهائي.\n\n"
-            "⏱ بدك مؤقّت داخلي لكل سؤال؟ (الاستفتاء بيسكّر لحاله لما يخلص الوقت)"
-        )
-        await _safe_call(
-            lambda: ui_msg.answer(text, parse_mode="HTML", reply_markup=get_group_timer_keyboard(str(session["id"]))),
-            what="send channel timer screen",
-        )
+    # قيم الشاشة الافتراضية (الملخّص بيعرضها والأدمن بيعدّلها أو بيبدأ مباشرة).
+    # `top_n` لازم يتكتب صراحةً: افتراضي الـ schema 20 مش 5.
+    # القنوات مجهولة دايماً (قيد تيليجرام) فبنكتبها مباشرة.
+    sid = str(session["id"])
+    defaults: Dict[str, Any] = {
+        "poll_is_anonymous": bool(is_channel),
+        "show_names": True,
+        "top_n": SETUP_DEFAULT_TOP_N,
+        "question_timer_seconds": None,
+        "pacing_mode": "fixed_interval",
+        "question_interval_seconds": SETUP_DEFAULT_INTERVAL_SECONDS,
+    }
+    if not await update_session(sid, defaults):
+        await claim_session_cancel(sid)
+        await _safe_call(lambda: ui_msg.reply("❌ تعذّر تجهيز إعدادات الجلسة حالياً، جرّب بعد شوي."), what="reply defaults-failed")
         return
 
-    text = (
-        f"📚 <b>{title}</b>\n"
-        f"{dest_line}"
-        f"عدد الأسئلة: {len(questions)}\n\n"
-        "🎮 أول شي: شو نمط الجلسة؟\n"
-        f"{competitive_line}\n"
-        "🙈 <b>مجهول بالكامل</b>: محدا (ولا حتى أنا) بيعرف مين جاوب شو - بالمقابل بلا نقاط ولا ترتيب إطلاقاً."
+    title_raw = shared.get("source_title") or shared.get("title") or "كويز"
+    await _remember_setup_header(sid, title_raw, dest_title, is_channel)
+    state = _setup_state({**session, **defaults}, is_channel=is_channel)
+    text = _setup_summary_text(
+        state, title=title_raw, dest_title=dest_title, total=len(questions),
+        is_channel=is_channel, lock_available=await quiz_lock_schema_ready(),
     )
     await _safe_call(
-        lambda: ui_msg.answer(text, parse_mode="HTML", reply_markup=get_group_anonymity_keyboard(str(session["id"]))),
-        what="send anonymity screen",
+        lambda: ui_msg.answer(text, parse_mode="HTML", reply_markup=get_group_setup_summary_keyboard(sid)),
+        what="send setup summary screen",
     )
 
 
@@ -602,8 +622,18 @@ async def choose_group_timer(call: types.CallbackQuery):
             pass
 
 
-async def _ensure_group_lock_permission(call: types.CallbackQuery, session: Dict[str, Any]) -> bool:
-    """Check Telegram live and keep the waiting session intact while granting rights."""
+async def _ensure_group_lock_permission(
+    call: types.CallbackQuery,
+    session: Dict[str, Any],
+    retry_data: Optional[str] = None,
+    skip_data: Optional[str] = None,
+) -> bool:
+    """Check Telegram live and keep the waiting session intact while granting rights.
+
+    `retry_data`/`skip_data` (اختياريان): callback_data لزرّي «تحقق مجدداً» و«متابعة دون قفل».
+    الافتراضي = السلسلة القديمة (`gql:`)؛ شاشة الملخّص (`gqs:`) بتمرّر قيمها حتى ما يرجع
+    الأدمن للسلسلة القديمة.
+    """
     try:
         member = await bot.get_chat_member(int(session["chat_id"]), bot.id, request_timeout=15)
         if _member_status(member) == "administrator" and getattr(member, "can_restrict_members", False):
@@ -613,11 +643,13 @@ async def _ensure_group_lock_permission(call: types.CallbackQuery, session: Dict
         heading = "⚠️ تعذر التحقق من صلاحيات البوت حالياً. جرّب «تحقق مجدداً» بعد قليل."
     username = await _get_bot_username()
     sid = str(session["id"])
+    retry_cb = retry_data or f"gql:{sid}:1"
+    skip_cb = skip_data or f"gql:{sid}:0"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🔑 منح الصلاحية",
             url=f"https://t.me/{username}?startgroup&admin=restrict_members")],
-        [types.InlineKeyboardButton(text="🔄 تحقق مجدداً", callback_data=f"gql:{sid}:1")],
-        [types.InlineKeyboardButton(text="🔓 متابعة دون قفل", callback_data=f"gql:{sid}:0")],
+        [types.InlineKeyboardButton(text="🔄 تحقق مجدداً", callback_data=retry_cb)],
+        [types.InlineKeyboardButton(text="🔓 متابعة دون قفل", callback_data=skip_cb)],
         [types.InlineKeyboardButton(text="❌ إلغاء", callback_data=f"gqc:{sid}")],
     ])
     await _safe_call(lambda: call.message.edit_text(
@@ -652,6 +684,60 @@ async def choose_group_lock(call: types.CallbackQuery):
         reply_markup=get_group_pacing_keyboard(session_id, timer_enabled=bool(session.get("question_timer_seconds"))),
     )
     await call.answer()
+
+
+async def _launch_group_session(
+    call: types.CallbackQuery,
+    session: Dict[str, Any],
+    session_id: str,
+    pacing_mode: str,
+    interval: Optional[int],
+) -> None:
+    """مسار الإطلاق المشترك (waiting -> active ثم أول سؤال) - بتستدعيه شاشة الملخّص
+    (`gqs:...:go`) والمسار القديم (`gqp:`). القفل لازم يكون انفحص قبل هون.
+    بلا `call.answer()` - المستدعي مسؤول عنه."""
+    start_fields = {
+        "pacing_mode": pacing_mode,
+        "question_interval_seconds": interval,
+        "status": "active",
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "next_question_due_at": _utc_iso(120),
+    }
+    if not session.get("poll_is_anonymous") and await _is_channel_chat(int(session["chat_id"])):
+        # شبكة أمان أخيرة (جلسة قناة قديمة غير مجهولة): تيليجرام ما بتسمح بغير المجهول بالقنوات.
+        start_fields["poll_is_anonymous"] = True
+    updated = await start_waiting_session(session_id, start_fields)
+    if not updated:
+        await call.answer("❌ تعذّر بدء الجلسة", show_alert=True)
+        return
+
+    if updated.get("lock_chat"):
+        try:
+            await acquire_quiz_lock(updated)
+        except Exception:
+            await claim_session_cancel(session_id)
+            await restore_quiz_lock(session_id, int(updated["chat_id"]))
+            await call.message.edit_text("❌ تعذر تفعيل قفل المجموعة بأمان. تحقق أن البوت مشرف ولديه صلاحية تقييد الأعضاء، ثم أعد الإعداد.")
+            return
+    # Never overwrite a concurrent finish. Heartbeat resumes after a crash.
+    updated = await activate_session_due(session_id)
+    if not updated:
+        await restore_quiz_lock(session_id, int(session["chat_id"]))
+        return
+    if pacing_mode == "burst":
+        total = int(updated.get("total_questions") or 0)
+        minutes = max(1, -(-(total * BURST_GAP_SECONDS) // 60))
+        await call.message.edit_text(
+            f"🚀 انطلقت الجلسة! كل الأسئلة ({total}) رح تنبعت دفعة وحدة، بفاصل {BURST_GAP_SECONDS} ثواني "
+            f"بين كل سؤال والتاني (حوالي {minutes} دقيقة) لتفادي حدود تيليجرام.\nبالتوفيق للجميع 🎯"
+        )
+        log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} (burst)")
+        spawn(run_burst_session(session_id), name=f"gq_burst_{session_id}")
+        return
+    label = "فور انتهاء مؤقّت كل سؤال" if pacing_mode == "chain_to_timer" else f"كل {interval} ثانية"
+    await call.message.edit_text(f"🚀 انطلقت الجلسة! الأسئلة بتوصل {label}.\nبالتوفيق للجميع 🎯")
+    log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} ({pacing_mode})")
+    await send_next_group_question(updated)
 
 
 @router.callback_query(F.data.startswith("gqp:"))
@@ -692,48 +778,7 @@ async def choose_group_pacing(call: types.CallbackQuery):
         if session.get("lock_chat") and not await _ensure_group_lock_permission(call, session):
             return
 
-        start_fields = {
-            "pacing_mode": pacing_mode,
-            "question_interval_seconds": interval,
-            "status": "active",
-            "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "next_question_due_at": _utc_iso(120),
-        }
-        if not session.get("poll_is_anonymous") and await _is_channel_chat(int(session["chat_id"])):
-            # شبكة أمان أخيرة (جلسة قناة قديمة غير مجهولة): تيليجرام ما بتسمح بغير المجهول بالقنوات.
-            start_fields["poll_is_anonymous"] = True
-        updated = await start_waiting_session(session_id, start_fields)
-        if not updated:
-            await call.answer("❌ تعذّر بدء الجلسة", show_alert=True)
-            return
-
-        if updated.get("lock_chat"):
-            try:
-                await acquire_quiz_lock(updated)
-            except Exception:
-                await claim_session_cancel(session_id)
-                await restore_quiz_lock(session_id, int(updated["chat_id"]))
-                await call.message.edit_text("❌ تعذر تفعيل قفل المجموعة بأمان. تحقق أن البوت مشرف ولديه صلاحية تقييد الأعضاء، ثم أعد الإعداد.")
-                return
-        # Never overwrite a concurrent finish. Heartbeat resumes after a crash.
-        updated = await activate_session_due(session_id)
-        if not updated:
-            await restore_quiz_lock(session_id, int(session["chat_id"]))
-            return
-        if pacing_mode == "burst":
-            total = int(updated.get("total_questions") or 0)
-            minutes = max(1, -(-(total * BURST_GAP_SECONDS) // 60))
-            await call.message.edit_text(
-                f"🚀 انطلقت الجلسة! كل الأسئلة ({total}) رح تنبعت دفعة وحدة، بفاصل {BURST_GAP_SECONDS} ثواني "
-                f"بين كل سؤال والتاني (حوالي {minutes} دقيقة) لتفادي حدود تيليجرام.\nبالتوفيق للجميع 🎯"
-            )
-            log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} (burst)")
-            spawn(run_burst_session(session_id), name=f"gq_burst_{session_id}")
-            return
-        label = "فور انتهاء مؤقّت كل سؤال" if pacing_mode == "chain_to_timer" else f"كل {interval} ثانية"
-        await call.message.edit_text(f"🚀 انطلقت الجلسة! الأسئلة بتوصل {label}.\nبالتوفيق للجميع 🎯")
-        log_info(logger, f"Group quiz session {session_id} started in chat {updated['chat_id']} ({pacing_mode})")
-        await send_next_group_question(updated)
+        await _launch_group_session(call, session, session_id, pacing_mode, interval)
     except Exception as e:
         log_error(logger, f"Error in choose_group_pacing: {e}", exception=e)
     finally:
@@ -755,6 +800,429 @@ async def cancel_group_setup(call: types.CallbackQuery):
         await call.message.edit_text("❌ تم إلغاء إعداد الجلسة.")
     except Exception as e:
         log_error(logger, f"Error in cancel_group_setup: {e}", exception=e)
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
+
+
+# ==================== شاشة ملخّص الإعدادات (gqs:) ====================
+# بديل السلسلة القديمة gqa -> gqn -> gqk -> gqt -> gql -> gqp (آخر ضغطة فيها كانت تبدأ الجلسة).
+# هلق: ملخّص واحد + قائمة إعدادات؛ كل ضغطة إعداد بتنحفظ فوراً وبتنعاد نفس الشاشة.
+# المعالجات القديمة (gqa/gqn/gqk/gqt/gql/gqp) ضلّت موجودة بلا تغيير لرسائل قديمة معلّقة،
+# ولا شي بالكود الجديد بيوصل إلها.
+#
+# صيغة callback_data (≤ 64 بايت):
+#   gqs:<sid>:go | b | m | noop
+#   gqs:<sid>:o:<field>              فتح شاشة إعداد
+#   gqs:<sid>:s:<field>:<value>      حفظ قيمة ثم إعادة رسم نفس الشاشة
+#   field ∈ mode(c|a) · names(1|0) · top(1-20) · timer(0,15,30,45,60) · pace(c|b|f30|f60|f120|f300) · lock(1|0)
+#         · cert(1|0|th<لون>|d1|d0|r1|r0|sc1|sc0|n1|n3|n5|pv|te|ie)  ← شهادات التقدير (المرحلة ب)
+_SETUP_HEADER_PREFIX = "gq:setup_hdr:"
+_SETUP_HEADER_TTL = 3600
+_SETUP_FIELDS = ("mode", "names", "top", "timer", "pace", "lock", "cert")
+_SETUP_PACE_LABELS = {30: "كل 30 ثانية", 60: "كل دقيقة", 120: "كل دقيقتين", 300: "كل 5 دقائق"}
+
+
+async def _remember_setup_header(session_id: str, title: str, dest_title: Optional[str], is_channel: bool) -> None:
+    """صف الجلسة ما فيه عنوان الكويز/اسم الوجهة، فمنحفظهم بـ Redis لإعادة رسم الملخّص.
+    فقدانهم غير خطير: بيظهر «كويز» بلا اسم وجهة."""
+    try:
+        await redis_client.set(
+            f"{_SETUP_HEADER_PREFIX}{session_id}",
+            json.dumps({"title": title, "dest_title": dest_title, "is_channel": bool(is_channel)}),
+            ex=_SETUP_HEADER_TTL,
+        )
+    except Exception as e:
+        log_error(logger, f"Redis error saving setup header for session {session_id}: {e}")
+
+
+async def _load_setup_header(session_id: str) -> Dict[str, Any]:
+    try:
+        raw = await redis_client.get(f"{_SETUP_HEADER_PREFIX}{session_id}")
+        if raw:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        log_error(logger, f"Redis error loading setup header for session {session_id}: {e}")
+    return {}
+
+
+def _pace_to_mode(pace: str) -> Tuple[str, Optional[int]]:
+    """رمز الإيقاع -> (pacing_mode, question_interval_seconds)."""
+    if pace == "b":
+        return "burst", BURST_GAP_SECONDS
+    if pace == "c":
+        return "chain_to_timer", None
+    return "fixed_interval", max(MIN_QUESTION_INTERVAL_SECONDS, int(pace[1:]))
+
+
+def _setup_state(session: Dict[str, Any], *, is_channel: bool) -> Dict[str, Any]:
+    """الإعدادات الفعلية من صف الجلسة بعد تطبيع أي تعارض (مصدر الحقيقة لكل العرض)."""
+    anonymous = True if is_channel else bool(session.get("poll_is_anonymous"))
+    names = session.get("show_names")
+    names = True if names is None else bool(names)
+    try:
+        top = int(session.get("top_n") or SETUP_DEFAULT_TOP_N)
+    except (TypeError, ValueError):
+        top = SETUP_DEFAULT_TOP_N
+    top = max(GROUP_TOP_N_MIN, min(GROUP_TOP_N_MAX, top))
+    try:
+        timer = int(session.get("question_timer_seconds") or 0)
+    except (TypeError, ValueError):
+        timer = 0
+
+    mode = session.get("pacing_mode")
+    try:
+        interval = int(session.get("question_interval_seconds") or SETUP_DEFAULT_INTERVAL_SECONDS)
+    except (TypeError, ValueError):
+        interval = SETUP_DEFAULT_INTERVAL_SECONDS
+    if mode == "burst" and timer == 0:
+        pace = "b"
+    elif mode == "chain_to_timer" and timer > 0:
+        pace = "c"
+    else:
+        pace = f"f{interval if interval in GROUP_INTERVAL_PRESETS else SETUP_DEFAULT_INTERVAL_SECONDS}"
+    lock = bool(session.get("lock_chat")) and not is_channel and pace != "b"
+    cert_cfg = cert_normalize_config(session.get("cert_config"))
+    cert_ok, cert_reason = cert_eligibility(anonymous=anonymous, names=names, pace=pace, is_channel=is_channel)
+    return {
+        "mode": "a" if anonymous else "c", "anonymous": anonymous, "names": names, "top": top,
+        "timer": timer, "pace": pace, "lock": lock, "is_channel": bool(is_channel),
+        "cert": bool(cert_cfg["enabled"] and cert_ok), "cert_cfg": cert_cfg, "cert_reason": cert_reason,
+    }
+
+
+def _compute_setup_update_core(
+    session: Dict[str, Any], field: str, value: str, *, is_channel: bool, lock_available: bool = True,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """دالة صرفة (بلا I/O) بكل قواعد التعارض (الحقول الستة الأصلية؛ الشهادات بالغلاف `_compute_setup_update`). بترجّع (updates, None) أو (None, رسالة_خطأ).
+
+    - burst بلا مؤقّت فقط · chain_to_timer بمؤقّت فقط · القفل لا يعمل مع burst.
+    - تفعيل مؤقّت أثناء burst (أو إلغاؤه أثناء chain_to_timer) يرجّع الإيقاع تلقائياً إلى fixed_interval/30.
+    - القنوات: مجهولة فقط وبلا قفل. المجهول: الأسماء والأوائل بلا معنى.
+    """
+    state = _setup_state(session, is_channel=is_channel)
+    invalid = "❌ إعداد غير صالح"
+    reset_pace = {
+        "pacing_mode": "fixed_interval",
+        "question_interval_seconds": max(MIN_QUESTION_INTERVAL_SECONDS, SETUP_DEFAULT_INTERVAL_SECONDS),
+    }
+
+    if field == "mode":
+        if value not in ("c", "a"):
+            return None, invalid
+        if value == "c" and is_channel:
+            return None, "⚠️ القنوات بتدعم النمط المجهول فقط (قيد من تيليجرام)"
+        return {"poll_is_anonymous": value == "a"}, None
+
+    if field == "names":
+        if value not in ("1", "0"):
+            return None, invalid
+        if state["anonymous"]:
+            return None, "⚠️ النمط المجهول بلا ترتيب، فالأسماء بلا معنى"
+        return {"show_names": value == "1"}, None
+
+    if field == "top":
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return None, invalid
+        if not GROUP_TOP_N_MIN <= n <= GROUP_TOP_N_MAX:
+            return None, invalid
+        if state["anonymous"]:
+            return None, "⚠️ النمط المجهول بلا ترتيب نهائي"
+        return {"top_n": n}, None
+
+    if field == "timer":
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            return None, invalid
+        if seconds not in GROUP_TIMER_PRESETS:
+            return None, "❌ مدة غير صالحة"
+        updates: Dict[str, Any] = {"question_timer_seconds": seconds or None}
+        if (seconds > 0 and state["pace"] == "b") or (seconds == 0 and state["pace"] == "c"):
+            updates.update(reset_pace)
+        return updates, None
+
+    if field == "pace":
+        if value == "b":
+            if state["timer"]:
+                return None, "⚠️ هالوضع بلا مؤقّت داخلي فقط"
+            if state["lock"]:
+                return None, "⚠️ القفل لا يعمل مع الإرسال دفعة واحدة"
+        elif value == "c":
+            if not state["timer"]:
+                return None, "⚠️ هالوضع بيحتاج مؤقّت داخلي مفعّل"
+        elif value.startswith("f"):
+            try:
+                seconds = int(value[1:])
+            except ValueError:
+                return None, invalid
+            if seconds not in GROUP_INTERVAL_PRESETS:
+                return None, "❌ فاصل زمني غير صالح"
+        else:
+            return None, invalid
+        mode, interval = _pace_to_mode(value)
+        return {"pacing_mode": mode, "question_interval_seconds": interval}, None
+
+    if field == "lock":
+        if value not in ("1", "0"):
+            return None, invalid
+        if is_channel or not lock_available:
+            return None, "❌ إعداد غير صالح"
+        if value == "1" and state["pace"] == "b":
+            return None, "⚠️ القفل لا يعمل مع الإرسال دفعة واحدة"
+        return {"lock_chat": value == "1"}, None
+
+    return None, invalid
+
+
+_CERT_AUTO_DISABLED_NOTE = "ℹ️ عطّلت شهادات التقدير لأنها بتحتاج النمط التنافسي مع إظهار الأسماء وترتيب نهائي منشور."
+
+
+def _compute_setup_update(
+    session: Dict[str, Any], field: str, value: str, *, is_channel: bool, lock_available: bool = True,
+    cert_available: bool = False, default_title: str = CERT_DEFAULT_TITLE,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """دالة صرفة (بلا I/O). غلاف حول القواعد الأصلية يضيف: حقل `cert` (الشهادات) وتعطيلها تلقائياً
+    لو تغيّر إعداد آخر بحيث ما عادت ممكنة (مجهول / أسماء مخفية / إرسال دفعة واحدة)."""
+    if field == "cert":
+        if is_channel or not cert_available:
+            return None, "❌ إعداد غير صالح"
+        state = _setup_state(session, is_channel=is_channel)
+        cfg = cert_normalize_config(session.get("cert_config"), default_title=default_title)
+        new_cfg, error = cert_apply_change(cfg, value)
+        if error:
+            return None, error
+        if value == "1":
+            ok, reason = cert_eligibility(anonymous=state["anonymous"], names=state["names"], pace=state["pace"], is_channel=is_channel)
+            if not ok:
+                return None, f"⚠️ {reason}"
+        return {"cert_config": new_cfg}, None
+
+    updates, error = _compute_setup_update_core(session, field, value, is_channel=is_channel, lock_available=lock_available)
+    if error or not updates:
+        return updates, error
+    cfg = cert_normalize_config(session.get("cert_config"))
+    if cfg["enabled"]:
+        after = _setup_state({**session, **updates}, is_channel=is_channel)
+        if not after["cert"]:
+            updates = {**updates, "cert_config": {**cfg, "enabled": False}}
+    return updates, error
+
+
+def _setup_summary_text(
+    state: Dict[str, Any], *, title: str, dest_title: Optional[str], total: int,
+    is_channel: bool, lock_available: bool = True, cert_available: bool = False,
+) -> str:
+    # `title`/`dest_title` نص حر من المستخدم ومنحطّه جوا parse_mode=HTML - لازم escape.
+    pace = state["pace"]
+    if pace == "b":
+        pace_label = "دفعة واحدة"
+    elif pace == "c":
+        pace_label = "فور انتهاء المؤقّت"
+    else:
+        pace_label = _SETUP_PACE_LABELS.get(int(pace[1:]), f"كل {pace[1:]} ثانية")
+    lines = [f"📚 <b>{html.escape(title or 'كويز')}</b>"]
+    if dest_title:
+        dest_label = "📢 القناة" if is_channel else "👥 الغروب"
+        lines.append(f"{dest_label}: <b>{html.escape(dest_title)}</b>")
+    lines += [f"عدد الأسئلة: {total}", "", "⚙️ <b>الإعدادات الحالية</b>"]
+    lines.append("🎮 النمط: " + ("مجهول" if state["anonymous"] else "تنافسي"))
+    if not state["anonymous"]:
+        lines.append("👤 الأسماء بالترتيب: " + ("ظاهرة" if state["names"] else "مخفية"))
+        if pace == "b":
+            # هاد سلوك finish_group_session الفعلي: burst بلا مؤقّت ما بينشر ترتيب نهائي.
+            lines.append("🏅 الترتيب النهائي: ما بينشر مع الإرسال دفعة واحدة")
+        else:
+            lines.append(f"🏅 الترتيب النهائي: أول {state['top']}")
+    lines.append("⏱ المؤقّت الداخلي: " + (f"{state['timer']} ثانية" if state["timer"] else "بدون"))
+    lines.append(f"⏳ إرسال الأسئلة: {pace_label}")
+    if not is_channel and lock_available:
+        lines.append("🔒 قفل رسائل المجموعة: " + ("مفعّل" if state["lock"] else "معطّل"))
+    if cert_available and not is_channel:
+        if state["cert"]:
+            lines.append(f"🎓 الشهادات: مفعّلة (أول {min(state['cert_cfg']['count'], state['top'])})")
+        else:
+            lines.append("🎓 الشهادات: غير مفعّلة")
+    if state["anonymous"]:
+        lines += ["", "🙈 <i>بلا نقاط ولا ترتيب نهائي" + (" (القنوات بتدعم المجهول فقط - قيد من تيليجرام)" if is_channel else "") + ".</i>"]
+    return "\n".join(lines)
+
+
+def _cert_screen_text(cfg: Dict[str, Any], *, enabled: bool, reason: Optional[str], top: int) -> str:
+    """نص شاشة الشهادات. اسم الاختبار/الجهة نص حر -> html.escape (داخل parse_mode=HTML)."""
+    lines = [
+        "🎓 <b>شهادات التقدير</b>",
+        "الحالة: " + ("✅ مفعّلة" if enabled else "غير مفعّلة"),
+        f"📝 اسم الاختبار: <b>{html.escape(cfg['title'])}</b>",
+        "✍️ الجهة / المعلّم: " + (f"<b>{html.escape(cfg['issuer'])}</b>" if cfg["issuer"] else "بدون"),
+        f"🎨 اللون: {CERT_THEMES[cfg['theme']]['label']}",
+        "📅 التاريخ: " + ("يظهر" if cfg["show_date"] else "مخفي"),
+        "🏅 المركز: " + ("يظهر (المركز الأول...)" if cfg["show_rank"] else "عبارة عامة (متميّز)"),
+        "🔢 الدرجة: " + ("تظهر" if cfg["show_score"] else "مخفية"),
+        f"👥 عدد الشهادات: أول {min(cfg['count'], top)} (فقط لمن جاب نقطة أو أكتر)",
+        "",
+        "<i>بتنرسل كصور بعد الترتيب النهائي، وبتحمل اسم الطالب (الأول والأخير من حسابه) واسم المجموعة. "
+        "هي شهادة تقدير غير رسمية، والعبارة هاي ثابتة. اضغط «معاينة» لتشوف شكلها التقريبي.</i>",
+    ]
+    if reason:
+        lines += ["", f"⚠️ {html.escape(reason)}"]
+    return "\n".join(lines)
+
+
+async def _setup_screen_view(session: Dict[str, Any], screen: str, *, is_channel: bool, note: str = "") -> Tuple[str, Any]:
+    """(نص، كيبورد) لشاشة: b ملخّص · m قائمة · أو اسم إعداد."""
+    sid = str(session["id"])
+    state = _setup_state(session, is_channel=is_channel)
+    lock_available = await quiz_lock_schema_ready()
+    cert_available = (not is_channel) and await group_cert_schema_ready()
+    prefix = f"{note}\n\n" if note else ""
+    if screen == "b":
+        header = await _load_setup_header(sid)
+        text = _setup_summary_text(
+            state, title=header.get("title") or "كويز", dest_title=header.get("dest_title"),
+            total=int(session.get("total_questions") or 0), is_channel=is_channel, lock_available=lock_available,
+            cert_available=cert_available,
+        )
+        return prefix + text, get_group_setup_summary_keyboard(sid)
+    if screen == "m":
+        return (prefix + "⚙️ <b>إعدادات الاختبار</b>\nاختار الإعداد اللي بدك تعدّله:",
+                get_group_setup_menu_keyboard(sid, is_channel=is_channel, anonymous=state["anonymous"],
+                                              lock_available=lock_available, cert_available=cert_available))
+    if screen == "cert":
+        header = await _load_setup_header(sid)
+        cfg = cert_normalize_config(session.get("cert_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
+        return (prefix + _cert_screen_text(cfg, enabled=state["cert"], reason=state["cert_reason"], top=state["top"]),
+                get_group_setup_cert_keyboard(sid, cfg, enabled=state["cert"]))
+    if screen == "mode":
+        return (prefix + "🎮 <b>نمط الجلسة</b>\n🏆 تنافسي: نقاط وترتيب نهائي (زر \"من صوّت لمين\" بيضل ظاهر - قيد من تيليجرام).\n"
+                "🙈 مجهول: محدا بيعرف مين جاوب شو، بلا نقاط ولا ترتيب.",
+                get_group_setup_mode_keyboard(sid, anonymous=state["anonymous"]))
+    if screen == "names":
+        return (prefix + "👤 <b>ظهور الأسماء</b>\nبتحب أسماء الطلاب تظهر برسائل الترتيب اللي بينشرها البوت؟",
+                get_group_setup_names_keyboard(sid, show_names=state["names"]))
+    if screen == "top":
+        return (prefix + _TOP_N_PROMPT, get_group_setup_top_keyboard(sid, state["top"]))
+    if screen == "timer":
+        return (prefix + "⏱ <b>المؤقّت الداخلي</b>\nالاستفتاء بيسكّر لحاله لما يخلص الوقت.",
+                get_group_setup_timer_keyboard(sid, state["timer"]))
+    if screen == "pace":
+        return (prefix + "⏳ <b>إيمتى يُرسل السؤال التالي؟</b>",
+                get_group_setup_pace_keyboard(sid, pace=state["pace"], timer_enabled=bool(state["timer"]), lock=state["lock"]))
+    # lock
+    return (prefix + "🔒 <b>قفل رسائل المجموعة أثناء الاختبار</b>\nالتصويت يبقى متاحاً، ويُعاد فتح المجموعة تلقائياً عند النهاية.\n"
+            "ما بيشتغل مع الإرسال دفعة واحدة.",
+            get_group_setup_lock_keyboard(sid, lock=state["lock"]))
+
+
+async def _edit_setup_screen(call: types.CallbackQuery, text: str, keyboard: Any) -> None:
+    try:
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        # ضغط على خيار محدّد أصلاً -> "message is not modified": مقصود نبلعه.
+        if "message is not modified" not in str(e):
+            raise
+
+
+@router.callback_query(F.data.startswith("gqs:"))
+async def setup_summary_callback(call: types.CallbackQuery):
+    try:
+        parts = call.data.split(":")
+        if len(parts) < 3 or not parts[1]:
+            await call.answer("❌ طلب غير صالح.", show_alert=True)
+            return
+        session_id, action = parts[1], parts[2]
+        if action == "noop":
+            return
+        if action not in {"go", "b", "m", "o", "s"} or (action in {"o"} and len(parts) != 4) or (action == "s" and len(parts) != 5):
+            await call.answer("❌ طلب غير صالح.", show_alert=True)
+            return
+        field = parts[3] if len(parts) > 3 else ""
+        if action in {"o", "s"} and field not in _SETUP_FIELDS:
+            await call.answer("❌ طلب غير صالح.", show_alert=True)
+            return
+        session = await _guard_config_callback(call, session_id)
+        if not session:
+            return
+        is_channel = await _is_channel_chat(int(session["chat_id"]))
+        state = _setup_state(session, is_channel=is_channel)
+
+        if action in {"b", "m"}:
+            text, kb = await _setup_screen_view(session, action, is_channel=is_channel)
+            await _edit_setup_screen(call, text, kb)
+            return
+
+        if action == "o":
+            hidden = ((is_channel and field in {"mode", "lock", "cert"})
+                      or (state["anonymous"] and field in {"names", "top"})
+                      or (field == "lock" and not await quiz_lock_schema_ready())
+                      or (field == "cert" and not await group_cert_schema_ready()))
+            if hidden:
+                await call.answer("⚠️ هالإعداد غير متاح هون", show_alert=True)
+                return
+            if field == "cert" and not state["cert"] and state["cert_reason"]:
+                await call.answer(f"⚠️ {state['cert_reason']}", show_alert=True)
+                return
+            text, kb = await _setup_screen_view(session, field, is_channel=is_channel)
+            await _edit_setup_screen(call, text, kb)
+            return
+
+        if action == "s":
+            value = parts[4]
+            if field == "cert" and value in {"pv", "te", "ie"}:
+                await _handle_cert_special(call, session, session_id, value, state, is_channel=is_channel)
+                return
+            cert_title = CERT_DEFAULT_TITLE
+            if field == "cert":
+                cert_title = (await _load_setup_header(session_id)).get("title") or CERT_DEFAULT_TITLE
+            updates, error = _compute_setup_update(
+                session, field, value, is_channel=is_channel, lock_available=await quiz_lock_schema_ready(),
+                cert_available=(not is_channel) and await group_cert_schema_ready(), default_title=cert_title)
+            if error:
+                await call.answer(error, show_alert=True)
+                return
+            if field == "lock" and value == "1" and not await _ensure_group_lock_permission(
+                    call, session, retry_data=f"gqs:{session_id}:s:lock:1", skip_data=f"gqs:{session_id}:s:lock:0"):
+                return
+            saved = await update_session(session_id, updates)
+            if not saved:
+                await call.answer("❌ تعذر حفظ الإعدادات", show_alert=True)
+                return
+            session = {**session, **updates}
+            note = ""
+            if field == "timer" and "pacing_mode" in updates:
+                note = "ℹ️ رجّعت إيقاع الإرسال لكل 30 ثانية لأنه ما بيتوافق مع هالمؤقّت."
+            if "cert_config" in updates and field != "cert":
+                note = (note + "\n" if note else "") + _CERT_AUTO_DISABLED_NOTE
+            text, kb = await _setup_screen_view(session, field, is_channel=is_channel, note=note)
+            await _edit_setup_screen(call, text, kb)
+            return
+
+        # action == "go": ابدأ الاختبار بالإعدادات الحالية
+        fixes: Dict[str, Any] = {}
+        if bool(session.get("lock_chat")) != state["lock"]:
+            fixes["lock_chat"] = state["lock"]
+        if is_channel and not session.get("poll_is_anonymous"):
+            fixes["poll_is_anonymous"] = True
+        if state["cert_cfg"]["enabled"] and not state["cert"]:
+            fixes["cert_config"] = {**state["cert_cfg"], "enabled": False}
+        if fixes:
+            if not await update_session(session_id, fixes):
+                await call.answer("❌ تعذر حفظ الإعدادات", show_alert=True)
+                return
+            session = {**session, **fixes}
+        if state["lock"] and not await _ensure_group_lock_permission(
+                call, session, retry_data=f"gqs:{session_id}:go", skip_data=f"gqs:{session_id}:s:lock:0"):
+            return
+        pacing_mode, interval = _pace_to_mode(state["pace"])
+        await _launch_group_session(call, session, session_id, pacing_mode, interval)
+    except Exception as e:
+        log_error(logger, f"Error in setup_summary_callback: {e}", exception=e)
     finally:
         try:
             await call.answer()
@@ -1368,6 +1836,8 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             # aiogram بترمي BadRequest بهالحالة، مش خطأ حقيقي.
             log_error(logger, f"stop_poll failed for session {session_id} (likely already closed): {e}")
 
+    cert_rows: Optional[list] = None
+    cert_top_n = 0
     if session.get("poll_is_anonymous"):
         # ما في ولا صف بـ group_quiz_participants أصلاً بهالوضع (تيليجرام ما
         # بيبعت poll_answer للاستفتاءات المجهولة) - رسالة صريحة بدل ما توحي
@@ -1403,6 +1873,7 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
             if not session.get("question_timer_seconds"):
                 lines += ["", "<i>الاستفتاءات ضلّت مفتوحة، بس الإجابات بعد هالترتيب ما بتنحسب.</i>"]
             text = "\n".join(lines)
+            cert_rows, cert_top_n = rows, top_n
         needs_manual_suffix = True
         try:
             await redis_client.set(f"{_FINISHED_SESSION_PREFIX}{session_id}", "1", ex=_FINISHED_SESSION_TTL)
@@ -1420,6 +1891,9 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
         ),
         what=f"send leaderboard (session {session_id})",
     )
+    if cert_rows:
+        # 🎓 بعد الترتيب النصي وبمهمة منفصلة: فشل/بطء الرسم ما بيعطّل الإنهاء ولا النبضة.
+        spawn(_send_certificates(session, cert_rows, cert_top_n))
 
 
 # ==================== إجابات الأعضاء ====================
@@ -1506,6 +1980,7 @@ async def handle_group_poll_answer(poll_answer: types.PollAnswer):
                 first_name=user.first_name,
                 is_correct=is_correct,
                 answer_time_ms=answer_time_ms,
+                last_name=getattr(user, "last_name", None),
             )
     except Exception as e:
         log_error(logger, f"Error in handle_group_poll_answer: {e}", exception=e)
@@ -1633,6 +2108,206 @@ async def group_quiz_heartbeat_loop(interval_seconds: int = HEARTBEAT_INTERVAL_S
         except Exception as e:
             log_error(logger, f"Error inside group quiz heartbeat loop: {e}", exception=e)
         await asyncio.sleep(interval_seconds)
+
+
+
+# ==================== 🎓 شهادات التقدير (المرحلة ب) ====================
+# تُفعَّل من شاشة الإعداد (gqs:<sid>:o:cert) وتُرسل كصور بعد الترتيب النهائي مباشرة.
+# الرسم بالسيرفر الثاني (أو محلياً كاحتياط) عبر services/certificate_renderer.py، وأي فشل هناك
+# ما بيأثّر على إنهاء الجلسة ولا على الترتيب النصي (مهمة منفصلة + try/except شامل).
+CERT_RENDER_TIMEOUT_SECONDS = 60
+_CERT_TEXT_WAIT_PREFIX = "gq:cert_text_wait:"
+_CERT_TEXT_WAIT_TTL = 300
+_CERT_PREVIEW_COOLDOWN_PREFIX = "gq:cert_preview:"
+_CERT_PREVIEW_COOLDOWN_SECONDS = 8
+_CERT_CANCEL_WORDS = {"إلغاء", "الغاء", "cancel"}
+
+# رسائل الأدمن النصية (اسم الاختبار/الجهة) بتوصل للخاص، و`router` الأساسي محصور بالغروبات،
+# فلها router مستقل محصور بالخاص (مسجّل بـ main.py قبل payments/start).
+group_quiz_cert_router = Router()
+group_quiz_cert_router.message.filter(F.chat.type == "private")
+
+
+async def _render_cert(payload: Dict[str, Any]) -> bytes:
+    # استيراد كسول: PIL ما بيتحمّل ببداية البوت إلا لو استُخدمت الميزة فعلاً (ذاكرة 512MB).
+    from services.certificate_renderer import render_certificate_async
+    return await render_certificate_async(payload)
+
+
+async def _handle_cert_special(
+    call: types.CallbackQuery, session: Dict[str, Any], session_id: str, value: str, state: Dict[str, Any], *, is_channel: bool,
+) -> None:
+    """أزرار الشهادات اللي ما بتحفظ إعداداً: pv معاينة · te تعديل اسم الاختبار · ie تعديل الجهة."""
+    if is_channel or not await group_cert_schema_ready():
+        await call.answer("⚠️ هالإعداد غير متاح هون", show_alert=True)
+        return
+    if value == "pv":
+        await _send_cert_preview(call, session, session_id)
+        return
+    field = "title" if value == "te" else "issuer"
+    try:
+        await redis_client.set(
+            f"{_CERT_TEXT_WAIT_PREFIX}{call.from_user.id}",
+            json.dumps({"sid": session_id, "field": field, "message_id": call.message.message_id}),
+            ex=_CERT_TEXT_WAIT_TTL,
+        )
+    except Exception as e:
+        log_error(logger, f"Redis error arming cert text wait: {e}")
+        await call.answer("❌ تعذّر، جرّب بعد شوي", show_alert=True)
+        return
+    if field == "title":
+        prompt = (f"✏️ ابعتلي <b>اسم الاختبار</b> اللي بدك ينكتب على الشهادة (حتى {CERT_TITLE_MAX_CHARS} حرف).\n"
+                  "الاسم إجباري. لإلغاء التعديل ابعت «إلغاء».")
+    else:
+        prompt = (f"✍️ ابعتلي اسم <b>الجهة أو المعلّم</b> (حتى {CERT_ISSUER_MAX_CHARS} حرف) ليظهر أسفل الشهادة.\n"
+                  "ابعت «-» لحذفه، أو «إلغاء» لتتراجع.")
+    await _safe_call(lambda: call.message.answer(prompt, parse_mode="HTML"), what="cert text prompt")
+
+
+async def _send_cert_preview(call: types.CallbackQuery, session: Dict[str, Any], session_id: str) -> None:
+    """معاينة تقريبية بإعدادات الشهادة الحالية، بخاص الأدمن فقط (ما بتنرسل للغروب). بتستخدم اسم الأدمن نفسه كعيّنة."""
+    try:
+        acquired = await redis_client.set(
+            f"{_CERT_PREVIEW_COOLDOWN_PREFIX}{call.from_user.id}", "1", nx=True, ex=_CERT_PREVIEW_COOLDOWN_SECONDS)
+    except Exception as e:
+        log_error(logger, f"Redis error on cert preview cooldown: {e}")
+        acquired = True
+    if not acquired:
+        await call.answer("⏳ استنى شوي قبل معاينة جديدة", show_alert=True)
+        return
+    await call.answer("⏳ عم جهّز المعاينة...")
+    try:
+        header = await _load_setup_header(session_id)
+        cfg = cert_normalize_config(session.get("cert_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
+        total = max(1, int(session.get("total_questions") or 10))
+        payload = cert_build_payload(
+            cfg,
+            name=cert_display_name(call.from_user.first_name, getattr(call.from_user, "last_name", None), call.from_user.username, call.from_user.id),
+            group_name=header.get("dest_title") or "", rank=1, score=total, total=total,
+            date_text=cert_format_date(datetime.datetime.now(datetime.timezone.utc)), preview=True,
+        )
+        await _safe_call(lambda: bot.send_chat_action(call.message.chat.id, "upload_photo"), what="cert preview action")
+        png = await asyncio.wait_for(_render_cert(payload), timeout=CERT_RENDER_TIMEOUT_SECONDS)
+        await bot.send_photo(
+            chat_id=call.message.chat.id,
+            photo=types.BufferedInputFile(png, filename="certificate_preview.png"),
+            caption="👁 معاينة تقريبية للشهادة (الاسم والمركز والدرجة هون للتجربة بس).",
+        )
+    except Exception as e:
+        log_error(logger, f"cert preview failed for session {session_id}: {e}", exception=e)
+        await _safe_call(lambda: call.message.answer("❌ تعذّر رسم المعاينة هلق، جرّب بعد شوي."), what="cert preview failed notice")
+
+
+async def _awaiting_cert_text(msg: types.Message) -> Any:
+    """فلتر: الأدمن ضغط «اسم الاختبار/الجهة» وما أرسل النص بعد. الأوامر (/...) ما بتنلتقط."""
+    text = getattr(msg, "text", None)
+    if not text or text.startswith("/") or not getattr(msg, "from_user", None):
+        return False
+    try:
+        raw = await redis_client.get(f"{_CERT_TEXT_WAIT_PREFIX}{msg.from_user.id}")
+        data = json.loads(raw) if raw else None
+    except Exception as e:
+        log_error(logger, f"Redis error reading cert text wait: {e}")
+        return False
+    if not isinstance(data, dict) or data.get("field") not in {"title", "issuer"} or not data.get("sid"):
+        return False
+    return {"cert_wait": data}
+
+
+@group_quiz_cert_router.message(F.text, _awaiting_cert_text)
+async def receive_cert_text(msg: types.Message, cert_wait: Dict[str, Any]):
+    user_id = msg.from_user.id
+    key = f"{_CERT_TEXT_WAIT_PREFIX}{user_id}"
+    try:
+        raw_text = (msg.text or "").strip()
+        if raw_text.lower() in _CERT_CANCEL_WORDS:
+            await redis_client.delete(key)
+            await msg.answer("تمام، ما غيّرت شي.")
+            return
+        session_id = str(cert_wait["sid"])
+        session = await get_session(session_id)
+        if (not session or session["status"] != "waiting" or int(session["started_by"]) != user_id
+                or not await is_group_admin(int(session["chat_id"]), user_id, fresh=True)):
+            await redis_client.delete(key)
+            await msg.answer("⚠️ هالجلسة ما عادت متاحة.")
+            return
+        field = cert_wait["field"]
+        if field == "title":
+            value = cert_clean_text(raw_text, CERT_TITLE_MAX_CHARS)
+            if not value:
+                await msg.answer("❌ اسم الاختبار إجباري، وما بيقبل إيموجي أو رموز فقط. جرّب اسم تاني، أو ابعت «إلغاء».")
+                return
+        else:
+            value = "" if raw_text in {"-", "—"} else cert_clean_text(raw_text, CERT_ISSUER_MAX_CHARS)
+        header = await _load_setup_header(session_id)
+        cfg = cert_normalize_config(session.get("cert_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
+        cfg[field] = value
+        if not await update_session(session_id, {"cert_config": cfg}):
+            await msg.answer("❌ تعذر حفظ الإعدادات، جرّب بعد شوي.")
+            return
+        await redis_client.delete(key)
+        session = {**session, "cert_config": cfg}
+        text, kb = await _setup_screen_view(session, "cert", is_channel=False, note="✅ انحفظ.")
+        try:
+            await bot.edit_message_text(chat_id=msg.chat.id, message_id=int(cert_wait["message_id"]), text=text,
+                                        parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        log_error(logger, f"Error in receive_cert_text: {e}", exception=e)
+
+
+async def _send_certificates(session: Dict[str, Any], rows: list, top_n: int) -> None:
+    """يرسم ويرسل شهادات الأوائل كألبوم (أو صورة وحدة). لا يرمي أبداً: كل فشل بيتسجّل وبينتهي بصمت."""
+    session_id = str(session.get("id"))
+    try:
+        cfg = cert_normalize_config(session.get("cert_config"))
+        if not cfg["enabled"] or session.get("poll_is_anonymous") or session.get("show_names") is False:
+            return
+        winners = cert_select_winners(rows, cfg, top_n)
+        if not winners:
+            return
+        chat_id = int(session["chat_id"])
+        group_name = ""
+        try:
+            group_name = getattr(await bot.get_chat(chat_id), "title", None) or ""
+        except Exception as e:
+            log_error(logger, f"cert: get_chat failed for session {session_id}: {e}")
+        total = max(1, int(session.get("total_questions") or 0))
+        date_text = cert_format_date(datetime.datetime.now(datetime.timezone.utc))
+        images = []
+        for winner in winners:
+            score = int(winner.get("score") or 0)
+            payload = cert_build_payload(
+                cfg,
+                name=cert_display_name(winner.get("first_name"), winner.get("last_name"), winner.get("username"), winner.get("user_id")),
+                group_name=group_name, rank=int(winner["rank"]), score=score, total=max(total, score), date_text=date_text,
+            )
+            try:
+                images.append(await asyncio.wait_for(_render_cert(payload), timeout=CERT_RENDER_TIMEOUT_SECONDS))
+            except Exception as e:
+                log_error(logger, f"cert: render failed for session {session_id} rank {winner['rank']}: {e}")
+        if not images:
+            return
+        caption = "🎓 <b>شهادات التقدير للأوائل</b>\n<i>شهادة تقدير غير رسمية من البوت.</i>"
+        thread_id = session.get("message_thread_id")
+        if len(images) == 1:
+            await _safe_call(
+                lambda: bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(images[0], filename="certificate_1.png"),
+                                       caption=caption, parse_mode="HTML", message_thread_id=thread_id),
+                what=f"send certificate (session {session_id})")
+        else:
+            media = [
+                types.InputMediaPhoto(
+                    media=types.BufferedInputFile(img, filename=f"certificate_{i}.png"),
+                    caption=caption if i == 1 else None, parse_mode="HTML" if i == 1 else None)
+                for i, img in enumerate(images, start=1)
+            ]
+            await _safe_call(
+                lambda: bot.send_media_group(chat_id=chat_id, media=media, message_thread_id=thread_id),
+                what=f"send certificates (session {session_id})")
+    except Exception as e:
+        log_error(logger, f"cert: unexpected failure for session {session_id}: {e}", exception=e)
 
 
 group_quiz_router = router
