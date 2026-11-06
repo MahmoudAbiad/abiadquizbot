@@ -28,6 +28,11 @@ THEME_AUDIO_PATH = os.path.join(ASSETS_DIR, "theme.mp3")
 THEME_AUDIO_TITLE = "حفل التكريم"
 VIDEO_WIDTH, VIDEO_HEIGHT = 720, 900     # أبعاد الفيديو (الحجم الزوجي مطلوب لـ send_video)
 MUSIC_SECONDS = 18.9                     # مدة theme.mp3 (الفيديو بيتقصّ عليها)
+# مواقيت theme.mp3 (مقيسة من الطاقة الصوتية): البِلد-أب بيقطع للصمت تقريباً عند 6.55، والـ beat drop الفعلي بيضرب عند 7.00.
+# الفيديو بيتزامن عليها (ceremony_renderer.build_ffmpeg_command). لو تغيّرت الأغنية عدّل هالقيمتين فقط.
+MUSIC_BREATH_SECONDS = 6.55              # بداية «الشهقة» (قطع الصوت قبل الدروب)
+MUSIC_DROP_SECONDS = 7.00                # لحظة ضربة الدروب (فلاش + لهب كامل + ظهور المركز الأول)
+MUSIC_BEAT_SECONDS = 0.575               # فاصل ضربات الأغنية (~104 BPM): الدروب نفسه على الشبكة (7.00 = 1.82 + 9×0.575)
 SILENT_SECONDS = 12.0                    # مدة الفيديو لو الأغنية مطفية
 
 COUNT_CHOICES = (3, 5, 10)

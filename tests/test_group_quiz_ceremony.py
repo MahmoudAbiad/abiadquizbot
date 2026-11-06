@@ -216,6 +216,26 @@ class StaticRenderTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(path), path)
 
 
+class StaticLayerPartsTests(unittest.TestCase):
+    def test_head_and_body_compose_to_the_full_layer(self):
+        from PIL import Image, ImageChops
+        data = cr.validate_payload(winners_payload(5))
+        full = cr.static_layer(data)
+        combined = cr.static_layer(data, "head")
+        combined.alpha_composite(cr.static_layer(data, "body"))
+        self.assertIsNone(ImageChops.difference(full, combined).getbbox())
+
+    def test_head_has_no_names_and_body_has_no_title_area(self):
+        data = cr.validate_payload(winners_payload(5))
+        head, body = cr.static_layer(data, "head"), cr.static_layer(data, "body")
+        self.assertIsNone(body.crop((0, 0, cr.FRAME_W, 500)).getchannel("A").getbbox())    # بلا عنوان (توهّج أول بانر بس بيمتد لحدود 530)
+        self.assertIsNone(head.crop((0, 600, cr.FRAME_W, cr.FRAME_H - 110)).getchannel("A").getbbox())  # بلا أسماء
+
+    def test_invalid_part_rejected(self):
+        with self.assertRaises(ValueError):
+            cr.static_layer(cr.validate_payload(winners_payload(3)), "x")
+
+
 class FfmpegCommandTests(unittest.TestCase):
     def test_with_music_maps_audio_and_trims_to_song(self):
         cmd = cr.build_ffmpeg_command("ffmpeg", "/t/o.png", "/t/out.mp4", music=True)
@@ -236,9 +256,88 @@ class FfmpegCommandTests(unittest.TestCase):
         i = cmd.index(cr.FLAMES_LOOP_PATH)
         self.assertEqual(cmd[i - 3:i], ["-stream_loop", "-1", "-i"])
 
+    REVEALS = [
+        {"path": "/t/r0.png", "cx": 360.0, "cy": 700.0, "t": 4.125, "role": "row"},
+        {"path": "/t/r1.png", "cx": 360.0, "cy": 527.0, "t": 4.7, "role": "top"},
+        {"path": "/t/r2.png", "cx": 360.0, "cy": 350.0, "t": gcm.MUSIC_DROP_SECONDS, "role": "hero"},
+    ]
+
+    def test_synced_music_command_keeps_audio_at_index_2_and_adds_reveal_inputs(self):
+        cmd = cr.build_ffmpeg_command("ffmpeg", "/t/head.png", "/t/out.mp4", music=True, reveals=self.REVEALS)
+        self.assertIn("2:a", cmd)                                   # الأغنية تبقى الفهرس 2
+        self.assertEqual(cmd[cmd.index("/t/r2.png") - 1], "-i")
+        self.assertEqual(cmd.count("-i"), 3 + len(self.REVEALS))
+        self.assertNotIn("-loop", cmd)                              # ⚠️ -loop 1 مع مدخلات كتيرة = تضخّم ذاكرة (انظر _STILL)
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        for k in range(len(self.REVEALS)):
+            self.assertIn(f"[{3 + k}:v]", graph)
+        self.assertEqual(cmd[cmd.index("-t") + 1], str(gcm.MUSIC_SECONDS))
+
+    def test_synced_graph_is_pinned_to_the_drop_constants(self):
+        graph = cr._drop_sync_graph(self.REVEALS)
+        self.assertIn(f"gte(t,{gcm.MUSIC_DROP_SECONDS})", graph)    # لهب كامل عند الدروب
+        self.assertIn(f"fade=t=in:st={gcm.MUSIC_DROP_SECONDS}:d=0.08", graph)   # المركز الأول (hero) عند الدروب
+        self.assertIn(f"fade=t=out:st={gcm.MUSIC_BREATH_SECONDS}", graph)       # شهقة قبله
+        self.assertIn(f"between(t,{gcm.MUSIC_DROP_SECONDS},", graph)            # الفلاش
+        self.assertLess(gcm.MUSIC_BREATH_SECONDS, gcm.MUSIC_DROP_SECONDS)
+        self.assertLess(gcm.MUSIC_DROP_SECONDS + 0.5, gcm.MUSIC_SECONDS)
+
+    def test_silent_and_legacy_commands_keep_simple_fade_in(self):
+        for cmd in (cr.build_ffmpeg_command("ffmpeg", "/t/o.png", "/t/out.mp4", music=False, reveals=self.REVEALS),
+                    cr.build_ffmpeg_command("ffmpeg", "/t/o.png", "/t/out.mp4", music=True)):
+            graph = cmd[cmd.index("-filter_complex") + 1]
+            self.assertIn("fade=t=in:st=1:d=1.6", graph)
+            self.assertNotIn("[3:v]", graph)
+
     def test_video_dimensions_are_even_for_telegram(self):
         self.assertEqual((gcm.VIDEO_WIDTH % 2, gcm.VIDEO_HEIGHT % 2), (0, 0))
         self.assertEqual(round(cr.FRAME_W * gcm.VIDEO_HEIGHT / gcm.VIDEO_WIDTH), cr.FRAME_H)
+
+
+class RevealScheduleTests(unittest.TestCase):
+    def test_best_group_lands_exactly_on_the_drop_and_others_on_beat_grid(self):
+        rows, groups = cr.reveal_times(7, 3)
+        self.assertEqual(groups[0], gcm.MUSIC_DROP_SECONDS)
+        self.assertEqual(groups, [round(gcm.MUSIC_DROP_SECONDS - 2 * gcm.MUSIC_BEAT_SECONDS * i, 3) for i in range(3)])
+        self.assertEqual(groups, sorted(groups, reverse=True))
+
+    def test_rows_come_before_the_first_group_and_after_the_title(self):
+        for n_rest in range(0, 12):
+            for n_groups in (1, 2, 3):
+                rows, groups = cr.reveal_times(n_rest, n_groups)
+                self.assertEqual(len(rows), n_rest)
+                self.assertEqual(rows, sorted(rows))
+                if rows:
+                    self.assertGreaterEqual(rows[0], 1.79)
+                    self.assertLess(rows[-1], groups[-1])
+
+    def test_few_rows_use_full_beats_and_many_rows_half_beats(self):
+        rows4, _ = cr.reveal_times(4, 3)
+        rows9, _ = cr.reveal_times(9, 3)
+        self.assertAlmostEqual(rows4[1] - rows4[0], gcm.MUSIC_BEAT_SECONDS, delta=0.002)
+        self.assertAlmostEqual(rows9[1] - rows9[0], gcm.MUSIC_BEAT_SECONDS / 2, delta=0.002)
+
+    def test_plan_reveals_rows_bottom_up_then_top_groups_best_last(self):
+        data = cr.validate_payload(winners_payload(10))
+        head, plan = cr.reveal_plan(data)
+        self.assertEqual(head.size, (gcm.VIDEO_WIDTH, gcm.VIDEO_HEIGHT))
+        # المعاينة فيها تعادل على المركز 3 (بانران)، فالباقي 6 صفوف: المركز 3 ×2 ثم 2 ثم 1 (hero)
+        self.assertEqual([r["role"] for r in plan], ["row"] * 6 + ["top", "top", "top", "hero"])
+        self.assertEqual([r["t"] for r in plan], sorted(r["t"] for r in plan))
+        self.assertEqual(plan[-1]["t"], gcm.MUSIC_DROP_SECONDS)
+
+    def test_tied_banners_share_one_reveal_time(self):
+        payload = winners_payload(6)
+        for w, rank in zip(payload["winners"], (1, 2, 3, 3, 5, 6)):
+            w["rank"] = rank
+        _, plan = cr.reveal_plan(cr.validate_payload(payload))
+        third = [r["t"] for r in plan if r["role"] == "top"]
+        self.assertEqual(len(third), 3)                 # المركز 2 + تعادل المركز 3 (اثنين)
+        self.assertEqual(len(set(third)), 2)
+
+    def test_one_winner_has_only_the_hero(self):
+        _, plan = cr.reveal_plan(cr.validate_payload(winners_payload(1)))
+        self.assertEqual([r["role"] for r in plan], ["hero"])
 
 
 @unittest.skipUnless(ffmpeg_available(), "ffmpeg غير متوفر")

@@ -5,7 +5,9 @@ services/ceremony_renderer.py
 الأوائل (البانرات الذهبية/الفضية/البرونزية للمراكز 1-3 + أعمدة للباقي). بصيغتين:
 
   png  صورة ثابتة (بتنرسل مع الأغنية كرسالة صوتية منفصلة)
-  mp4  فيديو ~19 ثانية: لهب متحرك + ظهور تدريجي للأسماء + الأغنية بنفس الملف
+  mp4  فيديو ~19 ثانية: لهب متحرك + الأغنية بنفس الملف. مع الأغنية الفيديو متزامن مع الـ beat drop:
+       بِلد-أب (لهب خافت + العنوان، ثم الأسماء تتصاعد من الأخير للأول على الضربات، ثم المركز 3 فالمركز 2 بدخول
+       مهيب) ← شهقة (قطع اللهب) ← عند الدروب: فلاش + لهب كامل + المركز الأول بصدمة. بدون أغنية: ظهور تدريجي بسيط.
 
 ⚠️ الإنتاج ما بيحسب لهب أبداً: اللهب أصول جاهزة بـ assets/ceremony (تتولّد بـ
 `scripts/build_ceremony_assets.py` وتتعمل commit). هون Pillow فقط (بلا numpy)، والفيديو
@@ -28,7 +30,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from services.certificate_renderer import _fit, _font, _kind_for, _logo, _shape
 from services.group_ceremony import (
-    ASSETS_DIR, MAX_WINNERS, MUSIC_SECONDS, SILENT_SECONDS, THEME_AUDIO_PATH, VIDEO_HEIGHT as VIDEO_H, VIDEO_WIDTH as VIDEO_W,
+    ASSETS_DIR, MAX_WINNERS, MUSIC_BEAT_SECONDS, MUSIC_BREATH_SECONDS, MUSIC_DROP_SECONDS, MUSIC_SECONDS, SILENT_SECONDS, THEME_AUDIO_PATH,
+    VIDEO_HEIGHT as VIDEO_H, VIDEO_WIDTH as VIDEO_W,
 )
 from services.group_certificate import GROUP_MAX_CHARS, NAME_MAX_CHARS, TITLE_MAX_CHARS, clean_text
 
@@ -129,72 +132,105 @@ def _banner(base: Image.Image, cx: int, y: int, w: int, h: int, pal, rank: int, 
     d.text(((ccx - r - 24 + left + score_w + 30) // 2, ccy + 2), _shape(text), font=font, fill=pal["text"], anchor="mm")
 
 
-def static_layer(data: Dict[str, Any]) -> Image.Image:
-    """الطبقة الشفافة (لوغو + عنوان + أسماء) بحجم FRAME_W×FRAME_H. `data` = validate_payload."""
-    W, H = FRAME_W, FRAME_H
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+def _draw_row(img: Image.Image, x_right: int, col_w: int, ry: int, w_: Dict[str, Any]) -> None:
+    """صف واحد من «الباقي» (المركز 4 وما بعد). rr = نصف قطر دائرة الترتيب."""
     d = ImageDraw.Draw(img)
+    rr, row_h = 28, 84
+    mid = ry + row_h // 2
+    d.rounded_rectangle((x_right - col_w, ry, x_right, ry + row_h), radius=26, fill=(255, 255, 255, 22), outline=(255, 170, 60, 150), width=2)
+    d.ellipse((x_right - 16 - 2 * rr, mid - rr, x_right - 16, mid + rr), fill=(255, 150, 40, 255))
+    d.text((x_right - 16 - rr, mid + 1), str(w_["rank"]), font=_font("name_lat", 32), fill=(40, 16, 0), anchor="mm")
+    score = f"{w_['score']}/{w_['total']}"
+    score_font = _font("name_lat", 26)
+    d.text((x_right - col_w + 22, mid), score, font=score_font, fill=(255, 200, 120), anchor="lm")
+    score_w = int(d.textlength(score, font=score_font))
+    room = col_w - 16 - 2 * rr - 22 - 22 - score_w - 28
+    font, text = _fit(d, w_["name"], _kind_for(w_["name"], "name_ar", "name_lat"), 44, 24, room)
+    nx = (x_right - 16 - 2 * rr - 14 + (x_right - col_w + 22 + score_w + 14)) // 2
+    d.text((nx, mid + 2), _shape(text), font=font, fill=(250, 246, 240), anchor="mm")
+
+
+def _body_items(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """عناصر الجسم كلها (بانرات المراكز 1-3 ثم الصفوف) بنفس التخطيط الحرفي للصورة الثابتة.
+    كل عنصر: {kind: 'banner'|'row', rank, draw(img)}. static_layer بيرسمها كلها معاً، والفيديو المتزامن بيرسم كل واحد لحاله."""
+    W, H = FRAME_W, FRAME_H
     cx = W // 2
-
-    logo = _logo(200)
-    halo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(halo).ellipse((cx - 150, 60, cx + 150, 360), fill=(255, 170, 40, 90))
-    img.alpha_composite(halo.filter(ImageFilter.GaussianBlur(40)))
-    if logo is not None:
-        img.alpha_composite(logo, (cx - 100, 70))
-
-    d.text((cx, 372), _shape("حفل تكريم"), font=_font("title", 124), fill=(255, 214, 102), anchor="mm")
-    d.line((cx - 260, 486, cx - 28, 486), fill=(255, 190, 70), width=3)
-    d.line((cx + 28, 486, cx + 260, 486), fill=(255, 190, 70), width=3)
-    d.polygon([(cx, 474), (cx + 12, 486), (cx, 498), (cx - 12, 486)], fill=(255, 190, 70))
-    sub_font, sub_text = _fit(d, f"«{data['title']}»", "bold", 54, 30, 860)
-    d.text((cx, 540), _shape(sub_text), font=sub_font, fill=(235, 235, 240), anchor="mm")
-
     winners = data["winners"]
     top = [w for w in winners if w["rank"] <= 3][:MAX_BANNERS]
     top_ids = {id(w) for w in top}
     rest = [w for w in winners if id(w) not in top_ids]
-    k = 1.0 if len(top) <= 3 else max(0.62, 3.0 / len(top))      # تعادلات بالمراكز الأولى: بانرات أصغر
+    k = 1.0 if len(top) <= 3 else max(0.62, 3.0 / len(top))          # تعادلات بالمراكز الأولى: بانرات أصغر
+    items: List[Dict[str, Any]] = []
     y = 596
     for w_ in top:
         bw, bh, pal = _BANNER_SPEC[w_["rank"]]
         bh = int(bh * k)
-        _banner(img, cx, y, bw if k == 1.0 else int(bw * (0.9 + 0.1 * k)), bh, pal, w_["rank"], w_["name"], f"{w_['score']}/{w_['total']}")
+        width = bw if k == 1.0 else int(bw * (0.9 + 0.1 * k))
+
+        def draw_banner(img, w_=w_, y=y, width=width, bh=bh, pal=pal):
+            _banner(img, cx, y, width, bh, pal, w_["rank"], w_["name"], f"{w_['score']}/{w_['total']}")
+
+        items.append({"kind": "banner", "rank": w_["rank"], "draw": draw_banner})
         y += bh + int(34 * k)
 
-    if rest:                                                     # أعمدة، الأول يمين (RTL)
+    if rest:                                                         # أعمدة، الأول يمين (RTL)
         y += 18
         row_h, row_gap, gap = 84, 12, 24
         rows_fit = max(1, int((H - 110 - y + row_gap) // (row_h + row_gap)))
         per_col = min(rows_fit, 5)
         ncols = max(1, -(-len(rest) // per_col))
-        per_col = -(-len(rest) // ncols)                         # توزيع متوازن
+        per_col = -(-len(rest) // ncols)                             # توزيع متوازن
         col_w = min(430, int((W - 2 * 130 - (ncols - 1) * gap) / ncols))
         cols = [rest[i:i + per_col] for i in range(0, len(rest), per_col)]
         right = cx + (len(cols) * col_w + (len(cols) - 1) * gap) // 2
-        rr = 28
         for ci, col in enumerate(cols):
             x_right = right - ci * (col_w + gap)
             for ri, w_ in enumerate(col):
-                ry = y + ri * (row_h + row_gap)
-                mid = ry + row_h // 2
-                d.rounded_rectangle((x_right - col_w, ry, x_right, ry + row_h), radius=26, fill=(255, 255, 255, 22), outline=(255, 170, 60, 150), width=2)
-                d.ellipse((x_right - 16 - 2 * rr, mid - rr, x_right - 16, mid + rr), fill=(255, 150, 40, 255))
-                d.text((x_right - 16 - rr, mid + 1), str(w_["rank"]), font=_font("name_lat", 32), fill=(40, 16, 0), anchor="mm")
-                score = f"{w_['score']}/{w_['total']}"
-                score_font = _font("name_lat", 26)
-                d.text((x_right - col_w + 22, mid), score, font=score_font, fill=(255, 200, 120), anchor="lm")
-                score_w = int(d.textlength(score, font=score_font))
-                room = col_w - 16 - 2 * rr - 22 - 22 - score_w - 28
-                font, text = _fit(d, w_["name"], _kind_for(w_["name"], "name_ar", "name_lat"), 44, 24, room)
-                nx = (x_right - 16 - 2 * rr - 14 + (x_right - col_w + 22 + score_w + 14)) // 2
-                d.text((nx, mid + 2), _shape(text), font=font, fill=(250, 246, 240), anchor="mm")
+                def draw_row(img, x_right=x_right, col_w=col_w, ry=y + ri * (row_h + row_gap), w_=w_):
+                    _draw_row(img, x_right, col_w, ry, w_)
 
-    foot = PREVIEW_DISCLAIMER if data["preview"] else DISCLAIMER
-    if data["group_name"]:
-        foot = f"{data['group_name']}  •  {foot}"
-    foot_font, foot_text = _fit(d, foot, "bold", 30, 22, 900)
-    d.text((cx, H - 50), _shape(foot_text), font=foot_font, fill=(170, 150, 130), anchor="mm")
+                items.append({"kind": "row", "rank": w_["rank"], "draw": draw_row})
+    return items
+
+
+def static_layer(data: Dict[str, Any], part: str = "all") -> Image.Image:
+    """الطبقة الشفافة بحجم FRAME_W×FRAME_H. `data` = validate_payload.
+
+    part: "all" الكل (الصورة الثابتة + الفيديو الصامت) · "head" لوغو + عنوان + سطر التذييل (بتظهر بالبِلد-أب)
+          · "body" البانرات والأعمدة فقط (بتظهر عند الدروب). head+body = all تماماً (نفس الإحداثيات)."""
+    if part not in ("all", "head", "body"):
+        raise ValueError("part must be 'all', 'head' or 'body'")
+    W, H = FRAME_W, FRAME_H
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    cx = W // 2
+    want_head, want_body = part in ("all", "head"), part in ("all", "body")
+
+    if want_head:
+        logo = _logo(200)
+        halo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(halo).ellipse((cx - 150, 60, cx + 150, 360), fill=(255, 170, 40, 90))
+        img.alpha_composite(halo.filter(ImageFilter.GaussianBlur(40)))
+        if logo is not None:
+            img.alpha_composite(logo, (cx - 100, 70))
+
+        d.text((cx, 372), _shape("حفل تكريم"), font=_font("title", 124), fill=(255, 214, 102), anchor="mm")
+        d.line((cx - 260, 486, cx - 28, 486), fill=(255, 190, 70), width=3)
+        d.line((cx + 28, 486, cx + 260, 486), fill=(255, 190, 70), width=3)
+        d.polygon([(cx, 474), (cx + 12, 486), (cx, 498), (cx - 12, 486)], fill=(255, 190, 70))
+        sub_font, sub_text = _fit(d, f"«{data['title']}»", "bold", 54, 30, 860)
+        d.text((cx, 540), _shape(sub_text), font=sub_font, fill=(235, 235, 240), anchor="mm")
+
+    if want_body:
+        for item in _body_items(data):
+            item["draw"](img)
+
+    if want_head:
+        foot = PREVIEW_DISCLAIMER if data["preview"] else DISCLAIMER
+        if data["group_name"]:
+            foot = f"{data['group_name']}  •  {foot}"
+        foot_font, foot_text = _fit(d, foot, "bold", 30, 22, 900)
+        d.text((cx, H - 50), _shape(foot_text), font=foot_font, fill=(170, 150, 130), anchor="mm")
     return img
 
 
@@ -228,18 +264,127 @@ def _ffmpeg_exe() -> str:
     raise CeremonyError("ffmpeg is not available")
 
 
-def build_ffmpeg_command(ffmpeg: str, overlay_path: str, out_path: str, *, music: bool) -> List[str]:
-    """أمر واحد: دورة اللهب (مكرّرة) + طبقة الأسماء (تظهر بعد ثانية) + الأغنية. دالة صرفة (قابلة للاختبار)."""
-    fade_text = "[1:v]format=rgba,fade=t=in:st=1:d=1.6:alpha=1[ov]"
-    fade_fire = "[0:v]fade=t=in:st=0:d=2[bg]"
-    graph = f"{fade_fire};{fade_text};[bg][ov]overlay=0:0:format=auto,format=yuv420p[v]"
-    cmd = [
-        ffmpeg, "-y", "-loglevel", "error",
-        "-stream_loop", "-1", "-i", FLAMES_LOOP_PATH,
-        "-loop", "1", "-framerate", str(VIDEO_FPS), "-i", overlay_path,
+# شكل الظهور لكل دور: (مدة التلاشي، قوة التكبير الابتدائي، مدة الاستقرار). التكبير بيهدى بمنحنى تربيعي (ease-out).
+_REVEAL_STYLE = {
+    "row": (0.12, 0.10, 0.20),     # صف: ضربة سريعة على نص الضربة
+    "top": (0.50, 0.16, 0.70),     # المركز 3 و2: دخول هادئ مهيب
+    "hero": (0.08, 0.30, 0.45),    # المركز 1: صدمة الدروب
+}
+# صورة ثابتة → بث لا نهائي. ⚠️ ما نستخدم «-loop 1» هون: مع 10+ مدخلات صور ffmpeg بيقرأ مسبقاً بلا حد ويتضخم لـ GBs
+# (قتل عملية الرسم بذاكرة 512MB). فلتر loop بيولّد الإطارات عند الطلب فقط (ذروة ~170MB مقاسة بـ 10 فائزين).
+_STILL = f"format=rgba,loop=loop=-1:size=1:start=0,fps={VIDEO_FPS}"
+_FIRST_ROW_NOT_BEFORE = 1.8        # الصفوف بعد ما العنوان يبلّش يظهر (ينتهي ظهوره ~2.4)
+
+
+def reveal_times(n_rest: int, n_groups: int) -> Tuple[List[float], List[float]]:
+    """جدول الظهور على شبكة ضربات الأغنية (كلها مرتبطة بالدروب). دالة صرفة.
+
+    group_times: مواعيد مجموعات المراكز (الأفضل أولاً): الدروب، ثم ضربتين أبكر، ثم أربع... (7.00 / 5.85 / 4.70)
+    row_times:   مواعيد صفوف الباقي من الأخير للأول (التصاعد نحو المراكز الأولى)، آخر صف قبل أول مجموعة بخطوة.
+                 خطوة = ضربة كاملة لو الصفوف قليلة (≤4) وإلا نص ضربة؛ وبتتضغط لو ما في مكان قبل العنوان."""
+    drop, beat = MUSIC_DROP_SECONDS, MUSIC_BEAT_SECONDS
+    group_times = [round(drop - 2 * beat * i, 3) for i in range(n_groups)]
+    anchor = group_times[-1] if group_times else drop
+    step = beat if n_rest <= 4 else beat / 2
+    if n_rest and anchor - step * n_rest < _FIRST_ROW_NOT_BEFORE:
+        step = max(0.12, (anchor - _FIRST_ROW_NOT_BEFORE) / n_rest)
+    row_times = [round(anchor - step * (n_rest - i), 3) for i in range(n_rest)]
+    return row_times, group_times
+
+
+def _drop_sync_graph(reveals: List[Dict[str, Any]]) -> str:
+    """فلتر الفيديو المتزامن مع theme.mp3. المدخلات: 0 لهب، 1 العنوان (head)، 3.. عناصر الكشف بالترتيب.
+
+    الخط الزمني (ثواني؛ القيم من group_ceremony):
+      بِلد-أب   اللهب يتصاعد لنص السطوع + العنوان يظهر + الصفوف تتصاعد من الأخير للأول على الضربات ثم المركز 3 فالمركز 2
+      BREATH    اللهب بيُقطع للأسود مع انقطاع الصوت (كل شي تاني بيضل)
+      DROP      فلاش أبيض يخبو + لهب كامل + المركز 1 بصدمة
+    كل عنصر: fade-in + تكبير يهدى لحجمه، ومتمركز على نقطته (cx, cy). دالة صرفة (قابلة للاختبار)."""
+    breath, drop = MUSIC_BREATH_SECONDS, MUSIC_DROP_SECONDS
+    w, h = VIDEO_W, VIDEO_H
+    parts = [
+        "[0:v]split=2[fa][fb]",
+        # لهب البِلد-أب: صعود من الأسود لنص السطوع، ثم قطع سريع (الشهقة)
+        f"[fa]fade=t=in:st=0:d={breath},colorchannelmixer=rr=0.5:gg=0.5:bb=0.5,fade=t=out:st={breath}:d=0.08[pre]",
+        # لهب كامل من لحظة الدروب (فوق البِلد-أب)
+        f"[pre][fb]overlay=0:0:enable='gte(t,{drop})'[fire]",
+        f"[1:v]{_STILL},fade=t=in:st=0.6:d=1.8:alpha=1[hd]",
+        "[fire][hd]overlay=0:0:format=auto[s0]",
     ]
+    prev = "s0"
+    for k, r in enumerate(reveals):
+        fade_d, amp, dur = _REVEAL_STYLE[r["role"]]
+        t = r["t"]
+        grow = f"(1+{amp}*pow(clip(1-(t-{t})/{dur},0,1),2))"
+        parts.append(
+            f"[{3 + k}:v]{_STILL},fade=t=in:st={t}:d={fade_d}:alpha=1,"
+            f"scale=w='trunc(iw*{grow})':h='trunc(ih*{grow})':eval=frame[r{k}]"
+        )
+        parts.append(f"[{prev}][r{k}]overlay=x='{r['cx']}-w/2':y='{r['cy']}-h/2':eof_action=repeat:format=auto[s{k + 1}]")
+        prev = f"s{k + 1}"
+    parts += [
+        f"color=c=white:s={w}x{h}:r={VIDEO_FPS},format=rgba,colorchannelmixer=aa=0.9,fade=t=out:st={drop}:d=0.5:alpha=1[fl]",
+        f"[{prev}][fl]overlay=0:0:enable='between(t,{drop},{drop + 0.5})':format=auto,format=yuv420p[v]",
+    ]
+    return ";".join(parts)
+
+
+def reveal_plan(data: Dict[str, Any]) -> Tuple[Image.Image, List[Dict[str, Any]]]:
+    """(طبقة العنوان، عناصر الكشف) بحجم الفيديو. كل عنصر: {img مقصوص، cx، cy (مركزه بالفيديو)، t، role}.
+    المراكز: أفضل رتبة = hero (عند الدروب)، البقية top؛ الباقي صفوف من الأخير للأول."""
+    scale = (VIDEO_W, VIDEO_H)
+    head = static_layer(data, "head").resize(scale, Image.LANCZOS)
+    items = _body_items(data)
+    ranks = sorted({it["rank"] for it in items if it["kind"] == "banner"})
+    rows = sorted((it for it in items if it["kind"] == "row"), key=lambda it: -it["rank"])   # sorted ثابت: الترتيب الأصلي بالتعادل
+    row_times, group_times = reveal_times(len(rows), len(ranks))
+    plan: List[Dict[str, Any]] = []
+    for it in items:
+        if it["kind"] == "banner":
+            gi = ranks.index(it["rank"])
+            plan.append({"item": it, "t": group_times[gi], "role": "hero" if gi == 0 else "top"})
+    for it, t in zip(rows, row_times):
+        plan.append({"item": it, "t": t, "role": "row"})
+    plan.sort(key=lambda e: e["t"])       # ترتيب الطبقات بالفيديو = ترتيب الظهور (الأحدث فوق)
+    out: List[Dict[str, Any]] = []
+    for e in plan:
+        canvas = Image.new("RGBA", (FRAME_W, FRAME_H), (0, 0, 0, 0))
+        e["item"]["draw"](canvas)
+        small = canvas.resize(scale, Image.LANCZOS)
+        box = small.getchannel("A").getbbox()
+        if box is None:
+            continue
+        out.append({
+            "img": small.crop(box), "cx": (box[0] + box[2]) / 2, "cy": (box[1] + box[3]) / 2,
+            "t": e["t"], "role": e["role"],
+        })
+    return head, out
+
+
+def build_ffmpeg_command(
+    ffmpeg: str, overlay_path: str, out_path: str, *, music: bool, reveals: "List[Dict[str, Any]] | None" = None,
+) -> List[str]:
+    """أمر واحد: دورة اللهب (مكرّرة) + طبقات الأسماء + الأغنية. دالة صرفة (قابلة للاختبار).
+
+    music + reveals: النسخة المتزامنة مع الـ beat drop. overlay_path = طبقة العنوان، وreveals = عناصر الكشف
+    ({path, cx, cy, t, role}) وبتصير مدخلات 3 وما بعد (الأغنية دائماً فهرس 2).
+    غير هيك (بدون أغنية، أو بدون reveals): الظهور التدريجي البسيط القديم (overlay_path = الطبقة الكاملة)."""
+    synced = bool(music and reveals is not None)
+    cmd = [ffmpeg, "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", FLAMES_LOOP_PATH]
+    if synced:
+        cmd += ["-framerate", str(VIDEO_FPS), "-i", overlay_path]                 # صورة مفردة؛ التكرار بفلتر loop (انظر _STILL)
+    else:
+        cmd += ["-loop", "1", "-framerate", str(VIDEO_FPS), "-i", overlay_path]
     if music:
-        cmd += ["-i", THEME_AUDIO_PATH]
+        cmd += ["-i", THEME_AUDIO_PATH]                       # الفهرس 2 دائماً (map 2:a)
+    if synced:
+        for r in reveals:                                      # الفهارس 3..
+            cmd += ["-framerate", str(VIDEO_FPS), "-i", r["path"]]
+        graph = _drop_sync_graph(reveals)
+    else:
+        fade_text = "[1:v]format=rgba,fade=t=in:st=1:d=1.6:alpha=1[ov]"
+        fade_fire = "[0:v]fade=t=in:st=0:d=2[bg]"
+        graph = f"{fade_fire};{fade_text};[bg][ov]overlay=0:0:format=auto,format=yuv420p[v]"
     cmd += ["-filter_complex", graph, "-map", "[v]"]
     if music:
         cmd += ["-map", "2:a", "-c:a", "aac", "-b:a", "96k"]
@@ -260,10 +405,20 @@ def render_ceremony_video(payload: Dict[str, Any]) -> bytes:
     with tempfile.TemporaryDirectory(prefix="ceremony_") as tmp:
         overlay_path = os.path.join(tmp, "overlay.png")
         out_path = os.path.join(tmp, "ceremony.mp4")
-        static_layer(data).resize((VIDEO_W, VIDEO_H), Image.LANCZOS).save(overlay_path, format="PNG")
+        reveals = None
+        if data["music"]:       # مع الأغنية: عنوان + عناصر كشف منفصلة، كل واحد بموعده على ضربات الأغنية
+            head, plan = reveal_plan(data)
+            head.save(overlay_path, format="PNG")
+            reveals = []
+            for i, r in enumerate(plan):
+                path = os.path.join(tmp, f"reveal_{i}.png")
+                r["img"].save(path, format="PNG")
+                reveals.append({"path": path, "cx": r["cx"], "cy": r["cy"], "t": r["t"], "role": r["role"]})
+        else:
+            static_layer(data).resize((VIDEO_W, VIDEO_H), Image.LANCZOS).save(overlay_path, format="PNG")
         try:
             result = subprocess.run(
-                build_ffmpeg_command(ffmpeg, overlay_path, out_path, music=data["music"]),
+                build_ffmpeg_command(ffmpeg, overlay_path, out_path, music=data["music"], reveals=reveals),
                 capture_output=True, timeout=FFMPEG_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
