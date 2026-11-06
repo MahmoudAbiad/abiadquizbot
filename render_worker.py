@@ -222,7 +222,9 @@ def main() -> None:
     import uvicorn
     port = int(os.getenv("PORT", "8080"))
     print("🛠️ تشغيل render worker (السيرفر الثاني) - لا يعمل البوت على هذه العملية.")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    # Heroku sets WEB_CONCURRENCY; use an import string so Uvicorn can
+    # safely start with more than one worker process.
+    uvicorn.run("render_worker:app", host="0.0.0.0", port=port, log_level="warning")
 
 
 if __name__ == "__main__":
