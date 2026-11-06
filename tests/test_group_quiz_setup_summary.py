@@ -11,6 +11,7 @@ from reliability_support import load_functions
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services import group_certificate as gc  # noqa: E402
+from services import group_ceremony as gcm  # noqa: E402
 
 SID = "11111111-1111-1111-1111-111111111111"
 CHAT = -100123
@@ -20,7 +21,7 @@ KB_NAMES = {
     "_setup_btn", "_mark", "_back_row", "get_group_setup_summary_keyboard", "get_group_setup_menu_keyboard",
     "get_group_setup_mode_keyboard", "get_group_setup_names_keyboard", "get_group_setup_top_keyboard",
     "get_group_setup_timer_keyboard", "get_group_setup_pace_keyboard", "get_group_setup_lock_keyboard",
-    "get_group_setup_cert_keyboard",
+    "get_group_setup_cert_keyboard", "get_group_setup_ceremony_keyboard",
 }
 
 
@@ -31,7 +32,7 @@ def load_keyboards():
         GROUP_TIMER_PRESETS=[0, 15, 30, 45, 60], GROUP_INTERVAL_PRESETS=[30, 60, 120, 300],
         _CERT_THEME_BUTTONS=(("blue", "🔵 أزرق"), ("green", "🟢 أخضر"), ("gold", "🟡 ذهبي"),
                              ("purple", "🟣 بنفسجي"), ("red", "🔴 أحمر"), ("slate", "⚫ رمادي")),
-        _CERT_COUNT_CHOICES=(1, 3, 5, 10),
+        _CERT_COUNT_CHOICES=(1, 3, 5, 10), _CEREMONY_COUNT_CHOICES=(3, 5, 10),
     )
 
 
@@ -51,11 +52,17 @@ def load_rules(**over):
         MIN_QUESTION_INTERVAL_SECONDS=12, BURST_GAP_SECONDS=6,
         _SETUP_PACE_LABELS={30: "كل 30 ثانية", 60: "كل دقيقة", 120: "كل دقيقتين", 300: "كل 5 دقائق"},
         _SETUP_HEADER_PREFIX="gq:setup_hdr:", _SETUP_HEADER_TTL=3600,
-        _SETUP_FIELDS=("mode", "names", "top", "timer", "pace", "lock", "cert"),
+        _SETUP_FIELDS=("mode", "names", "top", "timer", "pace", "lock", "cert", "cer"),
         CERT_DEFAULT_TITLE=gc.DEFAULT_TITLE, CERT_THEMES=gc.THEMES, cert_apply_change=gc.apply_config_change,
         cert_eligibility=gc.eligibility, cert_normalize_config=gc.normalize_config,
         _CERT_AUTO_DISABLED_NOTE="ℹ️ عطّلت شهادات التقدير لأنها بتحتاج النمط التنافسي مع إظهار الأسماء وترتيب نهائي منشور.",
         group_cert_schema_ready=AsyncMock(return_value=False),
+        ceremony_apply_change=gcm.apply_config_change, ceremony_eligibility=gcm.eligibility,
+        ceremony_normalize_config=gcm.normalize_config,
+        _CEREMONY_AUTO_DISABLED_NOTE="ℹ️ عطّلت حفل التكريم لأنه بيحتاج النمط التنافسي مع إظهار الأسماء وترتيب نهائي منشور.",
+        group_ceremony_schema_ready=AsyncMock(return_value=False),
+        get_group_setup_ceremony_keyboard=kb["get_group_setup_ceremony_keyboard"],
+        _handle_ceremony_special=AsyncMock(),
         get_group_setup_cert_keyboard=kb["get_group_setup_cert_keyboard"],
         _handle_cert_special=AsyncMock(),
         _TOP_N_PROMPT="top-prompt", html=__import__("html"), json=json,
@@ -73,7 +80,7 @@ def load_rules(**over):
     env.update(over)
     return load_functions(
         "handlers/group_quiz.py",
-        {"_pace_to_mode", "_setup_state", "_compute_setup_update", "_compute_setup_update_core", "_cert_screen_text",
+        {"_pace_to_mode", "_setup_state", "_compute_setup_update", "_compute_setup_update_core", "_cert_screen_text", "_ceremony_screen_text",
          "_setup_summary_text", "_setup_screen_view",
          "_edit_setup_screen", "setup_summary_callback", "_remember_setup_header", "_load_setup_header"},
         **env,

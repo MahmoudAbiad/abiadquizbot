@@ -7,6 +7,27 @@
 
 ---
 
+## [2026-11-06] ميزة: «حفل التكريم» بالكويز الجماعي (صورة/فيديو بلهب + أغنية)
+
+**الطلب:** إعداد جديد بإعدادات مشاركة الكويز للمجموعة: عند تفعيله، بعد الترتيب النهائي يرسل البوت صورة سودا بلهب متناظر على الطرفين ولوغو البوت بالأعلى وأسماء الأوائل بداخلها (الثلاثة الأوائل ببانرات ذهبي/فضي/برونزي والباقي بأعمدة)، مع الأغنية المرفقة. الصيغة الافتراضية فيديو mp4 (لهب متحرّك + الأغنية بنفس الملف) بدل GIF (لا صوت، 256 لون فقط، حجم أكبر بكثير).
+
+**الإعداد (شاشة `gqs:<sid>:o:cer`، زر «🏆 حفل التكريم»):** تفعيل/تعطيل (`1/0`) · عنوان الحفل (`te`، افتراضيه عنوان الكويز، تعديله بإرسال نص بالخاص عبر نفس مسار نص الشهادات بحقل `cer_title`) · صيغة فيديو/صورة (`fv/fi`) · الأغنية تشتغل/مطفية (`m1/m0`) · عدد المكرَّمين أول 3/5/10 (`n3/n5/n10`، وبحد أقصى «عدد الأوائل») · **👁 معاينة** (`pv`: صورة ثابتة بأسماء عامة بخاص الأدمن فقط، فاصل 10 ثواني).
+
+**القواعد:** نفس أهلية الشهادات (تنافسي + أسماء ظاهرة + ترتيب نهائي منشور؛ لا قنوات ولا مجهول ولا دفعة واحدة) وتتعطّل تلقائياً مع تنبيه عند تغيّر إعداد آخر، وتُصحَّح بـ `go`. لا يُكرَّم من درجته صفر. التعادل = نفس المركز، ولون البانر حسب المركز (تعادل على المركز الثالث = بانران برونزيان). أكثر من 6 بانرات (تعادلات كبيرة) تنزل للأعمدة، وحد أقصى 12 اسماً بالحفل. الإرسال: `_send_recognitions` يرسل الحفل أولاً ثم الشهادات بمهمة واحدة، وفشل أي منهما لا يمنع الآخر ولا يؤثر على إنهاء الجلسة.
+
+**التنفيذ:**
+- `db/migrations/20261106120000_group_quiz_ceremony.sql` (**غير مطبّقة بعد**): `group_quiz_sessions.ceremony_config jsonb`. الكود يكتشف غياب العمود (`ceremony_schema_ready`، كاش 60 ثانية) فتبقى الميزة مخفية.
+- `services/group_ceremony.py` (منطق صرف + ثوابت مشتركة) و`services/ceremony_renderer.py` (Pillow فقط، بلا numpy بالإنتاج؛ الفيديو بأمر ffmpeg واحد عبر الثنائي الساكن من `imageio-ffmpeg`).
+- **اللهب أصول جاهزة** (لا يُحسب بالإنتاج): `assets/ceremony/flames_still.png` (للصورة) و`flames_loop.mp4` (دورة ثانية واحدة بتتكرر بـ `-stream_loop`) و`theme.mp3` (~19 ثانية). تُعاد توليدها بـ `python scripts/build_ceremony_assets.py` (يحتاج numpy). توليد الفيديو بالإنتاج ≈ 5-9 ثواني (بيئة التطوير).
+- السيرفر الثاني: `POST /v1/render/ceremony` (`render_worker.py` + `offload_worker_core.render_ceremony` + `offload.remote_render_ceremony`)؛ يرجّع PNG أو mp4 (توقيع `ftyp` عند البايت 4 بـ `_looks_like`)، مهلة القراءة للفيديو `OFFLOAD_CEREMONY_VIDEO_READ_TIMEOUT` (120 ث افتراضياً). `requirements.worker.txt` أضيف له `imageio-ffmpeg==0.6.0`. احتياط محلي بخيط واحد.
+- الأغنية بنسخة الصورة تُرسل بـ `send_audio` ويُخزَّن `file_id` بـ Redis (`gq:ceremony_audio_file_id`، 30 يوماً) فلا تُرفع كل مرة.
+- `handlers/group_quiz.py`: حقل `cer` بـ `_setup_state`/`_compute_setup_update`، شاشة `_ceremony_screen_text`، `_send_ceremony`/`_send_ceremony_preview`/`_send_ceremony_audio`/`_send_recognitions`. `keyboards.py`: زر القائمة + `get_group_setup_ceremony_keyboard`.
+- الاختبارات: `tests/test_group_quiz_ceremony.py` (113 اختباراً، منها رسم فيديو فعلي بـ ffmpeg). عُدِّلت حقن الأسماء بـ `test_group_quiz_setup_summary.py` و`test_group_quiz_certificates.py` و`test_group_quiz_untimed_ranking.py` (`_send_recognitions` بدل `_send_certificates` بـ `finish_group_session`). لا فشل جديد بالحزمة الكاملة مقارنةً بقبل التعديل (18 فشلاً سابقاً بيئياً بالبيئة التي جُرِّب فيها).
+
+**ملاحظات:** **لم يُجرَّب على تيليجرام حقيقي ولا على السيرفر الثاني على Render.** قبل التفعيل: طبّق الـ migration، وتأكد أن Render ثبّت `imageio-ffmpeg` من `requirements.worker.txt`، وراجع ترخيص الأغنية (`assets/ceremony/theme.mp3`).
+
+---
+
 ## [2026-11-05] تعديل: إتاحة شهادات التقدير لأول 10 متصدرين
 
 أضيف خيار **أول 10** إلى إعدادات شهادات التقدير، مع قبول callback `n10` والتحقق منه،

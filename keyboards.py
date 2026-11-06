@@ -1225,7 +1225,7 @@ def get_group_setup_summary_keyboard(session_id: str) -> types.InlineKeyboardMar
 
 def get_group_setup_menu_keyboard(
     session_id: str, *, is_channel: bool = False, anonymous: bool = False, lock_available: bool = True,
-    cert_available: bool = False,
+    cert_available: bool = False, ceremony_available: bool = False,
 ) -> types.InlineKeyboardMarkup:
     """قائمة الإعدادات. الأزرار الما إلها معنى بتنخفى: القنوات بلا نمط/قفل، والمجهول بلا أسماء/أوائل."""
     rows = []
@@ -1240,6 +1240,8 @@ def get_group_setup_menu_keyboard(
         rows.append([_setup_btn("🔒 قفل رسائل المجموعة", session_id, "o:lock")])
     if cert_available and not is_channel:
         rows.append([_setup_btn("🎓 شهادات التقدير", session_id, "o:cert")])
+    if ceremony_available and not is_channel:
+        rows.append([_setup_btn("🏆 حفل التكريم", session_id, "o:cer")])
     rows.append([_setup_btn("🔙 رجوع للملخّص", session_id, "b")])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1388,4 +1390,26 @@ def get_group_setup_cert_keyboard(session_id: str, cfg: dict, *, enabled: bool) 
     rows.append([_setup_btn(_mark(f"أول {n}", cfg.get("count") == n), session_id, f"s:cert:n{n}") for n in _CERT_COUNT_CHOICES])
     rows.append([_setup_btn("👁 معاينة الشهادة", session_id, "s:cert:pv")])
     rows.append(_back_row(session_id))
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+_CEREMONY_COUNT_CHOICES = (3, 5, 10)
+
+
+def get_group_setup_ceremony_keyboard(session_id: str, cfg: dict, *, enabled: bool) -> types.InlineKeyboardMarkup:
+    """شاشة إعداد حفل التكريم. `cfg` إعدادات مُطبَّعة (services.group_ceremony.normalize_config).
+    الـ callbacks كلها gqs:<sid>:s:cer:<value>: 1/0 · fv/fi (فيديو/صورة) · m1/m0 (الأغنية) · n<عدد>
+    + pv (معاينة) · te (تعديل عنوان الحفل)."""
+    is_video = cfg.get("format") != "image"
+    rows = [
+        [_setup_btn("✅ مفعّل (اضغط للتعطيل)" if enabled else "☑️ تفعيل حفل التكريم", session_id, "s:cer:0" if enabled else "s:cer:1")],
+        [_setup_btn("✏️ عنوان الحفل", session_id, "s:cer:te")],
+        [_setup_btn(_mark("🎬 فيديو (لهب متحرّك)", is_video), session_id, "s:cer:fv"),
+         _setup_btn(_mark("🖼 صورة ثابتة", not is_video), session_id, "s:cer:fi")],
+        [_setup_btn("🎵 الأغنية: " + ("تشتغل" if cfg.get("music", True) else "مطفية"), session_id,
+                    "s:cer:m0" if cfg.get("music", True) else "s:cer:m1")],
+        [_setup_btn(_mark(f"أول {n}", cfg.get("count") == n), session_id, f"s:cer:n{n}") for n in _CEREMONY_COUNT_CHOICES],
+        [_setup_btn("👁 معاينة الحفل", session_id, "s:cer:pv")],
+        _back_row(session_id),
+    ]
     return types.InlineKeyboardMarkup(inline_keyboard=rows)

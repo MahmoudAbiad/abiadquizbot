@@ -12,6 +12,7 @@ JSON داخل، bytes خارج. لذلك يحتاج متغيرين فقط على
     GET/HEAD /health                    بلا مصادقة - لأداة الـ ping التي تبقيه مستيقظاً
     POST /v1/render/question-image      صورة PNG لسؤال رياضي
     POST /v1/render/certificate         صورة PNG لشهادة تقدير (كويز جماعي)
+    POST /v1/render/ceremony            PNG أو فيديو mp4 (مع الأغنية) لحفل التكريم (كويز جماعي)
     POST /v1/export/quiz                ملف Word/PDF لكويز
     POST /v1/export/document            ملف Word/PDF لنص حر
 المصادقة: ترويسة X-Worker-Secret (مقارنة ثابتة الزمن) - fail-closed لو السر غير مضبوط.
@@ -200,6 +201,11 @@ async def render_question_image_endpoint(request: Request):
 @app.post("/v1/render/certificate")
 async def render_certificate_endpoint(request: Request):
     return await _run(request, core.render_certificate)
+
+
+@app.post("/v1/render/ceremony")
+async def render_ceremony_endpoint(request: Request):
+    return await _run(request, core.render_ceremony)
 
 
 @app.post("/v1/export/quiz")

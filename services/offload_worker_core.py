@@ -20,6 +20,7 @@ MAX_INDEX = 10_000
 
 MEDIA_TYPES = {
     "png": "image/png",
+    "mp4": "video/mp4",
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
@@ -81,6 +82,17 @@ def render_certificate(payload: Dict[str, Any]) -> Tuple[bytes, str]:
     try:
         return draw(_require_dict(payload, "payload")), MEDIA_TYPES["png"]
     except CertificateError as exc:
+        raise BadPayload(str(exc))
+
+
+def render_ceremony(payload: Dict[str, Any]) -> Tuple[bytes, str]:
+    """يرسم «حفل التكريم»: PNG (fmt=png) أو فيديو mp4 مع الأغنية (fmt=mp4). التحقق الكامل بـ ceremony_renderer.validate_payload."""
+    from services.ceremony_renderer import CeremonyError, render_ceremony as draw
+
+    try:
+        data, kind = draw(_require_dict(payload, "payload"))
+        return data, MEDIA_TYPES[kind]
+    except CeremonyError as exc:
         raise BadPayload(str(exc))
 
 

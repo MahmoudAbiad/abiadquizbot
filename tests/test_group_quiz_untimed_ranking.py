@@ -25,7 +25,7 @@ def _env(session, rows):
         get_leaderboard=AsyncMock(return_value=rows), bot=bot, redis_client=redis, html=html,
         _safe_call=safe_call, GROUP_TOP_N_MIN=1, GROUP_TOP_N_MAX=20,
         _FINISHED_SESSION_PREFIX="gq:finished:", _FINISHED_SESSION_TTL=7200,
-        logger=Mock(), log_error=Mock(), spawn=Mock(), _send_certificates=Mock(),
+        logger=Mock(), log_error=Mock(), spawn=Mock(), _send_recognitions=Mock(),
     )
     return env["finish_group_session"], bot, redis
 

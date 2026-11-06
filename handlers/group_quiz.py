@@ -59,6 +59,7 @@ from keyboards import (
     get_group_timer_keyboard,
     get_group_top_n_keyboard,
     get_group_setup_cert_keyboard,
+    get_group_setup_ceremony_keyboard,
     get_group_setup_lock_keyboard,
     get_group_setup_menu_keyboard,
     get_group_setup_mode_keyboard,
@@ -91,9 +92,23 @@ from services.group_certificate import (
     rank_label as cert_rank_label,
     select_winners as cert_select_winners,
 )
+from services.group_ceremony import (
+    MUSIC_SECONDS as CEREMONY_MUSIC_SECONDS,
+    THEME_AUDIO_PATH as CEREMONY_AUDIO_PATH,
+    THEME_AUDIO_TITLE as CEREMONY_AUDIO_TITLE,
+    VIDEO_HEIGHT as CEREMONY_VIDEO_HEIGHT,
+    VIDEO_WIDTH as CEREMONY_VIDEO_WIDTH,
+    apply_config_change as ceremony_apply_change,
+    build_payload as ceremony_build_payload,
+    eligibility as ceremony_eligibility,
+    normalize_config as ceremony_normalize_config,
+    preview_winners as ceremony_preview_winners,
+    select_winners as ceremony_select_winners,
+)
 from services.group_permissions import invalidate_group_admin_cache, is_group_admin
 from services.group_quiz_store import (
     cert_schema_ready as group_cert_schema_ready,
+    ceremony_schema_ready as group_ceremony_schema_ready,
     start_waiting_session,
     activate_session_due,
     claim_question_slot,
@@ -821,7 +836,7 @@ async def cancel_group_setup(call: types.CallbackQuery):
 #         · cert(1|0|th<لون>|d1|d0|r1|r0|sc1|sc0|n1|n3|n5|n10|pv|te|ie)  ← شهادات التقدير (المرحلة ب)
 _SETUP_HEADER_PREFIX = "gq:setup_hdr:"
 _SETUP_HEADER_TTL = 3600
-_SETUP_FIELDS = ("mode", "names", "top", "timer", "pace", "lock", "cert")
+_SETUP_FIELDS = ("mode", "names", "top", "timer", "pace", "lock", "cert", "cer")
 _SETUP_PACE_LABELS = {30: "كل 30 ثانية", 60: "كل دقيقة", 120: "كل دقيقتين", 300: "كل 5 دقائق"}
 
 
@@ -888,10 +903,13 @@ def _setup_state(session: Dict[str, Any], *, is_channel: bool) -> Dict[str, Any]
     lock = bool(session.get("lock_chat")) and not is_channel and pace != "b"
     cert_cfg = cert_normalize_config(session.get("cert_config"))
     cert_ok, cert_reason = cert_eligibility(anonymous=anonymous, names=names, pace=pace, is_channel=is_channel)
+    cer_cfg = ceremony_normalize_config(session.get("ceremony_config"))
+    cer_ok, cer_reason = ceremony_eligibility(anonymous=anonymous, names=names, pace=pace, is_channel=is_channel)
     return {
         "mode": "a" if anonymous else "c", "anonymous": anonymous, "names": names, "top": top,
         "timer": timer, "pace": pace, "lock": lock, "is_channel": bool(is_channel),
         "cert": bool(cert_cfg["enabled"] and cert_ok), "cert_cfg": cert_cfg, "cert_reason": cert_reason,
+        "cer": bool(cer_cfg["enabled"] and cer_ok), "cer_cfg": cer_cfg, "cer_reason": cer_reason,
     }
 
 
@@ -982,14 +1000,30 @@ def _compute_setup_update_core(
 
 
 _CERT_AUTO_DISABLED_NOTE = "ℹ️ عطّلت شهادات التقدير لأنها بتحتاج النمط التنافسي مع إظهار الأسماء وترتيب نهائي منشور."
+_CEREMONY_AUTO_DISABLED_NOTE = "ℹ️ عطّلت حفل التكريم لأنه بيحتاج النمط التنافسي مع إظهار الأسماء وترتيب نهائي منشور."
 
 
 def _compute_setup_update(
     session: Dict[str, Any], field: str, value: str, *, is_channel: bool, lock_available: bool = True,
     cert_available: bool = False, default_title: str = CERT_DEFAULT_TITLE,
+    ceremony_available: bool = False, ceremony_default_title: str = CERT_DEFAULT_TITLE,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """دالة صرفة (بلا I/O). غلاف حول القواعد الأصلية يضيف: حقل `cert` (الشهادات) وتعطيلها تلقائياً
     لو تغيّر إعداد آخر بحيث ما عادت ممكنة (مجهول / أسماء مخفية / إرسال دفعة واحدة)."""
+    if field == "cer":
+        if is_channel or not ceremony_available:
+            return None, "❌ إعداد غير صالح"
+        state = _setup_state(session, is_channel=is_channel)
+        cfg = ceremony_normalize_config(session.get("ceremony_config"), default_title=ceremony_default_title)
+        new_cfg, error = ceremony_apply_change(cfg, value)
+        if error:
+            return None, error
+        if value == "1":
+            ok, reason = ceremony_eligibility(anonymous=state["anonymous"], names=state["names"], pace=state["pace"], is_channel=is_channel)
+            if not ok:
+                return None, f"⚠️ {reason}"
+        return {"ceremony_config": new_cfg}, None
+
     if field == "cert":
         if is_channel or not cert_available:
             return None, "❌ إعداد غير صالح"
@@ -1008,16 +1042,19 @@ def _compute_setup_update(
     if error or not updates:
         return updates, error
     cfg = cert_normalize_config(session.get("cert_config"))
-    if cfg["enabled"]:
+    cer_cfg = ceremony_normalize_config(session.get("ceremony_config"))
+    if cfg["enabled"] or cer_cfg["enabled"]:
         after = _setup_state({**session, **updates}, is_channel=is_channel)
-        if not after["cert"]:
+        if cfg["enabled"] and not after["cert"]:
             updates = {**updates, "cert_config": {**cfg, "enabled": False}}
+        if cer_cfg["enabled"] and not after["cer"]:
+            updates = {**updates, "ceremony_config": {**cer_cfg, "enabled": False}}
     return updates, error
 
 
 def _setup_summary_text(
     state: Dict[str, Any], *, title: str, dest_title: Optional[str], total: int,
-    is_channel: bool, lock_available: bool = True, cert_available: bool = False,
+    is_channel: bool, lock_available: bool = True, cert_available: bool = False, ceremony_available: bool = False,
 ) -> str:
     # `title`/`dest_title` نص حر من المستخدم ومنحطّه جوا parse_mode=HTML - لازم escape.
     pace = state["pace"]
@@ -1049,6 +1086,13 @@ def _setup_summary_text(
             lines.append(f"🎓 الشهادات: مفعّلة (أول {min(state['cert_cfg']['count'], state['top'])})")
         else:
             lines.append("🎓 الشهادات: غير مفعّلة")
+    if ceremony_available and not is_channel:
+        if state["cer"]:
+            cer = state["cer_cfg"]
+            lines.append(f"🏆 حفل التكريم: مفعّل (أول {min(cer['count'], state['top'])}، "
+                         + ("فيديو" if cer["format"] == "video" else "صورة") + (" + أغنية" if cer["music"] else "") + ")")
+        else:
+            lines.append("🏆 حفل التكريم: غير مفعّل")
     if state["anonymous"]:
         lines += ["", "🙈 <i>بلا نقاط ولا ترتيب نهائي" + (" (القنوات بتدعم المجهول فقط - قيد من تيليجرام)" if is_channel else "") + ".</i>"]
     return "\n".join(lines)
@@ -1075,30 +1119,56 @@ def _cert_screen_text(cfg: Dict[str, Any], *, enabled: bool, reason: Optional[st
     return "\n".join(lines)
 
 
+def _ceremony_screen_text(cfg: Dict[str, Any], *, enabled: bool, reason: Optional[str], top: int) -> str:
+    """نص شاشة حفل التكريم. العنوان نص حر -> html.escape (داخل parse_mode=HTML)."""
+    lines = [
+        "🏆 <b>حفل التكريم</b>",
+        "الحالة: " + ("✅ مفعّل" if enabled else "غير مفعّل"),
+        f"📝 عنوان الحفل: <b>{html.escape(cfg['title'])}</b>",
+        "🎞 الصيغة: " + ("🎬 فيديو بلهب متحرّك" if cfg["format"] == "video" else "🖼 صورة ثابتة"),
+        "🎵 الأغنية: " + ("بتنرسل مع الحفل" if cfg["music"] else "مطفية"),
+        f"👥 عدد المكرَّمين: أول {min(cfg['count'], top)} (فقط لمن جاب نقطة أو أكتر)",
+        "",
+        "<i>بعد الترتيب النهائي بينرسل حفل بخلفية سودا ولهب على الطرفين ولوغو البوت، وأسماء الأوائل بداخله: "
+        "الثلاثة الأوائل ببانرات ذهبي/فضي/برونزي والباقي بأعمدة. بيظهر الاسم الأول والأخير من حساب الطالب. "
+        "اضغط «معاينة» لتشوف شكله التقريبي.</i>",
+    ]
+    if reason:
+        lines += ["", f"⚠️ {html.escape(reason)}"]
+    return "\n".join(lines)
+
+
 async def _setup_screen_view(session: Dict[str, Any], screen: str, *, is_channel: bool, note: str = "") -> Tuple[str, Any]:
     """(نص، كيبورد) لشاشة: b ملخّص · m قائمة · أو اسم إعداد."""
     sid = str(session["id"])
     state = _setup_state(session, is_channel=is_channel)
     lock_available = await quiz_lock_schema_ready()
     cert_available = (not is_channel) and await group_cert_schema_ready()
+    ceremony_available = (not is_channel) and await group_ceremony_schema_ready()
     prefix = f"{note}\n\n" if note else ""
     if screen == "b":
         header = await _load_setup_header(sid)
         text = _setup_summary_text(
             state, title=header.get("title") or "كويز", dest_title=header.get("dest_title"),
             total=int(session.get("total_questions") or 0), is_channel=is_channel, lock_available=lock_available,
-            cert_available=cert_available,
+            cert_available=cert_available, ceremony_available=ceremony_available,
         )
         return prefix + text, get_group_setup_summary_keyboard(sid)
     if screen == "m":
         return (prefix + "⚙️ <b>إعدادات الاختبار</b>\nاختار الإعداد اللي بدك تعدّله:",
                 get_group_setup_menu_keyboard(sid, is_channel=is_channel, anonymous=state["anonymous"],
-                                              lock_available=lock_available, cert_available=cert_available))
+                                              lock_available=lock_available, cert_available=cert_available,
+                                              ceremony_available=ceremony_available))
     if screen == "cert":
         header = await _load_setup_header(sid)
         cfg = cert_normalize_config(session.get("cert_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
         return (prefix + _cert_screen_text(cfg, enabled=state["cert"], reason=state["cert_reason"], top=state["top"]),
                 get_group_setup_cert_keyboard(sid, cfg, enabled=state["cert"]))
+    if screen == "cer":
+        header = await _load_setup_header(sid)
+        cfg = ceremony_normalize_config(session.get("ceremony_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
+        return (prefix + _ceremony_screen_text(cfg, enabled=state["cer"], reason=state["cer_reason"], top=state["top"]),
+                get_group_setup_ceremony_keyboard(sid, cfg, enabled=state["cer"]))
     if screen == "mode":
         return (prefix + "🎮 <b>نمط الجلسة</b>\n🏆 تنافسي: نقاط وترتيب نهائي (زر \"من صوّت لمين\" بيضل ظاهر - قيد من تيليجرام).\n"
                 "🙈 مجهول: محدا بيعرف مين جاوب شو، بلا نقاط ولا ترتيب.",
@@ -1158,15 +1228,19 @@ async def setup_summary_callback(call: types.CallbackQuery):
             return
 
         if action == "o":
-            hidden = ((is_channel and field in {"mode", "lock", "cert"})
+            hidden = ((is_channel and field in {"mode", "lock", "cert", "cer"})
                       or (state["anonymous"] and field in {"names", "top"})
                       or (field == "lock" and not await quiz_lock_schema_ready())
-                      or (field == "cert" and not await group_cert_schema_ready()))
+                      or (field == "cert" and not await group_cert_schema_ready())
+                      or (field == "cer" and not await group_ceremony_schema_ready()))
             if hidden:
                 await call.answer("⚠️ هالإعداد غير متاح هون", show_alert=True)
                 return
             if field == "cert" and not state["cert"] and state["cert_reason"]:
                 await call.answer(f"⚠️ {state['cert_reason']}", show_alert=True)
+                return
+            if field == "cer" and not state["cer"] and state["cer_reason"]:
+                await call.answer(f"⚠️ {state['cer_reason']}", show_alert=True)
                 return
             text, kb = await _setup_screen_view(session, field, is_channel=is_channel)
             await _edit_setup_screen(call, text, kb)
@@ -1177,12 +1251,16 @@ async def setup_summary_callback(call: types.CallbackQuery):
             if field == "cert" and value in {"pv", "te", "ie"}:
                 await _handle_cert_special(call, session, session_id, value, state, is_channel=is_channel)
                 return
+            if field == "cer" and value in {"pv", "te"}:
+                await _handle_ceremony_special(call, session, session_id, value, is_channel=is_channel)
+                return
             cert_title = CERT_DEFAULT_TITLE
-            if field == "cert":
+            if field in {"cert", "cer"}:
                 cert_title = (await _load_setup_header(session_id)).get("title") or CERT_DEFAULT_TITLE
             updates, error = _compute_setup_update(
                 session, field, value, is_channel=is_channel, lock_available=await quiz_lock_schema_ready(),
-                cert_available=(not is_channel) and await group_cert_schema_ready(), default_title=cert_title)
+                cert_available=(not is_channel) and await group_cert_schema_ready(), default_title=cert_title,
+                ceremony_available=(not is_channel) and await group_ceremony_schema_ready(), ceremony_default_title=cert_title)
             if error:
                 await call.answer(error, show_alert=True)
                 return
@@ -1199,6 +1277,8 @@ async def setup_summary_callback(call: types.CallbackQuery):
                 note = "ℹ️ رجّعت إيقاع الإرسال لكل 30 ثانية لأنه ما بيتوافق مع هالمؤقّت."
             if "cert_config" in updates and field != "cert":
                 note = (note + "\n" if note else "") + _CERT_AUTO_DISABLED_NOTE
+            if "ceremony_config" in updates and field != "cer":
+                note = (note + "\n" if note else "") + _CEREMONY_AUTO_DISABLED_NOTE
             text, kb = await _setup_screen_view(session, field, is_channel=is_channel, note=note)
             await _edit_setup_screen(call, text, kb)
             return
@@ -1211,6 +1291,8 @@ async def setup_summary_callback(call: types.CallbackQuery):
             fixes["poll_is_anonymous"] = True
         if state["cert_cfg"]["enabled"] and not state["cert"]:
             fixes["cert_config"] = {**state["cert_cfg"], "enabled": False}
+        if state["cer_cfg"]["enabled"] and not state["cer"]:
+            fixes["ceremony_config"] = {**state["cer_cfg"], "enabled": False}
         if fixes:
             if not await update_session(session_id, fixes):
                 await call.answer("❌ تعذر حفظ الإعدادات", show_alert=True)
@@ -1893,7 +1975,7 @@ async def finish_group_session(session: Dict[str, Any], manual: bool = False) ->
     )
     if cert_rows:
         # 🎓 بعد الترتيب النصي وبمهمة منفصلة: فشل/بطء الرسم ما بيعطّل الإنهاء ولا النبضة.
-        spawn(_send_certificates(session, cert_rows, cert_top_n))
+        spawn(_send_recognitions(session, cert_rows, cert_top_n))
 
 
 # ==================== إجابات الأعضاء ====================
@@ -2209,7 +2291,7 @@ async def _awaiting_cert_text(msg: types.Message) -> Any:
     except Exception as e:
         log_error(logger, f"Redis error reading cert text wait: {e}")
         return False
-    if not isinstance(data, dict) or data.get("field") not in {"title", "issuer"} or not data.get("sid"):
+    if not isinstance(data, dict) or data.get("field") not in {"title", "issuer", "cer_title"} or not data.get("sid"):
         return False
     return {"cert_wait": data}
 
@@ -2232,7 +2314,7 @@ async def receive_cert_text(msg: types.Message, cert_wait: Dict[str, Any]):
             await msg.answer("⚠️ هالجلسة ما عادت متاحة.")
             return
         field = cert_wait["field"]
-        if field == "title":
+        if field in {"title", "cer_title"}:
             value = cert_clean_text(raw_text, CERT_TITLE_MAX_CHARS)
             if not value:
                 await msg.answer("❌ اسم الاختبار إجباري، وما بيقبل إيموجي أو رموز فقط. جرّب اسم تاني، أو ابعت «إلغاء».")
@@ -2240,21 +2322,27 @@ async def receive_cert_text(msg: types.Message, cert_wait: Dict[str, Any]):
         else:
             value = "" if raw_text in {"-", "—"} else cert_clean_text(raw_text, CERT_ISSUER_MAX_CHARS)
         header = await _load_setup_header(session_id)
-        cfg = cert_normalize_config(session.get("cert_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
-        cfg[field] = value
-        if not await update_session(session_id, {"cert_config": cfg}):
+        if field == "cer_title":
+            column, screen_name = "ceremony_config", "cer"
+            cfg = ceremony_normalize_config(session.get("ceremony_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
+            cfg["title"] = value
+        else:
+            column, screen_name = "cert_config", "cert"
+            cfg = cert_normalize_config(session.get("cert_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
+            cfg[field] = value
+        if not await update_session(session_id, {column: cfg}):
             await msg.answer("❌ تعذر حفظ الإعدادات، جرّب بعد شوي.")
             return
         await redis_client.delete(key)
-        session = {**session, "cert_config": cfg}
-        success_label = "اسم الاختبار" if field == "title" else "الجهة / المعلّم"
+        session = {**session, column: cfg}
+        success_label = {"title": "اسم الاختبار", "cer_title": "عنوان الحفل"}.get(field, "الجهة / المعلّم")
         success_text = f"✅ تم حفظ {success_label} بنجاح."
         try:
             await msg.answer(success_text)
         except Exception as e:
             # نجاح الإشعار ليس شرطاً لعرض شاشة الإعدادات المحدّثة؛ الحفظ تم فعلاً.
             log_error(logger, f"Error sending certificate save confirmation: {e}")
-        text, kb = await _setup_screen_view(session, "cert", is_channel=False)
+        text, kb = await _setup_screen_view(session, screen_name, is_channel=False)
         try:
             await bot.edit_message_text(chat_id=msg.chat.id, message_id=int(cert_wait["message_id"]), text=text,
                                         parse_mode="HTML", reply_markup=kb)
@@ -2315,6 +2403,154 @@ async def _send_certificates(session: Dict[str, Any], rows: list, top_n: int) ->
                 what=f"send certificates (session {session_id})")
     except Exception as e:
         log_error(logger, f"cert: unexpected failure for session {session_id}: {e}", exception=e)
+
+
+# ==================== حفل التكريم ====================
+CEREMONY_RENDER_TIMEOUT_SECONDS = 150          # الفيديو أثقل من الشهادة (ffmpeg)
+_CEREMONY_PREVIEW_COOLDOWN_PREFIX = "gq:ceremony_preview:"
+_CEREMONY_PREVIEW_COOLDOWN_SECONDS = 10
+_CEREMONY_AUDIO_FID_KEY = "gq:ceremony_audio_file_id"
+_CEREMONY_AUDIO_FID_TTL = 30 * 24 * 3600
+
+
+async def _render_ceremony(payload: Dict[str, Any]) -> bytes:
+    # استيراد كسول: PIL ما بيتحمّل ببداية البوت إلا لو استُخدمت الميزة فعلاً (ذاكرة 512MB).
+    from services.ceremony_renderer import render_ceremony_async
+    return await render_ceremony_async(payload)
+
+
+async def _handle_ceremony_special(
+    call: types.CallbackQuery, session: Dict[str, Any], session_id: str, value: str, *, is_channel: bool,
+) -> None:
+    """أزرار حفل التكريم اللي ما بتحفظ إعداداً: pv معاينة · te تعديل العنوان."""
+    if is_channel or not await group_ceremony_schema_ready():
+        await call.answer("⚠️ هالإعداد غير متاح هون", show_alert=True)
+        return
+    if value == "pv":
+        await _send_ceremony_preview(call, session, session_id)
+        return
+    try:
+        await redis_client.set(
+            f"{_CERT_TEXT_WAIT_PREFIX}{call.from_user.id}",
+            json.dumps({"sid": session_id, "field": "cer_title", "message_id": call.message.message_id}),
+            ex=_CERT_TEXT_WAIT_TTL,
+        )
+    except Exception as e:
+        log_error(logger, f"Redis error arming ceremony title wait: {e}")
+        await call.answer("❌ تعذّر، جرّب بعد شوي", show_alert=True)
+        return
+    await _safe_call(
+        lambda: call.message.answer(
+            f"✏️ ابعتلي <b>عنوان الحفل</b> اللي بدك ينكتب تحت «حفل تكريم» (حتى {CERT_TITLE_MAX_CHARS} حرف).\n"
+            "العنوان إجباري. لإلغاء التعديل ابعت «إلغاء».", parse_mode="HTML"),
+        what="ceremony title prompt")
+
+
+async def _send_ceremony_preview(call: types.CallbackQuery, session: Dict[str, Any], session_id: str) -> None:
+    """معاينة تقريبية (صورة ثابتة بأسماء عامة) بخاص الأدمن فقط. الفيديو ما بينعاين (أثقل بلا فايدة)."""
+    try:
+        acquired = await redis_client.set(
+            f"{_CEREMONY_PREVIEW_COOLDOWN_PREFIX}{call.from_user.id}", "1", nx=True, ex=_CEREMONY_PREVIEW_COOLDOWN_SECONDS)
+    except Exception as e:
+        log_error(logger, f"Redis error on ceremony preview cooldown: {e}")
+        acquired = True
+    if not acquired:
+        await call.answer("⏳ استنى شوي قبل معاينة جديدة", show_alert=True)
+        return
+    await call.answer("⏳ عم جهّز المعاينة...")
+    try:
+        header = await _load_setup_header(session_id)
+        cfg = ceremony_normalize_config(session.get("ceremony_config"), default_title=header.get("title") or CERT_DEFAULT_TITLE)
+        total = max(1, int(session.get("total_questions") or 10))
+        payload = ceremony_build_payload(
+            {**cfg, "format": "image", "music": False}, ceremony_preview_winners(cfg["count"], total),
+            group_name=header.get("dest_title") or "", total=total, preview=True)
+        await _safe_call(lambda: bot.send_chat_action(call.message.chat.id, "upload_photo"), what="ceremony preview action")
+        png = await asyncio.wait_for(_render_ceremony(payload), timeout=CEREMONY_RENDER_TIMEOUT_SECONDS)
+        await bot.send_photo(
+            chat_id=call.message.chat.id,
+            photo=types.BufferedInputFile(png, filename="ceremony_preview.png"),
+            caption=("👁 معاينة تقريبية لحفل التكريم (الأسماء والدرجات هون للتجربة بس)."
+                     + ("\nالحفل الحقيقي بيجي فيديو بلهب متحرّك وأغنية." if cfg["format"] == "video" else "")),
+        )
+    except Exception as e:
+        log_error(logger, f"ceremony preview failed for session {session_id}: {e}", exception=e)
+        await _safe_call(lambda: call.message.answer("❌ تعذّر رسم المعاينة هلق، جرّب بعد شوي."), what="ceremony preview failed notice")
+
+
+async def _send_ceremony_audio(chat_id: int, thread_id: Optional[int]) -> None:
+    """الأغنية مع نسخة الصورة. أول مرة بتنرفع من الملف، وبعدها بالـ file_id المحفوظ (بلا رفع متكرر)."""
+    file_id = None
+    try:
+        file_id = await redis_client.get(_CEREMONY_AUDIO_FID_KEY)
+        if isinstance(file_id, bytes):
+            file_id = file_id.decode("utf-8")
+    except Exception as e:
+        log_error(logger, f"Redis error reading ceremony audio file_id: {e}")
+    audio = file_id or types.FSInputFile(CEREMONY_AUDIO_PATH, filename="ceremony.mp3")
+    sent = await _safe_call(
+        lambda: bot.send_audio(chat_id=chat_id, audio=audio, title=CEREMONY_AUDIO_TITLE,
+                               duration=int(CEREMONY_MUSIC_SECONDS), message_thread_id=thread_id),
+        what="send ceremony audio")
+    new_id = getattr(getattr(sent, "audio", None), "file_id", None)
+    if new_id and new_id != file_id:
+        try:
+            await redis_client.set(_CEREMONY_AUDIO_FID_KEY, new_id, ex=_CEREMONY_AUDIO_FID_TTL)
+        except Exception as e:
+            log_error(logger, f"Redis error storing ceremony audio file_id: {e}")
+
+
+async def _send_ceremony(session: Dict[str, Any], rows: list, top_n: int) -> None:
+    """يرسم ويرسل حفل التكريم (فيديو بأغنيته، أو صورة + أغنية). لا يرمي أبداً: كل فشل بيتسجّل وبينتهي بصمت."""
+    session_id = str(session.get("id"))
+    try:
+        cfg = ceremony_normalize_config(session.get("ceremony_config"))
+        if not cfg["enabled"] or session.get("poll_is_anonymous") or session.get("show_names") is False:
+            return
+        winners = ceremony_select_winners(rows, cfg, top_n)
+        if not winners:
+            return
+        chat_id = int(session["chat_id"])
+        thread_id = session.get("message_thread_id")
+        group_name = ""
+        try:
+            group_name = getattr(await bot.get_chat(chat_id), "title", None) or ""
+        except Exception as e:
+            log_error(logger, f"ceremony: get_chat failed for session {session_id}: {e}")
+        payload = ceremony_build_payload(cfg, winners, group_name=group_name, total=max(1, int(session.get("total_questions") or 0)))
+        is_video = payload["fmt"] == "mp4"
+        await _safe_call(
+            lambda: bot.send_chat_action(chat_id, "upload_video" if is_video else "upload_photo", message_thread_id=thread_id),
+            what=f"ceremony action (session {session_id})")
+        try:
+            data = await asyncio.wait_for(_render_ceremony(payload), timeout=CEREMONY_RENDER_TIMEOUT_SECONDS)
+        except Exception as e:
+            log_error(logger, f"ceremony: render failed for session {session_id}: {e}")
+            return
+        caption = "🏆 <b>حفل تكريم الأوائل</b>\n<i>مبروك للجميع، وحظ أوفر للباقي.</i>"
+        if is_video:
+            await _safe_call(
+                lambda: bot.send_video(
+                    chat_id=chat_id, video=types.BufferedInputFile(data, filename="ceremony.mp4"),
+                    width=CEREMONY_VIDEO_WIDTH, height=CEREMONY_VIDEO_HEIGHT,
+                    duration=int(CEREMONY_MUSIC_SECONDS if cfg["music"] else 12), supports_streaming=True,
+                    caption=caption, parse_mode="HTML", message_thread_id=thread_id),
+                what=f"send ceremony video (session {session_id})")
+        else:
+            await _safe_call(
+                lambda: bot.send_photo(chat_id=chat_id, photo=types.BufferedInputFile(data, filename="ceremony.png"),
+                                       caption=caption, parse_mode="HTML", message_thread_id=thread_id),
+                what=f"send ceremony photo (session {session_id})")
+            if cfg["music"]:
+                await _send_ceremony_audio(chat_id, thread_id)
+    except Exception as e:
+        log_error(logger, f"ceremony: unexpected failure for session {session_id}: {e}", exception=e)
+
+
+async def _send_recognitions(session: Dict[str, Any], rows: list, top_n: int) -> None:
+    """حفل التكريم أولاً ثم الشهادات (بالترتيب، بمهمة واحدة). كل واحدة معزولة: فشل الأولى ما بيمنع التانية."""
+    await _send_ceremony(session, rows, top_n)
+    await _send_certificates(session, rows, top_n)
 
 
 group_quiz_router = router

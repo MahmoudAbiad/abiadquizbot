@@ -929,7 +929,7 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FinishHookTests(unittest.IsolatedAsyncioTestCase):
-    """finish_group_session بيجدول الشهادات بعد الترتيب النصي فقط، وفشلها ما بيأثّر عليه."""
+    """finish_group_session بيجدول (حفل التكريم ثم الشهادات) بعد الترتيب النصي فقط، وفشلها ما بيأثّر عليه."""
 
     def build(self, rows, **sess):
         bot = SimpleNamespace(send_message=AsyncMock(), stop_poll=AsyncMock())
@@ -944,7 +944,7 @@ class FinishHookTests(unittest.IsolatedAsyncioTestCase):
             clear_session_questions_cache=AsyncMock(), _pop_open_poll=AsyncMock(return_value=None),
             get_leaderboard=AsyncMock(return_value=rows), bot=bot, redis_client=SimpleNamespace(set=AsyncMock()), html=html,
             _safe_call=safe_call, GROUP_TOP_N_MIN=1, GROUP_TOP_N_MAX=20, _FINISHED_SESSION_PREFIX="gq:finished:",
-            _FINISHED_SESSION_TTL=7200, logger=Mock(), log_error=Mock(), spawn=self.spawn, _send_certificates=self.send_certs,
+            _FINISHED_SESSION_TTL=7200, logger=Mock(), log_error=Mock(), spawn=self.spawn, _send_recognitions=self.send_certs,
             Optional=object,
         )
         s = dict(id=SID, chat_id=-1001, poll_is_anonymous=False, show_names=True, top_n=5, pacing_mode="fixed_interval",

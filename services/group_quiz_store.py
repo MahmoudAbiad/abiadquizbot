@@ -399,6 +399,23 @@ async def cert_schema_ready() -> bool:
     return ready
 
 
+_CEREMONY_SCHEMA_CACHE: Dict[str, Any] = {"ready": False, "until": 0.0}
+
+
+async def ceremony_schema_ready() -> bool:
+    """بوابة نشر: حفل التكريم يحتاج عمود `ceremony_config`. قبل تطبيق الـ migration تبقى الميزة مخفية
+    (نفس نمط cert_schema_ready، كاش 60 ثانية)."""
+    if time.monotonic() < _CEREMONY_SCHEMA_CACHE["until"]:
+        return bool(_CEREMONY_SCHEMA_CACHE["ready"])
+    try:
+        await supabase.table("group_quiz_sessions").select("ceremony_config").limit(1).execute()
+        ready = True
+    except Exception:
+        ready = False
+    _CEREMONY_SCHEMA_CACHE.update(ready=ready, until=time.monotonic() + 60)
+    return ready
+
+
 async def bump_participant(
     session_id: str,
     user_id: int,

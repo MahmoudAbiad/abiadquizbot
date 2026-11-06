@@ -79,6 +79,7 @@ UPDATE_CONCURRENCY_LIMIT = (
 # مهلات القراءة (ثوانٍ). الاتصال نفسه 6 ثوانٍ دائماً.
 CONNECT_TIMEOUT = 6.0
 RENDER_READ_TIMEOUT = float(_env_int("OFFLOAD_RENDER_READ_TIMEOUT", 45, 5, 180))
+CEREMONY_VIDEO_READ_TIMEOUT = float(_env_int("OFFLOAD_CEREMONY_VIDEO_READ_TIMEOUT", 120, 30, 300))
 EXPORT_READ_TIMEOUT = float(_env_int("OFFLOAD_EXPORT_READ_TIMEOUT", 150, 15, 600))
 MAX_REQUEST_BYTES = 3 * 1024 * 1024   # أكبر من هيك: نطبّق سياسة FALLBACK_LOCAL
 
@@ -219,6 +220,13 @@ async def _post(path: str, body: bytes, read_timeout: float) -> Tuple[int, bytes
 _MAGIC = {"png": b"\x89PNG\r\n\x1a\n", "pdf": b"%PDF-", "docx": b"PK"}
 
 
+def _looks_like(kind: str, content: bytes) -> bool:
+    """mp4 توقيعه `ftyp` عند البايت 4 (مش بالبداية) - باقي الأنواع توقيعها بأول الملف."""
+    if kind == "mp4":
+        return content[4:8] == b"ftyp"
+    return content.startswith(_MAGIC[kind])
+
+
 async def _call(path: str, payload: Dict[str, Any], read_timeout: float, kind: str, *, allow_local_fallback=True) -> Optional[bytes]:
     """ينفّذ الاستدعاء كاملاً. يرجع bytes عند النجاح، None عند فشل مسموح معه الرجوع محلياً،
     ويرمي OffloadUnavailable لو الرجوع المحلي معطّل. رسالة 422 (خطأ مستخدم) تُرفع كما هي."""
@@ -259,7 +267,7 @@ async def _call(path: str, payload: Dict[str, Any], read_timeout: float, kind: s
                     continue
                 break
 
-            if status == 200 and content.startswith(_MAGIC[kind]):
+            if status == 200 and _looks_like(kind, content):
                 _breaker.record_success(generation)
                 stats["remote_ok"] += 1
                 return content
@@ -301,6 +309,17 @@ async def remote_render_certificate(payload: Dict[str, Any], *, allow_local_fall
     if not ENABLED:
         return None
     return await _call("/v1/render/certificate", payload, RENDER_READ_TIMEOUT, "png", allow_local_fallback=allow_local_fallback)
+
+
+async def remote_render_ceremony(payload: Dict[str, Any], *, allow_local_fallback=True) -> Optional[bytes]:
+    """PNG (payload["fmt"]=="png") أو mp4 ("mp4") لحفل التكريم من السيرفر الثاني، أو None => نفّذ محلياً."""
+    if not ENABLED:
+        return None
+    is_video = payload.get("fmt") == "mp4"
+    return await _call(
+        "/v1/render/ceremony", payload, CEREMONY_VIDEO_READ_TIMEOUT if is_video else RENDER_READ_TIMEOUT,
+        "mp4" if is_video else "png", allow_local_fallback=allow_local_fallback,
+    )
 
 
 async def remote_build_quiz(fmt: str, title: str, questions: List[Dict[str, Any]], style: str, include_answers: bool = True) -> Optional[bytes]:
