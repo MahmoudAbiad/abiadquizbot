@@ -13,7 +13,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -21,8 +21,8 @@ from docx.shared import Cm, Pt, RGBColor
 
 from logger import get_logger, log_error
 from services.image_quiz_renderer import render_question_image
-from services.latex_text import latex_to_plain
 from services.print_quiz_renderer import iter_print_blocks
+from services.quiz_print_layout import text_parts, option_columns
 
 logger = get_logger(__name__)
 
@@ -377,6 +377,9 @@ def _set_paragraph_rtl(paragraph, align_right: bool = True) -> None:
     bidi = OxmlElement("w:bidi")
     pPr.append(bidi)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT if align_right else WD_ALIGN_PARAGRAPH.LEFT
+    # Word mirrors left/right justification in bidi paragraphs; start/end
+    # express the intended physical edge consistently in RTL documents.
+    pPr.find(qn("w:jc")).set(qn("w:val"), "start" if align_right else "end")
 
 
 def _style_run(run, font_name: str, size_pt: float, bold: bool = False,
@@ -388,6 +391,13 @@ def _style_run(run, font_name: str, size_pt: float, bold: bool = False,
     if color:
         run.font.color.rgb = RGBColor(*color)
     rPr = run._element.get_or_add_rPr()
+    size_cs = OxmlElement("w:szCs")
+    size_cs.set(qn("w:val"), str(round(size_pt * 2)))
+    rPr.append(size_cs)
+    if bold:
+        rPr.append(OxmlElement("w:bCs"))
+    if italic:
+        rPr.append(OxmlElement("w:iCs"))
     rFonts = rPr.find(qn("w:rFonts"))
     if rFonts is None:
         rFonts = OxmlElement("w:rFonts")
@@ -508,6 +518,112 @@ def _add_table_cell_text(cell, text: str, font_name: str, size_pt: float, is_ar:
     _style_run(run, font_name, size_pt, bold=bold, color=color, rtl=is_ar, cs_font=cs_font)
 
 
+def _native_question_parts(q, idx, fallback):
+    parts = text_parts(str(q.get("question", "")).strip(), fallback, split_translation=True)
+    direction = parts[0][1]
+    label = f"السؤال {idx}: " if direction else f"Question {idx}: "
+    return [(label + parts[0][0], direction), *parts[1:]]
+
+
+def _native_options(q, is_ar):
+    letters = _letters_for(is_ar)
+    options = []
+    for i, opt in enumerate(q.get("options") or []):
+        parts = text_parts(opt, is_ar)
+        label = letters[i] if i < len(letters) else str(i + 1)
+        options.append([(f"{label}) {parts[0][0]}", parts[0][1]), *parts[1:]])
+    return options
+
+
+def _docx_native_paragraph(p, text, is_ar, cfg, size=11.5, bold=False, center=False):
+    # Explicit direction per paragraph and script per run keeps mixed options
+    # editable without making the English sentence inherit the Arabic direction.
+    pPr = p._p.get_or_add_pPr()
+    bidi = OxmlElement("w:bidi")
+    bidi.set(qn("w:val"), "1" if is_ar else "0")
+    pPr.append(bidi)
+    p.alignment = (WD_ALIGN_PARAGRAPH.CENTER if center else
+                   WD_ALIGN_PARAGRAPH.RIGHT if is_ar else WD_ALIGN_PARAGRAPH.LEFT)
+    if not center:
+        pPr.find(qn("w:jc")).set(qn("w:val"), "start")
+    p.paragraph_format.space_after = Pt(4)
+    p.paragraph_format.line_spacing = 1.15
+    for segment, segment_ar in _split_script_runs(text):
+        run = p.add_run(segment)
+        _style_run(run, cfg["ar_font"] if segment_ar else cfg["en_font"], size,
+                   bold=bold, cs_font=cfg["ar_font"], color=cfg["accent"] if bold else None)
+        rtl = OxmlElement("w:rtl")
+        segment_rtl = segment_ar or (is_ar and not re.search(r"[^\W\d_]", segment))
+        rtl.set(qn("w:val"), "1" if segment_rtl else "0")
+        run._element.get_or_add_rPr().append(rtl)
+
+
+def _docx_native_question(doc, q, idx, cfg, width_cm, fallback):
+    parts = _native_question_parts(q, idx, fallback)
+    direction = parts[0][1]
+    options = _native_options(q, direction)
+    _register_pdf_fonts()
+    en = "Latin" if _font_available("Latin") else "Helvetica"
+    ar = "Arabic" if _font_available("Arabic") else en
+    # Match the PDF's printable geometry and keep a little extra cell padding
+    # for Word's Calibri/Arial/Amiri substitutes.
+    columns = option_columns(options, width_cm * 72 / 2.54,
+                             lambda text, rtl: _mixed_width(text, rtl, en, ar, 11.5), padding=24)
+    paragraphs = []
+    for text, rtl in parts:
+        p = doc.add_paragraph()
+        _docx_native_paragraph(p, text, rtl, cfg, size=12.5, bold=True)
+        paragraphs.append(p)
+    if options:
+        rows = (len(options) + columns - 1) // columns
+        table = doc.add_table(rows=rows, cols=columns)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+        if direction:
+            _set_table_rtl(table)
+        for col in table.columns:
+            col.width = Cm(width_cm / columns)
+        for row_idx, row in enumerate(table.rows):
+            # Normal option rows must not break across pages. Oversized single
+            # options remain splittable so Word can paginate them safely.
+            if all(sum(len(t) for t, _ in parts_) < 1500
+                   for parts_ in options[row_idx * columns:(row_idx + 1) * columns]):
+                row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+            for col_idx, cell in enumerate(row.cells):
+                _set_cell_width(cell, width_cm / columns)
+                _set_cell_borders(cell, cfg.get("question_box_border", "777777"), size=4)
+                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                margins = OxmlElement("w:tcMar")
+                for edge, value in (("top", 100), ("bottom", 100), ("left", 100), ("right", 100)):
+                    el = OxmlElement(f"w:{edge}")
+                    el.set(qn("w:w"), str(value))
+                    el.set(qn("w:type"), "dxa")
+                    margins.append(el)
+                cell._tc.get_or_add_tcPr().append(margins)
+                if cfg["question_box"]:
+                    _shade_cell(cell, cfg["question_box_bg"])
+                opt_idx = row_idx * columns + col_idx
+                if opt_idx < len(options):
+                    for line_idx, (text, rtl) in enumerate(options[opt_idx]):
+                        p = cell.paragraphs[0] if line_idx == 0 else cell.add_paragraph()
+                        _docx_native_paragraph(p, text, rtl, cfg, center=columns > 1)
+                        paragraphs.append(p)
+                else:
+                    paragraphs.append(cell.paragraphs[0])
+    # Word's keep-with-next chain moves a complete normal question to the next
+    # page. Word can relax it for content taller than one printable page.
+    for p in paragraphs:
+        p.paragraph_format.keep_together = True
+        p.paragraph_format.keep_with_next = True
+    if paragraphs:
+        paragraphs[-1].paragraph_format.keep_with_next = False
+    spacer = doc.add_paragraph()
+    spacer.paragraph_format.space_after = Pt(8)
+    spacer.paragraph_format.space_before = Pt(0)
+    spacer.paragraph_format.line_spacing = Pt(1)
+    spacer.paragraph_format.keep_with_next = False
+
+
 def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE, include_answers: bool = True) -> bytes:
     """يبني ملف Word جميل التنسيق للكويز، مع اتجاه تلقائي حسب اللغة وستايل شكلي قابل للاختيار
     (simple / modern / academic)."""
@@ -527,6 +643,10 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
 
     doc = Document()
     section = doc.sections[0]
+    # Same A4 sheet and printable width as the PDF and math export.
+    section.page_width, section.page_height = Cm(21), Cm(29.7)
+    section.left_margin = section.right_margin = Pt(48)
+    section.top_margin = section.bottom_margin = Pt(48)
     usable_width_cm = (section.page_width - section.left_margin - section.right_margin) / 360000
 
     # اتجاه الصفحة بالكامل RTL للعربي
@@ -598,76 +718,17 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
                 raise ExportError(f"تعذّر تنسيق السؤال {idx} للطباعة؛ راجع صيغة المعادلات أو حجم الجدول.") from exc
             continue
 
-        if cfg["question_box"]:
-            tbl = doc.add_table(rows=1, cols=1)
-            tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-            if is_ar:
-                _set_table_rtl(tbl)
-            cell = tbl.cell(0, 0)
-            _set_cell_width(cell, usable_width_cm)
-            _shade_cell(cell, cfg["question_box_bg"])
-            _set_cell_borders(cell, cfg["question_box_border"])
-
-            qp = cell.paragraphs[0]
-            if is_ar:
-                _set_paragraph_rtl(qp, align_right=True)
-            run = qp.add_run(label + q_text)
-            _style_run(run, body_font, 13, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
-            qp.paragraph_format.space_after = Pt(6)
-
-            for opt_idx, opt_text in enumerate(options):
-                letter = letters[opt_idx] if opt_idx < len(letters) else str(opt_idx + 1)
-                op = cell.add_paragraph()
-                if is_ar:
-                    _set_paragraph_rtl(op, align_right=True)
-                if cfg["badge"]:
-                    badge_run = op.add_run(f" {letter} ")
-                    _style_run(badge_run, body_font, 11.5, bold=True, color=(255, 255, 255), rtl=is_ar, cs_font=cs_font)
-                    _shade_run(badge_run, _rgb_to_hex(cfg["badge_bg"]))
-                    sep_run = op.add_run("  ")
-                    _style_run(sep_run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
-                    text_run = op.add_run(opt_text)
-                    _style_run(text_run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
-                else:
-                    run = op.add_run(f"{letter}) {opt_text}")
-                    _style_run(run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
-                op.paragraph_format.space_after = Pt(3)
-
-            spacer = doc.add_paragraph()
-            spacer.paragraph_format.space_after = Pt(10)
-        else:
-            qp = doc.add_paragraph()
-            run = qp.add_run(label + q_text)
-            _style_run(run, body_font, 13, bold=True,
-                       color=cfg["accent"] if style == STYLE_ACADEMIC else None, rtl=is_ar, cs_font=cs_font)
-            if is_ar:
-                _set_paragraph_rtl(qp, align_right=True)
-            qp.paragraph_format.space_after = Pt(6)
-
-            for opt_idx, opt_text in enumerate(options):
-                letter = letters[opt_idx] if opt_idx < len(letters) else str(opt_idx + 1)
-                op = doc.add_paragraph()
-                sep = "." if style == STYLE_ACADEMIC else ")"
-                run = op.add_run(f"{letter}{sep} {opt_text}")
-                _style_run(run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
-                if is_ar:
-                    _set_paragraph_rtl(op, align_right=True)
-                    op.paragraph_format.right_indent = Cm(0.8)
-                else:
-                    op.paragraph_format.left_indent = Cm(0.8)
-                op.paragraph_format.space_after = Pt(2)
-
-            spacer = doc.add_paragraph()
-            if cfg["divider"]:
-                spacer.paragraph_format.space_before = Pt(4)
-                _set_paragraph_border_bottom(spacer, "AAAAAA", size=6)
-            spacer.paragraph_format.space_after = Pt(10)
+        _docx_native_question(doc, q, idx, cfg, usable_width_cm, is_ar)
 
     if include_answers:
         doc.add_page_break()
         doc.add_heading("الإجابات والحلول" if is_ar else "Answers and solutions", level=1)
         for idx, q in enumerate(questions, 1):
-            answer = _answer_print_question(q, is_ar)
+            answer_direction = is_ar if _is_math_question(q) else _native_question_parts(q, idx, is_ar)[0][1]
+            answer = _answer_print_question(q, answer_direction)
+            if not _is_math_question(q) and not _is_math_question(answer):
+                _docx_native_question(doc, answer, idx, cfg, usable_width_cm, is_ar)
+                continue
             try:
                 for img_bytes in iter_print_blocks(answer, is_ar, f"{idx}"):
                     p = doc.add_paragraph()
@@ -913,6 +974,24 @@ def _draw_mixed_line(c, text: str, base_ar: bool, font_en: str, font_ar: str, si
         x += pdfmetrics.stringWidth(seg, font, size)
 
 
+def _wrap_print_line(text, rtl, font_en, font_ar, size, width):
+    """Bound even a long URL/underscore run to the cell's printable width."""
+    result = []
+    for line in _wrap_line(text, rtl, font_en, font_ar, size, width):
+        if _mixed_width(line, rtl, font_en, font_ar, size) <= width:
+            result.append(line)
+            continue
+        current = ""
+        for char in line:
+            if current and _mixed_width(current + char, rtl, font_en, font_ar, size) > width:
+                result.append(current)
+                current = ""
+            current += char
+        if current:
+            result.append(current)
+    return result or [""]
+
+
 # إعدادات كل ستايل شكلي للـ PDF
 _PDF_STYLES = {
     STYLE_SIMPLE: dict(
@@ -1066,69 +1145,76 @@ class _QuizPDFRenderer:
         except Exception as exc:
             raise ExportError(f"تعذّر تنسيق السؤال {idx0 + 1} للطباعة؛ راجع صيغة المعادلات أو حجم الجدول.") from exc
 
+    def _native_lines(self, parts, size, width, bold=False):
+        en = self.font_en_bold if bold else self.font_en_regular
+        ar = (self.font_ar_bold if bold else self.font_ar_regular) or en
+        return [(line, rtl) for text, rtl in parts
+                for line in _wrap_print_line(text, rtl, en, ar, size, width)]
+
+    def _native_text(self, lines, size, x, width, bold=False, center=False, paginate=True):
+        en = self.font_en_bold if bold else self.font_en_regular
+        ar = (self.font_ar_bold if bold else self.font_ar_regular) or en
+        for text, rtl in lines:
+            if paginate:
+                self._ensure_space(size + 5)
+            _draw_mixed_line(self.c, text, rtl, en, ar, size, self.y,
+                             self.cfg["accent"] if bold else "#111111",
+                             x, 2 * x + width, center=center)
+            self.y -= size + 5
+
+    def _native_option_rows(self, options, width):
+        en, ar = self.font_en_regular, self.font_ar_regular or self.font_en_regular
+        columns = option_columns(options, width,
+                                 lambda text, rtl: _mixed_width(text, rtl, en, ar, 11.5))
+        cells = [self._native_lines(parts, 11.5, width / columns - 20) for parts in options]
+        return columns, [cells[i:i + columns] for i in range(0, len(cells), columns)]
+
+    def _native_grid_row(self, cells, columns, width, direction):
+        height = max((len(cell) for cell in cells), default=1) * 16.5 + 16
+        self._ensure_space(height)
+        top = self.y
+        self.c.setLineWidth(0.5)
+        self.c.setStrokeColor(HexColor(self.cfg.get("box_border", "#777777")))
+        self.c.setFillColor(HexColor(self.cfg.get("box_bg", "#FFFFFF")))
+        self.c.rect(self.margin, top - height, width, height, stroke=1, fill=1)
+        cell_width = width / columns
+        for col in range(1, columns):
+            x = self.margin + col * cell_width
+            self.c.line(x, top, x, top - height)
+        for col, lines in enumerate(cells):
+            visual_col = columns - col - 1 if direction else col
+            x = self.margin + visual_col * cell_width + 10
+            self.y = top - 8 - 11.5 - (height - 16 - len(lines) * 16.5) / 2
+            self._native_text(lines, 11.5, x, cell_width - 20, center=columns > 1, paginate=False)
+        self.y = top - height
+
     def _render_questions(self):
-        cfg = self.cfg
-        if cfg["box"]:
-            self._render_questions_boxed()
-            return
+        width = self.page_w - 2 * self.margin
+        capacity = self.page_h - 2 * self.margin - 25
         for idx, q in enumerate(self.questions, 1):
             if _is_math_question(q) and self._draw_math_question_image(q, idx - 1):
                 continue
-            label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {latex_to_plain(str(q.get('question', '')).strip())}"
-            self._ensure_space(30)
-            label_color = cfg["accent"] if self.style == STYLE_ACADEMIC else "#111111"
-            self._draw_paragraph(label, 12.5, bold=True, color=label_color, gap_after=4)
-            for oidx, opt in enumerate(q.get("options") or []):
-                letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
-                sep = "." if self.style == STYLE_ACADEMIC else ")"
-                self._draw_paragraph(f"{letter}{sep} {latex_to_plain(str(opt))}", 11, extra_indent=18, gap_after=2)
-            if cfg["divider"]:
-                self._ensure_space(14)
-                self.c.setStrokeColor(HexColor("#AAAAAA"))
-                self.c.setLineWidth(0.75)
-                self.c.line(self.margin, self.y, self.page_w - self.margin, self.y)
-                self.y -= 6
+            parts = _native_question_parts(q, idx, self.is_ar)
+            direction = parts[0][1]
+            question_lines = self._native_lines(parts, 12.5, width, bold=True)
+            options = _native_options(q, direction)
+            columns, rows = self._native_option_rows(options, width)
+            height = len(question_lines) * 17.5 + 8 + sum(
+                max(len(cell) for cell in row) * 16.5 + 16 for row in rows) + 24
+            if height <= capacity:
+                self._ensure_space(height)
+            self._native_text(question_lines, 12.5, self.margin, width, bold=True)
             self.y -= 8
-
-    def _render_questions_boxed(self):
-        """ستايل 'modern': كل سؤال جوا بطاقة (مستطيل بحواف دائرية) بخلفية فاتحة."""
-        cfg = self.cfg
-        pad = 12
-        font_en, font_ar = self.font_en_regular, (self.font_ar_regular or self.font_en_regular)
-        font_en_b, font_ar_b = self.font_en_bold, (self.font_ar_bold or self.font_en_bold)
-        max_w = self.page_w - 2 * self.margin - 2 * pad
-
-        for idx, q in enumerate(self.questions, 1):
-            if _is_math_question(q) and self._draw_math_question_image(q, idx - 1):
-                continue
-            label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {latex_to_plain(str(q.get('question', '')).strip())}"
-            options = [latex_to_plain(str(o)) for o in (q.get("options") or [])]
-
-            q_lines = _wrap_line(label, self.is_ar, font_en_b, font_ar_b, 12.5, max_w)
-            content_h = 2 * pad + len(q_lines) * (12.5 + 5) + 6
-            opt_line_counts = []
-            for oidx, opt in enumerate(options):
-                letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
-                lines = _wrap_line(f"{letter}) {opt}", self.is_ar, font_en, font_ar, 11, max_w - 10)
-                opt_line_counts.append(lines)
-                content_h += len(lines) * (11 + 4) + 3
-
-            self._ensure_space(content_h + 14)
-            top_y = self.y
-            self.c.setFillColor(HexColor(cfg["box_bg"]))
-            self.c.roundRect(self.margin, top_y - content_h, self.page_w - 2 * self.margin, content_h,
-                              6, fill=1, stroke=0)
-            self.c.setStrokeColor(HexColor(cfg["box_border"]))
-            self.c.setLineWidth(1)
-            self.c.roundRect(self.margin, top_y - content_h, self.page_w - 2 * self.margin, content_h,
-                              6, fill=0, stroke=1)
-
-            self.y = top_y - pad
-            self._draw_paragraph(label, 12.5, bold=True, color=cfg["accent"], extra_indent=pad, gap_after=6)
-            for oidx, opt in enumerate(options):
-                letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
-                self._draw_paragraph(f"{letter}) {opt}", 11, extra_indent=pad + 10, gap_after=3)
-            self.y = top_y - content_h - 12
+            # Very long one-column choices are split into bounded native-text
+            # rows. Normal multi-column rows always fit together on one page.
+            max_lines = max(1, int((capacity - 16) / 16.5))
+            for row in rows:
+                if columns == 1 and len(row[0]) > max_lines:
+                    for start in range(0, len(row[0]), max_lines):
+                        self._native_grid_row([row[0][start:start + max_lines]], 1, width, direction)
+                else:
+                    self._native_grid_row(row, columns, width, direction)
+            self.y -= 24
 
     def _render_answer_table(self):
         self._new_page()
@@ -1136,7 +1222,18 @@ class _QuizPDFRenderer:
                              15, bold=True, gap_after=12)
         for idx, q in enumerate(self.questions, 1):
             try:
-                self._draw_print_question(_answer_print_question(q, self.is_ar), str(idx))
+                answer_direction = self.is_ar if _is_math_question(q) else _native_question_parts(q, idx, self.is_ar)[0][1]
+                answer = _answer_print_question(q, answer_direction)
+                if not _is_math_question(q) and not _is_math_question(answer):
+                    lines = self._native_lines(_native_question_parts(answer, idx, self.is_ar),
+                                               11.5, self.page_w - 2 * self.margin)
+                    height = len(lines) * 16.5 + 12
+                    if height <= self.page_h - 2 * self.margin - 25:
+                        self._ensure_space(height)
+                    self._native_text(lines, 11.5, self.margin, self.page_w - 2 * self.margin)
+                    self.y -= 12
+                else:
+                    self._draw_print_question(answer, str(idx))
             except Exception as exc:
                 raise ExportError(f"تعذّر تنسيق إجابة السؤال {idx}؛ راجع المعادلات.") from exc
 
