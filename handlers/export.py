@@ -61,7 +61,8 @@ from services.export_service import (
     max_questions_per_page_docx,
 )
 from services.export_options import (
-    ANSWERS_MODES, FIELD_CODES, PLACEMENTS, TEXT_FIELDS, ExportOptions, ExportOptionsError,
+    ANSWERS_MODES, DRAFT_SIZES, DRAFT_STYLES, FIELD_CODES, PLACEMENTS, TEXT_FIELDS, ExportOptions,
+    ExportOptionsError,
 )
 from helpers.supabase_helper import get_favorite_quiz, log_usage_event
 
@@ -345,14 +346,15 @@ async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -
                 await _safe_answer(call, MSG_NO_QUESTIONS, show_alert=True)
                 return
             style = STYLE_CODE_TO_NAME.get(style_code, "simple")
-            max_allowed = await asyncio.to_thread(max_questions_per_page, questions, style)
-            word_max = min(max_allowed, await asyncio.to_thread(max_questions_per_page_docx, questions, style))
+            max_allowed = await asyncio.to_thread(max_questions_per_page, questions, style, options)
+            word_max = min(max_allowed, await asyncio.to_thread(max_questions_per_page_docx, questions, style, options))
             await _edit_export_screen(
                 call,
                 "🔢 <b>عدد الأسئلة في الصفحة الواحدة</b>\n\n"
                 f"اختر من 1 إلى {max_allowed}. هذا الحد الأعلى مناسب لطول أسئلة كويزك وتنسيق «{escape(STYLE_LABELS_AR[style])}» في PDF"
                 + (f"، وفي Word يتسع عادةً حتى {word_max} لأن صفحته أصغر.\n" if word_max < max_allowed else ".\n") +
                 "إن كانت بعض الأسئلة أطول من المعتاد توضع أسئلة أقل في صفحتها تلقائياً بدل التزاحم أو القص.\n"
+                "تقسيم الصفحة إلى عمودين يرفع الحد الأعلى، ومساحة المسودة تخفّضه.\n"
                 "«تلقائي» يملأ كل صفحة بأكبر عدد يتسع (السلوك المعتاد).\n\n"
                 f"يمكنك أيضاً إرسال الرقم كرسالة نصية.",
                 get_export_per_page_keyboard(max_allowed, options.per_page, style_code, favorite_id))
@@ -408,6 +410,20 @@ async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -
         elif action == "pn":
             cycle = {None: True, True: False, False: None}
             options = replace(options, page_numbers=cycle[options.page_numbers])
+            await _save_options(state, options)
+        elif action == "cl":
+            options = replace(options, columns=2 if options.columns == 1 else 1)
+            await _save_options(state, options)
+        elif action == "dv":
+            options = replace(options, column_divider=not options.column_divider)
+            await _save_options(state, options)
+        elif action == "ds":
+            nxt = DRAFT_SIZES[(DRAFT_SIZES.index(options.draft_size) + 1) % len(DRAFT_SIZES)]
+            options = replace(options, draft_size=nxt)
+            await _save_options(state, options)
+        elif action == "dt":
+            nxt = DRAFT_STYLES[(DRAFT_STYLES.index(options.draft_style) + 1) % len(DRAFT_STYLES)]
+            options = replace(options, draft_style=nxt)
             await _save_options(state, options)
         elif action == "rs":
             await _leave_input_state(state)

@@ -21,7 +21,8 @@ from helpers.settings_helper import get_setting
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
 from services.export_options import (
-    ANSWERS_MODE_LABELS_AR, FIELD_CODES, MAX_PER_PAGE, PLACEMENT_LABELS_AR, PLACEMENTS, TEXT_FIELDS,
+    ANSWERS_MODE_LABELS_AR, COLUMN_LABELS_AR, DRAFT_SIZE_LABELS_AR, DRAFT_STYLE_LABELS_AR, FIELD_CODES,
+    MAX_PER_PAGE, PLACEMENT_LABELS_AR, PLACEMENTS, TEXT_FIELDS,
 )
 from services.quiz_permissions import can_delete_quiz
 from utils import hash_to_short_token
@@ -169,6 +170,24 @@ def get_export_settings_keyboard(options: dict, style_code: str = "s", favorite_
     kb.append([types.InlineKeyboardButton(
         text="🔢 ترقيم الصفحات: " + ("افتراضي" if numbers is None else "ظاهر" if numbers else "مخفي"),
         callback_data=_xo("pn", "", style_code, favorite_id))])
+    # تقسيم الصفحة (PDF وWord): عمود واحد أو عمودان بخط فاصل اختياري
+    columns = options.get("columns", 1)
+    row = [types.InlineKeyboardButton(text="📰 تقسيم الصفحة: " + COLUMN_LABELS_AR[columns],
+                                      callback_data=_xo("cl", "", style_code, favorite_id))]
+    if columns == 2:
+        row.append(types.InlineKeyboardButton(
+            text="➖ خط فاصل: " + ("ظاهر" if options.get("column_divider", True) else "مخفي"),
+            callback_data=_xo("dv", "", style_code, favorite_id)))
+    kb.append(row)
+    # مساحة مسودة تحت كل سؤال (PDF وWord): الحجم ثم الشكل
+    draft_size = options.get("draft_size", "none")
+    row = [types.InlineKeyboardButton(text="✍️ مسودة تحت كل سؤال: " + DRAFT_SIZE_LABELS_AR[draft_size],
+                                      callback_data=_xo("ds", "", style_code, favorite_id))]
+    if draft_size != "none":
+        row.append(types.InlineKeyboardButton(
+            text="📐 الشكل: " + DRAFT_STYLE_LABELS_AR[options.get("draft_style", "auto")],
+            callback_data=_xo("dt", "", style_code, favorite_id)))
+    kb.append(row)
     kb.append([types.InlineKeyboardButton(text="♻️ إعادة الضبط", callback_data=_xo("rs", "", style_code, favorite_id)),
                types.InlineKeyboardButton(text="✅ تم — اختيار الصيغة",
                                           callback_data=_xo("done", "", style_code, favorite_id))])

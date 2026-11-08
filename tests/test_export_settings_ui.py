@@ -49,6 +49,7 @@ def handler_env(**extra):
         ExportState=types.SimpleNamespace(waiting_for_value=_St('ExportState:waiting_for_value')),
         ExportOptions=ExportOptions, ExportOptionsError=ExportOptionsError,
         FIELD_CODES=eo.FIELD_CODES, TEXT_FIELDS=eo.TEXT_FIELDS, PLACEMENTS=eo.PLACEMENTS,
+        DRAFT_SIZES=eo.DRAFT_SIZES, DRAFT_STYLES=eo.DRAFT_STYLES,
         STYLE_CODE_TO_NAME={'s': 'simple', 'm': 'modern', 'a': 'academic'},
         STYLE_LABELS_AR={'simple': 'بسيط', 'modern': 'عصري', 'academic': 'أكاديمي'},
         MSG_NO_QUESTIONS='no questions', _FIELD_PROMPTS={f: f'prompt {f}' for f in eo.TEXT_FIELDS},
@@ -61,7 +62,7 @@ def handler_env(**extra):
         get_export_placement_keyboard=Mock(return_value='placement_kb'),
         get_export_input_keyboard=Mock(return_value='input_kb'),
         get_export_format_keyboard=Mock(return_value='format_kb'),
-        max_questions_per_page=lambda questions, style: 6, max_questions_per_page_docx=lambda questions, style: 4, get_favorite_quiz=AsyncMock(),
+        max_questions_per_page=lambda questions, style, options=None: 6, max_questions_per_page_docx=lambda questions, style, options=None: 4, get_favorite_quiz=AsyncMock(),
     )
     ns.update(extra)
     return load_functions('handlers/export.py', HANDLER_FUNCS, **ns)
@@ -85,6 +86,19 @@ class SettingsFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.answers_mode, 'key')
         self.assertIs(saved.page_numbers, True)
         self.assertEqual(saved.teacher_placement, 'footer')
+
+    async def test_columns_and_draft_actions_cycle_and_persist(self):
+        env = handler_env()
+        state = FakeState({'questions': Q})
+        for data in ('xo|cl||s|', 'xo|dv||s|', 'xo|ds||s|', 'xo|ds||s|', 'xo|dt||s|'):
+            await env['export_settings_action'](call(data), state)
+        saved = ExportOptions.from_state_data(state.data)
+        self.assertEqual((saved.columns, saved.column_divider), (2, False))
+        self.assertEqual((saved.draft_size, saved.draft_style), ('medium', 'lines'))
+        for data in ('xo|cl||s|', 'xo|ds||s|', 'xo|ds||s|'):
+            await env['export_settings_action'](call(data), state)
+        saved = ExportOptions.from_state_data(state.data)
+        self.assertEqual((saved.columns, saved.draft_size), (1, 'none'))      # الدورة تعود إلى «بدون»
 
     async def test_per_page_screen_limits_buttons_and_validates_button_values(self):
         env = handler_env()
@@ -182,6 +196,8 @@ class KeyboardTests(unittest.TestCase):
                'STYLE_CODE_TO_NAME': {'s': 'simple', 'm': 'modern', 'a': 'academic'},
                'STYLE_LABELS_AR': {'simple': 'بسيط', 'modern': 'عصري', 'academic': 'أكاديمي'},
                'ANSWERS_MODE_LABELS_AR': eo.ANSWERS_MODE_LABELS_AR, 'FIELD_CODES': eo.FIELD_CODES,
+               'COLUMN_LABELS_AR': eo.COLUMN_LABELS_AR, 'DRAFT_SIZE_LABELS_AR': eo.DRAFT_SIZE_LABELS_AR,
+               'DRAFT_STYLE_LABELS_AR': eo.DRAFT_STYLE_LABELS_AR,
                'MAX_PER_PAGE': eo.MAX_PER_PAGE, 'PLACEMENT_LABELS_AR': eo.PLACEMENT_LABELS_AR,
                'PLACEMENTS': eo.PLACEMENTS, 'TEXT_FIELDS': eo.TEXT_FIELDS})
 
@@ -192,7 +208,8 @@ class KeyboardTests(unittest.TestCase):
         env = self.env()
         regex = re.compile(r"^xo\|([a-z]+)\|([A-Za-z0-9_-]*)\|([sma])\|(.*)$")
         fav = '12345678-1234-1234-1234-123456789012'
-        full = ExportOptions(per_page=3, subject='a', teacher_name='t', total_marks='5').to_dict()
+        full = ExportOptions(per_page=3, subject='a', teacher_name='t', total_marks='5', columns=2,
+                             draft_size='small', draft_style='grid').to_dict()
         for favorite in ('', fav):
             boards = [
                 env['get_export_settings_keyboard']({}, 'a', favorite),
@@ -207,6 +224,18 @@ class KeyboardTests(unittest.TestCase):
                     self.assertLessEqual(len(data.encode()), 64, data)
                     if data.startswith('xo|'):
                         self.assertEqual(regex.match(data).group(4), favorite, data)
+
+    def test_columns_and_draft_buttons_appear_with_their_sub_options(self):
+        env = self.env()
+        plain = self.all_callbacks(env['get_export_settings_keyboard']({}, 's', ''))
+        self.assertIn('xo|cl||s|', plain)
+        self.assertIn('xo|ds||s|', plain)
+        self.assertNotIn('xo|dv||s|', plain)      # خط الفصل فقط مع عمودين
+        self.assertNotIn('xo|dt||s|', plain)      # الشكل فقط مع مسودة
+        both = self.all_callbacks(env['get_export_settings_keyboard'](
+            ExportOptions(columns=2, draft_size='large').to_dict(), 's', ''))
+        self.assertIn('xo|dv||s|', both)
+        self.assertIn('xo|dt||s|', both)
 
     def test_format_keyboard_has_extra_settings_button_before_back(self):
         env = self.env()
@@ -223,7 +252,7 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(values, ['1', '2', '3', '4', 'auto'])
         self.assertEqual(len(env['get_export_per_page_keyboard'](99, None, 's', '').inline_keyboard[0]), 5)
         self.assertEqual([d.split('|')[2] for d in self.all_callbacks(
-            env['get_export_per_page_keyboard'](99, None, 's', '')) if d.startswith('xo|ppv|')][-2], '10')
+            env['get_export_per_page_keyboard'](99, None, 's', '')) if d.startswith('xo|ppv|')][-2], '16')
 
 
 class GenerateWithOptionsTests(unittest.IsolatedAsyncioTestCase):
