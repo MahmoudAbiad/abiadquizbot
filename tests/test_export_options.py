@@ -69,7 +69,7 @@ class OptionsValidationTests(unittest.TestCase):
                 clean_text_field("total_marks", bad)
 
     def test_from_dict_is_strict(self):
-        for bad in ({"per_page": 0}, {"per_page": 11}, {"teacher_placement": "x"}, {"answers_mode": "x"},
+        for bad in ({"per_page": 0}, {"per_page": 17}, {"teacher_placement": "x"}, {"answers_mode": "x"},
                     {"student_fields": "no"}, {"unknown": 1}, "text", {"duration": 5}):
             with self.assertRaises(ExportOptionsError, msg=repr(bad)):
                 ExportOptions.from_dict(bad)

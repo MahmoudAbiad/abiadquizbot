@@ -13,10 +13,22 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 MIN_PER_PAGE = 1
-# سقف مطلق عملي لورقة امتحان A4: أقصر سؤال صح/خطأ (خياران) يأخذ ~60pt من ~700pt متاحة،
-# أي نحو 11 سؤالاً. أكثر من 10 يصبح خطاً صغيراً مزدحماً غير مقروء عند الطباعة.
-# السقف الفعلي لكل كويز أقل غالباً ويُحسب من طول أسئلته (services.export_layout).
-MAX_PER_PAGE = 10
+# السقف المطلق لعدد الأسئلة بالصفحة. 16 ممكنة عملياً مع تقسيم الصفحة إلى عمودين والأسئلة
+# القصيرة (صح/خطأ أو اختيارات قصيرة تُرتَّب شبكة 2×2)؛ بعمود واحد لا يتسع هذا العدد.
+# السقف الفعلي لكل كويز وتنسيق أقل غالباً ويُحسب من طول أسئلته (services.export_layout).
+MAX_PER_PAGE = 16
+
+# تقسيم الصفحة: عمود واحد (الافتراضي) أو عمودان يفصلهما خط منصّف اختياري.
+COLUMN_CHOICES = (1, 2)
+COLUMN_LABELS_AR = {1: "عمود واحد", 2: "عمودان"}
+
+# مساحة المسودة تحت كل سؤال. الارتفاع بوحدة pt (نقطة طباعة).
+DRAFT_SIZES = ("none", "small", "medium", "large")
+DRAFT_SIZE_LABELS_AR = {"none": "بدون", "small": "صغيرة", "medium": "متوسطة", "large": "كبيرة"}
+DRAFT_HEIGHTS_PT = {"none": 0.0, "small": 34.0, "medium": 68.0, "large": 112.0}
+# شكل المسودة: «تلقائي» يختار حسب نوع السؤال (رياضي/علمي => مربعات، غيره => أسطر).
+DRAFT_STYLES = ("auto", "lines", "grid", "box")
+DRAFT_STYLE_LABELS_AR = {"auto": "تلقائي", "lines": "أسطر", "grid": "مربعات", "box": "إطار فارغ"}
 
 PLACEMENTS = ("first", "last", "header", "footer")
 PLACEMENT_LABELS_AR = {
@@ -124,6 +136,10 @@ class ExportOptions:
     student_fields: bool = True             # سطر (الاسم/الشعبة/التاريخ) الموجود أصلاً
     answers_mode: str = "full"              # يخص نسخة الأستاذ فقط
     page_numbers: Optional[bool] = None     # None = كما كان (PDF نعم، Word لا)
+    columns: int = 1                        # 1 = كما كان، 2 = عمودان (PDF وWord فقط)
+    column_divider: bool = True             # خط منصّف بين العمودين (يُستعمل فقط مع عمودين)
+    draft_size: str = "none"                # مساحة مسودة تحت كل سؤال (PDF وWord فقط)
+    draft_style: str = "auto"               # auto / lines / grid / box
 
     # ---------- تحويل وتحقق ----------
 
@@ -170,6 +186,22 @@ class ExportOptions:
                 if raw is not None and not isinstance(raw, bool):
                     raise ExportOptionsError("إعداد ترقيم الصفحات غير صالح.")
                 kwargs[name] = raw
+            elif name == "columns":
+                if isinstance(raw, bool) or raw not in COLUMN_CHOICES:
+                    raise ExportOptionsError("عدد الأعمدة يجب أن يكون 1 أو 2.")
+                kwargs[name] = int(raw)
+            elif name == "column_divider":
+                if not isinstance(raw, bool):
+                    raise ExportOptionsError("إعداد خط الفصل غير صالح.")
+                kwargs[name] = raw
+            elif name == "draft_size":
+                if raw not in DRAFT_SIZES:
+                    raise ExportOptionsError("حجم المسودة غير صالح.")
+                kwargs[name] = raw
+            elif name == "draft_style":
+                if raw not in DRAFT_STYLES:
+                    raise ExportOptionsError("شكل المسودة غير صالح.")
+                kwargs[name] = raw
         return cls(**kwargs)
 
     @classmethod
@@ -206,7 +238,30 @@ class ExportOptions:
             lines.append(f"الإجابات: {ANSWERS_MODE_LABELS_AR[self.answers_mode]}")
         if self.page_numbers is not None:
             lines.append("ترقيم الصفحات: " + ("ظاهر" if self.page_numbers else "مخفي"))
+        if self.columns == 2:
+            lines.append("تقسيم الصفحة: عمودان" + (" بخط فاصل" if self.column_divider else " بدون خط فاصل"))
+        if self.draft_size != "none":
+            lines.append(f"مسودة تحت كل سؤال: {DRAFT_SIZE_LABELS_AR[self.draft_size]}"
+                         + (f" ({DRAFT_STYLE_LABELS_AR[self.draft_style]})" if self.draft_style != "auto" else ""))
         return lines
+
+    # ---------- مشتقات يستعملها التخطيط والمولّدات ----------
+
+    @property
+    def draft_height(self) -> float:
+        return DRAFT_HEIGHTS_PT[self.draft_size]
+
+    @property
+    def dense(self) -> bool:
+        """تخطيط مضغوط: عمودان أو 8 أسئلة فأكثر بالصفحة => خيارات قصيرة تُرتَّب شبكة 2×2."""
+        return self.columns == 2 or (self.per_page or 0) >= 8
+
+
+def resolve_draft_style(style: str, is_math: bool) -> str:
+    """«تلقائي»: مربعات للأسئلة الرياضية/العلمية (مصوّرة)، أسطر لغيرها."""
+    if style == "auto":
+        return "grid" if is_math else "lines"
+    return style
 
 
 # ==================== نصوص الورقة (مشتركة بين PDF/Word/Excel) ====================
