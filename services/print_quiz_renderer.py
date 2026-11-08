@@ -42,8 +42,13 @@ def _validate_cells(obj):
             r._MATH_PARSER.parse(span, dpi=r.DPI)
 
 
-def _layout(q, is_ar):
-    width = WIDTH - 2 * PAD
+class _Chunk(list):
+    """كتلة مخططة (قائمة عناصر) تحمل عرض الصورة بالبكسل؛ تبقى قائمة عادية لباقي الكود."""
+    width = WIDTH
+
+
+def _layout(q, is_ar, width_px=WIDTH):
+    width = width_px - 2 * PAD
     items = [('text', h, [(PAD, line, bold)])
              for line, h, bold in _lines(q.get('question', ''), is_ar, width, True)]
     # Validate all formulas before legacy table/matrix helpers can sanitize them.
@@ -112,9 +117,9 @@ def _layout(q, is_ar):
     return items
 
 
-def _draw_options(ax, data, y_top, is_ar):
+def _draw_options(ax, data, y_top, is_ar, total_w=WIDTH):
     columns, rows = data
-    width = WIDTH - 2 * PAD
+    width = total_w - 2 * PAD
     cell_w = width / columns
     height = sum(row_h for row_h, _ in rows)
     top = y_top - 10
@@ -126,7 +131,7 @@ def _draw_options(ax, data, y_top, is_ar):
     y = top
     for ri, (row_h, cells) in enumerate(rows):
         if ri:
-            ax.plot([PAD, WIDTH - PAD], [y, y], color='black', linewidth=0.65)
+            ax.plot([PAD, total_w - PAD], [y, y], color='black', linewidth=0.65)
         for col, lines in enumerate(cells):
             visual_col = columns - 1 - col if is_ar else col
             x = PAD + (visual_col + 0.5) * cell_w
@@ -138,8 +143,12 @@ def _draw_options(ax, data, y_top, is_ar):
         y -= row_h
 
 
-def plan_print_blocks(q, is_ar):
+def plan_print_blocks(q, is_ar, width_px=WIDTH):
     """تخطيط فقط (بلا رسم): قائمة كتل، كل كتلة قائمة عناصر لا يتجاوز ارتفاعها صفحة.
+
+    width_px: عرض الصورة بالبكسل (الافتراضي صفحة كاملة). عند تقسيم الصفحة إلى أعمدة يُمرَّر عرض
+    العمود بنفس مقياس الرسم فيبقى حجم الخط كما هو، وتفشل المعادلة/الجدول الأعرض من العمود بـ
+    ValueError فيُوضع سؤالها بعرض الصفحة كاملاً.
 
     مفصولة عن الرسم حتى يقيس مخطط «عدد الأسئلة بالصفحة» ارتفاع السؤال قبل وضعه،
     وتعطي نفس الأخطاء الصريحة (ValueError) للمعادلات/الجداول غير المدعومة.
@@ -148,14 +157,16 @@ def plan_print_blocks(q, is_ar):
     if len(str(q)) > 40000:
         raise ValueError('Question too large for print export')
     with r._RENDER_LOCK:
-        items = _layout(q, is_ar)
-    chunks, chunk, height = [], [], 0
+        items = _layout(q, is_ar, width_px)
+    chunks, chunk, height = [], _Chunk(), 0
+    chunk.width = width_px
     for item in items:
         if item[1] > MAX_HEIGHT - 130:
             raise ValueError('Table or matrix too tall for a printed page')
         if chunk and height + item[1] > MAX_HEIGHT - 130:
             chunks.append(chunk)
-            chunk, height = [], 0
+            chunk, height = _Chunk(), 0
+            chunk.width = width_px
         chunk.append(item)
         height += item[1]
     if chunk:
@@ -168,34 +179,40 @@ def chunk_height_px(chunk):
     return sum(item[1] for item in chunk) + 130
 
 
+def chunk_width_px(chunk):
+    """عرض الصورة الناتجة (بكسل): WIDTH لكتلة صفحة كاملة، أو عرض العمود لكتلة مخططة لعمود."""
+    return getattr(chunk, 'width', WIDTH)
+
+
 def render_print_chunk(chunk, is_ar, heading, index=0):
-    """يرسم كتلة واحدة مخططة سلفاً إلى PNG (نفس الرسم القديم حرفياً)."""
+    """يرسم كتلة واحدة مخططة سلفاً إلى PNG (نفس الرسم القديم حرفياً بعرض الصفحة الكاملة)."""
+    W = chunk_width_px(chunk)
     with r._RENDER_LOCK:
         h = chunk_height_px(chunk)
-        fig = r.Figure(figsize=(WIDTH / r.DPI, h / r.DPI), dpi=r.DPI)
+        fig = r.Figure(figsize=(W / r.DPI, h / r.DPI), dpi=r.DPI)
         canvas = r.FigureCanvasAgg(fig)
         ax = fig.add_axes((0, 0, 1, 1))
         ax.axis('off')
-        ax.set_xlim(0, WIDTH)
+        ax.set_xlim(0, W)
         ax.set_ylim(0, h)
         align = 'right' if is_ar else 'left'
         label = heading + ((' — تابع' if is_ar else ' — continued') if index else '')
-        ax.text(WIDTH - PAD if is_ar else PAD, h - 12,
+        ax.text(W - PAD if is_ar else PAD, h - 12,
                 r._shape_line(label) if is_ar else label, ha=align, va='top',
                 fontsize=SIZE, fontproperties=r._font_prop(is_ar, True), color='black')
         y = h - 90
         for kind, ih, data in chunk:
             if kind == 'text':
                 for offset, line, bold in data:
-                    ax.text(WIDTH - offset if is_ar else offset, y, line,
+                    ax.text(W - offset if is_ar else offset, y, line,
                             ha=align, va='top', fontsize=SIZE,
                             fontproperties=r._font_prop(is_ar, bold), color='black')
             elif kind == 'options':
-                _draw_options(ax, data, y, is_ar)
+                _draw_options(ax, data, y, is_ar, W)
             elif kind == 'table':
-                r._draw_table(ax, data, PAD, y, WIDTH - 2 * PAD, is_ar)
+                r._draw_table(ax, data, PAD, y, W - 2 * PAD, is_ar)
             else:
-                r._draw_matrices(ax, data, PAD, y, WIDTH - 2 * PAD, is_ar)
+                r._draw_matrices(ax, data, PAD, y, W - 2 * PAD, is_ar)
             y -= ih
         with io.BytesIO() as buf:
             fig.savefig(buf, format='png', facecolor='white')
@@ -205,8 +222,8 @@ def render_print_chunk(chunk, is_ar, heading, index=0):
     return payload
 
 
-def iter_print_blocks(q, is_ar, heading):
-    for index, chunk in enumerate(plan_print_blocks(q, is_ar)):
+def iter_print_blocks(q, is_ar, heading, width_px=WIDTH):
+    for index, chunk in enumerate(plan_print_blocks(q, is_ar, width_px)):
         payload = render_print_chunk(chunk, is_ar, heading, index)
         yield payload
         del payload
