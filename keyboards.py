@@ -21,7 +21,7 @@ from helpers.settings_helper import get_setting
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
 from services.export_options import (
-    ANSWERS_MODE_LABELS_AR, COLUMN_LABELS_AR, DRAFT_SIZE_LABELS_AR, DRAFT_STYLE_LABELS_AR, FIELD_CODES,
+    ANSWERS_MODE_LABELS_AR, COLUMN_LABELS_AR, DRAFT_SIZE_LABELS_AR, DRAFT_STYLE_LABELS_AR, FIELD_CODES, LAYOUT_PRESETS,
     MAX_PER_PAGE, PLACEMENT_LABELS_AR, PLACEMENTS, TEXT_FIELDS,
 )
 from services.quiz_permissions import can_delete_quiz
@@ -109,19 +109,24 @@ def get_export_style_keyboard(favorite_id: str = "") -> types.InlineKeyboardMark
         callback_data=f"fav_details_{favorite_id}" if favorite_id else "export_close")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
-    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF أو Excel)، مع الحفاظ على الستايل المختار،
-    تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
+def _format_rows(style_code: str = "s", favorite_id: str = "") -> list:
+    """صفوف التصدير الستة (PDF/Word/Excel × الطالب/الأستاذ): كل صيغة بصف واحد، «الطالب» و«الأستاذ» جنباً إلى جنب.
+    مشتركة بين لوحة اختيار الصيغة وشاشة «إعدادات إضافية»؛ callback_data وترتيبها ثابتان (تعتمد عليهما المعالجات)."""
     prefix = "fav_export_" if favorite_id else "export_"
     suffix = f"_{favorite_id}" if favorite_id else ""
-    # كل صيغة بصف واحد: «الطالب» و«الأستاذ» جنباً إلى جنب (3 صفوف منتظمة × زرّين).
-    # callback_data لم يتغيّر إطلاقاً، فمعالجات التصدير والاختبارات تعمل كما هي.
-    kb = []
+    rows = []
     for fmt, icon, name in (("pdf", "📕", "PDF"), ("docx", "📄", "Word"), ("xlsx", "📊", "Excel")):
-        kb.append([
+        rows.append([
             types.InlineKeyboardButton(text=f"{icon} {name} — {label}", callback_data=f"{prefix}{fmt}{variant}_{style_code}{suffix}")
             for variant, label in (("s", "الطالب"), ("t", "الأستاذ"))
         ])
+    return rows
+
+
+def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """لوحة اختيار صيغة تحميل الكويز (Word أو PDF أو Excel)، مع الحفاظ على الستايل المختار،
+    تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
+    kb = _format_rows(style_code, favorite_id)
     # إعدادات ورقة الاختبار الاختيارية (عدد الأسئلة بالصفحة، اسم الأستاذ، ...). قبل زر الرجوع.
     kb.append([types.InlineKeyboardButton(text="⚙️ إعدادات إضافية",
         callback_data=f"xo|open||{style_code}|{favorite_id}")])
@@ -135,61 +140,115 @@ def _xo(action: str, arg: str, style_code: str, favorite_id: str) -> str:
     return f"xo|{action}|{arg}|{style_code}|{favorite_id}"
 
 
+def _short_value(value, limit: int = 18) -> str:
+    """قيمة حقل مختصرة داخل نص زر (الأزرار تُقصّ بالعرض)."""
+    value = str(value)
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
 def get_export_settings_keyboard(options: dict, style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
-    """شاشة «إعدادات إضافية». options = ExportOptions.to_dict() (الحقول غير الافتراضية فقط)."""
-    def mark(name):
-        return "✅ " if options.get(name) else ""
-    per_page = options.get("per_page")
-    kb = [[types.InlineKeyboardButton(
-        text=f"🔢 عدد الأسئلة بالصفحة: {per_page if per_page else 'تلقائي'}",
-        callback_data=_xo("pp", "", style_code, favorite_id))]]
-    labels = {"exam_title": "📝 عنوان الاختبار", "subject": "📚 المادة", "grade": "🎓 الصف",
-              "exam_date": "📅 التاريخ", "duration": "⏱ المدة", "total_marks": "💯 العلامة الكلية"}
-    codes = {name: code for code, name in FIELD_CODES.items()}
-    pairs = list(labels.items())
-    for i in range(0, len(pairs), 2):
-        kb.append([types.InlineKeyboardButton(text=f"{mark(name)}{label}",
-                   callback_data=_xo("ed", codes[name], style_code, favorite_id)) for name, label in pairs[i:i + 2]])
-    kb.append([types.InlineKeyboardButton(text=f"{mark('teacher_name')}👨‍🏫 اسم الأستاذ",
-               callback_data=_xo("ed", "n", style_code, favorite_id))])
-    if options.get("teacher_name"):
-        place = PLACEMENT_LABELS_AR[options.get("teacher_placement", "first")]
-        kb.append([types.InlineKeyboardButton(text=f"📍 مكان الاسم: {place}",
-                   callback_data=_xo("pl", "", style_code, favorite_id))])
-    kb.append([
-        types.InlineKeyboardButton(
-            text="🧾 بيانات الطالب: " + ("مخفية" if options.get("student_fields") is False else "ظاهرة"),
-            callback_data=_xo("sf", "", style_code, favorite_id)),
-        types.InlineKeyboardButton(
-            text="🔑 " + ANSWERS_MODE_LABELS_AR[options.get("answers_mode", "full")],
-            callback_data=_xo("am", "", style_code, favorite_id)),
-    ])
-    numbers = options.get("page_numbers")
-    kb.append([types.InlineKeyboardButton(
-        text="🔢 ترقيم الصفحات: " + ("افتراضي" if numbers is None else "ظاهر" if numbers else "مخفي"),
-        callback_data=_xo("pn", "", style_code, favorite_id))])
-    # تقسيم الصفحة (PDF وWord): عمود واحد أو عمودان بخط فاصل اختياري
-    columns = options.get("columns", 1)
-    row = [types.InlineKeyboardButton(text="📰 تقسيم الصفحة: " + COLUMN_LABELS_AR[columns],
-                                      callback_data=_xo("cl", "", style_code, favorite_id))]
-    if columns == 2:
-        row.append(types.InlineKeyboardButton(
-            text="➖ خط فاصل: " + ("ظاهر" if options.get("column_divider", True) else "مخفي"),
-            callback_data=_xo("dv", "", style_code, favorite_id)))
-    kb.append(row)
-    # مساحة مسودة تحت كل سؤال (PDF وWord): الحجم ثم الشكل
-    draft_size = options.get("draft_size", "none")
-    row = [types.InlineKeyboardButton(text="✍️ مسودة تحت كل سؤال: " + DRAFT_SIZE_LABELS_AR[draft_size],
-                                      callback_data=_xo("ds", "", style_code, favorite_id))]
-    if draft_size != "none":
-        row.append(types.InlineKeyboardButton(
-            text="📐 الشكل: " + DRAFT_STYLE_LABELS_AR[options.get("draft_style", "auto")],
-            callback_data=_xo("dt", "", style_code, favorite_id)))
-    kb.append(row)
-    kb.append([types.InlineKeyboardButton(text="💾 حفظ كإعداداتي", callback_data=_xo("sv", "", style_code, favorite_id)),
-               types.InlineKeyboardButton(text="♻️ إعادة الضبط", callback_data=_xo("rs", "", style_code, favorite_id))])
-    kb.append([types.InlineKeyboardButton(text="✅ تم — اختيار الصيغة",
-                                          callback_data=_xo("done", "", style_code, favorite_id))])
+    """الشاشة الرئيسية لـ «إعدادات إضافية»: ثلاثة أقسام + قوالب جاهزة + حفظ/ضبط + تم.
+    options = ExportOptions.to_dict() (الحقول غير الافتراضية فقط، فوجود المفتاح = تغيير عن الافتراضي)."""
+    def changed(*names):
+        return sum(1 for name in names if name in options)
+
+    def section(icon, title, code, count):
+        return [types.InlineKeyboardButton(text=f"{icon} {title}" + (f" · {count}" if count else ""),
+                callback_data=_xo("sec", code, style_code, favorite_id))]
+
+    header = changed("exam_title", "subject", "grade", "exam_date", "duration", "total_marks", "teacher_name")
+    layout = changed("per_page", "page_numbers", "columns", "column_divider", "draft_size", "draft_style")
+    answers = changed("student_fields", "answers_mode")
+    kb = [
+        section("📝", "بيانات الورقة", "h", header),
+        section("📐", "التخطيط والمظهر", "l", layout),
+        section("🔑", "الإجابات وسطر الطالب", "a", answers),
+        [types.InlineKeyboardButton(text="⚡ قوالب جاهزة", callback_data=_xo("pre", "", style_code, favorite_id))],
+        [types.InlineKeyboardButton(text="💾 حفظ كإعداداتي", callback_data=_xo("sv", "", style_code, favorite_id)),
+         types.InlineKeyboardButton(text="♻️ إعادة الضبط", callback_data=_xo("rs", "", style_code, favorite_id))],
+        *_format_rows(style_code, favorite_id),
+        [types.InlineKeyboardButton(text="✅ تطبيق ورجوع", callback_data=_xo("done", "", style_code, favorite_id))],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_export_section_keyboard(section: str, options: dict, style_code: str = "s",
+                                favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """شاشة قسم فرعي: h = بيانات الورقة، l = التخطيط والمظهر، a = الإجابات وسطر الطالب.
+    الأزرار تعرض القيمة الحالية بنفسها. callback_data لكل إعداد كما كانت قبل التقسيم."""
+    def btn(text, action, arg=""):
+        return types.InlineKeyboardButton(text=text, callback_data=_xo(action, arg, style_code, favorite_id))
+
+    kb = []
+    if section == "h":
+        kb.append([btn("⚡ تعبئة سريعة برسالة واحدة", "bulk")])
+        labels = {"exam_title": "📝 عنوان الاختبار", "subject": "📚 المادة", "grade": "🎓 الصف",
+                  "exam_date": "📅 التاريخ", "duration": "⏱ المدة", "total_marks": "💯 العلامة الكلية",
+                  "teacher_name": "👨‍🏫 اسم الأستاذ"}
+        codes = {name: code for code, name in FIELD_CODES.items()}
+        for name, label in labels.items():
+            value = options.get(name)
+            kb.append([btn(f"✅ {label}: {_short_value(value)}" if value else label, "ed", codes[name])])
+        if options.get("teacher_name"):
+            place = PLACEMENT_LABELS_AR[options.get("teacher_placement", "first")]
+            kb.append([btn(f"📍 مكان الاسم: {place}", "pl")])
+    elif section == "a":
+        kb.append([btn("🧾 بيانات الطالب: " + ("مخفية" if options.get("student_fields") is False else "ظاهرة"), "sf")])
+        kb.append([btn("🔑 " + ANSWERS_MODE_LABELS_AR[options.get("answers_mode", "full")] + " (نسخة الأستاذ)", "am")])
+    else:
+        # كل زر هنا يفتح شاشة اختيار تعرض كل القيم (xo|<إجراء>m)، والقيمة تُحفظ بـ xo|<إجراء>v.
+        per_page = options.get("per_page")
+        kb.append([btn(f"🔢 عدد الأسئلة بالصفحة (PDF/Word): {per_page if per_page else 'تلقائي'}", "pp")])
+        numbers = options.get("page_numbers")
+        kb.append([btn("📃 ترقيم الصفحات: " + ("افتراضي" if numbers is None else "ظاهر" if numbers else "مخفي"), "pnm")])
+        # تقسيم الصفحة (PDF وWord): عمود واحد أو عمودان؛ الخط الفاصل يُختار من شاشة التقسيم نفسها
+        columns = options.get("columns", 1)
+        kb.append([btn("📰 تقسيم الصفحة: " + COLUMN_LABELS_AR[columns], "clm")])
+        # مساحة مسودة تحت كل سؤال (PDF وWord): الحجم ثم الشكل
+        draft_size = options.get("draft_size", "none")
+        row = [btn("✍️ مسودة تحت كل سؤال: " + DRAFT_SIZE_LABELS_AR[draft_size], "dsm")]
+        if draft_size != "none":
+            row.append(btn("📐 الشكل: " + DRAFT_STYLE_LABELS_AR[options.get("draft_style", "auto")], "dtm"))
+        kb.append(row)
+    kb.append([btn("🔙 رجوع للإعدادات", "open")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_export_choice_keyboard(kind: str, options: dict, style_code: str = "s",
+                               favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """شاشة اختيار قيمة واحدة بأزرار ظاهرة مع ✅ على الحالية (بدل الدوران عند كل ضغطة).
+    kind: pn ترقيم الصفحات، cl تقسيم الصفحة (+ الخط الفاصل مع عمودين)، ds حجم المسودة، dt شكل المسودة.
+    القيمة تُحفظ بـ xo|<kind>v|<قيمة> ثم يرجع المستخدم لقسمه (التقسيم يبقى على شاشته ليختار الخط الفاصل)."""
+    def btn(text, action, arg, current):
+        return types.InlineKeyboardButton(text=("✅ " if current else "") + text,
+                                          callback_data=_xo(action, arg, style_code, favorite_id))
+
+    kb = []
+    if kind == "pn":
+        numbers = options.get("page_numbers")
+        kb.append([btn("افتراضي", "pnv", "def", numbers is None), btn("ظاهر", "pnv", "on", numbers is True),
+                   btn("مخفي", "pnv", "off", numbers is False)])
+    elif kind == "cl":
+        columns = options.get("columns", 1)
+        kb.append([btn(COLUMN_LABELS_AR[n], "clv", str(n), columns == n) for n in (1, 2)])
+        if columns == 2:
+            divider = options.get("column_divider", True)
+            kb.append([btn("➖ خط فاصل: ظاهر", "dvv", "on", divider), btn("➖ خط فاصل: مخفي", "dvv", "off", not divider)])
+    elif kind == "ds":
+        size = options.get("draft_size", "none")
+        kb.append([btn(DRAFT_SIZE_LABELS_AR[n], "dsv", n, size == n) for n in ("none", "small", "medium", "large")])
+    else:
+        style = options.get("draft_style", "auto")
+        kb.append([btn(DRAFT_STYLE_LABELS_AR[n], "dtv", n, style == n) for n in ("auto", "lines", "grid", "box")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data=_xo("back", "", style_code, favorite_id))])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_export_presets_keyboard(style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """قوالب التخطيط الجاهزة: زر لكل قالب (xo|prv|<اسم القالب>) ثم رجوع."""
+    kb = [[types.InlineKeyboardButton(text=f"{preset['icon']} {preset['label']}",
+           callback_data=_xo("prv", name, style_code, favorite_id))] for name, preset in LAYOUT_PRESETS.items()]
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للإعدادات", callback_data=_xo("open", "", style_code, favorite_id))])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -204,7 +263,7 @@ def get_export_per_page_keyboard(max_allowed: int, current=None, style_code: str
     kb = [numbers[i:i + 5] for i in range(0, len(numbers), 5)]
     kb.append([types.InlineKeyboardButton(text=("✅ " if not current else "") + "تلقائي (كل ما يتسع)",
                callback_data=_xo("ppv", "auto", style_code, favorite_id))])
-    kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data=_xo("open", "", style_code, favorite_id))])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data=_xo("back", "", style_code, favorite_id))])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -212,7 +271,7 @@ def get_export_placement_keyboard(current: str = "first", style_code: str = "s",
                                   favorite_id: str = "") -> types.InlineKeyboardMarkup:
     kb = [[types.InlineKeyboardButton(text=("✅ " if current == place else "") + PLACEMENT_LABELS_AR[place],
            callback_data=_xo("plv", place, style_code, favorite_id))] for place in PLACEMENTS]
-    kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data=_xo("open", "", style_code, favorite_id))])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data=_xo("back", "", style_code, favorite_id))])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -223,7 +282,7 @@ def get_export_input_keyboard(field_code: str, has_value: bool, style_code: str 
     if has_value:
         row.append(types.InlineKeyboardButton(text="🗑 مسح القيمة",
                    callback_data=_xo("clr", field_code, style_code, favorite_id)))
-    row.append(types.InlineKeyboardButton(text="❌ إلغاء", callback_data=_xo("open", "", style_code, favorite_id)))
+    row.append(types.InlineKeyboardButton(text="❌ إلغاء", callback_data=_xo("back", "", style_code, favorite_id)))
     return types.InlineKeyboardMarkup(inline_keyboard=[row])
 
 

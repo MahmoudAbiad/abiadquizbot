@@ -17,10 +17,14 @@ from html import escape
 
 from config import ExportState
 from keyboards import (
-    get_export_format_keyboard, get_export_input_keyboard, get_export_per_page_keyboard,
-    get_export_placement_keyboard, get_export_settings_keyboard, get_export_style_keyboard,
+    get_export_choice_keyboard, get_export_format_keyboard, get_export_input_keyboard, get_export_per_page_keyboard,
+    get_export_placement_keyboard, get_export_presets_keyboard, get_export_section_keyboard,
+    get_export_settings_keyboard, get_export_style_keyboard,
 )
-from helpers.student_ui import EXPORT_STYLE_TEXT, export_format_text, export_settings_text
+from helpers.student_ui import (
+    EXPORT_STYLE_TEXT, export_bulk_prompt_text, export_choice_text, export_format_text, export_presets_text, export_section_text,
+    export_settings_text,
+)
 from logger import get_logger, log_error
 from mem_utils import release_memory_to_os
 from services import offload
@@ -63,8 +67,8 @@ from services.export_service import (
     max_questions_per_page_docx,
 )
 from services.export_options import (
-    ANSWERS_MODES, DRAFT_SIZES, DRAFT_STYLES, FIELD_CODES, MAX_PER_PAGE, PLACEMENTS, TEXT_FIELDS,
-    ExportOptions, ExportOptionsError, per_page_hint_ar,
+    ANSWERS_MODES, DRAFT_SIZES, DRAFT_STYLES, FIELD_CODES, LAYOUT_PRESETS, MAX_PER_PAGE, PLACEMENTS, TEXT_FIELDS,
+    ExportOptions, ExportOptionsError, parse_bulk_fields, per_page_hint_ar,
 )
 from helpers.supabase_helper import get_export_profile, get_favorite_quiz, log_usage_event, save_export_profile
 
@@ -173,6 +177,8 @@ async def _generate_and_send(call: types.CallbackQuery, questions: List[dict], t
             if custom:
                 # يؤكد للمعلم ما طُبّق فعلاً (الإعدادات محفوظة في جلسته لا في الزر نفسه).
                 caption += "\n⚙️ " + "، ".join(options.summary_lines_ar())
+                if fmt == "xlsx" and (options.per_page or options.columns == 2 or options.draft_size != "none"):
+                    caption += "\nℹ️ إعدادات التخطيط (الأسئلة بالصفحة، الأعمدة، المسودة) لا تُطبَّق على Excel."
             await call.message.answer_document(document=document, caption=caption[:1000])
             document = file_bytes = None
             heartbeat_task.cancel()
@@ -393,11 +399,36 @@ def _join_notes(*notes: str) -> str:
     return "\n".join(n for n in notes if n)
 
 
+_EXPORT_SECTIONS = ("h", "l", "a")
+
+
+async def _settings_view(state: FSMContext, style_code: str, favorite_id: str, options: ExportOptions,
+                         notice: str = "") -> tuple:
+    """(نص، لوحة) الشاشة الحالية للإعدادات: الرئيسية، أو القسم المفتوح (المحفوظ بالجلسة تحت export_sec)."""
+    section = (await state.get_data()).get("export_sec") or ""
+    if section in _EXPORT_SECTIONS:
+        return (export_section_text(section, notice),
+                get_export_section_keyboard(section, options.to_dict(), style_code, favorite_id))
+    return (export_settings_text(options.summary_lines_ar(), notice),
+            get_export_settings_keyboard(options.to_dict(), style_code, favorite_id))
+
+
+async def _show_choice(call, kind: str, options: ExportOptions, style_code: str, favorite_id: str) -> None:
+    """شاشة اختيار قيمة واحدة (ترقيم الصفحات/التقسيم/حجم المسودة/شكلها) بكل خياراتها ظاهرة."""
+    await _edit_export_screen(call, export_choice_text(kind),
+                              get_export_choice_keyboard(kind, options.to_dict(), style_code, favorite_id))
+
+
+_PAGE_NUMBERS_ARGS = {"def": None, "on": True, "off": False}
+
+
 async def _show_settings(call, state: FSMContext, style_code: str, favorite_id: str, notice: str = "") -> None:
     options, sync_note = await _sync_options(state, call.from_user.id, favorite_id)
-    hint = await _per_page_hint(state, call.from_user.id, style_code, favorite_id, options)
-    await _edit_export_screen(call, export_settings_text(options.summary_lines_ar(), _join_notes(notice, sync_note, hint)),
-                              get_export_settings_keyboard(options.to_dict(), style_code, favorite_id))
+    section = (await state.get_data()).get("export_sec") or ""
+    # تنبيه «اخترت أكثر مما يتسع» يخص التخطيط: يظهر بالرئيسية وبقسم التخطيط فقط
+    hint = await _per_page_hint(state, call.from_user.id, style_code, favorite_id, options) if section in ("", "l") else ""
+    text, keyboard = await _settings_view(state, style_code, favorite_id, options, _join_notes(notice, sync_note, hint))
+    await _edit_export_screen(call, text, keyboard)
 
 
 @router.callback_query(F.data.regexp(_XO_RE))
@@ -408,8 +439,36 @@ async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -
     try:
         if action == "open":
             await _leave_input_state(state)
+            await state.update_data(export_sec="")
+        elif action == "back":
+            await _leave_input_state(state)      # رجوع من شاشة إدخال/اختيار إلى القسم المفتوح
+        elif action == "sec":
+            if arg not in _EXPORT_SECTIONS:
+                await _safe_answer(call)
+                return
+            await _leave_input_state(state)
+            await state.update_data(export_sec=arg)
+        elif action == "pre":
+            await _leave_input_state(state)
+            await _edit_export_screen(call, export_presets_text(LAYOUT_PRESETS),
+                                      get_export_presets_keyboard(style_code, favorite_id))
+            await _safe_answer(call)
+            return
+        elif action == "prv":
+            options = options.with_preset(arg)
+            await _save_options(state, options)
+            await state.update_data(export_sec="")
+            preset = LAYOUT_PRESETS[arg]
+            notice = f"✅ طُبّق قالب «{preset['label']}»."
+        elif action == "bulk":
+            await _edit_export_screen(call, export_bulk_prompt_text(),
+                                      get_export_input_keyboard("", False, style_code, favorite_id))
+            await _start_input(state, "bulk", style_code, favorite_id)
+            await _safe_answer(call)
+            return
         elif action == "done":
             await _leave_input_state(state)
+            await state.update_data(export_sec="")
             label = STYLE_LABELS_AR[STYLE_CODE_TO_NAME[style_code]]
             await _edit_export_screen(
                 call, export_format_text(label) + await _active_settings_note(state, call.from_user.id, favorite_id),
@@ -502,6 +561,33 @@ async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -
             nxt = DRAFT_STYLES[(DRAFT_STYLES.index(options.draft_style) + 1) % len(DRAFT_STYLES)]
             options = replace(options, draft_style=nxt)
             await _save_options(state, options)
+        elif action in ("pnm", "clm", "dsm", "dtm"):
+            await _leave_input_state(state)
+            await _show_choice(call, action[:2], options, style_code, favorite_id)
+            await _safe_answer(call)
+            return
+        elif action == "pnv":
+            if arg in _PAGE_NUMBERS_ARGS:
+                options = replace(options, page_numbers=_PAGE_NUMBERS_ARGS[arg])
+                await _save_options(state, options)
+        elif action in ("clv", "dvv"):
+            # التقسيم والخط الفاصل على شاشة واحدة: تبقى مفتوحة لتظهر الخيارات المتاحة بعد كل اختيار
+            if action == "clv" and arg in ("1", "2"):
+                options = replace(options, columns=int(arg))
+            elif action == "dvv" and arg in ("on", "off"):
+                options = replace(options, column_divider=arg == "on")
+            await _save_options(state, options)
+            await _show_choice(call, "cl", options, style_code, favorite_id)
+            await _safe_answer(call)
+            return
+        elif action == "dsv":
+            if arg in DRAFT_SIZES:
+                options = replace(options, draft_size=arg)
+                await _save_options(state, options)
+        elif action == "dtv":
+            if arg in DRAFT_STYLES:
+                options = replace(options, draft_style=arg)
+                await _save_options(state, options)
         elif action == "sv":
             profile = options.profile_dict()
             if not await save_export_profile(call.from_user.id, profile):
@@ -545,9 +631,15 @@ async def export_setting_value(msg: types.Message, state: FSMContext) -> None:
         await _leave_input_state(state)
         return
     options = ExportOptions.from_state_data(data)
+    saved_note = "✅ تم الحفظ."
     try:
         if field == "per_page":
             options = options.with_per_page(msg.text, MAX_PER_PAGE)
+        elif field == "bulk":
+            values, problems = parse_bulk_fields(msg.text)
+            options = replace(options, **values)
+            saved_note = _join_notes(f"✅ تمت تعبئة {len(values)} من الحقول." if values else "",
+                                     *(f"⚠️ {problem}" for problem in problems))
         else:
             options = options.with_text(field, msg.text)
     except ExportOptionsError as exc:
@@ -556,9 +648,10 @@ async def export_setting_value(msg: types.Message, state: FSMContext) -> None:
         return
     await _save_options(state, options)
     await _leave_input_state(state)
-    hint = await _per_page_hint(state, msg.from_user.id, style_code, favorite_id, options)
-    await msg.answer(export_settings_text(options.summary_lines_ar(), _join_notes("✅ تم الحفظ.", hint)), parse_mode="HTML",
-                     reply_markup=get_export_settings_keyboard(options.to_dict(), style_code, favorite_id))
+    section = (await state.get_data()).get("export_sec") or ""
+    hint = await _per_page_hint(state, msg.from_user.id, style_code, favorite_id, options) if section in ("", "l") else ""
+    text, keyboard = await _settings_view(state, style_code, favorite_id, options, _join_notes(saved_note, hint))
+    await msg.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 # ==================== تصدير كويز محفوظ في المفضلة ====================

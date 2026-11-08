@@ -213,7 +213,7 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
         msg.answer.assert_awaited_with('text', parse_mode='HTML', reply_markup='keyboard')
 
     def test_export_download_buttons_and_back_targets_fit_telegram_limit(self):
-        env = keyboard_env('get_export_format_keyboard', 'get_export_style_keyboard')
+        env = keyboard_env('_format_rows', 'get_export_format_keyboard', 'get_export_style_keyboard')
         favorite_id = '12345678-1234-1234-1234-123456789012'
         for favorite in ('', favorite_id):
             formats = env['get_export_format_keyboard']('a', favorite)

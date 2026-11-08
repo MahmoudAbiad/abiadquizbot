@@ -58,6 +58,33 @@ TEXT_FIELDS: Dict[str, Tuple[str, int]] = {
 FIELD_CODES = {"t": "exam_title", "s": "subject", "g": "grade", "d": "exam_date",
                "u": "duration", "m": "total_marks", "n": "teacher_name"}
 
+# قوالب تخطيط جاهزة بضغطة واحدة. كل قالب يغيّر الحقول المدرجة فيه فقط (تخطيط الصفحة والمسودة وترقيم
+# الصفحات)، ولا يمس بيانات الورقة ولا اسم الأستاذ ولا وضع الإجابات ولا سطر بيانات الطالب.
+# «عادي» يعيد كل حقول التخطيط (ومنها عدد الأسئلة بالصفحة) إلى الافتراضي.
+LAYOUT_PRESETS: Dict[str, Dict[str, Any]] = {
+    "plain": {
+        "icon": "📄", "label": "عادي",
+        "desc": "الشكل المعتاد: عمود واحد وبلا مسودة، وعدد الأسئلة بالصفحة تلقائي.",
+        "values": {"per_page": None, "columns": 1, "column_divider": True, "draft_size": "none",
+                   "draft_style": "auto", "page_numbers": None},
+    },
+    "exam": {
+        "icon": "📝", "label": "ورقة امتحان",
+        "desc": "مساحة مسودة متوسطة تحت كل سؤال بعمود واحد، مع ترقيم الصفحات.",
+        "values": {"columns": 1, "draft_size": "medium", "draft_style": "auto", "page_numbers": True},
+    },
+    "save": {
+        "icon": "📰", "label": "توفير ورق",
+        "desc": "عمودان بخط فاصل وبلا مسودة، فتتسع أسئلة أكثر بالصفحة.",
+        "values": {"columns": 2, "column_divider": True, "draft_size": "none", "page_numbers": True},
+    },
+    "practice": {
+        "icon": "✍️", "label": "تدريب بمساحة حل",
+        "desc": "مسودة كبيرة تحت كل سؤال بعمود واحد، ليحلّ الطالب على الورقة نفسها.",
+        "values": {"columns": 1, "draft_size": "large", "draft_style": "auto", "page_numbers": True},
+    },
+}
+
 # ---- تقسيم الإعدادات حسب «ما الذي يخصه» ----
 # QUIZ: يخص اختباراً بعينه (عنوانه/مادته/تاريخه/مدته/علامته/عدد أسئلته بالصفحة). يُمسح تلقائياً عند
 #       الانتقال إلى كويز آخر حتى لا يتسرّب «عنوان» أو «تاريخ» اختبار سابق إلى ورقة جديدة.
@@ -260,6 +287,13 @@ class ExportOptions:
     def with_per_page(self, raw: Any, max_allowed: int = MAX_PER_PAGE) -> "ExportOptions":
         return replace(self, per_page=parse_per_page(raw, max_allowed))
 
+    def with_preset(self, name: str) -> "ExportOptions":
+        """يطبّق قالب تخطيط جاهزاً (LAYOUT_PRESETS). اسم غير معروف => ExportOptionsError."""
+        preset = LAYOUT_PRESETS.get(name)
+        if not preset:
+            raise ExportOptionsError("قالب غير معروف.")
+        return replace(self, **preset["values"])
+
     # ---------- عرض ----------
 
     def summary_lines_ar(self) -> List[str]:
@@ -296,6 +330,95 @@ class ExportOptions:
     def dense(self) -> bool:
         """تخطيط مضغوط: عمودان أو 8 أسئلة فأكثر بالصفحة => خيارات قصيرة تُرتَّب شبكة 2×2."""
         return self.columns == 2 or (self.per_page or 0) >= 8
+
+
+# ---------- تعبئة بيانات الورقة برسالة واحدة ----------
+# اسم الحقل بالرسالة (بعد التطبيع) -> الحقل. التطبيع حرفاً بحرف (لا يغيّر الأطوال): أ/إ/آ=ا، ى=ي، ة=ه.
+_BULK_LABELS: Dict[str, Tuple[str, ...]] = {
+    "exam_title": ("عنوان الاختبار", "اسم الاختبار", "العنوان", "عنوان", "title"),
+    "subject": ("المادة", "مادة", "subject"),
+    "grade": ("الصف الدراسي", "الصف", "صف", "grade", "class"),
+    "exam_date": ("تاريخ الاختبار", "التاريخ", "تاريخ", "date"),
+    "duration": ("مدة الاختبار", "المدة", "مدة", "الزمن", "الوقت", "duration", "time"),
+    "total_marks": ("العلامة الكلية", "الدرجة الكلية", "العلامات", "العلامة", "الدرجات", "الدرجة",
+                    "total marks", "marks", "total"),
+    "teacher_name": ("اسم الاستاذ", "اسم الاستاذه", "اسم المعلم", "اسم المعلمه", "اسم المدرس", "الاستاذه",
+                     "الاستاذ", "المعلمه", "المعلم", "المدرسه", "المدرس", "teacher"),
+}
+_NORM_MAP = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ة": "ه"})
+_BULK_SEPARATORS = "\n\r،,;؛|"
+
+
+def _norm_label_text(text: str) -> str:
+    """تطبيع حرفاً بحرف بحيث تبقى مواضع النص الأصلي صالحة للنص المُطبَّع."""
+    out = []
+    for ch in text.translate(_NORM_MAP):
+        low = ch.lower()
+        out.append(low if len(low) == 1 else ch)
+    return "".join(out)
+
+
+def _build_bulk_regex() -> Tuple["re.Pattern[str]", Dict[str, str]]:
+    label_to_field: Dict[str, str] = {}
+    for field, labels in _BULK_LABELS.items():
+        for label in labels:
+            label_to_field[_norm_label_text(label)] = field
+    parts = []
+    for label in sorted(label_to_field, key=len, reverse=True):
+        body = "[ \t]+".join(re.escape(word) for word in label.split())
+        # «ال» التعريف اختيارية لكل اسم لا يبدأ بها أصلاً
+        parts.append(body if label.startswith("ال") else f"(?:ال)?{body}")
+    pattern = re.compile(
+        r"(?:^|[" + re.escape(_BULK_SEPARATORS) + r"])[ \t•*\-]*(?P<key>" + "|".join(parts) + r")[ \t]*[:：=][ \t]*",
+        re.MULTILINE)
+    return pattern, label_to_field
+
+
+_BULK_RE, _BULK_LABEL_TO_FIELD = _build_bulk_regex()
+
+BULK_HELP_AR = ("لم أجد أي حقل مفهوماً. اكتب كل حقل بصيغة «الاسم: القيمة»، مثل:\n"
+                "المادة: رياضيات\nالصف: التاسع\nالمدة: 45 دقيقة")
+
+
+def _bulk_field_of(norm_key: str) -> Optional[str]:
+    key = " ".join(norm_key.split())
+    if key in _BULK_LABEL_TO_FIELD:
+        return _BULK_LABEL_TO_FIELD[key]
+    if key.startswith("ال") and key[2:] in _BULK_LABEL_TO_FIELD:
+        return _BULK_LABEL_TO_FIELD[key[2:]]
+    return None
+
+
+def parse_bulk_fields(text: Any) -> Tuple[Dict[str, str], List[str]]:
+    """يقرأ رسالة واحدة فيها عدة حقول للورقة («المادة: رياضيات» بسطر لكل حقل أو عدة حقول بسطر واحد
+    مفصولة بفاصلة) ويُرجع (القيم الصالحة، ملاحظات عن ما تجاوزناه). كل حقل يُتحقق منه كما لو أُدخل وحده.
+    لا حقل مفهوم إطلاقاً => ExportOptionsError. حقل فارغ يُتجاهل. تكرار الحقل: الأخير يكسب."""
+    raw = "" if text is None else str(text)
+    norm = _norm_label_text(raw)
+    matches = list(_BULK_RE.finditer(norm))
+    if not matches:
+        raise ExportOptionsError(BULK_HELP_AR)
+    values: Dict[str, str] = {}
+    problems: List[str] = []
+    if norm[:matches[0].start()].strip(_BULK_SEPARATORS + " \t•*-"):
+        problems.append("تجاهلتُ نصاً قبل أول حقل لم أفهمه.")
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        chunk = raw[match.end():end]
+        first, _, rest = chunk.partition("\n")
+        if rest.strip(_BULK_SEPARATORS + " \t"):
+            problems.append("تجاهلتُ سطراً لم أفهمه بعد أحد الحقول.")
+        value = _clean(first.strip().rstrip(_BULK_SEPARATORS + " \t"))
+        field = _bulk_field_of(match.group("key"))
+        if field is None or not value:
+            continue
+        try:
+            values[field] = clean_text_field(field, value)
+        except ExportOptionsError as exc:
+            problems.append(str(exc))
+    if not values and not problems:
+        raise ExportOptionsError(BULK_HELP_AR)
+    return values, problems
 
 
 def resolve_draft_style(style: str, is_math: bool) -> str:

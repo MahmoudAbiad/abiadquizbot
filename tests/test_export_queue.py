@@ -93,9 +93,10 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         import re
         from aiogram import types
         tree = ast.parse(Path('keyboards.py').read_text())
-        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'get_export_format_keyboard')
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                 and n.name in ('_format_rows', 'get_export_format_keyboard')]
         ns = {'types': types}
-        exec(compile(ast.Module(body=[node], type_ignores=[]), 'keyboards.py', 'exec'), ns)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), 'keyboards.py', 'exec'), ns)
         handler = ast.parse(Path('handlers/export.py').read_text())
         patterns = {}
         for n in handler.body:
