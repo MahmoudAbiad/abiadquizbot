@@ -58,6 +58,15 @@ TEXT_FIELDS: Dict[str, Tuple[str, int]] = {
 FIELD_CODES = {"t": "exam_title", "s": "subject", "g": "grade", "d": "exam_date",
                "u": "duration", "m": "total_marks", "n": "teacher_name"}
 
+# ---- تقسيم الإعدادات حسب «ما الذي يخصه» ----
+# QUIZ: يخص اختباراً بعينه (عنوانه/مادته/تاريخه/مدته/علامته/عدد أسئلته بالصفحة). يُمسح تلقائياً عند
+#       الانتقال إلى كويز آخر حتى لا يتسرّب «عنوان» أو «تاريخ» اختبار سابق إلى ورقة جديدة.
+# PROFILE: يخص المعلم وذوقه في الورقة (اسمه، الصف، مكان الاسم، الأعمدة، المسودة، ...). يبقى بين
+#       الكويزات، ويمكن حفظه دائماً بحسابه («حفظ كإعداداتي») فيُطبَّق تلقائياً بكل جلسة جديدة.
+QUIZ_FIELDS = ("exam_title", "subject", "exam_date", "duration", "total_marks", "per_page")
+PROFILE_FIELDS = ("grade", "teacher_name", "teacher_placement", "student_fields", "answers_mode",
+                  "page_numbers", "columns", "column_divider", "draft_size", "draft_style")
+
 _DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫،", "01234567890123456789.,")
 _MARKS_RE = re.compile(r"^\d{1,4}(?:[.,]\d{1,2})?$")
 _SPACES_RE = re.compile(r"\s+")
@@ -152,6 +161,38 @@ class ExportOptions:
     @property
     def is_default(self) -> bool:
         return not self.to_dict()
+
+    # ---------- فصل إعدادات الكويز عن إعدادات المعلم ----------
+
+    def profile_dict(self) -> Dict[str, Any]:
+        """إعدادات المعلم (غير الافتراضية فقط) القابلة للحفظ الدائم بحسابه."""
+        return {k: v for k, v in self.to_dict().items() if k in PROFILE_FIELDS}
+
+    def without_quiz_fields(self) -> "ExportOptions":
+        """نسخة بلا إعدادات الكويز (تعود افتراضية) وبقاء إعدادات المعلم كما هي."""
+        default = ExportOptions()
+        return replace(self, **{name: getattr(default, name) for name in QUIZ_FIELDS})
+
+    @property
+    def has_quiz_fields(self) -> bool:
+        return any(name in self.to_dict() for name in QUIZ_FIELDS)
+
+    @classmethod
+    def from_profile(cls, data: Optional[Dict[str, Any]]) -> "ExportOptions":
+        """من ملف المعلم المحفوظ بقاعدة البيانات: يتجاهل أي مفتاح ليس من PROFILE_FIELDS ويتحقق من
+        الباقي بصرامة. تالف => الافتراضي (لا نكسر التصدير بسبب صف فاسد)."""
+        if not isinstance(data, dict):
+            return cls()
+        clean: Dict[str, Any] = {}
+        for key, value in data.items():
+            if key not in PROFILE_FIELDS:
+                continue
+            try:  # قيمة فاسدة واحدة لا تُسقط بقية الإعدادات المحفوظة
+                cls.from_dict({key: value})
+            except ExportOptionsError:
+                continue
+            clean[key] = value
+        return cls.from_dict(clean)
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ExportOptions":
@@ -262,6 +303,18 @@ def resolve_draft_style(style: str, is_math: bool) -> str:
     if style == "auto":
         return "grid" if is_math else "lines"
     return style
+
+
+def per_page_hint_ar(per_page: Optional[int], comfortable: Optional[int]) -> str:
+    """تنبيه عندما يطلب المعلم عدداً أكبر مما يتسع عادةً لأسئلة هذا الكويز بتنسيقه الحالي.
+
+    الرقم المختار **سقف** لا حصة ثابتة: المخطط يضع أقل منه بالصفحات المزدحمة بدل التزاحم أو القص.
+    لذلك نسمح بكل القيم حتى MAX_PER_PAGE، ونوضّح فقط ما الذي سيحدث فعلاً. فارغ = لا تنبيه."""
+    if not per_page or not comfortable or per_page <= comfortable:
+        return ""
+    return (f"⚠️ اخترت {per_page} أسئلة بالصفحة، لكن أسئلة هذا الكويز تتسع عادةً حتى {comfortable} "
+            "بهذا التنسيق، فستحتوي الصفحات المزدحمة على أقل من ذلك تلقائياً دون قص. "
+            "لرفع الحد: فعّل «عمودين» أو صغّر مساحة المسودة.")
 
 
 # ==================== نصوص الورقة (مشتركة بين PDF/Word/Excel) ====================

@@ -58,6 +58,8 @@ from .sharing import (
     get_shared_quiz,
 )
 
+from .export_profiles import get_export_profile, save_export_profile
+
 from .favorites import (
     count_favorite_sections,
     list_favorite_sections,
@@ -179,6 +181,8 @@ __all__ = [
     "save_question_image_url", "get_quiz_creator_id", "update_quiz_question",
     # sharing
     "create_shared_quiz_id", "save_shared_quiz", "get_shared_quiz",
+    # export_profiles
+    "get_export_profile", "save_export_profile",
     # favorites
     "count_favorite_sections", "list_favorite_sections",
     "create_favorite_section", "save_favorite_quiz", "list_favorite_quizzes",

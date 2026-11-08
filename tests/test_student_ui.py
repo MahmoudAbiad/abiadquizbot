@@ -183,7 +183,8 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
             get_export_format_keyboard=Mock(return_value='keyboard'), _safe_answer=AsyncMock(),
             _active_settings_note=AsyncMock(return_value=''))
         state = object()
-        call = types.SimpleNamespace(data='export_style_a', message=types.SimpleNamespace(answer=AsyncMock()))
+        call = types.SimpleNamespace(data='export_style_a', from_user=types.SimpleNamespace(id=1),
+                                     message=types.SimpleNamespace(answer=AsyncMock()))
         await env['export_style_chosen'](call, state)
         env['_edit_export_screen'].assert_awaited_once()
         call.message.answer.assert_not_awaited()

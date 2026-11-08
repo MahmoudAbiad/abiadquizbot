@@ -274,5 +274,43 @@ class WordAndExcelTests(unittest.TestCase):
         self.assertNotIn("Explanation", headers)
 
 
+class ProfileSplitTests(unittest.TestCase):
+    """فصل إعدادات الكويز (تُمسح بين الكويزات) عن إعدادات المعلم (تبقى وتُحفظ بحسابه)."""
+
+    def test_field_groups_cover_every_option_exactly_once(self):
+        from dataclasses import fields
+        from services.export_options import PROFILE_FIELDS, QUIZ_FIELDS
+        names = {f.name for f in fields(ExportOptions)}
+        self.assertEqual(set(PROFILE_FIELDS) | set(QUIZ_FIELDS), names)
+        self.assertFalse(set(PROFILE_FIELDS) & set(QUIZ_FIELDS))
+
+    def test_profile_dict_and_without_quiz_fields(self):
+        opts = ExportOptions(exam_title='T', subject='S', per_page=4, total_marks='50',
+                             teacher_name='علي', grade='9', columns=2, draft_size='small')
+        self.assertEqual(opts.profile_dict(), {'teacher_name': 'علي', 'grade': '9', 'columns': 2, 'draft_size': 'small'})
+        stripped = opts.without_quiz_fields()
+        self.assertEqual(stripped.to_dict(), opts.profile_dict())
+        self.assertTrue(opts.has_quiz_fields)
+        self.assertFalse(stripped.has_quiz_fields)
+
+    def test_from_profile_ignores_quiz_unknown_and_invalid_keys_individually(self):
+        loaded = ExportOptions.from_profile({'teacher_name': 'سامر', 'exam_title': 'x', 'per_page': 3,
+                                             'columns': 7, 'draft_size': 'large', 'evil': 1})
+        self.assertEqual(loaded.to_dict(), {'teacher_name': 'سامر', 'draft_size': 'large'})
+        for junk in (None, [], 'x', 5):
+            self.assertTrue(ExportOptions.from_profile(junk).is_default)
+
+    def test_per_page_hint_only_when_exceeding_comfortable(self):
+        from services.export_options import per_page_hint_ar
+        self.assertEqual(per_page_hint_ar(None, 8), '')
+        self.assertEqual(per_page_hint_ar(8, 8), '')
+        self.assertEqual(per_page_hint_ar(6, 8), '')
+        self.assertEqual(per_page_hint_ar(12, None), '')
+        hint = per_page_hint_ar(12, 8)
+        self.assertIn('12', hint)
+        self.assertIn('8', hint)
+        self.assertIn('عمودين', hint)
+
+
 if __name__ == "__main__":
     unittest.main()

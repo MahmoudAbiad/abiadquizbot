@@ -1,6 +1,8 @@
 # handlers/export.py
 """تصدير الكويز إلى Word أو PDF أو Excel من النتيجة أو المفضلة."""
 import asyncio
+import hashlib
+import json
 from task_utils import spawn
 import re
 from typing import List, Optional
@@ -61,10 +63,10 @@ from services.export_service import (
     max_questions_per_page_docx,
 )
 from services.export_options import (
-    ANSWERS_MODES, DRAFT_SIZES, DRAFT_STYLES, FIELD_CODES, PLACEMENTS, TEXT_FIELDS, ExportOptions,
-    ExportOptionsError,
+    ANSWERS_MODES, DRAFT_SIZES, DRAFT_STYLES, FIELD_CODES, MAX_PER_PAGE, PLACEMENTS, TEXT_FIELDS,
+    ExportOptions, ExportOptionsError, per_page_hint_ar,
 )
-from helpers.supabase_helper import get_favorite_quiz, log_usage_event
+from helpers.supabase_helper import get_export_profile, get_favorite_quiz, log_usage_event, save_export_profile
 
 logger = get_logger(__name__)
 router = Router()
@@ -251,7 +253,7 @@ async def export_menu(call: types.CallbackQuery, state: FSMContext) -> None:
 async def export_style_chosen(call: types.CallbackQuery, state: FSMContext) -> None:
     style_code = _STYLE_RE.match(call.data).group(1)
     label = STYLE_LABELS_AR[STYLE_CODE_TO_NAME[style_code]]
-    await _edit_export_screen(call, export_format_text(label) + await _active_settings_note(state),
+    await _edit_export_screen(call, export_format_text(label) + await _active_settings_note(state, call.from_user.id),
                               get_export_format_keyboard(style_code))
     await _safe_answer(call)
 
@@ -263,8 +265,9 @@ async def export_current_quiz(call: types.CallbackQuery, state: FSMContext) -> N
     questions = data.get("questions") or []
     title = data.get("source_title") or "كويز"
     await _leave_input_state(state)
+    options, _note = await _sync_options(state, call.from_user.id)
     await _generate_and_send(call, questions, title, fmt, style_code, include_answers=variant != "s",
-                             options=ExportOptions.from_state_data(data))
+                             options=options)
     await _safe_answer(call)
 
 
@@ -286,20 +289,56 @@ _FIELD_PROMPTS = {
 }
 
 
-async def _get_options(state: FSMContext) -> ExportOptions:
-    return ExportOptions.from_state_data(await state.get_data())
+def _quiz_scope(data: dict, favorite_id: str = "") -> str:
+    """هوية الكويز الذي تخصه إعدادات الجلسة: معرّف المفضلة، أو بصمة أسئلة الكويز الحالي.
+    تغيّرها = المعلم انتقل لكويز آخر، فتُمسح إعدادات الكويز السابق (العنوان/التاريخ/...)."""
+    if favorite_id:
+        return f"fav:{favorite_id}"
+    questions = data.get("questions") or []
+    if not questions:
+        return "cur:none"
+    raw = json.dumps(questions, ensure_ascii=False, sort_keys=True, default=str)
+    return "cur:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+async def _sync_options(state: FSMContext, user_id: int, favorite_id: str = "") -> tuple:
+    """يُرجع (الإعدادات الفعّالة لهذا الكويز، ملاحظة للعرض أو ''). نقطة الدخول الوحيدة لقراءتها.
+
+    - أول استعمال بالجلسة: تُحمَّل «إعداداتي» المحفوظة بالحساب (إن وُجدت) فلا يعيد المعلم إدخالها.
+    - كويز مختلف عن المرة السابقة: تُمسح إعدادات الكويز (العنوان، المادة، التاريخ، المدة، العلامة،
+      عدد الأسئلة بالصفحة) وتبقى إعدادات المعلم (الاسم، الصف، الأعمدة، المسودة ...).
+    تُستدعى أيضاً قبل التصدير نفسه حتى لا يُصدَّر كويز بعنوان كويز سابق دون أن يفتح المعلم الإعدادات."""
+    data = await state.get_data()
+    scope = _quiz_scope(data, favorite_id)
+    options = ExportOptions.from_state_data(data)
+    note = ""
+    if "export_scope" not in data:
+        if "export_options" not in data:
+            saved = await get_export_profile(user_id)
+            if saved:
+                options = ExportOptions.from_profile(saved)
+                note = "📌 طُبّقت إعداداتك المحفوظة."
+        await state.update_data(export_scope=scope, export_options=options.to_dict())
+    elif data["export_scope"] != scope:
+        if options.has_quiz_fields:
+            options = options.without_quiz_fields()
+            note = "🧹 هذا كويز مختلف: مُسحت بيانات الاختبار السابق (العنوان والمادة والتاريخ ...) وبقيت إعداداتك العامة."
+        await state.update_data(export_scope=scope, export_options=options.to_dict())
+    return options, note
 
 
 async def _save_options(state: FSMContext, options: ExportOptions) -> None:
     await state.update_data(export_options=options.to_dict())
 
 
-async def _active_settings_note(state: FSMContext) -> str:
+async def _active_settings_note(state: FSMContext, user_id: int = 0, favorite_id: str = "") -> str:
     """سطر تذكير بالإعدادات الإضافية الفعّالة على شاشة اختيار الصيغة (فارغ إن لا شيء)."""
-    lines = (await _get_options(state)).summary_lines_ar()
+    options, note = await _sync_options(state, user_id, favorite_id)
+    lines = options.summary_lines_ar()
     if not lines:
-        return ""
-    return "\n\n⚙️ <b>إعدادات إضافية فعّالة:</b>\n" + "\n".join(f"• {escape(line)}" for line in lines)
+        return ("\n\n" + escape(note)) if note else ""
+    return ((("\n\n" + escape(note)) if note else "") + "\n\n⚙️ <b>إعدادات إضافية فعّالة:</b>\n"
+            + "\n".join(f"• {escape(line)}" for line in lines))
 
 
 async def _leave_input_state(state: FSMContext) -> None:
@@ -318,16 +357,53 @@ async def _questions_for_settings(state: FSMContext, user_id: int, favorite_id: 
     return (await state.get_data()).get("questions") or []
 
 
+async def _comfortable_per_page(state: FSMContext, user_id: int, style_code: str, favorite_id: str,
+                                options: ExportOptions) -> Optional[int]:
+    """أعلى عدد مريح بالصفحة (PDF) لهذا الكويز وتنسيقه وإعداداته الحالية. يُخزَّن بالجلسة لأن القياس ثقيل
+    ولا يتغير إلا بتغيّر الكويز/الأعمدة/المسودة/عتبة التخطيط المضغوط (8+)."""
+    data = await state.get_data()
+    key = "|".join(map(str, (_quiz_scope(data, favorite_id), style_code, options.columns, options.draft_size,
+                             options.draft_style, int((options.per_page or 0) >= 8))))
+    cached = data.get("export_fit") or {}
+    if cached.get("k") == key:
+        return cached.get("v")
+    questions = await _questions_for_settings(state, user_id, favorite_id)
+    if not questions:
+        return None
+    style = STYLE_CODE_TO_NAME.get(style_code, "simple")
+    comfortable = await asyncio.to_thread(max_questions_per_page, questions, style, options)
+    await state.update_data(export_fit={"k": key, "v": comfortable})
+    return comfortable
+
+
+async def _per_page_hint(state: FSMContext, user_id: int, style_code: str, favorite_id: str,
+                         options: ExportOptions) -> str:
+    """تنبيه «اخترت أكثر مما يتسع» (فارغ إن لا مشكلة). لا يكسر الشاشة أبداً إن فشل القياس."""
+    if not options.per_page:
+        return ""
+    try:
+        return per_page_hint_ar(options.per_page,
+                                await _comfortable_per_page(state, user_id, style_code, favorite_id, options))
+    except Exception as exc:
+        log_error(logger, f"per-page hint failed: {exc}")
+        return ""
+
+
+def _join_notes(*notes: str) -> str:
+    return "\n".join(n for n in notes if n)
+
+
 async def _show_settings(call, state: FSMContext, style_code: str, favorite_id: str, notice: str = "") -> None:
-    options = await _get_options(state)
-    await _edit_export_screen(call, export_settings_text(options.summary_lines_ar(), notice),
+    options, sync_note = await _sync_options(state, call.from_user.id, favorite_id)
+    hint = await _per_page_hint(state, call.from_user.id, style_code, favorite_id, options)
+    await _edit_export_screen(call, export_settings_text(options.summary_lines_ar(), _join_notes(notice, sync_note, hint)),
                               get_export_settings_keyboard(options.to_dict(), style_code, favorite_id))
 
 
 @router.callback_query(F.data.regexp(_XO_RE))
 async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -> None:
     action, arg, style_code, favorite_id = _XO_RE.match(call.data).groups()
-    options = await _get_options(state)
+    options, _sync_note = await _sync_options(state, call.from_user.id, favorite_id)
     notice = ""
     try:
         if action == "open":
@@ -336,7 +412,7 @@ async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -
             await _leave_input_state(state)
             label = STYLE_LABELS_AR[STYLE_CODE_TO_NAME[style_code]]
             await _edit_export_screen(
-                call, export_format_text(label) + await _active_settings_note(state),
+                call, export_format_text(label) + await _active_settings_note(state, call.from_user.id, favorite_id),
                 get_export_format_keyboard(style_code, favorite_id))
             await _safe_answer(call)
             return
@@ -346,19 +422,21 @@ async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -
                 await _safe_answer(call, MSG_NO_QUESTIONS, show_alert=True)
                 return
             style = STYLE_CODE_TO_NAME.get(style_code, "simple")
-            max_allowed = await asyncio.to_thread(max_questions_per_page, questions, style, options)
-            word_max = min(max_allowed, await asyncio.to_thread(max_questions_per_page_docx, questions, style, options))
+            comfortable = await _comfortable_per_page(state, call.from_user.id, style_code, favorite_id, options)
+            comfortable = comfortable or MAX_PER_PAGE
+            word_max = min(comfortable, await asyncio.to_thread(max_questions_per_page_docx, questions, style, options))
             await _edit_export_screen(
                 call,
                 "🔢 <b>عدد الأسئلة في الصفحة الواحدة</b>\n\n"
-                f"اختر من 1 إلى {max_allowed}. هذا الحد الأعلى مناسب لطول أسئلة كويزك وتنسيق «{escape(STYLE_LABELS_AR[style])}» في PDF"
-                + (f"، وفي Word يتسع عادةً حتى {word_max} لأن صفحته أصغر.\n" if word_max < max_allowed else ".\n") +
-                "إن كانت بعض الأسئلة أطول من المعتاد توضع أسئلة أقل في صفحتها تلقائياً بدل التزاحم أو القص.\n"
-                "تقسيم الصفحة إلى عمودين يرفع الحد الأعلى، ومساحة المسودة تخفّضه.\n"
+                f"اختر من 1 إلى {MAX_PER_PAGE}. المريح لأسئلة كويزك وتنسيق «{escape(STYLE_LABELS_AR[style])}» "
+                f"في PDF حتى {comfortable}"
+                + (f"، وفي Word نحو {word_max} لأن صفحته أصغر.\n" if word_max < comfortable else ".\n") +
+                "الأرقام التي عليها ⚠️ أكبر من المريح لكنها مسموحة: الرقم <b>سقف</b> لا حصة ثابتة، فتوضع أسئلة "
+                "أقل في الصفحات المزدحمة تلقائياً دون تزاحم أو قص.\n"
+                "عمودان يرفعان الحد المريح، ومساحة المسودة تخفّضه.\n"
                 "«تلقائي» يملأ كل صفحة بأكبر عدد يتسع (السلوك المعتاد).\n\n"
                 f"يمكنك أيضاً إرسال الرقم كرسالة نصية.",
-                get_export_per_page_keyboard(max_allowed, options.per_page, style_code, favorite_id))
-            await state.update_data(export_max_per_page=max_allowed)
+                get_export_per_page_keyboard(MAX_PER_PAGE, options.per_page, style_code, favorite_id, comfortable))
             await _start_input(state, "per_page", style_code, favorite_id)
             await _safe_answer(call)
             return
@@ -367,8 +445,7 @@ async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -
             if arg == "auto":
                 options = replace(options, per_page=None)
             else:
-                max_allowed = (await state.get_data()).get("export_max_per_page") or 10
-                options = options.with_per_page(arg, max_allowed)
+                options = options.with_per_page(arg, MAX_PER_PAGE)
             await _save_options(state, options)
         elif action == "ed":
             field = FIELD_CODES.get(arg)
@@ -425,6 +502,15 @@ async def export_settings_action(call: types.CallbackQuery, state: FSMContext) -
             nxt = DRAFT_STYLES[(DRAFT_STYLES.index(options.draft_style) + 1) % len(DRAFT_STYLES)]
             options = replace(options, draft_style=nxt)
             await _save_options(state, options)
+        elif action == "sv":
+            profile = options.profile_dict()
+            if not await save_export_profile(call.from_user.id, profile):
+                await _safe_answer(call, "تعذّر حفظ إعداداتك الآن. ما زالت مطبّقة على هذه الجلسة؛ أعد المحاولة بعد قليل.",
+                                   show_alert=True)
+                return
+            notice = ("💾 حُفظت إعداداتك العامة وستُطبَّق تلقائياً على كل اختبار. لا يُحفظ العنوان ولا المادة ولا "
+                      "التاريخ ولا المدة ولا العلامة ولا عدد الأسئلة بالصفحة." if profile
+                      else "🗑 أُزيلت إعداداتك المحفوظة (الإعدادات الحالية افتراضية).")
         elif action == "rs":
             await _leave_input_state(state)
             await state.update_data(export_options=None)
@@ -461,7 +547,7 @@ async def export_setting_value(msg: types.Message, state: FSMContext) -> None:
     options = ExportOptions.from_state_data(data)
     try:
         if field == "per_page":
-            options = options.with_per_page(msg.text, data.get("export_max_per_page") or 10)
+            options = options.with_per_page(msg.text, MAX_PER_PAGE)
         else:
             options = options.with_text(field, msg.text)
     except ExportOptionsError as exc:
@@ -470,7 +556,8 @@ async def export_setting_value(msg: types.Message, state: FSMContext) -> None:
         return
     await _save_options(state, options)
     await _leave_input_state(state)
-    await msg.answer(export_settings_text(options.summary_lines_ar(), "✅ تم الحفظ."), parse_mode="HTML",
+    hint = await _per_page_hint(state, msg.from_user.id, style_code, favorite_id, options)
+    await msg.answer(export_settings_text(options.summary_lines_ar(), _join_notes("✅ تم الحفظ.", hint)), parse_mode="HTML",
                      reply_markup=get_export_settings_keyboard(options.to_dict(), style_code, favorite_id))
 
 
@@ -487,7 +574,7 @@ async def export_favorite_menu(call: types.CallbackQuery) -> None:
 async def export_favorite_style_chosen(call: types.CallbackQuery, state: FSMContext) -> None:
     style_code, fav_id = _FAV_STYLE_RE.match(call.data).groups()
     label = STYLE_LABELS_AR[STYLE_CODE_TO_NAME[style_code]]
-    await _edit_export_screen(call, export_format_text(label) + await _active_settings_note(state),
+    await _edit_export_screen(call, export_format_text(label) + await _active_settings_note(state, call.from_user.id, fav_id),
                               get_export_format_keyboard(style_code, fav_id))
     await _safe_answer(call)
 
@@ -504,8 +591,9 @@ async def export_favorite_quiz(call: types.CallbackQuery, state: FSMContext) -> 
     questions = favorite.get("quiz_data") or []
     title = favorite.get("title") or "كويز محفوظ"
     await _leave_input_state(state)
+    options, _note = await _sync_options(state, call.from_user.id, fav_id)
     await _generate_and_send(call, questions, title, fmt, style_code, include_answers=variant != "s",
-                             options=ExportOptions.from_state_data(await state.get_data()))
+                             options=options)
     await _safe_answer(call)
 
 

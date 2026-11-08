@@ -114,16 +114,14 @@ def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> 
     تدعم التصدير من الجلسة الحالية أو من كويز محفوظ بالمفضلة"""
     prefix = "fav_export_" if favorite_id else "export_"
     suffix = f"_{favorite_id}" if favorite_id else ""
+    # كل صيغة بصف واحد: «الطالب» و«الأستاذ» جنباً إلى جنب (3 صفوف منتظمة × زرّين).
+    # callback_data لم يتغيّر إطلاقاً، فمعالجات التصدير والاختبارات تعمل كما هي.
     kb = []
-    for variant, label in (("s", "نسخة الطالب"), ("t", "نسخة الأستاذ")):
+    for fmt, icon, name in (("pdf", "📕", "PDF"), ("docx", "📄", "Word"), ("xlsx", "📊", "Excel")):
         kb.append([
-            types.InlineKeyboardButton(text=f"📕 PDF — {label}", callback_data=f"{prefix}pdf{variant}_{style_code}{suffix}"),
-            types.InlineKeyboardButton(text=f"📄 Word — {label}", callback_data=f"{prefix}docx{variant}_{style_code}{suffix}"),
+            types.InlineKeyboardButton(text=f"{icon} {name} — {label}", callback_data=f"{prefix}{fmt}{variant}_{style_code}{suffix}")
+            for variant, label in (("s", "الطالب"), ("t", "الأستاذ"))
         ])
-    kb.append([
-        types.InlineKeyboardButton(text=f"📊 Excel — {label}", callback_data=f"{prefix}xlsx{variant}_{style_code}{suffix}")
-        for variant, label in (("s", "نسخة الطالب"), ("t", "نسخة الأستاذ"))
-    ])
     # إعدادات ورقة الاختبار الاختيارية (عدد الأسئلة بالصفحة، اسم الأستاذ، ...). قبل زر الرجوع.
     kb.append([types.InlineKeyboardButton(text="⚙️ إعدادات إضافية",
         callback_data=f"xo|open||{style_code}|{favorite_id}")])
@@ -188,17 +186,20 @@ def get_export_settings_keyboard(options: dict, style_code: str = "s", favorite_
             text="📐 الشكل: " + DRAFT_STYLE_LABELS_AR[options.get("draft_style", "auto")],
             callback_data=_xo("dt", "", style_code, favorite_id)))
     kb.append(row)
-    kb.append([types.InlineKeyboardButton(text="♻️ إعادة الضبط", callback_data=_xo("rs", "", style_code, favorite_id)),
-               types.InlineKeyboardButton(text="✅ تم — اختيار الصيغة",
+    kb.append([types.InlineKeyboardButton(text="💾 حفظ كإعداداتي", callback_data=_xo("sv", "", style_code, favorite_id)),
+               types.InlineKeyboardButton(text="♻️ إعادة الضبط", callback_data=_xo("rs", "", style_code, favorite_id))])
+    kb.append([types.InlineKeyboardButton(text="✅ تم — اختيار الصيغة",
                                           callback_data=_xo("done", "", style_code, favorite_id))])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def get_export_per_page_keyboard(max_allowed: int, current=None, style_code: str = "s",
-                                 favorite_id: str = "") -> types.InlineKeyboardMarkup:
-    """أزرار الأرقام الصالحة فقط (1..الحد الأعلى لهذا الكويز) + تلقائي + رجوع."""
+                                 favorite_id: str = "", comfortable=None) -> types.InlineKeyboardMarkup:
+    """أزرار الأرقام (1..max_allowed، وهو MAX_PER_PAGE عادةً) + تلقائي + رجوع.
+    comfortable: أعلى عدد يتسع عادةً لهذا الكويز؛ ما فوقه مسموح لكنه يُعلَّم ⚠️ (يُعامل كسقف ويخفّضه المخطط)."""
     max_allowed = max(1, min(MAX_PER_PAGE, int(max_allowed)))
-    numbers = [types.InlineKeyboardButton(text=("✅ " if current == n else "") + str(n),
+    numbers = [types.InlineKeyboardButton(
+               text=("✅ " if current == n else "⚠️ " if comfortable and n > comfortable else "") + str(n),
                callback_data=_xo("ppv", str(n), style_code, favorite_id)) for n in range(1, max_allowed + 1)]
     kb = [numbers[i:i + 5] for i in range(0, len(numbers), 5)]
     kb.append([types.InlineKeyboardButton(text=("✅ " if not current else "") + "تلقائي (كل ما يتسع)",
