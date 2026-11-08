@@ -21,6 +21,12 @@ load_dotenv()
 logger = get_logger(__name__)
 
 # ==================== FSM States ====================
+class ExportState(StatesGroup):
+    """انتظار قيمة نصية لإعداد تصدير إضافي (اسم الأستاذ/المادة/...). منفصلة عن QuizState حتى
+    لا يلتقط معالج النصوص العام (files.py) رسالة الإعداد كمحتوى كويز جديد."""
+    waiting_for_value = State()
+
+
 class QuizState(StatesGroup):
     """حالات المستخدم المخصصة لإدارة تدفق الكويز"""
     waiting_for_count = State()  # انتظار تحديد عدد الأسئلة

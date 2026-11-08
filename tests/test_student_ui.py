@@ -180,13 +180,15 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
             _FAV_STYLE_RE=re.compile(r'^fav_export_style_([sma])_(.+)$'),
             STYLE_CODE_TO_NAME={'a': 'academic'}, STYLE_LABELS_AR={'academic': 'أكاديمي'},
             _edit_export_screen=AsyncMock(), export_format_text=ui.export_format_text,
-            get_export_format_keyboard=Mock(return_value='keyboard'), _safe_answer=AsyncMock())
+            get_export_format_keyboard=Mock(return_value='keyboard'), _safe_answer=AsyncMock(),
+            _active_settings_note=AsyncMock(return_value=''))
+        state = object()
         call = types.SimpleNamespace(data='export_style_a', message=types.SimpleNamespace(answer=AsyncMock()))
-        await env['export_style_chosen'](call)
+        await env['export_style_chosen'](call, state)
         env['_edit_export_screen'].assert_awaited_once()
         call.message.answer.assert_not_awaited()
         call.data = 'fav_export_style_a_1234'
-        await env['export_favorite_style_chosen'](call)
+        await env['export_favorite_style_chosen'](call, state)
         env['get_export_format_keyboard'].assert_called_with('a', '1234')
 
     async def test_return_from_custom_count_reuses_current_message(self):

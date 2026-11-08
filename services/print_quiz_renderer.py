@@ -138,7 +138,12 @@ def _draw_options(ax, data, y_top, is_ar):
         y -= row_h
 
 
-def iter_print_blocks(q, is_ar, heading):
+def plan_print_blocks(q, is_ar):
+    """تخطيط فقط (بلا رسم): قائمة كتل، كل كتلة قائمة عناصر لا يتجاوز ارتفاعها صفحة.
+
+    مفصولة عن الرسم حتى يقيس مخطط «عدد الأسئلة بالصفحة» ارتفاع السؤال قبل وضعه،
+    وتعطي نفس الأخطاء الصريحة (ValueError) للمعادلات/الجداول غير المدعومة.
+    """
     # Guard input before measuring to bound even malformed imported quizzes.
     if len(str(q)) > 40000:
         raise ValueError('Question too large for print export')
@@ -155,39 +160,54 @@ def iter_print_blocks(q, is_ar, heading):
         height += item[1]
     if chunk:
         chunks.append(chunk)
-    for index, chunk in enumerate(chunks):
-        with r._RENDER_LOCK:
-            h = sum(item[1] for item in chunk) + 130
-            fig = r.Figure(figsize=(WIDTH / r.DPI, h / r.DPI), dpi=r.DPI)
-            canvas = r.FigureCanvasAgg(fig)
-            ax = fig.add_axes((0, 0, 1, 1))
-            ax.axis('off')
-            ax.set_xlim(0, WIDTH)
-            ax.set_ylim(0, h)
-            align = 'right' if is_ar else 'left'
-            label = heading + ((' — تابع' if is_ar else ' — continued') if index else '')
-            ax.text(WIDTH - PAD if is_ar else PAD, h - 12,
-                    r._shape_line(label) if is_ar else label, ha=align, va='top',
-                    fontsize=SIZE, fontproperties=r._font_prop(is_ar, True), color='black')
-            y = h - 90
-            for kind, ih, data in chunk:
-                if kind == 'text':
-                    for offset, line, bold in data:
-                        ax.text(WIDTH - offset if is_ar else offset, y, line,
-                                ha=align, va='top', fontsize=SIZE,
-                                fontproperties=r._font_prop(is_ar, bold), color='black')
-                elif kind == 'options':
-                    _draw_options(ax, data, y, is_ar)
-                elif kind == 'table':
-                    r._draw_table(ax, data, PAD, y, WIDTH - 2 * PAD, is_ar)
-                else:
-                    r._draw_matrices(ax, data, PAD, y, WIDTH - 2 * PAD, is_ar)
-                y -= ih
-            with io.BytesIO() as buf:
-                fig.savefig(buf, format='png', facecolor='white')
-                payload = buf.getvalue()
-            fig.clear()
-            del fig, canvas, ax
+    return chunks
+
+
+def chunk_height_px(chunk):
+    """ارتفاع الصورة الناتجة (بكسل) لكتلة مخططة؛ العرض ثابت WIDTH."""
+    return sum(item[1] for item in chunk) + 130
+
+
+def render_print_chunk(chunk, is_ar, heading, index=0):
+    """يرسم كتلة واحدة مخططة سلفاً إلى PNG (نفس الرسم القديم حرفياً)."""
+    with r._RENDER_LOCK:
+        h = chunk_height_px(chunk)
+        fig = r.Figure(figsize=(WIDTH / r.DPI, h / r.DPI), dpi=r.DPI)
+        canvas = r.FigureCanvasAgg(fig)
+        ax = fig.add_axes((0, 0, 1, 1))
+        ax.axis('off')
+        ax.set_xlim(0, WIDTH)
+        ax.set_ylim(0, h)
+        align = 'right' if is_ar else 'left'
+        label = heading + ((' — تابع' if is_ar else ' — continued') if index else '')
+        ax.text(WIDTH - PAD if is_ar else PAD, h - 12,
+                r._shape_line(label) if is_ar else label, ha=align, va='top',
+                fontsize=SIZE, fontproperties=r._font_prop(is_ar, True), color='black')
+        y = h - 90
+        for kind, ih, data in chunk:
+            if kind == 'text':
+                for offset, line, bold in data:
+                    ax.text(WIDTH - offset if is_ar else offset, y, line,
+                            ha=align, va='top', fontsize=SIZE,
+                            fontproperties=r._font_prop(is_ar, bold), color='black')
+            elif kind == 'options':
+                _draw_options(ax, data, y, is_ar)
+            elif kind == 'table':
+                r._draw_table(ax, data, PAD, y, WIDTH - 2 * PAD, is_ar)
+            else:
+                r._draw_matrices(ax, data, PAD, y, WIDTH - 2 * PAD, is_ar)
+            y -= ih
+        with io.BytesIO() as buf:
+            fig.savefig(buf, format='png', facecolor='white')
+            payload = buf.getvalue()
+        fig.clear()
+        del fig, canvas, ax
+    return payload
+
+
+def iter_print_blocks(q, is_ar, heading):
+    for index, chunk in enumerate(plan_print_blocks(q, is_ar)):
+        payload = render_print_chunk(chunk, is_ar, heading, index)
         yield payload
         del payload
         from mem_utils import release_memory_to_os

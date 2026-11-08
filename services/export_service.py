@@ -22,7 +22,13 @@ from docx.shared import Cm, Pt, RGBColor
 from logger import get_logger, log_error
 from services.image_quiz_renderer import render_question_image
 from services.latex_text import latex_to_plain
-from services.print_quiz_renderer import iter_print_blocks
+from services.print_quiz_renderer import (
+    WIDTH as PRINT_WIDTH, chunk_height_px, iter_print_blocks, plan_print_blocks, render_print_chunk,
+)
+from services.export_layout import MAX_SPREAD_GAP, pick_max_per_page, plan_pages, spread_gap
+from services.export_options import (
+    ExportOptions, ExportOptionsError, MAX_PER_PAGE, exam_meta_line, student_line, teacher_text,
+)
 
 logger = get_logger(__name__)
 
@@ -58,6 +64,16 @@ def normalize_style(style: str) -> str:
 
 class ExportError(Exception):
     """خطأ عام أثناء توليد ملف التصدير (يُعرض للمستخدم برسالة ودّية)."""
+
+
+def coerce_options(options) -> ExportOptions:
+    """None/dict/ExportOptions => ExportOptions صالح. قيمة فاسدة => ExportError برسالة عربية."""
+    if isinstance(options, ExportOptions):
+        return options
+    try:
+        return ExportOptions.from_dict(options)
+    except ExportOptionsError as exc:
+        raise ExportError(str(exc)) from exc
 
 
 _PARENS_RE = re.compile(r"\([^()]*\)|\uFF08[^\uFF08\uFF09]*\uFF09")
@@ -184,7 +200,7 @@ def _letters_for(is_ar: bool) -> List[str]:
 
 
 def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
-                    style: str = DEFAULT_STYLE, include_answers: bool = True) -> bytes:
+                    style: str = DEFAULT_STYLE, include_answers: bool = True, options=None) -> bytes:
     """Editable question bank. Student files never contain answer-key fields.
 
     Mathematical quizzes open on a rendered preview sheet, while source cells
@@ -196,8 +212,21 @@ def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
+    from services.export_options import ExportOptions, ExportOptionsError
+
     if not questions:
         raise ExportError("لا توجد أسئلة لتصديرها.")
+    # ملاحظة: اسم `options` يُستعمل لاحقاً كمتغير حلقة لخيارات السؤال، لذا نحفظ الإعدادات باسم آخر.
+    if isinstance(options, ExportOptions):
+        sheet_opts = options
+    else:
+        try:
+            sheet_opts = ExportOptions.from_dict(options)
+        except ExportOptionsError as exc:
+            raise ExportError(str(exc)) from exc
+    # عنوان مخصص يستبدل العنوان، ومفتاح الإجابة فقط يحذف عمود الشرح. غير ذلك: كما كان.
+    title = sheet_opts.exam_title or title
+    with_explanation = include_answers and sheet_opts.answers_mode == "full"
     option_count = max(len(q.get("options") or []) for q in questions)
     if len(questions) > 1_048_575 or option_count > 16_370:
         raise ExportError("حجم الكويز يتجاوز حدود ملف Excel.")
@@ -238,8 +267,10 @@ def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
     if has_matrices:
         headers += ["المصفوفات (JSON)" if is_ar else "Matrices (JSON)"]
     if include_answers:
-        headers += (["رقم الإجابة الصحيحة", "الإجابة الصحيحة", "الشرح"] if is_ar else
-                    ["Correct Option Number", "Correct Answer", "Explanation"])
+        headers += (["رقم الإجابة الصحيحة", "الإجابة الصحيحة"] if is_ar else
+                    ["Correct Option Number", "Correct Answer"])
+        if with_explanation:
+            headers += ["الشرح"] if is_ar else ["Explanation"]
     add_row(ws, headers)
     for number, q in enumerate(questions, 1):
         options = q.get("options") or []
@@ -257,23 +288,34 @@ def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
             except (ValueError, TypeError):
                 correct = -1
             valid = 0 <= correct < len(options)
-            values += [correct + 1 if valid else None,
-                       str(options[correct]) if valid else "", str(q.get("explanation") or "")]
+            values += [correct + 1 if valid else None, str(options[correct]) if valid else ""]
+            if with_explanation:
+                values += [str(q.get("explanation") or "")]
         add_row(ws, values)
 
     metadata = ([
         ["المعلومة", "القيمة"], ["عنوان الاختبار", title or "كويز"],
         ["عدد الأسئلة", len(questions)], ["النسخة", "الأستاذ" if include_answers else "الطالب"],
-        ["المدة", "غير محددة"],
+        ["المدة", sheet_opts.duration or "غير محددة"],
         ["ملاحظات", "ترقيم الخيارات يبدأ من 1. الصيغ الرياضية محفوظة كنص قابل للتعديل."],
     ] if is_ar else [
         ["Field", "Value"], ["Quiz Title", title or "Quiz"],
         ["Question Count", len(questions)], ["Version", "Teacher" if include_answers else "Student"],
-        ["Duration", "Not specified"],
+        ["Duration", sheet_opts.duration or "Not specified"],
         ["Notes", "Option numbers start at 1. Math notation is preserved as editable text."],
     ])
+    # حقول ورقة الاختبار الاختيارية تُضاف قبل «ملاحظات» (آخر صف) فقط عند تعبئتها.
+    extra_rows = [(label, value) for label, value in (
+        ("المادة" if is_ar else "Subject", sheet_opts.subject),
+        ("الصف" if is_ar else "Grade", sheet_opts.grade),
+        ("التاريخ" if is_ar else "Date", sheet_opts.exam_date),
+        ("العلامة الكلية" if is_ar else "Total Marks", sheet_opts.total_marks),
+        ("اسم الأستاذ" if is_ar else "Teacher", sheet_opts.teacher_name),
+    ) if value]
+    metadata[-1:-1] = [[label, value] for label, value in extra_rows]
     for values in metadata:
         add_row(info, values)
+    notes_row = len(metadata)
     for sheet in (ws, info):
         sheet.sheet_view.rightToLeft = is_ar
         sheet.freeze_panes = "A2"
@@ -296,7 +338,7 @@ def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
                 "الصور لا تتحدث عند تعديل الخلايا." if is_ar else
                 "Read equations in Math Preview. Source text in Questions remains editable; "
                 "images do not update when cells are edited.")
-        info.cell(6, 2, note)
+        info.cell(notes_row, 2, note)
     buf = io.BytesIO()
     wb.save(buf)
     wb.close()
@@ -508,14 +550,89 @@ def _add_table_cell_text(cell, text: str, font_name: str, size_pt: float, is_ar:
     _style_run(run, font_name, size_pt, bold=bold, color=color, rtl=is_ar, cs_font=cs_font)
 
 
-def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE, include_answers: bool = True) -> bytes:
+_DOCX_LINE_FACTOR = 1.32      # ارتفاع السطر في Word ≈ هذا × حجم الخط (محافظ عمداً)
+_DOCX_SAFETY = 0.90           # نترك 10% احتياطاً: Word يرتّب الصفحة بنفسه، وتجاوز بسيط يخلق صفحة شاردة
+
+
+def _docx_text_height(text: str, size: float, width_pt: float, bold: bool, is_ar: bool,
+                      space_after: float = 0.0) -> float:
+    """تقدير ارتفاع فقرة نصية بـ pt اعتماداً على مقاييس خطوط المشروع (تقريبي لـ Word)."""
+    _register_pdf_fonts()
+    font_en = "Latin-Bold" if bold and _font_available("Latin-Bold") else (
+        "Latin" if _font_available("Latin") else "Helvetica")
+    font_ar = ("Arabic-Bold" if bold else "Arabic") if _font_available("Arabic") else font_en
+    lines = 0
+    for paragraph in (text.split("\n") or [""]):
+        lines += len(_wrap_line(latex_to_plain(paragraph), is_ar, font_en, font_ar, size, max(width_pt, 50.0)))
+    return lines * size * _DOCX_LINE_FACTOR + space_after
+
+
+def _docx_question_height(q: Dict[str, Any], idx: int, is_ar: bool, cfg: Dict[str, Any],
+                          width_pt: float, label: str) -> float:
+    """تقدير ارتفاع سؤال كامل في Word (نص أو صور رياضية)."""
+    if _is_math_question(q):
+        total = 0.0
+        for chunk in plan_print_blocks(q, is_ar):
+            total += width_pt * chunk_height_px(chunk) / PRINT_WIDTH + 6 + 4
+        return total
+    pad = 18 if cfg["question_box"] else 0
+    inner = width_pt - pad - (0 if cfg["question_box"] else 23)
+    height = _docx_text_height(label + str(q.get("question", "")).strip(), 13, width_pt - pad, True, is_ar, 6)
+    for opt in (q.get("options") or []):
+        height += _docx_text_height(f"أ) {opt}", 11.5, inner, False, is_ar, 3 if cfg["question_box"] else 2)
+    return height + pad + 14 + (8 if cfg["divider"] else 0)
+
+
+def _docx_new_page(doc) -> None:
+    """بداية صفحة جديدة بفقرة شبه معدومة الارتفاع (لا سطر فارغ ظاهر أعلى الصفحة)."""
+    p = doc.add_paragraph()
+    p.paragraph_format.page_break_before = True
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    run = p.add_run("")
+    run.font.size = Pt(1)
+    pPr = p._p.get_or_add_pPr()
+    spacing = pPr.find(qn("w:spacing"))
+    if spacing is None:
+        spacing = OxmlElement("w:spacing")
+        pPr.append(spacing)
+    spacing.set(qn("w:line"), "20")
+    spacing.set(qn("w:lineRule"), "exact")
+
+
+def _docx_add_page_number(paragraph, size_pt: float = 9) -> None:
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), "PAGE")
+    run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    sz = OxmlElement("w:sz")
+    sz.set(qn("w:val"), str(int(size_pt * 2)))
+    rPr.append(sz)
+    run.append(rPr)
+    text = OxmlElement("w:t")
+    text.text = "1"
+    run.append(text)
+    fld.append(run)
+    paragraph._p.append(fld)
+
+
+def _docx_keep_together(paragraph, keep: bool = True) -> None:
+    paragraph.paragraph_format.keep_with_next = keep
+    paragraph.paragraph_format.keep_together = True
+
+
+def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE,
+                    include_answers: bool = True, options=None) -> bytes:
     """يبني ملف Word جميل التنسيق للكويز، مع اتجاه تلقائي حسب اللغة وستايل شكلي قابل للاختيار
-    (simple / modern / academic)."""
+    (simple / modern / academic). options: إعدادات ورقة الاختبار الاختيارية (ExportOptions
+    أو dict)؛ بدونها (أو بقيمها الافتراضية) المخرجات كما كانت."""
     if not questions:
         raise ExportError("لا توجد أسئلة لتصديرها.")
     if len(questions) > 200 or sum(len(str(q)) for q in questions) > 500000:
         raise ExportError("هذا الكويز كبير للتصدير دفعة واحدة؛ قسّمه إلى اختبارات أصغر (حتى ٢٠٠ سؤال).")
 
+    opts = coerce_options(options)
+    title = opts.exam_title or title
     style = normalize_style(style)
     cfg = _DOCX_STYLES[style]
 
@@ -533,6 +650,30 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
     if is_ar:
         for sec in doc.sections:
             sec._sectPr.append(OxmlElement("w:bidi"))
+
+    # ==================== ترويسة/تذييل الصفحات (اسم الأستاذ + ترقيم) ====================
+    teacher = teacher_text(opts, is_ar)
+    if teacher and opts.teacher_placement == "header":
+        hp = section.header.paragraphs[0]
+        if is_ar:
+            _set_paragraph_rtl(hp, align_right=False)
+        hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _style_run(hp.add_run(teacher), body_font, 9, color=cfg["muted"], rtl=is_ar, cs_font=cs_font)
+    show_numbers = opts.page_numbers is True
+    if (teacher and opts.teacher_placement == "footer") or show_numbers:
+        fp = section.footer.paragraphs[0]
+        if is_ar:
+            _set_paragraph_rtl(fp, align_right=False)
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if teacher and opts.teacher_placement == "footer":
+            _style_run(fp.add_run(teacher), body_font, 9, color=cfg["muted"], rtl=is_ar, cs_font=cs_font)
+            if show_numbers:
+                fp = section.footer.add_paragraph()
+                if is_ar:
+                    _set_paragraph_rtl(fp, align_right=False)
+                fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if show_numbers:
+            _docx_add_page_number(fp)
 
     # ==================== العنوان ====================
     title_p = doc.add_paragraph()
@@ -557,11 +698,25 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
         _set_paragraph_rtl(sub_p, align_right=False)
         sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+    # بيانات الورقة الاختيارية (المادة/الصف/التاريخ/المدة/العلامة + اسم الأستاذ بالصفحة الأولى)
+    header_lines = 1
+    extra_header = [exam_meta_line(opts, is_ar)]
+    if teacher and opts.teacher_placement == "first":
+        extra_header.append(teacher)
+    for text in filter(None, extra_header):
+        meta_p = doc.add_paragraph()
+        _style_run(meta_p.add_run(text), body_font, 11, bold=(text == teacher),
+                   color=cfg["muted"], rtl=is_ar, cs_font=cs_font)
+        meta_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if is_ar:
+            _set_paragraph_rtl(meta_p, align_right=False)
+            meta_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        header_lines += 1 + text.count("|") // 3
+
+    info_text = student_line(opts, is_ar, academic=(style == STYLE_ACADEMIC))
     if style == STYLE_ACADEMIC:
         # سطر معلومات شبيه بورقة امتحان رسمية: الاسم / التاريخ
         info_p = doc.add_paragraph()
-        info_text = "الاسم: ________________________     التاريخ: ______________" if is_ar \
-            else "Name: ________________________     Date: ______________"
         info_run = info_p.add_run(info_text)
         _style_run(info_run, body_font, 11, color=(30, 30, 30), rtl=is_ar, cs_font=cs_font)
         if is_ar:
@@ -569,11 +724,28 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
         info_p.paragraph_format.space_before = Pt(10)
         _set_paragraph_border_bottom(info_p, "333333", size=10)
         info_p.paragraph_format.space_after = Pt(14)
-    else:
-        info = doc.add_paragraph("الاسم: ______________  الشعبة: ______  التاريخ: __________" if is_ar
-                                 else "Name: ______________  Class: ______  Date: __________")
+    elif info_text:
+        info = doc.add_paragraph(info_text)
         if is_ar:
             _set_paragraph_rtl(info)
+
+    # ==================== تخطيط الصفحات (اختياري) ====================
+    usable_width_pt = usable_width_cm * 28.3465
+    group_starts: set = set()
+    if opts.per_page:
+        page_h_pt = (section.page_height - section.top_margin - section.bottom_margin) / 12700
+        first_cap = (page_h_pt - 95 - 16 * header_lines) * _DOCX_SAFETY
+        cap = page_h_pt * _DOCX_SAFETY
+        heights = []
+        for idx, q in enumerate(questions, 1):
+            label = f"السؤال {idx}: " if is_ar else f"Question {idx}: "
+            try:
+                heights.append(_docx_question_height(q, idx, is_ar, cfg, usable_width_pt, label))
+            except Exception as exc:
+                raise ExportError(f"تعذّر تنسيق السؤال {idx} للطباعة؛ راجع صيغة المعادلات أو حجم الجدول.") from exc
+        pages = plan_pages(heights, opts.per_page, first_cap, cap)
+        group_starts = {page[0] + 1 for page in pages[1:]}
+    keep = bool(opts.per_page)
 
     # ==================== الأسئلة ====================
     total_questions = len(questions)
@@ -581,6 +753,8 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
         q_text = str(q.get("question", "")).strip()
         options = q.get("options") or []
         label = f"السؤال {idx}: " if is_ar else f"Question {idx}: "
+        if idx in group_starts:
+            _docx_new_page(doc)
 
         # 🆕 سؤال رياضي (نمط الكويز المصوّر LaTeX، أو جدول بيانات): يُرسم كصورة
         # نظيفة بنفس محرك عرض الكويز الفعلي بدل كتابة رموز LaTeX الخام كنص -
@@ -607,6 +781,10 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
             _set_cell_width(cell, usable_width_cm)
             _shade_cell(cell, cfg["question_box_bg"])
             _set_cell_borders(cell, cfg["question_box_border"])
+            if keep:
+                # لا يُقسَّم صندوق السؤال بين صفحتين
+                trPr = tbl.rows[0]._tr.get_or_add_trPr()
+                trPr.append(OxmlElement("w:cantSplit"))
 
             qp = cell.paragraphs[0]
             if is_ar:
@@ -643,6 +821,8 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
             if is_ar:
                 _set_paragraph_rtl(qp, align_right=True)
             qp.paragraph_format.space_after = Pt(6)
+            if keep:
+                _docx_keep_together(qp, bool(options))
 
             for opt_idx, opt_text in enumerate(options):
                 letter = letters[opt_idx] if opt_idx < len(letters) else str(opt_idx + 1)
@@ -656,6 +836,8 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
                 else:
                     op.paragraph_format.left_indent = Cm(0.8)
                 op.paragraph_format.space_after = Pt(2)
+                if keep:
+                    _docx_keep_together(op, opt_idx < len(options) - 1)
 
             spacer = doc.add_paragraph()
             if cfg["divider"]:
@@ -663,11 +845,32 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
                 _set_paragraph_border_bottom(spacer, "AAAAAA", size=6)
             spacer.paragraph_format.space_after = Pt(10)
 
+    if teacher and opts.teacher_placement == "last":
+        sign_p = doc.add_paragraph()
+        sign_p.paragraph_format.space_before = Pt(10)
+        _set_paragraph_border_bottom(sign_p, "AAAAAA", size=6)
+        sign_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _style_run(sign_p.add_run(teacher), body_font, 12, bold=True, color=cfg["accent"],
+                   rtl=is_ar, cs_font=cs_font)
+        if is_ar:
+            _set_paragraph_rtl(sign_p, align_right=False)
+            sign_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
     if include_answers:
         doc.add_page_break()
         doc.add_heading("الإجابات والحلول" if is_ar else "Answers and solutions", level=1)
+        key_only = opts.answers_mode == "key"
         for idx, q in enumerate(questions, 1):
-            answer = _answer_print_question(q, is_ar)
+            answer = _answer_print_question(q, is_ar, with_explanation=not key_only)
+            if key_only and not _is_math_question(q) and not _is_math_question(answer):
+                # مفتاح مضغوط: سطر نصي واحد لكل سؤال (الصور فقط للمحتوى الرياضي)
+                text = answer["question"].strip().replace("\n", " ")
+                key_p = doc.add_paragraph()
+                _style_run(key_p.add_run(f"{idx}) {text}"), body_font, 11.5, rtl=is_ar, cs_font=cs_font)
+                if is_ar:
+                    _set_paragraph_rtl(key_p, align_right=True)
+                key_p.paragraph_format.space_after = Pt(3)
+                continue
             try:
                 for img_bytes in iter_print_blocks(answer, is_ar, f"{idx}"):
                     p = doc.add_paragraph()
@@ -680,7 +883,7 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
     return out.getvalue()
 
 
-def _answer_print_question(q, is_ar):
+def _answer_print_question(q, is_ar, with_explanation=True):
     options = q.get("options") or []
     try:
         correct = int(q.get("correct_option_id"))
@@ -690,8 +893,9 @@ def _answer_print_question(q, is_ar):
     label = letters[correct] if 0 <= correct < len(letters) else "-"
     answer = str(options[correct]) if 0 <= correct < len(options) else "-"
     prefix = "الإجابة الصحيحة" if is_ar else "Correct answer"
-    explanation = str(q.get("explanation") or "").strip()
-    return {"question": f"{prefix}: {label}) {answer}\n{explanation}", "options": []}
+    explanation = str(q.get("explanation") or "").strip() if with_explanation else ""
+    text = f"{prefix}: {label}) {answer}" + (f"\n{explanation}" if with_explanation else "\n")
+    return {"question": text, "options": []}
 
 
 def build_document_docx(title: str, text: str, style: str = DEFAULT_STYLE) -> bytes:
@@ -931,11 +1135,22 @@ _PDF_STYLES = {
 }
 
 
+class _NullCanvas:
+    """قماش وهمي يتجاهل كل أوامر الرسم؛ يُستخدم لقياس ارتفاع السؤال بنفس كود الرسم الفعلي."""
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
 class _QuizPDFRenderer:
-    def __init__(self, title: str, questions: List[Dict[str, Any]], is_ar: bool, style: str = DEFAULT_STYLE, include_answers: bool = True):
-        self.title = title or ("كويز" if is_ar else "Quiz")
+    def __init__(self, title: str, questions: List[Dict[str, Any]], is_ar: bool, style: str = DEFAULT_STYLE,
+                 include_answers: bool = True, options: Optional[ExportOptions] = None):
+        self.options = options or ExportOptions()
+        self.title = self.options.exam_title or title or ("كويز" if is_ar else "Quiz")
         self.questions = questions
         self.include_answers = include_answers
+        self._plans: Dict[int, Any] = {}       # تخطيط الصور الرياضية المحسوب أثناء القياس
+        self._keep_plans = False
         self.is_ar = is_ar
         self.letters = _letters_for(is_ar)
         self.style = normalize_style(style)
@@ -986,11 +1201,30 @@ class _QuizPDFRenderer:
         self.c.showPage()
         self.page_num += 1
         self.y = self.page_h - self.margin
+        self._draw_page_header()
+
+    def _page_is_fresh(self) -> bool:
+        return self.y >= self.page_h - self.margin - 1
+
+    def _draw_teacher_line(self, y: float) -> None:
+        text = teacher_text(self.options, self.is_ar)
+        font_en = self.font_en_regular
+        font_ar = self.font_ar_regular or font_en
+        _draw_mixed_line(self.c, text, self.is_ar, font_en, font_ar, 9, y, "#777777",
+                         self.margin, self.page_w, center=True)
+
+    def _draw_page_header(self) -> None:
+        """ترويسة كل صفحة: اسم الأستاذ فقط عند اختيار «ترويسة». داخل الهامش العلوي."""
+        if self.options.teacher_name and self.options.teacher_placement == "header":
+            self._draw_teacher_line(self.page_h - 28)
 
     def _draw_footer(self):
-        self.c.setFont(self.font_regular, 9)
-        self.c.setFillColor(HexColor("#888888"))
-        self.c.drawCentredString(self.page_w / 2, 25, str(self.page_num))
+        if self.options.page_numbers is not False:
+            self.c.setFont(self.font_regular, 9)
+            self.c.setFillColor(HexColor("#888888"))
+            self.c.drawCentredString(self.page_w / 2, 25, str(self.page_num))
+        if self.options.teacher_name and self.options.teacher_placement == "footer":
+            self._draw_teacher_line(40)
 
     def _ensure_space(self, needed: float):
         if self.y - needed < self.margin + 25:
@@ -1030,24 +1264,43 @@ class _QuizPDFRenderer:
         else:
             self._draw_paragraph(self.title, 19, bold=True, color=cfg["accent"], gap_after=4, center=True)
 
-        sub = f"عدد الأسئلة: {len(self.questions)}" if self.is_ar else f"Total Questions: {len(self.questions)}"
-        self._draw_paragraph(sub, 10.5, color=cfg["muted"], gap_after=10 if self.style == STYLE_ACADEMIC else 16,
-                              center=True)
+        # بيانات الورقة الاختيارية بين عدد الأسئلة وسطر الطالب. بدونها: السلوك القديم حرفياً.
+        extra = [exam_meta_line(self.options, self.is_ar)]
+        if self.options.teacher_name and self.options.teacher_placement == "first":
+            extra.append(teacher_text(self.options, self.is_ar))
+        extra = [text for text in extra if text]
 
+        sub = f"عدد الأسئلة: {len(self.questions)}" if self.is_ar else f"Total Questions: {len(self.questions)}"
+        self._draw_paragraph(sub, 10.5, color=cfg["muted"],
+                              gap_after=(10 if self.style == STYLE_ACADEMIC else 16) if not extra else 4,
+                              center=True)
+        for position, text in enumerate(extra):
+            last = position == len(extra) - 1
+            self._draw_paragraph(text, 10.5, bold=(text.startswith(("إعداد", "Prepared"))), color=cfg["muted"],
+                                  gap_after=(10 if self.style == STYLE_ACADEMIC else 16) if last else 3, center=True)
+
+        info = student_line(self.options, self.is_ar, academic=(self.style == STYLE_ACADEMIC))
         if self.style == STYLE_ACADEMIC:
-            info = "الاسم: ________________________     التاريخ: ______________" if self.is_ar \
-                else "Name: ________________________     Date: ______________"
-            self._draw_paragraph(info, 11, color="#1E1E1E", gap_after=2)
+            if info:
+                self._draw_paragraph(info, 11, color="#1E1E1E", gap_after=2)
             self.c.setStrokeColor(HexColor("#333333"))
             self.c.setLineWidth(1)
             self.c.line(self.margin, self.y + 8, self.page_w - self.margin, self.y + 8)
             self.y -= 12
-        else:
-            info = "الاسم: ______________  الشعبة: ______  التاريخ: __________" if self.is_ar else "Name: ______________  Class: ______  Date: __________"
+        elif info:
             self._draw_paragraph(info, 10, gap_after=10)
 
-    def _draw_print_question(self, q, heading):
-        for img_bytes in iter_print_blocks(q, self.is_ar, heading):
+    def _draw_print_question(self, q, heading, plan=None):
+        if plan is None:
+            blocks = iter_print_blocks(q, self.is_ar, heading)
+        else:
+            def _render_planned():
+                from mem_utils import release_memory_to_os
+                for index, chunk in enumerate(plan):
+                    yield render_print_chunk(chunk, self.is_ar, heading, index)
+                    release_memory_to_os()
+            blocks = _render_planned()
+        for img_bytes in blocks:
             reader = ImageReader(io.BytesIO(img_bytes))
             w, h = reader.getSize()
             display_w = self.page_w - 2 * self.margin
@@ -1058,39 +1311,59 @@ class _QuizPDFRenderer:
             self.y -= display_h + 10
             del reader, img_bytes
 
+    def _plan_question(self, idx0: int, q: Dict[str, Any]):
+        """تخطيط كتل السؤال الرياضي؛ يُحفظ أثناء القياس ليُعاد استعماله عند الرسم الفعلي."""
+        plan = self._plans.get(idx0)
+        if plan is None:
+            plan = plan_print_blocks(q, self.is_ar)
+            if self._keep_plans:
+                self._plans[idx0] = plan
+        return plan
+
     def _draw_math_question_image(self, q: Dict[str, Any], idx0: int) -> bool:
         try:
             heading = f"السؤال {idx0 + 1}" if self.is_ar else f"Question {idx0 + 1}"
-            self._draw_print_question(q, heading)
+            plan = self._plans.pop(idx0, None) if self._keep_plans else None
+            self._draw_print_question(q, heading, plan)
             return True
         except Exception as exc:
             raise ExportError(f"تعذّر تنسيق السؤال {idx0 + 1} للطباعة؛ راجع صيغة المعادلات أو حجم الجدول.") from exc
 
-    def _render_questions(self):
+    def _draw_question(self, idx: int, q: Dict[str, Any]) -> None:
+        """يرسم سؤالاً واحداً (idx يبدأ من 1) بحسب الستايل - نفس الكود للرسم والقياس."""
+        if _is_math_question(q) and self._draw_math_question_image(q, idx - 1):
+            return
+        if self.cfg["box"]:
+            self._draw_question_boxed(idx, q)
+        else:
+            self._draw_question_plain(idx, q)
+
+    def _draw_question_plain(self, idx: int, q: Dict[str, Any]) -> None:
         cfg = self.cfg
-        if cfg["box"]:
-            self._render_questions_boxed()
+        label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {latex_to_plain(str(q.get('question', '')).strip())}"
+        self._ensure_space(30)
+        label_color = cfg["accent"] if self.style == STYLE_ACADEMIC else "#111111"
+        self._draw_paragraph(label, 12.5, bold=True, color=label_color, gap_after=4)
+        for oidx, opt in enumerate(q.get("options") or []):
+            letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
+            sep = "." if self.style == STYLE_ACADEMIC else ")"
+            self._draw_paragraph(f"{letter}{sep} {latex_to_plain(str(opt))}", 11, extra_indent=18, gap_after=2)
+        if cfg["divider"]:
+            self._ensure_space(14)
+            self.c.setStrokeColor(HexColor("#AAAAAA"))
+            self.c.setLineWidth(0.75)
+            self.c.line(self.margin, self.y, self.page_w - self.margin, self.y)
+            self.y -= 6
+        self.y -= 8
+
+    def _render_questions(self):
+        if self.options.per_page:
+            self._render_questions_paged()
             return
         for idx, q in enumerate(self.questions, 1):
-            if _is_math_question(q) and self._draw_math_question_image(q, idx - 1):
-                continue
-            label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {latex_to_plain(str(q.get('question', '')).strip())}"
-            self._ensure_space(30)
-            label_color = cfg["accent"] if self.style == STYLE_ACADEMIC else "#111111"
-            self._draw_paragraph(label, 12.5, bold=True, color=label_color, gap_after=4)
-            for oidx, opt in enumerate(q.get("options") or []):
-                letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
-                sep = "." if self.style == STYLE_ACADEMIC else ")"
-                self._draw_paragraph(f"{letter}{sep} {latex_to_plain(str(opt))}", 11, extra_indent=18, gap_after=2)
-            if cfg["divider"]:
-                self._ensure_space(14)
-                self.c.setStrokeColor(HexColor("#AAAAAA"))
-                self.c.setLineWidth(0.75)
-                self.c.line(self.margin, self.y, self.page_w - self.margin, self.y)
-                self.y -= 6
-            self.y -= 8
+            self._draw_question(idx, q)
 
-    def _render_questions_boxed(self):
+    def _draw_question_boxed(self, idx: int, q: Dict[str, Any]) -> None:
         """ستايل 'modern': كل سؤال جوا بطاقة (مستطيل بحواف دائرية) بخلفية فاتحة."""
         cfg = self.cfg
         pad = 12
@@ -1098,51 +1371,130 @@ class _QuizPDFRenderer:
         font_en_b, font_ar_b = self.font_en_bold, (self.font_ar_bold or self.font_en_bold)
         max_w = self.page_w - 2 * self.margin - 2 * pad
 
-        for idx, q in enumerate(self.questions, 1):
-            if _is_math_question(q) and self._draw_math_question_image(q, idx - 1):
-                continue
-            label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {latex_to_plain(str(q.get('question', '')).strip())}"
-            options = [latex_to_plain(str(o)) for o in (q.get("options") or [])]
+        label = f"{'السؤال' if self.is_ar else 'Question'} {idx}: {latex_to_plain(str(q.get('question', '')).strip())}"
+        options = [latex_to_plain(str(o)) for o in (q.get("options") or [])]
 
-            q_lines = _wrap_line(label, self.is_ar, font_en_b, font_ar_b, 12.5, max_w)
-            content_h = 2 * pad + len(q_lines) * (12.5 + 5) + 6
-            opt_line_counts = []
-            for oidx, opt in enumerate(options):
-                letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
-                lines = _wrap_line(f"{letter}) {opt}", self.is_ar, font_en, font_ar, 11, max_w - 10)
-                opt_line_counts.append(lines)
-                content_h += len(lines) * (11 + 4) + 3
+        q_lines = _wrap_line(label, self.is_ar, font_en_b, font_ar_b, 12.5, max_w)
+        content_h = 2 * pad + len(q_lines) * (12.5 + 5) + 6
+        for oidx, opt in enumerate(options):
+            letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
+            lines = _wrap_line(f"{letter}) {opt}", self.is_ar, font_en, font_ar, 11, max_w - 10)
+            content_h += len(lines) * (11 + 4) + 3
 
-            self._ensure_space(content_h + 14)
-            top_y = self.y
-            self.c.setFillColor(HexColor(cfg["box_bg"]))
-            self.c.roundRect(self.margin, top_y - content_h, self.page_w - 2 * self.margin, content_h,
-                              6, fill=1, stroke=0)
-            self.c.setStrokeColor(HexColor(cfg["box_border"]))
-            self.c.setLineWidth(1)
-            self.c.roundRect(self.margin, top_y - content_h, self.page_w - 2 * self.margin, content_h,
-                              6, fill=0, stroke=1)
+        if content_h + 14 > self.page_h - 2 * self.margin - 25:
+            # بطاقة أطول من صفحة كاملة: كانت تُقصّ خارج الصفحة. نرسمها كنص عادي يتابع
+            # عبر الصفحات بدل البطاقة (لا قص ولا فقدان محتوى).
+            self._draw_question_plain(idx, q)
+            return
 
-            self.y = top_y - pad
-            self._draw_paragraph(label, 12.5, bold=True, color=cfg["accent"], extra_indent=pad, gap_after=6)
-            for oidx, opt in enumerate(options):
-                letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
-                self._draw_paragraph(f"{letter}) {opt}", 11, extra_indent=pad + 10, gap_after=3)
-            self.y = top_y - content_h - 12
+        self._ensure_space(content_h + 14)
+        top_y = self.y
+        self.c.setFillColor(HexColor(cfg["box_bg"]))
+        self.c.roundRect(self.margin, top_y - content_h, self.page_w - 2 * self.margin, content_h,
+                          6, fill=1, stroke=0)
+        self.c.setStrokeColor(HexColor(cfg["box_border"]))
+        self.c.setLineWidth(1)
+        self.c.roundRect(self.margin, top_y - content_h, self.page_w - 2 * self.margin, content_h,
+                          6, fill=0, stroke=1)
+
+        self.y = top_y - pad
+        self._draw_paragraph(label, 12.5, bold=True, color=cfg["accent"], extra_indent=pad, gap_after=6)
+        for oidx, opt in enumerate(options):
+            letter = self.letters[oidx] if oidx < len(self.letters) else str(oidx + 1)
+            self._draw_paragraph(f"{letter}) {opt}", 11, extra_indent=pad + 10, gap_after=3)
+        self.y = top_y - content_h - 12
+
+    # ---------- عدد الأسئلة بالصفحة ----------
+
+    def _measuring_copy(self) -> "_QuizPDFRenderer":
+        """نسخة على قماش وهمي وصفحة ضخمة: نفس كود الرسم يقيس الارتفاع الحقيقي بلا رسم."""
+        probe = _QuizPDFRenderer(self.title, self.questions, self.is_ar, style=self.style,
+                                 include_answers=False, options=self.options)
+        probe.c = _NullCanvas()
+        probe.page_h = 1e7
+        probe.y = probe.page_h - probe.margin
+        probe._plans = self._plans
+        probe._keep_plans = True
+        probe._draw_print_question = probe._measure_print_question
+        return probe
+
+    def _measure_print_question(self, q, heading, plan=None):
+        display_w = self.page_w - 2 * self.margin
+        for chunk in (plan if plan is not None else plan_print_blocks(q, self.is_ar)):
+            self.y -= display_w * chunk_height_px(chunk) / PRINT_WIDTH + 10
+
+    def _measure_question(self, probe: "_QuizPDFRenderer", idx: int, q: Dict[str, Any]) -> float:
+        probe.y = probe.page_h - probe.margin
+        start = probe.y
+        if _is_math_question(q):
+            # التخطيط يُحسب مرة هنا ويُعاد استعماله عند الرسم الفعلي.
+            try:
+                probe._plans[idx - 1] = plan_print_blocks(q, self.is_ar)
+            except Exception as exc:
+                raise ExportError(f"تعذّر تنسيق السؤال {idx} للطباعة؛ راجع صيغة المعادلات أو حجم الجدول.") from exc
+            for chunk in probe._plans[idx - 1]:
+                probe.y -= (self.page_w - 2 * self.margin) * chunk_height_px(chunk) / PRINT_WIDTH + 10
+        else:
+            probe._draw_question(idx, q)
+        return start - probe.y
+
+    def _render_questions_paged(self) -> None:
+        """يوزّع الأسئلة على صفحات بحد أقصى per_page للصفحة، بقياس حقيقي لكل سؤال.
+
+        المحتوى الطويل يخفّض عدد أسئلة تلك الصفحة تلقائياً بدل التزاحم أو القص،
+        والفراغ المتبقي يُوزَّع بين الأسئلة لتبدو الصفحة ورقة امتحان متوازنة."""
+        self._keep_plans = True
+        probe = self._measuring_copy()
+        heights = [self._measure_question(probe, idx, q) for idx, q in enumerate(self.questions, 1)]
+        bottom = self.margin + 25
+        tolerance = 3.0
+        first_cap = self.y - bottom - tolerance
+        cap = self.page_h - self.margin - bottom - tolerance
+        pages = plan_pages(heights, self.options.per_page, first_cap, cap)
+        for page_no, group in enumerate(pages):
+            if page_no and not self._page_is_fresh():
+                self._new_page()
+            used = sum(heights[i] for i in group)
+            free = (first_cap if page_no == 0 else cap) - used
+            gap = spread_gap(free, len(group))
+            for i in group:
+                self._draw_question(i + 1, self.questions[i])
+                self.y -= gap
+
+    def _render_teacher_closing(self) -> None:
+        """«إعداد الأستاذ» في آخر صفحة الأسئلة (قبل صفحة الإجابات إن وُجدت)."""
+        self._ensure_space(60)
+        self.y -= 10
+        self.c.setStrokeColor(HexColor("#AAAAAA"))
+        self.c.setLineWidth(0.75)
+        self.c.line(self.margin, self.y, self.page_w - self.margin, self.y)
+        self.y -= 22
+        self._draw_paragraph(teacher_text(self.options, self.is_ar), 12, bold=True,
+                             color=self.cfg["accent"], center=True)
 
     def _render_answer_table(self):
         self._new_page()
         self._draw_paragraph("الإجابات والحلول" if self.is_ar else "Answers and solutions",
                              15, bold=True, gap_after=12)
+        key_only = self.options.answers_mode == "key"
         for idx, q in enumerate(self.questions, 1):
+            answer = _answer_print_question(q, self.is_ar, with_explanation=not key_only)
+            if key_only and not _is_math_question(q) and not _is_math_question(answer):
+                # مفتاح مضغوط: سطر نصي واحد لكل سؤال (الصور فقط للمحتوى الرياضي)
+                self._draw_paragraph(f"{idx}) " + answer["question"].strip().replace("\n", " "), 11.5,
+                                     gap_after=3)
+                continue
             try:
-                self._draw_print_question(_answer_print_question(q, self.is_ar), str(idx))
+                self._draw_print_question(answer, str(idx))
             except Exception as exc:
                 raise ExportError(f"تعذّر تنسيق إجابة السؤال {idx}؛ راجع المعادلات.") from exc
 
     def render(self) -> bytes:
+        self._draw_page_header()
         self._render_header()
         self._render_questions()
+        if self.options.teacher_name and self.options.teacher_placement == "last":
+            self._render_teacher_closing()
         if self.include_answers:
             self._render_answer_table()
         self._draw_footer()
@@ -1151,7 +1503,8 @@ class _QuizPDFRenderer:
         return self.buf.getvalue()
 
 
-def build_quiz_pdf(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE, include_answers: bool = True) -> bytes:
+def build_quiz_pdf(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE,
+                   include_answers: bool = True, options=None) -> bytes:
     """يبني ملف PDF جميل التنسيق للكويز، مع اتجاه تلقائي حسب اللغة وستايل شكلي قابل للاختيار
     (يتطلب خطوط assets/fonts للعربي)."""
     if not questions:
@@ -1159,8 +1512,58 @@ def build_quiz_pdf(title: str, questions: List[Dict[str, Any]], style: str = DEF
     if len(questions) > 200 or sum(len(str(q)) for q in questions) > 500000:
         raise ExportError("هذا الكويز كبير للتصدير دفعة واحدة؛ قسّمه إلى اختبارات أصغر (حتى ٢٠٠ سؤال).")
     is_ar = detect_language(questions) == "ar"
-    renderer = _QuizPDFRenderer(title, questions, is_ar, style=style, include_answers=include_answers)
+    renderer = _QuizPDFRenderer(title, questions, is_ar, style=style, include_answers=include_answers,
+                                options=coerce_options(options))
     return renderer.render()
+
+
+def max_questions_per_page_docx(questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE) -> int:
+    """نفس الفكرة لملف Word: صفحته Letter بهوامش أكبر فيتسع أقل مما في PDF (تقدير)."""
+    if not questions:
+        return MAX_PER_PAGE
+    is_ar = detect_language(questions) == "ar"
+    cfg = _DOCX_STYLES[normalize_style(style)]
+    section = Document().sections[0]
+    width_pt = (section.page_width - section.left_margin - section.right_margin) / 12700
+    capacity = (section.page_height - section.top_margin - section.bottom_margin) / 12700 * _DOCX_SAFETY
+    heights = []
+    for idx, q in enumerate(questions, 1):
+        if _is_math_question(q):
+            text_len = len(str(q.get("question", ""))) + sum(len(str(o)) for o in (q.get("options") or []))
+            px = 90 + (1 + text_len // 60) * 50 + 2 * (46 + 32) + (260 if (q.get("table") or q.get("matrices")) else 0)
+            heights.append(width_pt * px / PRINT_WIDTH + 10)
+        else:
+            label = f"السؤال {idx}: " if is_ar else f"Question {idx}: "
+            heights.append(_docx_question_height(q, idx, is_ar, cfg, width_pt, label))
+    return pick_max_per_page(heights, capacity, MAX_PER_PAGE)
+
+
+def max_questions_per_page(questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE) -> int:
+    """أعلى «عدد أسئلة بالصفحة» مريح لهذا الكويز وهذا التنسيق (1..MAX_PER_PAGE).
+
+    يُحسب من القياس الحقيقي للأسئلة النصية (نفس كود الرسم) وبتقدير محافظ للأسئلة الرياضية
+    المصوّرة (دون رسمها). المخطط يخفّض العدد بالصفحات التي فيها أسئلة أطول من النموذجي،
+    فالقيمة هنا تضبط ما يعرضه البوت للمعلم لا ما يحمي من القص (ذلك مضمون عند التوليد)."""
+    if not questions:
+        return MAX_PER_PAGE
+    is_ar = detect_language(questions) == "ar"
+    renderer = _QuizPDFRenderer("", questions, is_ar, style=style, include_answers=False)
+    probe = renderer._measuring_copy()
+    display_w = renderer.page_w - 2 * renderer.margin
+    heights: List[float] = []
+    for idx, q in enumerate(questions, 1):
+        if _is_math_question(q):
+            text_len = len(str(q.get("question", ""))) + sum(len(str(o)) for o in (q.get("options") or []))
+            lines = 1 + text_len // 60
+            px = 90 + lines * 50 + 2 * (46 + 32) + (260 if (q.get("table") or q.get("matrices")) else 0)
+            heights.append(display_w * px / PRINT_WIDTH + 10)
+            continue
+        probe.y = probe.page_h - probe.margin
+        start = probe.y
+        probe._draw_question(idx, q)
+        heights.append(start - probe.y)
+    capacity = renderer.page_h - renderer.margin - (renderer.margin + 25) - 3.0
+    return pick_max_per_page(heights, capacity, MAX_PER_PAGE)
 
 
 class _DocumentPDFRenderer:

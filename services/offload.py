@@ -322,15 +322,19 @@ async def remote_render_ceremony(payload: Dict[str, Any], *, allow_local_fallbac
     )
 
 
-async def remote_build_quiz(fmt: str, title: str, questions: List[Dict[str, Any]], style: str, include_answers: bool = True) -> Optional[bytes]:
-    """ملف Word/PDF لكويز كامل، أو None => نفّذ محلياً. fmt: 'docx' | 'pdf'."""
+async def remote_build_quiz(fmt: str, title: str, questions: List[Dict[str, Any]], style: str, include_answers: bool = True,
+                            options: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
+    """ملف Word/PDF لكويز كامل، أو None => نفّذ محلياً. fmt: 'docx' | 'pdf'.
+
+    options: إعدادات ورقة الاختبار (ExportOptions.to_dict()) وتُرسل فقط إن وُجدت؛ يجب نشر
+    السيرفر الثاني بنسخة تدعمها قبل/مع البوت (نسخة قديمة منه تتجاهلها بصمت)."""
     if fmt not in ("docx", "pdf") or not ENABLED:
         return None
-    return await _call(
-        "/v1/export/quiz",
-        {"fmt": fmt, "title": title, "questions": questions, "style": style, "include_answers": bool(include_answers)},
-        EXPORT_READ_TIMEOUT, fmt,
-    )
+    payload: Dict[str, Any] = {"fmt": fmt, "title": title, "questions": questions, "style": style,
+                               "include_answers": bool(include_answers)}
+    if options:
+        payload["options"] = options
+    return await _call("/v1/export/quiz", payload, EXPORT_READ_TIMEOUT, fmt)
 
 
 async def remote_build_document(fmt: str, title: str, text: str, style: Optional[str] = None) -> Optional[bytes]:

@@ -107,7 +107,8 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
             for row in kb.inline_keyboard:
                 for button in row:
                     self.assertLessEqual(len(button.callback_data.encode()), 64)
-                    if button.callback_data == 'export_back' or button.callback_data.startswith('fav_export_back_'):
+                    if (button.callback_data == 'export_back' or button.callback_data.startswith('fav_export_back_')
+                            or button.callback_data.startswith('xo|open|')):  # زر «إعدادات إضافية» له معالج مستقل
                         continue
                     self.assertIsNotNone(regex.fullmatch(button.callback_data))
         self.assertIsNotNone(patterns['_FORMAT_RE'].fullmatch('export_pdf_s'))

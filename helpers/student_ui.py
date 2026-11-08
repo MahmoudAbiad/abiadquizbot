@@ -47,6 +47,18 @@ def export_format_text(style_label):
     )
 
 
+def export_settings_text(summary_lines, notice=""):
+    """نص شاشة «إعدادات إضافية» (HTML): ما الذي سيُطبَّق على الملف حالياً."""
+    current = ("\n".join(f"• {escape(line)}" for line in summary_lines)
+               if summary_lines else "لا إعدادات إضافية — يُصدَّر الملف بالشكل المعتاد.")
+    return (
+        (f"{escape(notice)}\n\n" if notice else "")
+        + "⚙️ <b>إعدادات إضافية لورقة الاختبار</b>\n\n"
+        "كلها اختيارية. اضغط على أي خيار لتعديله، ثم «تم» لاختيار صيغة الملف.\n\n"
+        f"<b>الحالي:</b>\n{current}"
+    )
+
+
 def welcome_text(points, free_points, gift_points, paid_points, renewed=False):
     greeting = "☀️ <b>أهلاً بعودتك — تجدّد رصيدك اليومي</b>" if renewed else "👋 <b>أهلاً بعودتك</b>"
     return (

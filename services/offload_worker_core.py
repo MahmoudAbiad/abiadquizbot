@@ -109,7 +109,15 @@ def build_quiz(payload: Dict[str, Any]) -> Tuple[bytes, str]:
     if not isinstance(include_answers, bool):
         raise BadPayload("include_answers must be a boolean")
     builder = build_quiz_docx if fmt == "docx" else build_quiz_pdf
-    return builder(title, questions, style, include_answers), MEDIA_TYPES[fmt]
+    raw_options = payload.get("options")
+    if raw_options is None:
+        return builder(title, questions, style, include_answers), MEDIA_TYPES[fmt]
+    from services.export_options import ExportOptions, ExportOptionsError
+    try:
+        options = ExportOptions.from_dict(raw_options)
+    except ExportOptionsError as exc:
+        raise BadPayload(f"options invalid: {exc}")
+    return builder(title, questions, style, include_answers, options), MEDIA_TYPES[fmt]
 
 
 def build_document(payload: Dict[str, Any]) -> Tuple[bytes, str]:

@@ -20,6 +20,9 @@ from constants import (
 from helpers.settings_helper import get_setting
 from logger import get_logger
 from services.export_service import STYLE_CODE_TO_NAME, STYLE_LABELS_AR
+from services.export_options import (
+    ANSWERS_MODE_LABELS_AR, FIELD_CODES, MAX_PER_PAGE, PLACEMENT_LABELS_AR, PLACEMENTS, TEXT_FIELDS,
+)
 from services.quiz_permissions import can_delete_quiz
 from utils import hash_to_short_token
 
@@ -120,9 +123,88 @@ def get_export_format_keyboard(style_code: str = "s", favorite_id: str = "") -> 
         types.InlineKeyboardButton(text=f"📊 Excel — {label}", callback_data=f"{prefix}xlsx{variant}_{style_code}{suffix}")
         for variant, label in (("s", "نسخة الطالب"), ("t", "نسخة الأستاذ"))
     ])
+    # إعدادات ورقة الاختبار الاختيارية (عدد الأسئلة بالصفحة، اسم الأستاذ، ...). قبل زر الرجوع.
+    kb.append([types.InlineKeyboardButton(text="⚙️ إعدادات إضافية",
+        callback_data=f"xo|open||{style_code}|{favorite_id}")])
     kb.append([types.InlineKeyboardButton(text="🔙 تغيير التنسيق",
         callback_data=f"fav_export_back_{favorite_id}" if favorite_id else "export_back")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def _xo(action: str, arg: str, style_code: str, favorite_id: str) -> str:
+    """callback_data لإعدادات التصدير: xo|الإجراء|الوسيط|التنسيق|معرّف المفضلة (≤ 64 بايت)."""
+    return f"xo|{action}|{arg}|{style_code}|{favorite_id}"
+
+
+def get_export_settings_keyboard(options: dict, style_code: str = "s", favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """شاشة «إعدادات إضافية». options = ExportOptions.to_dict() (الحقول غير الافتراضية فقط)."""
+    def mark(name):
+        return "✅ " if options.get(name) else ""
+    per_page = options.get("per_page")
+    kb = [[types.InlineKeyboardButton(
+        text=f"🔢 عدد الأسئلة بالصفحة: {per_page if per_page else 'تلقائي'}",
+        callback_data=_xo("pp", "", style_code, favorite_id))]]
+    labels = {"exam_title": "📝 عنوان الاختبار", "subject": "📚 المادة", "grade": "🎓 الصف",
+              "exam_date": "📅 التاريخ", "duration": "⏱ المدة", "total_marks": "💯 العلامة الكلية"}
+    codes = {name: code for code, name in FIELD_CODES.items()}
+    pairs = list(labels.items())
+    for i in range(0, len(pairs), 2):
+        kb.append([types.InlineKeyboardButton(text=f"{mark(name)}{label}",
+                   callback_data=_xo("ed", codes[name], style_code, favorite_id)) for name, label in pairs[i:i + 2]])
+    kb.append([types.InlineKeyboardButton(text=f"{mark('teacher_name')}👨‍🏫 اسم الأستاذ",
+               callback_data=_xo("ed", "n", style_code, favorite_id))])
+    if options.get("teacher_name"):
+        place = PLACEMENT_LABELS_AR[options.get("teacher_placement", "first")]
+        kb.append([types.InlineKeyboardButton(text=f"📍 مكان الاسم: {place}",
+                   callback_data=_xo("pl", "", style_code, favorite_id))])
+    kb.append([
+        types.InlineKeyboardButton(
+            text="🧾 بيانات الطالب: " + ("مخفية" if options.get("student_fields") is False else "ظاهرة"),
+            callback_data=_xo("sf", "", style_code, favorite_id)),
+        types.InlineKeyboardButton(
+            text="🔑 " + ANSWERS_MODE_LABELS_AR[options.get("answers_mode", "full")],
+            callback_data=_xo("am", "", style_code, favorite_id)),
+    ])
+    numbers = options.get("page_numbers")
+    kb.append([types.InlineKeyboardButton(
+        text="🔢 ترقيم الصفحات: " + ("افتراضي" if numbers is None else "ظاهر" if numbers else "مخفي"),
+        callback_data=_xo("pn", "", style_code, favorite_id))])
+    kb.append([types.InlineKeyboardButton(text="♻️ إعادة الضبط", callback_data=_xo("rs", "", style_code, favorite_id)),
+               types.InlineKeyboardButton(text="✅ تم — اختيار الصيغة",
+                                          callback_data=_xo("done", "", style_code, favorite_id))])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_export_per_page_keyboard(max_allowed: int, current=None, style_code: str = "s",
+                                 favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """أزرار الأرقام الصالحة فقط (1..الحد الأعلى لهذا الكويز) + تلقائي + رجوع."""
+    max_allowed = max(1, min(MAX_PER_PAGE, int(max_allowed)))
+    numbers = [types.InlineKeyboardButton(text=("✅ " if current == n else "") + str(n),
+               callback_data=_xo("ppv", str(n), style_code, favorite_id)) for n in range(1, max_allowed + 1)]
+    kb = [numbers[i:i + 5] for i in range(0, len(numbers), 5)]
+    kb.append([types.InlineKeyboardButton(text=("✅ " if not current else "") + "تلقائي (كل ما يتسع)",
+               callback_data=_xo("ppv", "auto", style_code, favorite_id))])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data=_xo("open", "", style_code, favorite_id))])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_export_placement_keyboard(current: str = "first", style_code: str = "s",
+                                  favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    kb = [[types.InlineKeyboardButton(text=("✅ " if current == place else "") + PLACEMENT_LABELS_AR[place],
+           callback_data=_xo("plv", place, style_code, favorite_id))] for place in PLACEMENTS]
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع", callback_data=_xo("open", "", style_code, favorite_id))])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_export_input_keyboard(field_code: str, has_value: bool, style_code: str = "s",
+                              favorite_id: str = "") -> types.InlineKeyboardMarkup:
+    """تحت رسالة «أرسل القيمة»: مسح القيمة الحالية (إن وُجدت) أو إلغاء."""
+    row = []
+    if has_value:
+        row.append(types.InlineKeyboardButton(text="🗑 مسح القيمة",
+                   callback_data=_xo("clr", field_code, style_code, favorite_id)))
+    row.append(types.InlineKeyboardButton(text="❌ إلغاء", callback_data=_xo("open", "", style_code, favorite_id)))
+    return types.InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 def get_quiz_result_keyboard(quiz_id: str = None, viewer_id=None, creator_id=None) -> types.InlineKeyboardMarkup:
