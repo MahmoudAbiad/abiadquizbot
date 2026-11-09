@@ -389,31 +389,6 @@ def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineK
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_quiz_summary_keyboard(
-    selected_count: int = 10,
-    cost: Optional[float] = None,
-) -> types.InlineKeyboardMarkup:
-    """
-    🆕 لوحة ملخص إعدادات الكويز (Summary Dashboard):
-    تعرض رسالة الملخص مع زري إنشاء الاختبار والإعدادات فقط لإبقاء الواجهة نظيفة ومريحة.
-    """
-    cost_str = f" • {cost:.1f} نقطة" if cost is not None else ""
-    return types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(
-            text=f"🚀 إنشاء الاختبار ({selected_count} أسئلة{cost_str})",
-            callback_data="qcount_start"
-        )],
-        [types.InlineKeyboardButton(
-            text="⚙️ إعدادات الاختبار",
-            callback_data="quiz_open_settings"
-        )],
-        [types.InlineKeyboardButton(
-            text=BTN_CANCEL_REQUEST,
-            callback_data="cancel_upload_request"
-        )],
-    ])
-
-
 def get_question_count_keyboard(
     items: int,
     is_album: bool,
@@ -543,17 +518,11 @@ def get_question_count_keyboard(
     # 5. زر البدء المباشر
     cost_str = f" • {cost:.1f} نقطة" if cost is not None else ""
     kb.append([types.InlineKeyboardButton(
-        text=f"🚀 بدء التوليد ({selected_count} أسئلة{cost_str})",
+        text=f"🚀 ابدأ توليد الكويز ({selected_count} أسئلة{cost_str})",
         callback_data="qcount_start"
     )])
 
-    # 6. زر الرجوع للملخص
-    kb.append([types.InlineKeyboardButton(
-        text="🔙 الرجوع للملخص",
-        callback_data="quiz_back_summary"
-    )])
-
-    # 7. إلغاء
+    # 6. إلغاء
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 

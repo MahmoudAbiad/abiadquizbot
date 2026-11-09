@@ -42,7 +42,6 @@ from helpers.gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from keyboards import (
     get_multiple_quizzes_keyboard, get_question_count_keyboard,
-    get_quiz_summary_keyboard,
     get_translation_choice_keyboard, get_quiz_type_keyboard,
     get_web_upload_redirect_keyboard, get_quiz_extraction_choice_keyboard,
     get_quiz_detected_count_keyboard, get_classification_vote_keyboard,
@@ -329,64 +328,28 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         if not selected_count:
             text = f"<b>مراجعة العدد والتكلفة</b>\n\n{count_prompt_text}"
     else:
-        in_settings = bool(data.get("in_settings_mode", False))
-        if not in_settings:
-            heading = "📋 <b>ملخص إعدادات الكويز</b>"
-            is_english = data.get("subject_type") == SUBJECT_ENGLISH or data.get("content_subject_type") == SUBJECT_ENGLISH
-            is_french = data.get("subject_type") == SUBJECT_FRENCH or data.get("content_subject_type") == SUBJECT_FRENCH
-            extra_lang = ""
-            if is_english or is_french:
-                lang_name = "الفرنسية" if is_french else "الإنجليزية"
-                cur_trans = data.get("english_mode", "translated")
-                trans_label = "مترجمة للعربية 🌐" if cur_trans == "translated" else f"بـ{lang_name} فقط 🔤"
-                extra_lang = f"\n• لغة الأسئلة: {trans_label}"
+        heading = "🎛️ لوحة إعداد وتوليد الكويز"
+        text = f"<b>{heading}</b>\n\n{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
+        text += "\n\n💡 يمكنك تعديل الخيارات من الأزرار مباشرة، أو الضغط على زر البدء فوراً."
+        if mode in ("Super-PDF", "Super-Images", "Super-Text"):
+            text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
-            transparency = build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)
-            text = (
-                f"{heading}\n\n"
-                f"{transparency}{extra_lang}\n\n"
-                "🚀 اضغط <b>«إنشاء الاختبار»</b> للبدء فوراً بالإعدادات الافتراضية،\n"
-                "أو <b>«إعدادات الاختبار»</b> لتخصيص النوع أو الصعوبة أو العدد."
+        try:
+            keyboard = get_question_count_keyboard(
+                items=items,
+                is_album=is_album,
+                selected_count=selected_count,
+                suggestions=DEFAULT_COUNT_SUGGESTIONS,
+                selected_difficulty=difficulty,
+                selected_type=data.get("question_type", QUESTION_TYPE_GENERAL),
+                subject_type=data.get("subject_type", SUBJECT_OTHER),
+                suggested_types=data.get("suggested_question_types", []),
+                english_mode=data.get("english_mode"),
+                content_subject_type=data.get("content_subject_type"),
+                cost=cost,
             )
-            if mode in ("Super-PDF", "Super-Images", "Super-Text"):
-                text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
-
-            summary_kb_fn = globals().get("get_quiz_summary_keyboard")
-            if summary_kb_fn:
-                keyboard = summary_kb_fn(selected_count=selected_count, cost=cost)
-            else:
-                try:
-                    from keyboards import get_quiz_summary_keyboard as fn
-                    keyboard = fn(selected_count=selected_count, cost=cost)
-                except Exception:
-                    keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
-        else:
-            heading = "⚙️ <b>إعدادات الاختبار</b>"
-            transparency = build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)
-            text = (
-                f"{heading}\n\n"
-                f"{transparency}\n\n"
-                "💡 يمكنك تعديل الخيارات من الأزرار أدناه، ثم بدء التوليد أو الرجوع للملخص:"
-            )
-            if mode in ("Super-PDF", "Super-Images", "Super-Text"):
-                text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
-
-            try:
-                keyboard = get_question_count_keyboard(
-                    items=items,
-                    is_album=is_album,
-                    selected_count=selected_count,
-                    suggestions=DEFAULT_COUNT_SUGGESTIONS,
-                    selected_difficulty=difficulty,
-                    selected_type=data.get("question_type", QUESTION_TYPE_GENERAL),
-                    subject_type=data.get("subject_type", SUBJECT_OTHER),
-                    suggested_types=data.get("suggested_question_types", []),
-                    english_mode=data.get("english_mode"),
-                    content_subject_type=data.get("content_subject_type"),
-                    cost=cost,
-                )
-            except TypeError:
-                keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
+        except TypeError:
+            keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
 
     if message_id:
         try:
@@ -424,7 +387,6 @@ async def show_question_count_screen(reply_target: types.Message, state: FSMCont
             selected_question_count=data.get("review_count_to_restore") or data.get("selected_question_count") or DEFAULT_COUNT_SUGGESTIONS[1],
             review_count_to_restore=None,
             count_screen_message_id=None,
-            in_settings_mode=False,
         )
         await state.set_state(QuizState.waiting_for_count)
 
@@ -1182,14 +1144,10 @@ async def handle_count_pick(call: types.CallbackQuery, state: FSMContext) -> Non
 async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContext) -> None:
     """يطلب من الطالب كتابة عدد مخصص - نفس الرسالة تتحول لطلب إدخال نصي (edit)."""
     try:
-        data = await state.get_data() if hasattr(state, "get_data") else {}
-        ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
-        back_cb = "qcount_review" if ready_exam else "quiz_open_settings"
-        back_txt = "🔙 الرجوع للملخص" if ready_exam else "🔙 الرجوع للإعدادات"
         await call.message.edit_text(
             "✏️ اكتب الآن عدد الأسئلة المطلوب (رقم فقط):",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text=back_txt, callback_data=back_cb)],
+                [types.InlineKeyboardButton(text="🔙 الرجوع للملخص", callback_data="qcount_review")],
                 [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
             ]),
         )
@@ -1199,26 +1157,8 @@ async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContex
         await call.answer()
 
 
-@router.callback_query(F.data == "quiz_open_settings")
-async def handle_open_quiz_settings(call: types.CallbackQuery, state: FSMContext) -> None:
-    """فتح شاشة إعدادات الكويز المتقدمة (تعديل النوع، الصعوبة، والعدد)."""
-    if hasattr(state, "set_state"):
-        await state.set_state(QuizState.waiting_for_count)
-    if hasattr(state, "update_data"):
-        await state.update_data(in_settings_mode=True)
-    await _render_question_count_screen(
-        call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.in_({"quiz_back_summary", "qcount_review"}))
+@router.callback_query(QuizState.waiting_for_count, F.data == "qcount_review")
 async def back_to_count_review(call: types.CallbackQuery, state: FSMContext):
-    """الرجوع إلى لوحة ملخص إعدادات الكويز."""
-    if hasattr(state, "set_state"):
-        await state.set_state(QuizState.waiting_for_count)
-    if hasattr(state, "update_data"):
-        await state.update_data(in_settings_mode=False)
     await _render_question_count_screen(call.bot, call.message.chat.id,
         call.message.message_id, state, target_for_send=call.message)
     await call.answer()
