@@ -11,6 +11,7 @@ from unittest.mock import Mock
 from openpyxl import load_workbook
 from PIL import Image
 from reliability_support import load_functions
+from services.export_branding import branding_aspect, branding_png
 
 
 def exporter():
@@ -28,9 +29,10 @@ def exporter():
                 exec(compile(ast.Module(body=[node], type_ignores=[]), path, 'exec'), env)
     png = io.BytesIO()
     Image.new('RGB', (1500, 1600), 'white').save(png, format='PNG')
+    env['branding_png'], env['branding_aspect'] = branding_png, branding_aspect
     env['iter_print_blocks'] = Mock(side_effect=lambda *args: iter([png.getvalue()]))
     return load_functions(path, {
-        'build_quiz_xlsx', '_add_xlsx_math_preview', '_is_math_question',
+        'build_quiz_xlsx', '_add_xlsx_math_preview', '_add_xlsx_branding', '_is_math_question',
         '_answer_print_question', '_letters_for',
         'ExportError', 'normalize_style', 'detect_language', '_strip_parens'
     }, **env)
@@ -110,7 +112,8 @@ class ExcelExportTests(unittest.TestCase):
         self.assertEqual(renderer.call_args.args[0], {'question': q['question'], 'options': q['options']})
         self.assertEqual(wb['الأسئلة'].max_column, 7)
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            self.assertEqual(len([n for n in archive.namelist() if n.startswith('xl/media/')]), 1)
+            # 1 صورة للمعاينة الرياضية + شارة الختام الإجبارية بورقتي «الأسئلة» و«معلومات الاختبار».
+            self.assertEqual(len([n for n in archive.namelist() if n.startswith('xl/media/')]), 3)
             xml = ''.join(archive.read(n).decode() for n in archive.namelist() if n.endswith('.xml'))
         self.assertNotIn(q['explanation'], xml)
 

@@ -27,6 +27,7 @@ from services.print_quiz_renderer import (
     WIDTH as PRINT_WIDTH, chunk_height_px, chunk_width_px, iter_print_blocks, plan_print_blocks,
     render_print_chunk,
 )
+from services.export_branding import branding_aspect, branding_png
 from services.export_layout import MAX_SPREAD_GAP, pick_max_per_page, plan_column_pages, plan_pages, spread_gap
 from services.export_options import (
     DRAFT_HEIGHTS_PT, ExportOptions, ExportOptionsError, MAX_PER_PAGE, exam_meta_line, resolve_draft_style,
@@ -342,10 +343,22 @@ def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
                 "Read equations in Math Preview. Source text in Questions remains editable; "
                 "images do not update when cells are edited.")
         info.cell(notes_row, 2, note)
+    _add_xlsx_branding(ws, ws.max_row + 2, "B")
+    _add_xlsx_branding(info, info.max_row + 2, "A")
     buf = io.BytesIO()
     wb.save(buf)
     wb.close()
     return buf.getvalue()
+
+
+def _add_xlsx_branding(sheet, row: int, column: str) -> None:
+    """شارة الختام الإجبارية كصورة عائمة تحت آخر صف (لا تدخل بالخلايا فلا تؤثر على الاستيراد)."""
+    from openpyxl.drawing.image import Image as XLImage
+
+    img = XLImage(io.BytesIO(branding_png()))
+    img.width = 420
+    img.height = round(420 * branding_aspect())
+    sheet.add_image(img, f"{column}{row}")
 
 
 def _add_xlsx_math_preview(wb, title, questions, is_ar, include_answers, accent):
@@ -752,6 +765,17 @@ def _docx_keep_together(paragraph, keep: bool = True) -> None:
     paragraph.paragraph_format.keep_together = True
 
 
+def _docx_add_branding(doc, continuous_single_column: bool = False) -> None:
+    """شارة الختام الإجبارية (لوغو أبيض + تلغرام + @AbiadQuizMakerbot) بمنتصف الصفحة."""
+    if continuous_single_column:
+        _docx_set_columns(doc.add_section(WD_SECTION.CONTINUOUS), 1)
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(14)
+    p.paragraph_format.space_after = Pt(0)
+    p.add_run().add_picture(io.BytesIO(branding_png()), width=Cm(7.5))
+
+
 def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE,
                     include_answers: bool = True, options=None) -> bytes:
     """يبني ملف Word جميل التنسيق للكويز، مع اتجاه تلقائي حسب اللغة وستايل شكلي قابل للاختيار
@@ -1057,6 +1081,9 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
             _set_paragraph_rtl(sign_p, align_right=False)
             sign_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+    # شارة إجبارية بنهاية الاختبار (نهاية الأسئلة، قبل مفتاح الإجابات إن وُجد).
+    _docx_add_branding(doc, continuous_single_column=col_mode)
+
     if include_answers:
         if col_mode:
             _docx_set_columns(doc.add_section(WD_SECTION.NEW_PAGE), 1)   # الإجابات بعمود واحد
@@ -1082,6 +1109,7 @@ def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DE
                     del img_bytes
             except Exception as exc:
                 raise ExportError(f"تعذّر تنسيق إجابة السؤال {idx}؛ راجع المعادلات.") from exc
+        _docx_add_branding(doc)   # نهاية ملف نسخة الأستاذ
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
@@ -1868,6 +1896,32 @@ class _QuizPDFRenderer:
             self.y = lowest
         self.box_left, self.box_right = full_left, full_right
 
+    def _draw_branding(self) -> None:
+        """شارة الختام الإجبارية (لوغو أبيض + تلغرام + @AbiadQuizMakerbot) بمنتصف الصفحة.
+
+        إن كانت الصفحة ممتلئة تماماً (مثلاً «16 سؤال بالصفحة») تُرسم نسخة مصغّرة بالهامش السفلي
+        بدل دفعها لصفحة جديدة؛ ولا تُرسم فوق سطر الأستاذ بالتذييل (عندها تنتقل لصفحة جديدة).
+        """
+        aspect = branding_aspect()
+        image = ImageReader(io.BytesIO(branding_png()))
+        full_w = 210.0
+        if self.y - (full_w * aspect + 24) < self.margin + 25:
+            compact_w = 150.0
+            compact_h = compact_w * aspect
+            footer_line = bool(self.options.teacher_name and self.options.teacher_placement == "footer")
+            floor = 52.0 if footer_line else 37.0   # أعلى من رقم الصفحة وسطر الأستاذ
+            if self.y - 4 - compact_h >= floor:
+                self.c.drawImage(image, (self.page_w - compact_w) / 2, self.y - 4 - compact_h,
+                                 width=compact_w, height=compact_h, mask="auto")
+                self.y -= compact_h + 4
+                return
+        height = full_w * aspect
+        self._ensure_space(height + 24)
+        self.y -= 14
+        self.c.drawImage(image, (self.page_w - full_w) / 2, self.y - height,
+                         width=full_w, height=height, mask="auto")
+        self.y -= height + 6
+
     def _render_teacher_closing(self) -> None:
         """«إعداد الأستاذ» في آخر صفحة الأسئلة (قبل صفحة الإجابات إن وُجدت)."""
         self._ensure_space(60)
@@ -1902,8 +1956,10 @@ class _QuizPDFRenderer:
         self._render_questions()
         if self.options.teacher_name and self.options.teacher_placement == "last":
             self._render_teacher_closing()
+        self._draw_branding()   # إجباري: نهاية الأسئلة
         if self.include_answers:
             self._render_answer_table()
+            self._draw_branding()   # إجباري: نهاية ملف نسخة الأستاذ
         self._draw_footer()
         self.c.save()
         self.buf.seek(0)

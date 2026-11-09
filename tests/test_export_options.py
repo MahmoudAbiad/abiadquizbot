@@ -256,7 +256,8 @@ class WordAndExcelTests(unittest.TestCase):
     def test_word_answer_key_is_text(self):
         qs = quiz(5)
         data = build_quiz_docx("t", qs, "simple", True, ExportOptions(answers_mode="key"))
-        self.assertEqual(len(Document(io.BytesIO(data)).inline_shapes), 0)
+        # الأسئلة والمفتاح نصّ بلا صور؛ الصور الوحيدة هي شارة الختام الإجبارية (نهاية الأسئلة + نهاية الملف).
+        self.assertEqual(len(Document(io.BytesIO(data)).inline_shapes), 2)
 
     def test_excel_info_sheet_and_notes_row(self):
         qs = quiz(3, lang="en")
