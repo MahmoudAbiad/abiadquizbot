@@ -46,7 +46,7 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
             os=os,Dict=dict,List=list,Any=object,InvalidUploadError=InvalidUploadError,safe_title=lambda t:t,
             MSG_UPLOAD_FILE_MISSING='FILE-MISSING',
             execute_quiz_generation_workflow=AsyncMock(return_value=([{'question':'ok'}],'own-id','',None)),
-            _run_processing_heartbeat=AsyncMock(), reward_referrer_if_eligible=AsyncMock(),start_loaded_quiz=loaded,safe_file_cleanup=Mock())
+            _run_processing_heartbeat=AsyncMock(), _track_quiz_generation_failure=Mock(), reward_referrer_if_eligible=AsyncMock(),start_loaded_quiz=loaded,safe_file_cleanup=Mock())
         self.state=State({'selected_question_count':5,'items_count':1,'debited_cost':999,'debited_free':999,'debited_paid':999,'source_title':'keep'})
         return self.env['handle_count_start']
 
@@ -339,7 +339,7 @@ class WebAudioTests(unittest.IsolatedAsyncioTestCase):
                 logger=Mock(),log_error=Mock(),log_info=Mock(),get_or_create_audio_user=AsyncMock(return_value={'points':10}),
                 compute_balance_and_deficit=lambda *a:(10,0),get_audio_confirm_keyboard=lambda:None,
                 get_safe_mime_type=lambda p:'audio/mpeg',log_audio_uploaded_event=AsyncMock(),
-                spawn=lambda coro:coro.close(),
+                spawn=lambda coro:coro.close(), track_upload_rejection=Mock(),
                 MSG_AUDIO_CONFIRM_TEMPLATE='{duration_minutes} {cost} {balance}')
             await env['process_web_uploaded_audio'](1,1,'1/audio.mp3','audio.mp3')
             if seconds is None:

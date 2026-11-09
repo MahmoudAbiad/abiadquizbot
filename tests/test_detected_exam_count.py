@@ -47,18 +47,16 @@ class ExamCountTests(unittest.IsolatedAsyncioTestCase):
         await env['process_count_custom_text'](msg, state)
         self.assertEqual(state.data['selected_question_count'], 21)
 
-    async def test_missing_detection_does_not_invent_ten(self):
+    async def test_missing_detection_falls_back_to_default_count(self):
         env = self.ui()
         state = State(subject_type=C.SUBJECT_QUIZ_SOLVED)
         msg = types.SimpleNamespace(bot=object(), chat=types.SimpleNamespace(id=1), message_id=2)
         await env['show_question_count_screen'](msg, state)
-        self.assertEqual(state.data['selected_question_count'], 0)
+        self.assertEqual(state.data['selected_question_count'], C.DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK)
         keyboard = load_functions('keyboards.py', {'get_quiz_detected_count_keyboard'},
                                   **vars(C), types=WIDGETS)['get_quiz_detected_count_keyboard']
-        actions = [b.callback_data for row in keyboard(0).inline_keyboard for b in row]
+        actions = [b.callback_data for row in keyboard(C.DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK).inline_keyboard for b in row]
         self.assertIn('qcount_custom', actions)
-        self.assertNotIn('qcount_start', actions)
-        actions = [b.callback_data for row in keyboard(17).inline_keyboard for b in row]
         self.assertIn('qcount_start', actions)
 
     async def test_render_uses_current_number_after_edit(self):
@@ -122,6 +120,7 @@ class ExamCountTests(unittest.IsolatedAsyncioTestCase):
         fixture.state.data['file_paths'] = ['source.pdf']
         fixture.env['_missing_upload_paths'] = lambda data: []
         fixture.env['_render_question_count_screen'] = AsyncMock()
+        fixture.env['_track_quiz_generation_failure'] = Mock()
         fixture.env['execute_quiz_generation_workflow'].return_value = (
             None, None, 'extraction_count_mismatch', {'extracted_count':1})
         await fn(fixture.call, fixture.state)

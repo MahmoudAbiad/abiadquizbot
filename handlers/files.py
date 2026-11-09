@@ -29,7 +29,7 @@ from constants import (
     SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
     QUIZ_EXTRACTION_MODE_AS_IS, QUIZ_EXTRACTION_MODE_AI_SOLVE,
     MSG_QUIZ_SOLVED_DETECTED, MSG_QUIZ_UNSOLVED_DETECTED,
-    MSG_QUIZ_DETECTED_COUNT_TEMPLATE, MAX_QUESTIONS_TO_GENERATE,
+    MSG_QUIZ_DETECTED_COUNT_TEMPLATE, MAX_QUESTIONS_TO_GENERATE, DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK,
     # 🆕 التحقق المجتمعي من تصنيف المادة (راجع migration_classification_votes.sql)
     CLASSIFICATION_SUBJECT_LABELS_AR, CLASSIFICATION_SUBJECT_CODES_REVERSE,
     MSG_CLASSIFICATION_VOTE_PROMPT,
@@ -283,7 +283,8 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
     subject_type = data.get("subject_type")
     ready_exam = subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
     default_suggestions = globals().get("DEFAULT_COUNT_SUGGESTIONS", [5, 10, 15, 20])
-    selected_count = int(data.get("selected_question_count") or (0 if ready_exam else default_suggestions[1]))
+    default_fallback = globals().get("DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK", 10)
+    selected_count = int(data.get("selected_question_count") or (default_fallback if ready_exam else default_suggestions[1]))
     count_prompt_text = data.get(
         "count_prompt_text",
         "✅ تم تجهيز الإعدادات الافتراضية للاختبار. يمكنك الإنشاء مباشرة أو تعديل الإعدادات.",
@@ -370,7 +371,8 @@ async def show_question_count_screen(reply_target: types.Message, state: FSMCont
     data = await state.get_data()
     subject_type = data.get("subject_type")
     if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH:
-        detected_count = int(data.get("selected_question_count") or data.get("detected_question_count") or 0)
+        default_fallback = globals().get("DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK", 10)
+        detected_count = int(data.get("selected_question_count") or data.get("detected_question_count") or default_fallback)
         as_is_mode = globals().get("QUIZ_EXTRACTION_MODE_AS_IS", "as_is")
         ai_solve_mode = globals().get("QUIZ_EXTRACTION_MODE_AI_SOLVE", "ai_solve")
         default_mode = as_is_mode if subject_type == SUBJECT_QUIZ_SOLVED else ai_solve_mode
@@ -524,9 +526,9 @@ async def ask_question_count(
     default_suggestions = globals().get("DEFAULT_COUNT_SUGGESTIONS", [5, 10, 15, 20])
 
     if classification.subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
-        detected_count = classification.question_count
-        if detected_count is not None:
-            detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
+        default_fallback = globals().get("DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK", 10)
+        raw_count = classification.question_count or default_fallback
+        detected_count = max(1, min(int(raw_count), MAX_QUESTIONS_TO_GENERATE))
         default_extraction_mode = (
             QUIZ_EXTRACTION_MODE_AS_IS
             if classification.subject == SUBJECT_QUIZ_SOLVED

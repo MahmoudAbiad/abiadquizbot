@@ -43,7 +43,7 @@ CLASSIFY_CACHE_TTL_SECONDS = 7 * 24 * 3600
 # Ignore those temporary results without deleting votes, locks or saved quizzes.
 # v8: v7 results cached under the "null if unsure" prompt made exam-count detection
 # fail for the same file for a week; ignore them without touching votes/locks/quizzes.
-_CLASSIFY_CACHE_PREFIX = "subject_classify:v8:"
+_CLASSIFY_CACHE_PREFIX = "subject_classify:v9:"
 
 # 🆕 SUBJECT_FRENCH أُضيف بنفس معاملة SUBJECT_ENGLISH بالضبط (راجع constants.py).
 _VALID_SUBJECTS = {
@@ -80,8 +80,8 @@ class SubjectClassification(BaseModel):
         default=None,
         description=(
             "approximate count of the actual convertible questions in the document; give your best "
-            "reasonable estimate rather than null when an exact count is hard; only set when "
-            "subject is quiz_solved or quiz_unsolved, otherwise null"
+            "reasonable estimate rather than null when an exact count is hard; MUST always be an integer >= 1 "
+            "when subject is quiz_solved or quiz_unsolved (never null); only null when subject is NOT an exam"
         ),
     )
     # 🆕 المادة العلمية الفعلية للمحتوى، بمعزل عن كونه اختباراً جاهزاً أم لا - تُملأ فقط
@@ -165,8 +165,11 @@ def _normalize(result: Optional[SubjectClassification]) -> SubjectClassification
             raw_count = int(result.question_count) if result.question_count else None
         except (TypeError, ValueError):
             raw_count = None
-        if raw_count is not None:
+        if raw_count is not None and raw_count > 0:
             question_count = max(MIN_QUESTIONS_TO_GENERATE, min(raw_count, MAX_QUESTIONS_TO_GENERATE))
+        else:
+            from constants import DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
+            question_count = DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
 
     # 🆕 content_subject منطقي فقط لاختبار جاهز (محلول/غير محلول) - لأي subject آخر يبقى
     # null دائماً (مادته العلمية محمولة أصلاً بقيمة subject نفسها). قيمة غير متوقعة راجعة
@@ -197,8 +200,9 @@ def _merge_classification_results(results):
     subject = Counter(r.subject for r in useful).most_common(1)[0][0]
     chosen = next(r for r in useful if r.subject == subject).model_copy(deep=True)
     if quizzes:
-        counts = [r.question_count for r in quizzes if r.question_count is not None]
-        chosen.question_count = sum(counts) if counts else None
+        from constants import DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
+        counts = [r.question_count for r in quizzes if r.question_count is not None and r.question_count > 0]
+        chosen.question_count = sum(counts) if counts else DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
         academics = [r.content_subject for r in quizzes if r.content_subject not in (None, SUBJECT_OTHER)]
         if academics:
             chosen.content_subject = Counter(academics).most_common(1)[0][0]
@@ -216,8 +220,9 @@ async def _dispatch_classification(*, contents=None, paths=None):
                            slot="detection", mode="detection",
                            timeout=MATH_DETECTION_TIMEOUT)
     if result:
-        if getattr(result, "sampled", False):
-            result.parsed.question_count = None
+        if getattr(result, "sampled", False) and not getattr(result.parsed, "question_count", None):
+            from constants import DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
+            result.parsed.question_count = DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
         return _normalize(result.parsed)
     # Vision-only models can read PDF pages as images. Keep three pages in
     # memory at a time, matching the previous bounded Groq classifier.
@@ -232,7 +237,9 @@ async def _dispatch_classification(*, contents=None, paths=None):
                 slot="detection", mode="detection", timeout=MATH_DETECTION_TIMEOUT)
             if result:
                 if getattr(result, "sampled", False):
-                    result.parsed.question_count = None
+                    if not getattr(result.parsed, "question_count", None):
+                        from constants import DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
+                        result.parsed.question_count = DEFAULT_DETECTED_QUIZ_COUNT_FALLBACK
                     return _normalize(result.parsed)
                 results.append(result.parsed)
             else:
