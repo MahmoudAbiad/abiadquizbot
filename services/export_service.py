@@ -18,6 +18,7 @@ from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Cm, Pt, RGBColor
 
 from logger import get_logger, log_error
@@ -27,7 +28,7 @@ from services.print_quiz_renderer import (
     WIDTH as PRINT_WIDTH, chunk_height_px, chunk_width_px, iter_print_blocks, plan_print_blocks,
     render_print_chunk,
 )
-from services.export_branding import branding_aspect, branding_png
+from services.export_branding import BOT_HANDLE, BOT_URL, TELEGRAM_BLUE_HEX, branding_aspect, branding_png
 from services.export_layout import MAX_SPREAD_GAP, pick_max_per_page, plan_column_pages, plan_pages, spread_gap
 from services.export_options import (
     DRAFT_HEIGHTS_PT, ExportOptions, ExportOptionsError, MAX_PER_PAGE, exam_meta_line, resolve_draft_style,
@@ -352,13 +353,24 @@ def build_quiz_xlsx(title: str, questions: List[Dict[str, Any]],
 
 
 def _add_xlsx_branding(sheet, row: int, column: str) -> None:
-    """شارة الختام الإجبارية كصورة عائمة تحت آخر صف (لا تدخل بالخلايا فلا تؤثر على الاستيراد)."""
+    """شارة الختام الإجبارية: صورة عائمة (لوغو + تلغرام) تحت آخر صف، ومعرّف البوت تحتها كنص
+    حقيقي بخلية (قابل للتحديد) برابط يفتح البوت. الصورة لا تدخل بالخلايا؛ وخلية المعرّف
+    يتجاهلها الاستيراد (services/excel_import.py) فلا تُحسب سؤالاً."""
     from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.styles import Alignment, Font
+    from services.export_branding import BOT_HANDLE, BOT_URL, TELEGRAM_BLUE_HEX
 
     img = XLImage(io.BytesIO(branding_png()))
-    img.width = 420
-    img.height = round(420 * branding_aspect())
+    img.width = 150
+    img.height = round(150 * branding_aspect())
     sheet.add_image(img, f"{column}{row}")
+    # الصورة ~82px = ~4 صفوف (20px للصف الافتراضي)، فنضع المعرّف تحتها مباشرة.
+    cell = sheet[f"{column}{row + 5}"]
+    cell.value = BOT_HANDLE
+    cell.data_type = "s"
+    cell.hyperlink = BOT_URL
+    cell.font = Font(name="Calibri", size=14, bold=True, underline="single", color=TELEGRAM_BLUE_HEX)
+    cell.alignment = Alignment(horizontal="left", vertical="center")
 
 
 def _add_xlsx_math_preview(wb, title, questions, is_ar, include_answers, accent):
@@ -765,15 +777,56 @@ def _docx_keep_together(paragraph, keep: bool = True) -> None:
     paragraph.paragraph_format.keep_together = True
 
 
+def _docx_add_hyperlink(paragraph, url: str, text: str, size_pt: float, color_hex: str,
+                        raise_half_pt: int = 0, font_name: str = "Calibri") -> None:
+    """يضيف نصاً حقيقياً (قابل للتحديد) كرابط خارجي قابل للضغط داخل الفقرة.
+    raise_half_pt: رفع النص عن خط الأساس بنصف النقطة (لمحاذاته عمودياً مع صورة بجانبه)."""
+    r_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+    hyperlink.set(qn("w:history"), "1")
+    run = OxmlElement("w:r")
+    rpr = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    for attr in ("w:ascii", "w:hAnsi", "w:cs"):
+        fonts.set(qn(attr), font_name)
+    rpr.append(fonts)
+    rpr.append(OxmlElement("w:b"))
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), color_hex)
+    rpr.append(color)
+    if raise_half_pt:
+        position = OxmlElement("w:position")
+        position.set(qn("w:val"), str(raise_half_pt))
+        rpr.append(position)
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), str(int(size_pt * 2)))
+    rpr.append(size)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    rpr.append(underline)
+    run.append(rpr)
+    t = OxmlElement("w:t")
+    t.text = text
+    run.append(t)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
 def _docx_add_branding(doc, continuous_single_column: bool = False) -> None:
-    """شارة الختام الإجبارية (لوغو أبيض + تلغرام + @AbiadQuizMakerbot) بمنتصف الصفحة."""
+    """شارة الختام الإجبارية بمنتصف الصفحة: صورة (لوغو + تلغرام) ثم @AbiadQuizMakerbot كنص حقيقي
+    قابل للتحديد وللضغط (يفتح البوت). الفقرة LTR عمداً حتى لا ينقل bidi الـ«@» لآخر المعرّف."""
     if continuous_single_column:
         _docx_set_columns(doc.add_section(WD_SECTION.CONTINUOUS), 1)
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(14)
     p.paragraph_format.space_after = Pt(0)
-    p.add_run().add_picture(io.BytesIO(branding_png()), width=Cm(7.5))
+    badge_w = Cm(2.5)   # ارتفاعها ≈ 1.375 سم (39pt)
+    p.add_run().add_picture(io.BytesIO(branding_png()), width=badge_w)
+    p.add_run("\u00a0")
+    # الصورة تجلس على خط الأساس، فنرفع النص تقريباً لمنتصفها عمودياً (28 = 14pt بنصف النقطة).
+    _docx_add_hyperlink(p, BOT_URL, BOT_HANDLE, 15, TELEGRAM_BLUE_HEX, raise_half_pt=28)
 
 
 def build_quiz_docx(title: str, questions: List[Dict[str, Any]], style: str = DEFAULT_STYLE,
@@ -1896,31 +1949,54 @@ class _QuizPDFRenderer:
             self.y = lowest
         self.box_left, self.box_right = full_left, full_right
 
+    def _branding_geometry(self, scale: float):
+        """مقاسات صف الشارة: صورة (لوغو + تلغرام) ثم المعرّف نصاً. scale=1 للحجم الكامل."""
+        img_w = 70.0 * scale
+        img_h = img_w * branding_aspect()
+        size = 12.5 * scale
+        gap = 6.0 * scale
+        font = "Latin-Bold" if _font_available("Latin-Bold") else "Helvetica-Bold"
+        text_w = pdfmetrics.stringWidth(BOT_HANDLE, font, size)
+        return img_w, img_h, size, gap, font, text_w
+
+    def _paint_branding(self, geo, top: float) -> None:
+        """يرسم الصف بمنتصف الصفحة: الصورة + @AbiadQuizMakerbot كنص حقيقي (قابل للتحديد/النسخ)
+        مع خط تحته، وكامل الصف رابط URI قابل للضغط يفتح البوت."""
+        img_w, img_h, size, gap, font, text_w = geo
+        x = (self.page_w - (img_w + gap + text_w)) / 2
+        y0 = top - img_h
+        self.c.drawImage(ImageReader(io.BytesIO(branding_png())), x, y0,
+                         width=img_w, height=img_h, mask="auto")
+        tx = x + img_w + gap
+        ty = y0 + img_h / 2 - size * 0.36
+        color = HexColor("#" + TELEGRAM_BLUE_HEX)
+        self.c.setFillColor(color)
+        self.c.setFont(font, size)
+        self.c.drawString(tx, ty, BOT_HANDLE)
+        self.c.setStrokeColor(color)
+        self.c.setLineWidth(max(0.5, size * 0.06))
+        self.c.line(tx, ty - size * 0.14, tx + text_w, ty - size * 0.14)
+        self.c.linkURL(BOT_URL, (x, y0, tx + text_w, y0 + img_h), relative=0, thickness=0)
+
     def _draw_branding(self) -> None:
-        """شارة الختام الإجبارية (لوغو أبيض + تلغرام + @AbiadQuizMakerbot) بمنتصف الصفحة.
+        """شارة الختام الإجبارية (لوغو أبيض + تلغرام + @AbiadQuizMakerbot كنص قابل للضغط) بمنتصف الصفحة.
 
         إن كانت الصفحة ممتلئة تماماً (مثلاً «16 سؤال بالصفحة») تُرسم نسخة مصغّرة بالهامش السفلي
         بدل دفعها لصفحة جديدة؛ ولا تُرسم فوق سطر الأستاذ بالتذييل (عندها تنتقل لصفحة جديدة).
         """
-        aspect = branding_aspect()
-        image = ImageReader(io.BytesIO(branding_png()))
-        full_w = 210.0
-        if self.y - (full_w * aspect + 24) < self.margin + 25:
-            compact_w = 150.0
-            compact_h = compact_w * aspect
+        full = self._branding_geometry(1.0)
+        if self.y - (full[1] + 24) < self.margin + 25:
+            compact = self._branding_geometry(0.71)
             footer_line = bool(self.options.teacher_name and self.options.teacher_placement == "footer")
             floor = 52.0 if footer_line else 37.0   # أعلى من رقم الصفحة وسطر الأستاذ
-            if self.y - 4 - compact_h >= floor:
-                self.c.drawImage(image, (self.page_w - compact_w) / 2, self.y - 4 - compact_h,
-                                 width=compact_w, height=compact_h, mask="auto")
-                self.y -= compact_h + 4
+            if self.y - 4 - compact[1] >= floor:
+                self._paint_branding(compact, self.y - 4)
+                self.y -= compact[1] + 4
                 return
-        height = full_w * aspect
-        self._ensure_space(height + 24)
+        self._ensure_space(full[1] + 24)
         self.y -= 14
-        self.c.drawImage(image, (self.page_w - full_w) / 2, self.y - height,
-                         width=full_w, height=height, mask="auto")
-        self.y -= height + 6
+        self._paint_branding(full, self.y)
+        self.y -= full[1] + 6
 
     def _render_teacher_closing(self) -> None:
         """«إعداد الأستاذ» في آخر صفحة الأسئلة (قبل صفحة الإجابات إن وُجدت)."""
