@@ -84,8 +84,9 @@ async def execute(request, *, slot="cascade", exclude_vertex=False, mode="regula
     from dataclasses import replace
     from helpers.settings_helper import get_ai_thinking_level
     task = "detection" if slot == "detection" or mode == "detection" else "generation"
-    # Resolve once for this cascade: fallback attempts keep the same policy.
-    request = replace(request, reasoning_effort=await get_ai_thinking_level(task))
+    # Resolve once for this cascade: fallback attempts keep the same policy, unless caller set an explicit effort.
+    effective_effort = request.reasoning_effort if request.reasoning_effort is not None else await get_ai_thinking_level(task)
+    request = replace(request, reasoning_effort=effective_effort)
     # All generation/extraction/streaming paths use this boundary and QuizResponse.
     if request.schema is not None and request.schema.__name__ == "QuizResponse":
         from dataclasses import replace

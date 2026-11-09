@@ -618,16 +618,29 @@ def get_audio_action_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_document_export_keyboard() -> types.InlineKeyboardMarkup:
-    """🆕 لوحة اختيار صيغة الملف (Word أو PDF) عند تصدير النص المفرغ/الملخص الأكاديمي
-    للمحاضرة الصوتية - أبسط من get_export_format_keyboard (بدون اختيار ستايل تنسيق
-    مسبق، لأن المحتوى هنا نص متصل وليس كويز أسئلة)."""
-    kb = [
-        [
-            types.InlineKeyboardButton(text="📄 Word (docx)", callback_data="audio_export_docx"),
-            types.InlineKeyboardButton(text="📕 PDF", callback_data="audio_export_pdf"),
+def get_document_export_keyboard(has_summary: bool = False) -> types.InlineKeyboardMarkup:
+    """🆕 لوحة اختيار صيغة الملف (Word أو PDF) عند تصدير المحاضرة الصوتية.
+    إذا وُجد ملخص أكاديمي في الجلسة الحالية، تتيح للطالب تصدير الملخص أو النص الكامل كلٍّ على حدة."""
+    if has_summary:
+        kb = [
+            [
+                types.InlineKeyboardButton(text="📄 الملخص — Word", callback_data="audio_export_sum_docx"),
+                types.InlineKeyboardButton(text="📕 الملخص — PDF", callback_data="audio_export_sum_pdf"),
+            ],
+            [
+                types.InlineKeyboardButton(text="📄 النص الكامل — Word", callback_data="audio_export_raw_docx"),
+                types.InlineKeyboardButton(text="📕 النص الكامل — PDF", callback_data="audio_export_raw_pdf"),
+            ],
+            [types.InlineKeyboardButton(text="🔙 إغلاق خيارات التحميل", callback_data="audio_export_back")],
         ]
-    ]
+    else:
+        kb = [
+            [
+                types.InlineKeyboardButton(text="📄 Word (docx)", callback_data="audio_export_docx"),
+                types.InlineKeyboardButton(text="📕 PDF", callback_data="audio_export_pdf"),
+            ],
+            [types.InlineKeyboardButton(text="🔙 إغلاق خيارات التحميل", callback_data="audio_export_back")],
+        ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 # ==================== لوحات إدارة المخازن المتعددة والتقييمات ====================

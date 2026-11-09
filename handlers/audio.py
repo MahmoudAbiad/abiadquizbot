@@ -35,7 +35,8 @@ from helpers.gemini_helper import get_last_generation_metadata
 from services.ai_audit import build_audio_audit_metadata
 from config import QuizState, bot
 from constants import (
-    ADMIN_CONTACT, MAX_AUDIO_DURATION_MINUTES, MAX_AUDIO_WEB_UPLOAD_SIZE,
+    ADMIN_CONTACT, ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE,
+    MAX_AUDIO_DURATION_MINUTES, MAX_AUDIO_WEB_UPLOAD_SIZE,
     MSG_AUDIO_CONFIRM_TEMPLATE, MSG_PREVIOUS_REQUEST_REPLACED,
     MSG_REDIRECT_TO_WEB_UPLOAD,
 )
@@ -58,10 +59,19 @@ from services.audio_flow_service import (
     log_insufficient_balance_event,
     write_temp_text_export,
 )
-from services.audio_service import summarize_lecture_text, transcribe_audio_lecture
+from services.audio_service import (
+    format_markdown_for_telegram_html,
+    summarize_lecture_text,
+    transcribe_audio_lecture,
+)
 from services.flow_state import build_state_for_chat
 from handlers.files import ask_question_count
-from services.export_service import build_document_docx, build_document_pdf, build_export_filename
+from services.export_service import (
+    STYLE_MODERN,
+    build_document_docx,
+    build_document_pdf,
+    build_export_filename,
+)
 from services import offload
 from services.usage_tracking import track_upload_rejection
 from helpers.supabase_helper import (
@@ -84,9 +94,37 @@ MAX_INLINE_TEXT_CHARS = 4000  # حد رسالة تيليجرام النصية ا
 def _extract_extension(message: types.Message) -> str:
     if message.voice:
         return ".ogg"
-    file_name = message.audio.file_name or ""
-    ext = os.path.splitext(file_name)[1]
+    media_obj = message.audio or getattr(message, "document", None)
+    file_name = (getattr(media_obj, "file_name", None) or "") if media_obj else ""
+    ext = os.path.splitext(file_name)[1].lower()
     return ext if ext else ".mp3"
+
+
+async def _run_audio_transcription_heartbeat(status_msg: types.Message, duration_minutes: int) -> None:
+    """نبضة تحديث حية لرسالة الانتظار أثناء التفريغ الصوتي لإبقاء الطالب مطمئناً بالوقت المنقضي والمتوقع."""
+    est_total = max(20, int(duration_minutes or 1) * int(ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE or 12))
+    started = time.monotonic()
+    last_text = None
+    while True:
+        await asyncio.sleep(12)
+        elapsed = int(time.monotonic() - started)
+        remaining = max(5, est_total - elapsed)
+        if elapsed < est_total:
+            progress_line = f"⏳ مضى <b>{elapsed} ثانية</b> · المتبقي التقديري: ~<b>{remaining} ثانية</b>"
+        else:
+            progress_line = f"⏳ مضى <b>{elapsed} ثانية</b> · جارٍ تنسيق ومراجعة الفقرات النهائية..."
+        new_text = (
+            "🎙️ <b>جارٍ تفريغ المحاضرة نصياً وتنظيمها أكاديمياً...</b>\n\n"
+            f"{progress_line}\n"
+            "يرجى الانتظار قليلاً، سنعرض لك الخيارات فور الاكتمال."
+        )
+        if new_text == last_text:
+            continue
+        try:
+            await status_msg.edit_text(new_text, parse_mode="HTML")
+            last_text = new_text
+        except Exception:
+            pass
 
 
 async def _send_insufficient_balance(
@@ -163,8 +201,8 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
         # جاهزة لم يُقرَّر مصيرها بعد) يُلغى بأمان عند وصول محاضرة صوتية جديدة
         await state.set_state(None)
 
-    media = message.voice or message.audio
-    file_size = media.file_size or 0
+    media = message.voice or message.audio or getattr(message, "document", None)
+    file_size = (media.file_size if media else 0) or 0
     if file_size > MAX_AUDIO_FILE_SIZE:
         track_upload_rejection(
             message.from_user.id, "audio", "size_exceeded", "telegram",
@@ -186,9 +224,16 @@ async def handle_audio_message(message: types.Message, state: FSMContext) -> Non
     # الزمنية قدر الإمكان إذا وصل مقطع صوتي ثانٍ من نفس الطالب بنفس اللحظة تقريباً.
     await state.set_state(QuizState.processing_audio)
 
-    reported_duration_seconds = message.voice.duration if message.voice else (message.audio.duration or 0)
-    mime_type = media.mime_type or ("audio/ogg" if message.voice else "audio/mp3")
-    source_title = message.audio.title if (message.audio and message.audio.title) else None
+    reported_duration_seconds = (
+        message.voice.duration if message.voice
+        else ((message.audio.duration or 0) if message.audio else 0)
+    )
+    mime_type = getattr(media, "mime_type", None) or ("audio/ogg" if message.voice else "audio/mp3")
+    doc_obj = getattr(message, "document", None)
+    source_title = (
+        message.audio.title if (message.audio and message.audio.title)
+        else (os.path.splitext(doc_obj.file_name)[0] if (doc_obj and getattr(doc_obj, "file_name", None)) else None)
+    )
 
     ensure_directory_exists(DOWNLOADS_DIR)
     extension = _extract_extension(message)
@@ -367,14 +412,27 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         )
 
         transcription_started_at = time.monotonic()
+        heartbeat_task = None
+        hb_fn = globals().get("_run_audio_transcription_heartbeat")
+        if hb_fn is not None:
+            heartbeat_task = asyncio.create_task(hb_fn(call.message, duration_minutes))
         try:
-            transcription_result = await transcribe_audio_lecture(destination, mime_type)
+            try:
+                transcription_result = await transcribe_audio_lecture(
+                    destination, mime_type, duration_minutes=duration_minutes
+                )
+            except TypeError:
+                transcription_result = await transcribe_audio_lecture(destination, mime_type)
         except Exception as exc:
             log_error(logger, f"Audio transcription failed: {exc}", exception=exc)
             transcription_result = None
         finally:
-            # 🆕 سجل الزمن الفعلي مقابل مدة المحاضرة - استخدم هاي القيم لاحقاً لمعايرة
-            # ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE بدل الرقم التقريبي الحالي (12)
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             elapsed = time.monotonic() - transcription_started_at
             per_minute = elapsed / duration_minutes if duration_minutes else elapsed
             log_info(logger, f"Transcription timing: {duration_minutes}min audio took {elapsed:.1f}s ({per_minute:.1f}s/min)")
@@ -414,6 +472,8 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
         final_title = source_title or f"محاضرة صوتية ({duration_minutes} دقيقة)"
         await state.update_data(
             pure_text=pure_text,
+            summary_text=None,
+            summary_truncated=False,
             source_title=final_title,
             duration_minutes=duration_minutes,
             audio_debited_cost=cost - partial_refund_amount,
@@ -517,7 +577,7 @@ async def handle_audio_cancel(call: types.CallbackQuery, state: FSMContext) -> N
 
 @router.callback_query(QuizState.waiting_for_audio_action, F.data == "audio_act_send_text")
 async def handle_audio_send_text(call: types.CallbackQuery, state: FSMContext) -> None:
-    """إرسال النص المفرغ مباشرة كرسالة لو كان قصيراً، أو كملف .txt لو تجاوز الحد الآمن."""
+    """إرسال النص المفرغ مباشرة كرسالة منسقة لو كان قصيراً، أو كملف .txt لو تجاوز الحد الآمن."""
     await call.answer()
     txt_path = None
     try:
@@ -527,8 +587,12 @@ async def handle_audio_send_text(call: types.CallbackQuery, state: FSMContext) -
             await call.message.answer("❌ تعذر العثور على نص المحاضرة، يرجى إعادة إرسال الملف الصوتي.")
             return
 
-        if len(pure_text) <= MAX_INLINE_TEXT_CHARS:
-            await call.message.answer(pure_text)
+        formatted_html = format_markdown_for_telegram_html(pure_text)
+        if len(formatted_html) <= MAX_INLINE_TEXT_CHARS:
+            try:
+                await call.message.answer(f"📋 <b>النص المفرغ من المحاضرة:</b>\n\n{formatted_html}", parse_mode="HTML")
+            except Exception:
+                await call.message.answer(pure_text[:MAX_INLINE_TEXT_CHARS])
         else:
             txt_path = write_temp_text_export("transcript", call.from_user.id, pure_text)
             await call.message.answer_document(
@@ -546,8 +610,8 @@ async def handle_audio_send_text(call: types.CallbackQuery, state: FSMContext) -
 @router.callback_query(QuizState.waiting_for_audio_action, F.data == "audio_act_summarize")
 @user_locked()
 async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -> None:
-    """يلخّص النص المفرغ ويعيد صياغته أكاديمياً عبر summarize_lecture_text، ثم يعرض
-    نفس لوحة الإجراءات مجدداً لتمكين الطالب من تصدير الملخص أو توليد كويز منه."""
+    """يلخّص النص المفرغ ويعيد صياغته أكاديمياً عبر summarize_lecture_text (أو يعرض الملخص
+    المحفوظ بنفس الجلسة الحالية فوراً دون إعادة استدعاء الذكاء الاصطناعي)."""
     await call.answer()
     status_msg = None
     try:
@@ -557,28 +621,41 @@ async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -
             await call.message.answer("❌ تعذر العثور على نص المحاضرة، يرجى إعادة إرسال الملف الصوتي.")
             return
 
-        status_msg = await call.message.answer("✨ جارٍ تلخيص المحاضرة وصياغتها أكاديمياً، يرجى الانتظار...")
-        summary_result = await summarize_lecture_text(pure_text)
-        if not summary_result or not summary_result[0] or not summary_result[0].strip():
-            await status_msg.edit_text("⚠️ تعذر توليد تلخيص للمحاضرة، حاول مجدداً لاحقاً.")
-            return
-        summary, summary_truncated = summary_result
+        summary = data.get("summary_text")
+        summary_truncated = bool(data.get("summary_truncated"))
+        if not summary:
+            status_msg = await call.message.answer("✨ جارٍ تلخيص المحاضرة وصياغتها أكاديمياً، يرجى الانتظار...")
+            summary_result = await summarize_lecture_text(pure_text)
+            if not summary_result or not summary_result[0] or not summary_result[0].strip():
+                await status_msg.edit_text("⚠️ تعذر توليد تلخيص للمحاضرة، حاول مجدداً لاحقاً.")
+                return
+            summary, summary_truncated = summary_result
 
-        await state.update_data(summary_text=summary)
-        spawn(log_usage_event(call.from_user.id, "audio_summary_completed", build_audio_audit_metadata(
-            get_last_generation_metadata(), "audio_summary", data.get("input_channel"),
-            duration_minutes=data.get("duration_minutes"), cost=0, truncated=summary_truncated,
-        )))
+            await state.update_data(summary_text=summary, summary_truncated=summary_truncated)
+            spawn(log_usage_event(call.from_user.id, "audio_summary_completed", build_audio_audit_metadata(
+                get_last_generation_metadata(), "audio_summary", data.get("input_channel"),
+                duration_minutes=data.get("duration_minutes"), cost=0, truncated=summary_truncated,
+            )))
 
         truncated_note = (
             "\n\n⚠️ <i>ملاحظة: النص طويل جداً وتوقف التلخيص قبل تغطية كامل المحاضرة.</i>"
             if summary_truncated else ""
         )
 
-        if len(summary) <= MAX_INLINE_TEXT_CHARS:
-            await status_msg.edit_text(f"✨ <b>ملخص المحاضرة (صياغة أكاديمية):</b>\n\n{summary}{truncated_note}", parse_mode="HTML")
+        formatted_summary_html = format_markdown_for_telegram_html(summary)
+        full_html_msg = f"✨ <b>ملخص المحاضرة (صياغة أكاديمية):</b>\n\n{formatted_summary_html}{truncated_note}"
+
+        if len(full_html_msg) <= MAX_INLINE_TEXT_CHARS:
+            if status_msg:
+                await status_msg.edit_text(full_html_msg, parse_mode="HTML")
+            else:
+                await call.message.answer(full_html_msg, parse_mode="HTML")
         else:
-            await status_msg.delete()
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
             txt_path = write_temp_text_export("summary", call.from_user.id, summary)
             try:
                 await call.message.answer_document(
@@ -589,7 +666,7 @@ async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -
                 safe_file_cleanup(txt_path)
 
         await call.message.answer(
-            "يمكنك الآن تحميل الملخص كملف Word/PDF، أو إنشاء كويز من محتوى المحاضرة:",
+            "يمكنك الآن تحميل الملخص أو النص الكامل كملف Word/PDF منسّق، أو إنشاء كويز من المحاضرة:",
             reply_markup=get_audio_action_keyboard(),
         )
     except Exception as exc:
@@ -603,36 +680,69 @@ async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -
 
 @router.callback_query(QuizState.waiting_for_audio_action, F.data == "audio_act_export")
 async def handle_audio_export_menu(call: types.CallbackQuery, state: FSMContext) -> None:
-    """يعرض اختيار الصيغة (Word/PDF) قبل توليد ملف التصدير النهائي."""
+    """يعرض اختيار الصيغة (Word/PDF) مع الفصل بين تصدير الملخص وتصدير النص الكامل إن وُجد الملخص."""
     await call.answer()
     try:
-        await call.message.answer("📄 اختر صيغة الملف التي تريد تحميلها:", reply_markup=get_document_export_keyboard())
+        data = await state.get_data()
+        has_summary = bool(data.get("summary_text"))
+        prompt = (
+            "📄 اختر النسخة والصيغة التي تريد تحميلها (الملخص الأكاديمي أو النص الكامل للمحاضرة):"
+            if has_summary else "📄 اختر صيغة الملف التي تريد تحميلها:"
+        )
+        await call.message.answer(prompt, reply_markup=get_document_export_keyboard(has_summary=has_summary))
     except Exception as exc:
         log_error(logger, f"Audio export menu failed: {exc}", exception=exc)
         await call.message.answer("❌ تعذر عرض خيارات التصدير، حاول مجدداً.")
 
 
-@router.callback_query(QuizState.waiting_for_audio_action, F.data.in_({"audio_export_docx", "audio_export_pdf"}))
+@router.callback_query(QuizState.waiting_for_audio_action, F.data == "audio_export_back")
+async def handle_audio_export_back(call: types.CallbackQuery) -> None:
+    """إغلاق رسالة خيارات التصدير الفرعية."""
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
+@router.callback_query(
+    QuizState.waiting_for_audio_action,
+    F.data.in_({
+        "audio_export_docx", "audio_export_pdf",
+        "audio_export_sum_docx", "audio_export_sum_pdf",
+        "audio_export_raw_docx", "audio_export_raw_pdf",
+    }),
+)
 async def handle_audio_export_format(call: types.CallbackQuery, state: FSMContext) -> None:
-    """يولّد ملف Word أو PDF من الملخص الأكاديمي إن وُجد، وإلا من النص الخام المفرغ."""
+    """يولّد ملف Word أو PDF بتصميم عصري منسّق من الملخص الأكاديمي أو النص الكامل حسب اختيار الطالب."""
     await call.answer()
     try:
         data = await state.get_data()
-        content = data.get("summary_text") or data.get("pure_text")
-        title = data.get("source_title", "محاضرة صوتية")
+        base_title = data.get("source_title", "محاضرة صوتية")
+        if call.data in ("audio_export_sum_docx", "audio_export_sum_pdf"):
+            content = data.get("summary_text") or data.get("pure_text")
+            title = f"ملخص أكاديمي — {base_title}"
+        elif call.data in ("audio_export_raw_docx", "audio_export_raw_pdf"):
+            content = data.get("pure_text")
+            title = f"تفريغ كامل — {base_title}"
+        else:
+            has_sum = bool(data.get("summary_text"))
+            content = data.get("summary_text") or data.get("pure_text")
+            title = f"ملخص أكاديمي — {base_title}" if has_sum else base_title
+
         if not content:
             await call.message.answer("❌ تعذر العثور على محتوى لتصديره، يرجى إعادة إرسال الملف الصوتي.")
             return
 
-        is_docx = call.data == "audio_export_docx"
+        is_docx = call.data.endswith("_docx")
         ext = "docx" if is_docx else "pdf"
 
-        file_bytes = await offload.remote_build_document(ext, title, content)
+        file_bytes = await offload.remote_build_document(ext, title, content, style=STYLE_MODERN)
         if file_bytes is None:
             if is_docx:
-                file_bytes = await asyncio.to_thread(build_document_docx, title, content)
+                file_bytes = await asyncio.to_thread(build_document_docx, title, content, STYLE_MODERN)
             else:
-                file_bytes = await asyncio.to_thread(build_document_pdf, title, content)
+                file_bytes = await asyncio.to_thread(build_document_pdf, title, content, STYLE_MODERN)
 
         if not file_bytes:
             await call.message.answer("❌ تعذر إنشاء الملف، حاول مجدداً.")

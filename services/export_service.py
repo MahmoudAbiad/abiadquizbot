@@ -153,15 +153,46 @@ def detect_text_language(text: str) -> str:
 
 
 _MD_BULLET_RE = re.compile(r"^\s*[-*•]\s+(.*)$")
+_MD_NUMBERED_RE = re.compile(r"^\s*(\d+|[٠-٩]+)[.)]\s+(.*)$")
 _MD_H1_RE = re.compile(r"^#\s+(.*)$")
-_MD_H2_RE = re.compile(r"^#{2,3}\s+(.*)$")
+_MD_H2_RE = re.compile(r"^##\s+(.*)$")
+_MD_H3_RE = re.compile(r"^#{3,4}\s+(.*)$")
+_MD_CALLOUT_RE = re.compile(r"^>\s*(.*)$")
+_MD_INLINE_TOKEN_RE = re.compile(r"(\*\*.+?\*\*|__.+?__|`.+?`)")
+
+
+def _strip_inline_markdown(text: str) -> str:
+    """يزيل علامات التنسيق الداخلي (**خط عريض** أو `كود`) لعرض نظيف في PDF."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    cleaned = re.sub(r"__(.+?)__", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`\n]+)`", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _parse_inline_markdown_segments(text: str) -> List[Tuple[str, bool]]:
+    """يقسم النص إلى مقاطع (نص، هل_هو_عريض) لمعالجة **bold** و `code` داخل فقرات Word."""
+    if not text:
+        return [("", False)]
+    segments: List[Tuple[str, bool]] = []
+    for part in _MD_INLINE_TOKEN_RE.split(text):
+        if not part:
+            continue
+        if (part.startswith("**") and part.endswith("**") and len(part) > 4) or (
+            part.startswith("__") and part.endswith("__") and len(part) > 4
+        ):
+            segments.append((part[2:-2], True))
+        elif part.startswith("`") and part.endswith("`") and len(part) > 2:
+            segments.append((part[1:-1], True))
+        else:
+            segments.append((part, False))
+    return segments or [(text, False)]
 
 
 def _parse_markdown_blocks(text: str) -> List[Tuple[str, str]]:
-    """يحلّل نص Markdown بسيط (عناوين # / ## أو ### ونقاط - أو * أو •) إلى قائمة
-    (نوع, محتوى) جاهزة للعرض بملفات Word/PDF. تُدمج الأسطر المتتالية غير الفارغة
-    التي لا تطابق أي نمط عنوان/نقطة بنفس الفقرة، حتى أول سطر فارغ أو عنصر جديد -
-    هيك ما تنكسر فقرة واحدة طويلة إلى أسطر منفصلة بالمستند النهائي."""
+    """يحلّل نص Markdown (عناوين # / ## / ###، اقتباسات >، قوائم نقطية ورقمية، وفواصل)
+    إلى قائمة (نوع, محتوى) جاهزة للعرض الاحترافي في ملفات Word وPDF."""
     blocks: List[Tuple[str, str]] = []
     para_buffer: List[str] = []
 
@@ -175,18 +206,34 @@ def _parse_markdown_blocks(text: str) -> List[Tuple[str, str]]:
         if not line:
             _flush()
             continue
-        h2_match = _MD_H2_RE.match(line) if line.startswith("##") else None
-        h1_match = _MD_H1_RE.match(line) if (not h2_match and line.startswith("#")) else None
+        if line in ("---", "***", "___"):
+            _flush()
+            blocks.append(("divider", ""))
+            continue
+        h3_match = _MD_H3_RE.match(line) if line.startswith("###") else None
+        h2_match = _MD_H2_RE.match(line) if (not h3_match and line.startswith("##")) else None
+        h1_match = _MD_H1_RE.match(line) if (not h2_match and not h3_match and line.startswith("#")) else None
+        callout_match = _MD_CALLOUT_RE.match(line)
         bullet_match = _MD_BULLET_RE.match(line)
+        numbered_match = _MD_NUMBERED_RE.match(line)
         if h1_match:
             _flush()
             blocks.append(("h1", h1_match.group(1).strip()))
         elif h2_match:
             _flush()
             blocks.append(("h2", h2_match.group(1).strip()))
+        elif h3_match:
+            _flush()
+            blocks.append(("h3", h3_match.group(1).strip()))
+        elif callout_match:
+            _flush()
+            blocks.append(("callout", callout_match.group(1).strip()))
         elif bullet_match:
             _flush()
             blocks.append(("bullet", bullet_match.group(1).strip()))
+        elif numbered_match:
+            _flush()
+            blocks.append(("numbered", f"{numbered_match.group(1)}. {numbered_match.group(2).strip()}"))
         else:
             para_buffer.append(line)
     _flush()
@@ -1183,13 +1230,27 @@ def _answer_print_question(q, is_ar, with_explanation=True):
     return {"question": text, "options": []}
 
 
+def _add_docx_markdown_runs(
+    paragraph, text: str, body_font: str, size_pt: float, is_ar: bool, cs_font: str,
+    base_color: Tuple[int, int, int] = (25, 25, 25),
+    bold_color: Optional[Tuple[int, int, int]] = None,
+) -> None:
+    """يضيف نصاً مع تحويل مقاطع **bold** و `code` إلى runs عريضة وملونة بدون ترك رموز ** الخام."""
+    for seg_text, is_bold in _parse_inline_markdown_segments(text):
+        if not seg_text:
+            continue
+        run = paragraph.add_run(seg_text)
+        _style_run(
+            run, body_font, size_pt, bold=is_bold,
+            color=(bold_color or base_color) if is_bold else base_color,
+            rtl=is_ar, cs_font=cs_font,
+        )
+
+
 def build_document_docx(title: str, text: str, style: str = DEFAULT_STYLE) -> bytes:
-    """يبني ملف Word منسّق لنص حر كامل (تفريغ محاضرة، ملخص، أي نص تعليمي عام) بعنوان
-    وفقرات، مع اكتشاف تلقائي للغة (عربي/إنكليزي)، دعم RTL كامل للعربي (اتجاه الصفحة/
-    الفقرات وخط الكتابة المعقّدة w:cs)، وطباعة عربية/إنكليزية سليمة - بنفس الستايلات
-    الشكلية (simple/modern/academic) المتوفرة بتصدير الكويز. يدعم Markdown بسيط: عناوين
-    (# / ## / ###) تُعرض كعناوين مُنسّقة، ونقاط (- أو * أو •) تُعرض كقائمة نقطية، وباقي
-    الأسطر تُدمج كفقرات نصّية عادية."""
+    """يبني ملف Word منسّق باحترافية عالية لنص حر كامل (تفريغ محاضرة، ملخص أكاديمي، أو مذكرة دراسية)
+    مع ترويسة أنيقة، بطاقات عناوين ملونة، صناديق تنبيهات وملاحظات، معالجة الخط العريض الداخلي،
+    ترقيم صفحات تلقائي، وشارة البوت في الختام."""
     if not text or not text.strip():
         raise ExportError("لا يوجد نص لتصديره.")
 
@@ -1200,47 +1261,67 @@ def build_document_docx(title: str, text: str, style: str = DEFAULT_STYLE) -> by
     body_font = cfg["ar_font"] if is_ar else cfg["en_font"]
     cs_font = cfg["ar_font"]
     accent_hex = _rgb_to_hex(cfg["accent"])
+    section_bg_hex = "EEF4FF" if style == STYLE_MODERN else ("F3F4F6" if style == STYLE_ACADEMIC else "F1F5F9")
+    section_border_hex = "93C5FD" if style == STYLE_MODERN else ("9CA3AF" if style == STYLE_ACADEMIC else "CBD5E1")
+    callout_bg_hex = "EFF6FF" if style != STYLE_ACADEMIC else "F9FAFB"
 
     doc = Document()
 
-    # اتجاه الصفحة بالكامل RTL للعربي
-    if is_ar:
-        for sec in doc.sections:
+    for sec in doc.sections:
+        sec.top_margin = Cm(2.0)
+        sec.bottom_margin = Cm(2.0)
+        sec.left_margin = Cm(2.0)
+        sec.right_margin = Cm(2.0)
+        if is_ar:
             sec._sectPr.append(OxmlElement("w:bidi"))
+        fp = sec.footer.paragraphs[0]
+        if is_ar:
+            _set_paragraph_rtl(fp, align_right=False)
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _docx_add_page_number(fp, size_pt=9.5)
 
-    # ==================== العنوان ====================
+    # ==================== ترويسة المستند (Title Banner) ====================
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if is_ar:
         _set_paragraph_rtl(title_p, align_right=False)
         title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_p.add_run(title or ("مستند" if is_ar else "Document"))
-    title_color = (255, 255, 255) if cfg["header_banner"] else cfg["accent"]
-    _style_run(title_run, body_font, 20, bold=True, color=title_color, rtl=is_ar, cs_font=cs_font)
-    if cfg["header_banner"]:
+    clean_title = _strip_inline_markdown(title or ("مذكرة دراسية" if is_ar else "Study Notes"))
+    title_run = title_p.add_run(clean_title)
+    use_banner = cfg["header_banner"] or style == STYLE_SIMPLE
+    title_color = (255, 255, 255) if use_banner else cfg["accent"]
+    _style_run(title_run, body_font, 19, bold=True, color=title_color, rtl=is_ar, cs_font=cs_font)
+    if use_banner:
         _shade_paragraph(title_p, accent_hex)
-        title_p.paragraph_format.space_before = Pt(6)
+        title_p.paragraph_format.space_before = Pt(8)
+        title_p.paragraph_format.space_after = Pt(12)
+    else:
+        title_p.paragraph_format.space_before = Pt(4)
         title_p.paragraph_format.space_after = Pt(6)
+        _set_paragraph_border_bottom(title_p, accent_hex, size=10)
 
     if style == STYLE_ACADEMIC:
-        # سطر معلومات شبيه بغلاف مستند أكاديمي رسمي: الاسم / التاريخ
         info_p = doc.add_paragraph()
-        info_text = "الاسم: ________________________     التاريخ: ______________" if is_ar \
-            else "Name: ________________________     Date: ______________"
+        info_text = "الاسم: ________________________     التاريخ: ______________" if is_ar             else "Name: ________________________     Date: ______________"
         info_run = info_p.add_run(info_text)
-        _style_run(info_run, body_font, 11, color=(30, 30, 30), rtl=is_ar, cs_font=cs_font)
+        _style_run(info_run, body_font, 11, color=(40, 40, 40), rtl=is_ar, cs_font=cs_font)
         if is_ar:
             _set_paragraph_rtl(info_p, align_right=True)
-        info_p.paragraph_format.space_before = Pt(10)
-        _set_paragraph_border_bottom(info_p, "333333", size=10)
-        info_p.paragraph_format.space_after = Pt(14)
-    else:
-        doc.add_paragraph()
+        info_p.paragraph_format.space_before = Pt(6)
+        _set_paragraph_border_bottom(info_p, "666666", size=6)
+        info_p.paragraph_format.space_after = Pt(12)
 
-    # ==================== الفقرات (Markdown مبسّط) ====================
+    # ==================== محتوى المستند (Rich Markdown Blocks) ====================
     for block_type, content in _parse_markdown_blocks(text):
+        if block_type == "divider":
+            div_p = doc.add_paragraph()
+            div_p.paragraph_format.space_before = Pt(4)
+            div_p.paragraph_format.space_after = Pt(8)
+            _set_paragraph_border_bottom(div_p, section_border_hex, size=6)
+            continue
         if not content.strip():
             continue
+
         p = doc.add_paragraph()
         if is_ar:
             _set_paragraph_rtl(p, align_right=True)
@@ -1248,31 +1329,84 @@ def build_document_docx(title: str, text: str, style: str = DEFAULT_STYLE) -> by
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
         if block_type == "h1":
-            run = p.add_run(content)
-            _style_run(run, body_font, 16, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            clean_h1 = _strip_inline_markdown(content)
+            run = p.add_run(clean_h1)
+            _style_run(run, body_font, 15.5, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            _shade_paragraph(p, section_bg_hex)
+            _set_paragraph_border_bottom(p, section_border_hex, size=8)
             p.paragraph_format.space_before = Pt(14)
             p.paragraph_format.space_after = Pt(6)
-            if cfg["divider"]:
-                _set_paragraph_border_bottom(p, "AAAAAA", size=6)
+            _docx_keep_together(p, True)
         elif block_type == "h2":
-            run = p.add_run(content)
-            _style_run(run, body_font, 13.5, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
-            p.paragraph_format.space_before = Pt(10)
-            p.paragraph_format.space_after = Pt(4)
-        elif block_type == "bullet":
-            run = p.add_run(f"• {content}")
-            _style_run(run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
-            if is_ar:
-                p.paragraph_format.right_indent = Cm(0.8)
-            else:
-                p.paragraph_format.left_indent = Cm(0.8)
+            clean_h2 = _strip_inline_markdown(content)
+            run = p.add_run(clean_h2)
+            _style_run(run, body_font, 14, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            _shade_paragraph(p, section_bg_hex)
+            _set_paragraph_border_bottom(p, section_border_hex, size=6)
+            p.paragraph_format.space_before = Pt(12)
+            p.paragraph_format.space_after = Pt(5)
+            _docx_keep_together(p, True)
+        elif block_type == "h3":
+            clean_h3 = _strip_inline_markdown(content)
+            marker = p.add_run("◈ ")
+            _style_run(marker, body_font, 12.5, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            run = p.add_run(clean_h3)
+            _style_run(run, body_font, 12.5, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            p.paragraph_format.space_before = Pt(9)
             p.paragraph_format.space_after = Pt(3)
-        else:
-            run = p.add_run(content)
-            _style_run(run, body_font, 11.5, rtl=is_ar, cs_font=cs_font)
+            _docx_keep_together(p, True)
+        elif block_type == "callout":
+            _shade_paragraph(p, callout_bg_hex)
+            _set_paragraph_border_bottom(p, section_border_hex, size=6)
+            if is_ar:
+                p.paragraph_format.right_indent = Cm(0.4)
+                p.paragraph_format.left_indent = Cm(0.4)
+            else:
+                p.paragraph_format.left_indent = Cm(0.4)
+                p.paragraph_format.right_indent = Cm(0.4)
+            p.paragraph_format.space_before = Pt(6)
             p.paragraph_format.space_after = Pt(8)
-            p.paragraph_format.line_spacing = 1.3
+            p.paragraph_format.line_spacing = 1.35
+            _add_docx_markdown_runs(
+                p, content, body_font, 11.5, is_ar, cs_font,
+                base_color=cfg["accent"], bold_color=cfg["accent"],
+            )
+        elif block_type == "bullet":
+            bullet_run = p.add_run("• ")
+            _style_run(bullet_run, body_font, 12, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            _add_docx_markdown_runs(
+                p, content, body_font, 11.5, is_ar, cs_font,
+                base_color=(25, 25, 25), bold_color=cfg["accent"],
+            )
+            if is_ar:
+                p.paragraph_format.right_indent = Cm(0.65)
+            else:
+                p.paragraph_format.left_indent = Cm(0.65)
+            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.line_spacing = 1.35
+        elif block_type == "numbered":
+            num_part, _, rest = content.partition(" ")
+            num_run = p.add_run(f"{num_part} ")
+            _style_run(num_run, body_font, 11.5, bold=True, color=cfg["accent"], rtl=is_ar, cs_font=cs_font)
+            _add_docx_markdown_runs(
+                p, rest, body_font, 11.5, is_ar, cs_font,
+                base_color=(25, 25, 25), bold_color=cfg["accent"],
+            )
+            if is_ar:
+                p.paragraph_format.right_indent = Cm(0.65)
+            else:
+                p.paragraph_format.left_indent = Cm(0.65)
+            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.line_spacing = 1.35
+        else:
+            _add_docx_markdown_runs(
+                p, content, body_font, 11.5, is_ar, cs_font,
+                base_color=(25, 25, 25), bold_color=cfg["accent"],
+            )
+            p.paragraph_format.space_after = Pt(7)
+            p.paragraph_format.line_spacing = 1.4
 
+    _docx_add_branding(doc)
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
@@ -2218,20 +2352,94 @@ class _DocumentPDFRenderer:
 
     # ---------- الأقسام ----------
 
+    def _draw_section_heading_box(self, text: str, size: float, is_h1: bool = False):
+        cfg = self.cfg
+        clean_text = _strip_inline_markdown(text)
+        font_en = self.font_en_bold
+        font_ar = self.font_ar_bold or font_en
+        pad_x = 10
+        pad_y = 7 if is_h1 else 5.5
+        max_w = self.page_w - 2 * self.margin - 2 * pad_x
+        lines = _wrap_line(clean_text, self.is_ar, font_en, font_ar, size, max_w)
+        line_h = size + 5
+        box_h = len(lines) * line_h + 2 * pad_y
+        self._ensure_space(box_h + 18)
+        self.y -= 6
+        top_y = self.y
+        bg_hex = "#EEF4FF" if self.style == STYLE_MODERN else ("#F3F4F6" if self.style == STYLE_ACADEMIC else "#F1F5F9")
+        border_hex = "#93C5FD" if self.style == STYLE_MODERN else ("#9CA3AF" if self.style == STYLE_ACADEMIC else "#CBD5E1")
+        self.c.saveState()
+        self.c.setFillColor(HexColor(bg_hex))
+        self.c.roundRect(self.margin, top_y - box_h, self.page_w - 2 * self.margin, box_h, 5, fill=1, stroke=0)
+        self.c.setStrokeColor(HexColor(border_hex))
+        self.c.setLineWidth(0.9)
+        self.c.roundRect(self.margin, top_y - box_h, self.page_w - 2 * self.margin, box_h, 5, fill=0, stroke=1)
+        # شريط جانبي بلون الهوية على طرف العنوان
+        accent_bar_w = 4.0
+        bar_x = (self.page_w - self.margin - accent_bar_w) if self.is_ar else self.margin
+        self.c.setFillColor(HexColor(cfg["accent"]))
+        self.c.rect(bar_x, top_y - box_h, accent_bar_w, box_h, fill=1, stroke=0)
+        self.c.restoreState()
+
+        cur_y = top_y - pad_y - size + 2
+        for line in lines:
+            _draw_mixed_line(
+                self.c, line, self.is_ar, font_en, font_ar, size, cur_y,
+                cfg["accent"], self.margin, self.page_w, extra_indent=pad_x + 4,
+            )
+            cur_y -= line_h
+        self.y = top_y - box_h - 8
+
+    def _draw_callout_box(self, text: str, size: float = 11.0):
+        cfg = self.cfg
+        clean_text = _strip_inline_markdown(text)
+        font_en = self.font_en_bold
+        font_ar = self.font_ar_bold or font_en
+        pad_x = 12
+        pad_y = 8
+        max_w = self.page_w - 2 * self.margin - 2 * pad_x
+        lines = _wrap_line(clean_text, self.is_ar, font_en, font_ar, size, max_w)
+        line_h = size + 5
+        box_h = len(lines) * line_h + 2 * pad_y
+        if box_h > self.page_h - 2 * self.margin - 40:
+            self._draw_paragraph(clean_text, size, bold=True, color=cfg["accent"], extra_indent=12, gap_after=8)
+            return
+        self._ensure_space(box_h + 12)
+        top_y = self.y
+        self.c.saveState()
+        self.c.setFillColor(HexColor("#EFF6FF" if self.style != STYLE_ACADEMIC else "#F9FAFB"))
+        self.c.roundRect(self.margin, top_y - box_h, self.page_w - 2 * self.margin, box_h, 6, fill=1, stroke=0)
+        self.c.setStrokeColor(HexColor("#93C5FD" if self.style != STYLE_ACADEMIC else "#9CA3AF"))
+        self.c.setLineWidth(1.0)
+        self.c.roundRect(self.margin, top_y - box_h, self.page_w - 2 * self.margin, box_h, 6, fill=0, stroke=1)
+        self.c.restoreState()
+
+        cur_y = top_y - pad_y - size + 2
+        for line in lines:
+            _draw_mixed_line(
+                self.c, line, self.is_ar, font_en, font_ar, size, cur_y,
+                cfg["accent"], self.margin, self.page_w, extra_indent=pad_x,
+            )
+            cur_y -= line_h
+        self.y = top_y - box_h - 8
+
     def _render_header(self):
         cfg = self.cfg
-        if cfg["header_banner"]:
-            band_h = 46
+        clean_title = _strip_inline_markdown(self.title)
+        if cfg["header_banner"] or self.style == STYLE_SIMPLE:
+            band_h = 48
             self._ensure_space(band_h + 20)
+            self.c.saveState()
             self.c.setFillColor(HexColor(cfg["accent"]))
-            self.c.rect(self.margin, self.y - band_h, self.page_w - 2 * self.margin, band_h, fill=1, stroke=0)
-            self.y -= (band_h / 2 - 7)
-            _draw_mixed_line(self.c, self.title, self.is_ar, self.font_en_bold,
-                              self.font_ar_bold or self.font_en_bold, 17, self.y, "#FFFFFF",
+            self.c.roundRect(self.margin, self.y - band_h, self.page_w - 2 * self.margin, band_h, 7, fill=1, stroke=0)
+            self.c.restoreState()
+            self.y -= (band_h / 2 - 6)
+            _draw_mixed_line(self.c, clean_title, self.is_ar, self.font_en_bold,
+                              self.font_ar_bold or self.font_en_bold, 16.5, self.y, "#FFFFFF",
                               self.margin, self.page_w, center=True)
-            self.y -= (band_h / 2 + 7) + 14
+            self.y -= (band_h / 2 + 6) + 14
         else:
-            self._draw_paragraph(self.title, 19, bold=True, color=cfg["accent"], gap_after=14, center=True)
+            self._draw_paragraph(clean_title, 18.5, bold=True, color=cfg["accent"], gap_after=10, center=True)
 
         if self.style == STYLE_ACADEMIC:
             info = "الاسم: ________________________     التاريخ: ______________" if self.is_ar \
@@ -2245,28 +2453,66 @@ class _DocumentPDFRenderer:
     def _render_body(self):
         cfg = self.cfg
         for block_type, content in self.blocks:
+            if block_type == "divider":
+                self._ensure_space(16)
+                self.c.saveState()
+                self.c.setStrokeColor(HexColor("#CBD5E1"))
+                self.c.setLineWidth(0.8)
+                self.c.line(self.margin, self.y - 4, self.page_w - self.margin, self.y - 4)
+                self.c.restoreState()
+                self.y -= 12
+                continue
             if not content.strip():
                 continue
+            clean_content = _strip_inline_markdown(content)
             if block_type == "h1":
-                self._ensure_space(30)
-                self._draw_paragraph(content, 15, bold=True, color=cfg["accent"], gap_after=8)
-                if cfg["divider"]:
-                    self.c.setStrokeColor(HexColor("#AAAAAA"))
-                    self.c.setLineWidth(0.75)
-                    self.c.line(self.margin, self.y + 4, self.page_w - self.margin, self.y + 4)
-                    self.y -= 4
+                self._draw_section_heading_box(clean_content, 14.5, is_h1=True)
             elif block_type == "h2":
-                self._ensure_space(24)
-                self._draw_paragraph(content, 13, bold=True, color=cfg["accent"], gap_after=6)
+                self._draw_section_heading_box(clean_content, 13.0, is_h1=False)
+            elif block_type == "h3":
+                self._ensure_space(22)
+                self.y -= 4
+                self._draw_paragraph(f"◈ {clean_content}", 12.0, bold=True, color=cfg["accent"], gap_after=5)
+            elif block_type == "callout":
+                self._draw_callout_box(clean_content, 11.0)
             elif block_type == "bullet":
-                self._draw_paragraph(f"• {content}", 11, color="#111111",
-                                      extra_indent=16, gap_after=4)
+                self._draw_paragraph(f"• {clean_content}", 11.0, color="#1E293B",
+                                      extra_indent=14, gap_after=5)
+            elif block_type == "numbered":
+                self._draw_paragraph(clean_content, 11.0, color="#1E293B",
+                                      extra_indent=14, gap_after=5)
             else:
-                self._draw_paragraph(content, 11, color="#111111", gap_after=8)
+                self._draw_paragraph(clean_content, 11.0, color="#1E293B", gap_after=8)
+
+    def _draw_branding(self) -> None:
+        img_w = 70.0
+        img_h = img_w * branding_aspect()
+        size = 12.5
+        gap = 6.0
+        font = "Latin-Bold" if _font_available("Latin-Bold") else "Helvetica-Bold"
+        text_w = pdfmetrics.stringWidth(BOT_HANDLE, font, size)
+        self._ensure_space(img_h + 24)
+        self.y -= 14
+        x = (self.page_w - (img_w + gap + text_w)) / 2
+        y0 = self.y - img_h
+        self.c.drawImage(ImageReader(io.BytesIO(branding_png())), x, y0,
+                         width=img_w, height=img_h, mask="auto")
+        tx = x + img_w + gap
+        ty = y0 + img_h / 2 - size * 0.36
+        color = HexColor("#" + TELEGRAM_BLUE_HEX)
+        self.c.setFillColor(color)
+        self.c.setFont(font, size)
+        self.c.drawString(tx, ty, BOT_HANDLE)
+        self.c.setStrokeColor(color)
+        self.c.setLineWidth(max(0.5, size * 0.06))
+        self.c.line(tx, ty - size * 0.14, tx + text_w, ty - size * 0.14)
+        self.c.linkURL(BOT_URL, (x, y0, tx + text_w, y0 + img_h), relative=0, thickness=0)
+        self.y -= img_h + 6
 
     def render(self) -> bytes:
         self._render_header()
         self._render_body()
+        self._draw_branding()
         self._draw_footer()
         self.c.save()
         self.buf.seek(0)

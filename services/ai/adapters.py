@@ -278,6 +278,18 @@ class GoogleAdapter:
                     mark("file_upload")
                     uploaded_file = await client.aio.files.upload(file=part.path)
                     uploaded.append(uploaded_file.name)
+                    # Wait if Gemini Files API marks large audio/media as PROCESSING before it becomes ACTIVE
+                    for _ in range(30):
+                        state_str = str(getattr(uploaded_file, "state", "") or "").upper()
+                        if "PROCESSING" not in state_str:
+                            break
+                        await asyncio.sleep(2.0)
+                        try:
+                            uploaded_file = await client.aio.files.get(name=uploaded_file.name)
+                        except Exception:
+                            break
+                    if "FAILED" in str(getattr(uploaded_file, "state", "") or "").upper():
+                        raise ProviderError(reason="file_processing_failed")
                     contents.append(uploaded_file)
                 else:
                     mark("attachment_read")

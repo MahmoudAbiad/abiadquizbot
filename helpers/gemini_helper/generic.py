@@ -29,13 +29,20 @@ async def generate_structured_with_cascade(contents, response_schema, prompt_ins
     return (result.parsed, result.total_tokens) if result else None
 
 
-async def generate_text_with_cascade(contents, prompt_instruction=None):
+async def generate_text_with_cascade(
+    contents, prompt_instruction=None, *, timeout=None, reasoning_effort=None
+):
     _last_model_used_var.set(None)
     _last_token_usage_var.set(None)
     _last_generation_metadata_var.set(None)
     started_at = time.monotonic()
     result = await _execute_cascade(
-        AIRequest(_normalize_contents(contents), system_instruction=prompt_instruction)
+        AIRequest(
+            _normalize_contents(contents),
+            system_instruction=prompt_instruction,
+            reasoning_effort=reasoning_effort,
+        ),
+        timeout=timeout,
     )
     if result:
         metadata = dict(_last_model_used_var.get() or {})

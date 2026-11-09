@@ -57,7 +57,7 @@ from services.usage_tracking import track_upload_rejection
 from helpers.r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, safe_title, short_token_to_hash
 from validators import validate_file_size, validate_question_count
-from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS, InvalidUploadError
+from services.upload_validation import validate_image, validate_document, supported_extension, DOCUMENT_EXTENSIONS, TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS, AUDIO_EXTENSIONS, InvalidUploadError
 from services.redis_reliability import UserLock, user_locked
 from services.generation_eta import GenerationEta, build_processing_text, estimate_generation_eta
 from services.generation_heartbeat import run_processing_heartbeat
@@ -750,6 +750,15 @@ async def handle_media(message: types.Message, state: FSMContext) -> None:
         ensure_directory_exists(DOWNLOADS_DIR)
 
         document_extension = os.path.splitext(message.document.file_name or "")[1].lower() if message.document else ""
+        document_mime = (message.document.mime_type or "").lower() if message.document else ""
+        if message.document and (
+            document_extension in (AUDIO_EXTENSIONS - {".mp4", ".webm", ".3gp"})
+            or document_mime.startswith("audio/")
+        ):
+            from handlers.audio import handle_audio_message
+            target_fn = getattr(handle_audio_message, "__wrapped__", handle_audio_message)
+            await target_fn(message, state)
+            return
         if message.photo or document_extension in TELEGRAM_IMAGE_DOCUMENT_EXTENSIONS:
             photo = message.photo[-1] if message.photo else message.document
             current = {"file_id": photo.file_id, "file_unique_id": photo.file_unique_id, "file_size": photo.file_size,
