@@ -80,20 +80,25 @@ class QuizInputIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.message.answer = AsyncMock(return_value=self.message)
         self.message.edit_text = AsyncMock()
 
-    async def test_english_lesson_and_english_exam_both_show_translation_choice(self):
+    async def test_english_lesson_and_english_exam_preconfigure_defaults_and_open_summary(self):
         schema = self.classifier['SubjectClassification']
-        for subject in ('english', 'quiz_solved', 'quiz_unsolved'):
+        expected_modes = {
+            'english': None,
+            'quiz_solved': constants.QUIZ_EXTRACTION_MODE_AS_IS,
+            'quiz_unsolved': constants.QUIZ_EXTRACTION_MODE_AI_SOLVE,
+        }
+        for subject, expected_extraction in expected_modes.items():
             with self.subTest(subject=subject):
                 self.classifier['_classify_media'].return_value = schema(
                     subject=subject, content_subject='english', question_count=10,
                     suggested_types=['مفردات الدرس', 'فهم المقروء'])
                 state = State()
-                self.message.edit_text.reset_mock()
+                self.env['_show_quiz_options_screen'].reset_mock()
                 await self.finalize(state, file_hash='english-' + subject)
-                self.assertEqual(state.current, 'translation')
-                self.assertEqual(self.message.edit_text.await_args.args[0],
-                                 constants.MSG_ENGLISH_CONTENT_DETECTED)
-                self.env['_show_quiz_options_screen'].assert_not_awaited()
+                self.assertEqual(state.data['english_mode'], 'plain')
+                self.assertEqual(state.data['quiz_extraction_mode'], expected_extraction)
+                self.assertEqual(state.data['selected_question_count'], 10)
+                self.env['_show_quiz_options_screen'].assert_awaited_once()
 
     def completed(self):
         return State({'pure_text': 'Old English lesson about grammar and verbs.',

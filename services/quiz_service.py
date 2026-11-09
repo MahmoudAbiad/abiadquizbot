@@ -12,7 +12,8 @@ from constants import (
     QUESTION_TYPE_SIMILAR_MATH, BTN_SIMILAR_MATH,
     # 🆕 اختبار محلول/غير محلول
     SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED,
-    QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
+    QUIZ_EXTRACTION_MODE_AS_IS, QUIZ_EXTRACTION_MODE_AI_SOLVE,
+    QUIZ_EXTRACTION_MODE_LABELS_AR, QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS,
 )
 from helpers.gemini_helper import generate_quiz_smart, get_last_generation_metadata
 from logger import get_logger, log_warning
@@ -128,10 +129,9 @@ def estimate_pages_from_text(text: str) -> Tuple[int, int]:
 def build_transparency_text(
     items: int, questions: int, mode: str, cost: float,
     difficulty: Optional[str] = None, question_type_label: Optional[str] = None,
+    language_label: Optional[str] = None,
 ) -> str:
-    """رسالة الشفافية المالية لعرض تفاصيل الخصم.
-    🆕 difficulty/question_type_label اختياريان (لعرض تفاصيل الاختيار عند تفعيل شاشة
-    نوع/صعوبة الأسئلة لاحقاً) - لا يؤثران على الاستدعاءات الحالية التي لا تمررهما."""
+    """رسالة الشفافية المالية لعرض ملخص الإعدادات وتفاصيل التكلفة."""
     from html import escape
     lines = [
         "📋 <b>ملخص الكويز</b>\n",
@@ -139,9 +139,11 @@ def build_transparency_text(
         f"• عدد الأسئلة: <b>{questions}</b>",
     ]
     if question_type_label:
-        lines.append(f"• نوع الأسئلة: {escape(question_type_label)}")
+        lines.append(f"• المسار / نوع الأسئلة: {escape(question_type_label)}")
     if difficulty:
         lines.append(f"• الصعوبة: {escape(DIFFICULTY_LABELS_AR.get(difficulty, difficulty))}")
+    if language_label:
+        lines.append(f"• لغة الأسئلة: {escape(language_label)}")
     lines.append(f"\n💰 <b>التكلفة: {cost:.2f} نقطة</b>")
     return "\n".join(lines)
 
@@ -228,8 +230,11 @@ def build_question_type_label(
     if question_type == QUESTION_TYPE_SIMILAR_MATH:
         return BTN_SIMILAR_MATH
     if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
+        as_is_mode = globals().get("QUIZ_EXTRACTION_MODE_AS_IS", "as_is")
+        default_mode = as_is_mode if subject_type == SUBJECT_QUIZ_SOLVED else QUIZ_EXTRACTION_MODE_AI_SOLVE
+        mode = extraction_mode or default_mode
         return QUIZ_EXTRACTION_MODE_LABELS_AR.get(
-            extraction_mode or QUIZ_EXTRACTION_MODE_AI_SOLVE, QUIZ_EXTRACTION_MODE_LABELS_AR[QUIZ_EXTRACTION_MODE_AI_SOLVE]
+            mode, QUIZ_EXTRACTION_MODE_LABELS_AR[default_mode]
         )
     if question_type == QUESTION_TYPE_CUSTOM and custom_text:
         return custom_text.strip()[:80]
@@ -252,12 +257,14 @@ def resolve_quiz_extraction_instruction(subject_type: str, extraction_mode: Opti
     التوليد (helpers/gemini_helper.py) عندما يكون المحتوى اختباراً جاهزاً (محلول/غير
     محلول) - راجع constants.QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS. None لأي مادة أخرى
     (لا تعديل على سلوك التوليد الاعتيادي إطلاقاً).
+    - اختبار جاهز محلول (SUBJECT_QUIZ_SOLVED): الافتراضي هو "استخدام أجوبة المصدر" (as_is)
+    - اختبار جاهز غير محلول (SUBJECT_QUIZ_UNSOLVED): الافتراضي هو "حل بالذكاء الاصطناعي" (ai_solve)
     """
     if subject_type not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
         return None
-    # 🆕 fail-safe: اختبار غير محلول دائماً ai_solve (لا خيار آخر أصلاً)، واختبار محلول بلا
-    # extraction_mode مخزّن (حالة غير متوقعة) يُعامل أيضاً كـ ai_solve أماناً بدل نص فارغ.
-    mode = extraction_mode or QUIZ_EXTRACTION_MODE_AI_SOLVE
+    as_is_mode = globals().get("QUIZ_EXTRACTION_MODE_AS_IS", "as_is")
+    default_mode = as_is_mode if subject_type == SUBJECT_QUIZ_SOLVED else QUIZ_EXTRACTION_MODE_AI_SOLVE
+    mode = extraction_mode or default_mode
     return QUIZ_EXTRACTION_PROMPT_INSTRUCTIONS.get(mode)
 
 

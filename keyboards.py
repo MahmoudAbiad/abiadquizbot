@@ -389,15 +389,61 @@ def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineK
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
+def get_quiz_creation_summary_keyboard() -> types.InlineKeyboardMarkup:
+    """
+    🆕 لوحة شاشة ملخص الإنشاء الموحّدة — 3 أزرار فقط:
+    1) 🚀 إنشاء الاختبار (qcount_start)
+    2) ⚙️ إعدادات الاختبار (qsetup_menu)
+    3) ❌ إلغاء الطلب (cancel_upload_request)
+    """
+    kb = [
+        [types.InlineKeyboardButton(text="🚀 إنشاء الاختبار", callback_data="qcount_start")],
+        [types.InlineKeyboardButton(text="⚙️ إعدادات الاختبار", callback_data="qsetup_menu")],
+        [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_quiz_settings_menu_keyboard(
+    ready_exam: bool = False,
+    has_ready_exam_origin: bool = False,
+    selected_count: int = 10,
+    type_label: str = "📚 أسئلة شاملة عن الدرس",
+    difficulty_label: str = "🟡 متوسط",
+    extraction_label: str = "📋 استخدام أجوبة المصدر",
+    language_label: Optional[str] = None,
+) -> types.InlineKeyboardMarkup:
+    """🆕 لوحة «⚙️ إعدادات الاختبار» لتعديل أي إعداد فرعي ثم العودة لشاشة الملخص."""
+    def _clip(val: str, limit: int = 24) -> str:
+        val = str(val or "")
+        return val if len(val) <= limit else val[:limit - 1] + "…"
+
+    count_text = f"{selected_count} سؤال" if selected_count and selected_count > 0 else "غير محدد (اضغط للتحديد)"
+    if ready_exam:
+        kb = [
+            [types.InlineKeyboardButton(text=f"🔢 عدد الأسئلة: {count_text}", callback_data="qcount_custom")],
+            [types.InlineKeyboardButton(text=f"🗂️ مسار الاختبار: {_clip(extraction_label)}", callback_data="qsetup_open_extraction")],
+        ]
+    else:
+        kb = [
+            [types.InlineKeyboardButton(text=f"🔢 عدد الأسئلة: {count_text}", callback_data="qsetup_open_count")],
+            [types.InlineKeyboardButton(text=f"🎯 نوع الأسئلة: {_clip(type_label)}", callback_data="qback_to_type")],
+            [types.InlineKeyboardButton(text=f"📊 مستوى الصعوبة: {difficulty_label}", callback_data="qback_to_difficulty")],
+        ]
+        if has_ready_exam_origin:
+            kb.append([types.InlineKeyboardButton(text=f"🗂️ مسار الاختبار: {_clip(extraction_label)}", callback_data="qsetup_open_extraction")])
+    if language_label:
+        kb.append([types.InlineKeyboardButton(text=f"🌐 لغة الأسئلة: {language_label}", callback_data="qsetup_open_translation")])
+    kb.append([types.InlineKeyboardButton(text="🔙 الرجوع للملخص", callback_data="qcount_review")])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 def get_question_count_keyboard(
     items: int, is_album: bool, selected_count: int, suggestions: list = None
 ) -> types.InlineKeyboardMarkup:
     """
-    🆕 شاشة عدد الأسئلة المدمجة - خطوة واحدة بدل خطوتين منفصلتين (اختيار عدد ← ثم شاشة
-    تأكيد وتكلفة مستقلة). السعر لا يظهر على الأزرار (تفادي الازدحام البصري) - مصدر
-    وحيد للسعر هو سطر "تكلفة العملية" بنص الرسالة فوق الكيبورد (build_transparency_text
-    بـ handlers/files.py._render_question_count_screen)، ويتحدّث تلقائياً مع كل تغيير
-    بالعدد المختار لأن الرسالة كلها تُعاد بناؤها بكل تعديل (edit_message_text).
+    🆕 شاشة اختيار عدد الأسئلة الفرعية (تُفتح من قائمة «⚙️ إعدادات الاختبار»).
+    اختيار أي عدد يعيد الطالب مباشرة إلى شاشة الملخص الموحدة مع تحديث التكلفة.
     """
     kb = []
     row = []
@@ -412,9 +458,8 @@ def get_question_count_keyboard(
         kb.append(row)
 
     kb.append([types.InlineKeyboardButton(text="✏️ عدد مخصص (اكتبه مباشرة)", callback_data="qcount_custom")])
-    kb.append([types.InlineKeyboardButton(text=f"🚀 توليد {selected_count} أسئلة", callback_data="qcount_start")])
-    kb.append([types.InlineKeyboardButton(text="🔙 تعديل الصعوبة", callback_data="qback_to_difficulty")])
-    kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للإعدادات", callback_data="qsetup_menu")])
+    kb.append([types.InlineKeyboardButton(text="🔙 الرجوع للملخص", callback_data="qcount_review")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_detected_count_keyboard(selected_count: int) -> types.InlineKeyboardMarkup:
@@ -432,9 +477,8 @@ def get_quiz_detected_count_keyboard(selected_count: int) -> types.InlineKeyboar
 
 def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_type: str) -> types.InlineKeyboardMarkup:
     """
-    🆕 المرحلة الأولى من شاشة الخيارات (نوع الأسئلة فقط - بدون صعوبة بنفس الشاشة لتقليل
-    الازدحام البصري). اختيار أي نوع (أو الشمول) ينقل تلقائياً لمرحلة الصعوبة - لا حاجة
-    لزر "متابعة" منفصل.
+    🆕 شاشة اختيار نوع الأسئلة الفرعية (تُفتح من قائمة «⚙️ إعدادات الاختبار»).
+    اختيار أي نوع يحفظه ويعيد الطالب مباشرة إلى شاشة الملخص الموحدة.
     """
     kb = []
 
@@ -460,29 +504,24 @@ def get_quiz_type_keyboard(subject_type: str, suggested_types: list, selected_ty
 
     general_text = f"✅ {BTN_QUESTION_TYPE_GENERAL}" if selected_type == QUESTION_TYPE_GENERAL else BTN_QUESTION_TYPE_GENERAL
     custom_text = f"✅ {BTN_QUESTION_TYPE_CUSTOM}" if selected_type == QUESTION_TYPE_CUSTOM else BTN_QUESTION_TYPE_CUSTOM
-    # 🆕 زر "عام" العمومي يُخفى لمادتي الإنجليزي والفرنسي تحديداً لأن "🎯 اختبار عام"
-    # (general_test) من القائمة الجاهزة أعلاه يؤدي نفس الغرض بالضبط - عرض الاثنين معاً
-    # كان يبدو كخيارين متطابقين مربكين بصرياً. باقي المواد (رياضيات/أخرى) لا تملك خياراً
-    # مكافئاً بنفس المعنى ضمن قوائمها، فيبقى الزر العمومي ضرورياً لها.
     if suggested_types or subject_type not in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
         kb.append([types.InlineKeyboardButton(text=general_text, callback_data="qtype_general")])
     kb.append([types.InlineKeyboardButton(text=custom_text, callback_data="qtype_custom")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للإعدادات", callback_data="qsetup_menu")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def get_quiz_difficulty_keyboard(selected_difficulty: str) -> types.InlineKeyboardMarkup:
     """
-    🆕 المرحلة الثانية والأخيرة (الصعوبة فقط). اختيار أي مستوى يُكمل التدفق مباشرة
-    لشاشة عدد الأسئلة - لا حاجة لزر "متابعة" منفصل هنا أيضاً.
+    🆕 شاشة اختيار مستوى الصعوبة الفرعية (تُفتح من قائمة «⚙️ إعدادات الاختبار»).
+    اختيار أي مستوى يحفظه ويعيد الطالب مباشرة إلى شاشة الملخص الموحدة.
     """
     diff_row = []
     for value in (DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED):
         label = DIFFICULTY_LABELS_AR[value]
         text = f"✅ {label}" if selected_difficulty == value else label
         diff_row.append(types.InlineKeyboardButton(text=text, callback_data=f"qdiff_{value}"))
-    # 🆕 "متدرج" بصف خاص لوحده (بدل ازدحامه مع الأزرار الثلاثة الأخرى بصف واحد) لأن
-    # نصه أطول (يشمل توضيح "سهل ← صعب") فقد يبدو مضغوطاً بجانب الثلاثة الباقين.
     progressive_label = DIFFICULTY_LABELS_AR[DIFFICULTY_PROGRESSIVE]
     progressive_text = (
         f"✅ {progressive_label}" if selected_difficulty == DIFFICULTY_PROGRESSIVE else progressive_label
@@ -490,32 +529,33 @@ def get_quiz_difficulty_keyboard(selected_difficulty: str) -> types.InlineKeyboa
     kb = [
         diff_row,
         [types.InlineKeyboardButton(text=progressive_text, callback_data=f"qdiff_{DIFFICULTY_PROGRESSIVE}")],
+        [types.InlineKeyboardButton(text="🔙 رجوع للإعدادات", callback_data="qsetup_menu")],
         [types.InlineKeyboardButton(text=BTN_BACK_TO_TYPE_SCREEN, callback_data="qback_to_type")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_translation_choice_keyboard(subject_type: str = SUBJECT_ENGLISH) -> types.InlineKeyboardMarkup:
-    """🆕 لوحة اختيار نمط الأسئلة عند اكتشاف محتوى إنجليزي أو فرنسي: مترجمة للعربية أو
-    باللغة الأصلية فقط. subject_type يحدد نص الأزرار (إنجليزي/فرنسي) - السلوك والـ
-    callback_data نفسهما لكلتا المادتين (راجع handlers/files.py)."""
+def get_translation_choice_keyboard(subject_type: str = SUBJECT_ENGLISH, selected_mode: Optional[str] = None) -> types.InlineKeyboardMarkup:
+    """🆕 لوحة اختيار نمط الأسئلة لمحتوى إنجليزي أو فرنسي: مترجمة للعربية أو باللغة الأصلية فقط."""
     if subject_type == SUBJECT_FRENCH:
         yes_text, no_text = BTN_TRANSLATE_YES_FRENCH, BTN_TRANSLATE_NO_FRENCH
     else:
         yes_text, no_text = BTN_TRANSLATE_YES, BTN_TRANSLATE_NO
+    if selected_mode == "translated":
+        yes_text = f"✅ {yes_text}"
+    elif selected_mode == "plain":
+        no_text = f"✅ {no_text}"
     kb = [
         [types.InlineKeyboardButton(text=yes_text, callback_data="translate_choice_yes")],
         [types.InlineKeyboardButton(text=no_text, callback_data="translate_choice_no")],
+        [types.InlineKeyboardButton(text="🔙 رجوع للإعدادات", callback_data="qsetup_menu")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 # 🆕 لوحة "هل التصنيف صحيح؟" (التحقق المجتمعي - راجع services/subject_classifier.py +
-# migration_classification_votes.sql). subject يُشفَّر بكود قصير وfile_hash يُضغط عبر
-# utils.hash_to_short_token لأن callback_data محدود بـ 64 بايت من تيليجرام والهاش
-# الأصلي (SHA-256 hex) وحده 64 حرفاً. الطالب لا يحتاج معرفة أي من هذا - قيمتا subject/
-# file_hash تُستخرجان لاحقاً عبر handlers/files.py._decode_classification_vote_callback.
+# migration_classification_votes.sql).
 def get_classification_vote_keyboard(file_hash: str, subject: str) -> types.InlineKeyboardMarkup:
     token = hash_to_short_token(file_hash)
     subj_code = CLASSIFICATION_SUBJECT_CODES.get(subject, "o")
@@ -526,21 +566,23 @@ def get_classification_vote_keyboard(file_hash: str, subject: str) -> types.Inli
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# 🆕 لوحة اختيار طريقة استخراج "اختبار محلول" (subject=quiz_solved): اعتماد الأجوبة
-# المدوّنة بالمستند كما هي، أو تجاهلها وحلّ الاختبار بالذكاء الاصطناعي بدلاً منها.
-# لا تُعرض إطلاقاً لـ quiz_unsolved (لا يوجد أجوبة أصلاً لاعتمادها - راجع handlers/files.py).
-def get_quiz_extraction_choice_keyboard(is_math: bool = False, solved: bool = True) -> types.InlineKeyboardMarkup:
+def get_quiz_extraction_choice_keyboard(
+    is_math: bool = False, solved: bool = True, selected_mode: Optional[str] = None
+) -> types.InlineKeyboardMarkup:
+    as_is_text = f"✅ {BTN_QUIZ_EXTRACT_AS_IS}" if selected_mode == "as_is" else BTN_QUIZ_EXTRACT_AS_IS
+    ai_solve_text = f"✅ {BTN_QUIZ_EXTRACT_AI_SOLVE}" if selected_mode == "ai_solve" else BTN_QUIZ_EXTRACT_AI_SOLVE
     kb = [
-        [types.InlineKeyboardButton(text=BTN_QUIZ_EXTRACT_AS_IS, callback_data="quiz_extract_as_is")],
-        [types.InlineKeyboardButton(text=BTN_QUIZ_EXTRACT_AI_SOLVE, callback_data="quiz_extract_ai_solve")],
+        [types.InlineKeyboardButton(text=as_is_text, callback_data="quiz_extract_as_is")],
+        [types.InlineKeyboardButton(text=ai_solve_text, callback_data="quiz_extract_ai_solve")],
+        [types.InlineKeyboardButton(text="🔙 رجوع للإعدادات", callback_data="qsetup_menu")],
         [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
     ]
-    kb.insert(-1, [types.InlineKeyboardButton(text="✨ توليد أسئلة جديدة من المحتوى", callback_data="quiz_generate_new")])
+    kb.insert(-2, [types.InlineKeyboardButton(text="✨ توليد أسئلة جديدة من المحتوى", callback_data="quiz_generate_new")])
     if not solved:
         kb = [row for row in kb if row[0].callback_data != "quiz_extract_as_is"]
     if is_math:
         from constants import BTN_SIMILAR_MATH
-        kb.insert(-1, [types.InlineKeyboardButton(text=BTN_SIMILAR_MATH, callback_data="quiz_generate_similar_math")])
+        kb.insert(-2, [types.InlineKeyboardButton(text=BTN_SIMILAR_MATH, callback_data="quiz_generate_similar_math")])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
