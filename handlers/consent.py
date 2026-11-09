@@ -6,6 +6,7 @@ from aiogram import F, Router, types
 from aiogram.exceptions import TelegramBadRequest
 
 from logger import get_logger
+from task_utils import spawn
 from services import consent as svc
 
 logger = get_logger(__name__)
@@ -82,8 +83,12 @@ async def _decide(call: types.CallbackQuery, decision: str) -> None:
 
         if decision == "accepted":
             await svc.remember_accepted(user_id, tv, pv)
+            pending = await svc.pop_pending_messages(user_id, bot=call.bot)
+            pending_cb = await svc.pop_pending_callback(user_id)
             if not changed:
                 await call.answer("تم تسجيل موافقتك سابقاً ✅")
+                if pending:
+                    spawn(svc.replay_pending_messages(call.bot, pending))
                 return
             payload = await svc.pop_start_payload(user_id)
             markup = None
@@ -92,12 +97,16 @@ async def _decide(call: types.CallbackQuery, decision: str) -> None:
                 markup = types.InlineKeyboardMarkup(inline_keyboard=[[
                     types.InlineKeyboardButton(text="▶️ متابعة", url=f"https://t.me/{username}?start={payload}")
                 ]])
-            await _edit_or_send(call, svc.build_accepted_text(), markup)
+            await _edit_or_send(call, svc.build_accepted_text(resuming=bool(pending), callback_pending=bool(pending_cb)), markup)
             await call.answer("✅ تمت الموافقة")
+            if pending:
+                spawn(svc.replay_pending_messages(call.bot, pending))
             return
 
         # decision == "declined"
         await svc.forget_denied(user_id, tv, pv)
+        await svc.clear_pending_messages(user_id)
+        await svc.clear_pending_callback(user_id)
         if not changed:
             await call.answer("لن يعمل البوت إلا بعد الموافقة على الشروط.")
             return
@@ -108,3 +117,4 @@ async def _decide(call: types.CallbackQuery, decision: str) -> None:
             await redis.delete(lock_key)
         except Exception:
             pass
+

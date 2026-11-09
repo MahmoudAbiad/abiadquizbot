@@ -151,8 +151,11 @@ class ErrorTrackingMiddleware(BaseMiddleware):
             # 🩹 محاولة عدم ترك الطالب بدون أي رد إطلاقاً (بدل التجاهل الصامت)
             user_response = None
             user_response_delivered = False
+            resumed = bool(data.get("consent_resumed"))
             try:
-                if isinstance(tg_event, CallbackQuery):
+                if resumed:
+                    pass
+                elif isinstance(tg_event, CallbackQuery):
                     user_response = _UNHANDLED_CALLBACK_NOTICE
                     await tg_event.answer(user_response, show_alert=True)
                     user_response_delivered = True
@@ -274,6 +277,9 @@ class ThrottlingMiddleware(BaseMiddleware):
         event: Any,
         data: Dict[str, Any]
     ) -> Any:
+        if data.get("consent_resumed"):
+            return await handler(event, data)
+
         # التحقق مما إذا كان الحدث رسالة أو ضغطة زر
         if isinstance(event, (Message, CallbackQuery)):
             # 🚀 استثناء ألبومات الصور: إذا كانت الرسالة جزءاً من ألبوم، نمررها مباشرة لتجميعها عبر Redis
@@ -314,5 +320,6 @@ class ThrottlingMiddleware(BaseMiddleware):
             if isinstance(event, (Message, CallbackQuery)):
                 self.cache.pop(event.from_user.id, None)
             raise
+
 
 

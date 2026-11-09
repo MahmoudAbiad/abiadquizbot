@@ -6,8 +6,6 @@ import zipfile
 
 from openpyxl import load_workbook
 
-from services.export_branding import BOT_HANDLE
-
 MAX_QUESTIONS = 120
 MAX_ROWS = 5000
 MAX_COLUMNS = 40
@@ -24,12 +22,6 @@ def _text(value):
 
 def _header(value):
     return re.sub(r"\s+", " ", _text(value).lower()).replace("أ", "ا").replace("إ", "ا")
-
-
-def _is_branding_row(row):
-    """صف شارة الختام المُصدَّرة (خلية واحدة بنص @AbiadQuizMakerbot) ليس سؤالاً."""
-    values = [_text(cell.value) for cell in row if cell.value is not None and _text(cell.value)]
-    return len(values) == 1 and values[0].casefold() == BOT_HANDLE.casefold()
 
 
 def _grid(value):
@@ -178,8 +170,6 @@ def read_quiz_xlsx(path, default_title="كويز من Excel"):
         sheet.reset_dimensions()
         for number, row in enumerate(sheet.iter_rows(min_row=2, max_row=MAX_ROWS + 1, max_col=MAX_COLUMNS), 2):
             if not any(cell.value is not None and _text(cell.value) for cell in row):
-                continue
-            if _is_branding_row(row):
                 continue
             if number > MAX_ROWS or len(questions) >= MAX_QUESTIONS:
                 raise ExcelImportError(f"الحد الأقصى {MAX_QUESTIONS} سؤالاً؛ قسّم الملف إلى اختبارات أصغر.")

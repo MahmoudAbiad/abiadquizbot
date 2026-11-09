@@ -12,8 +12,11 @@
 - عند تعطل Redis يُرجَع للقاعدة، وعند تعطل القاعدة يُرفض الطلب (fail closed) برسالة قصيرة.
 """
 
+import asyncio
+import json
 import re
-from typing import Any, Awaitable, Callable, Dict, Tuple
+import time
+from typing import Any, Awaitable, Callable, Dict, List, Tuple
 
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -45,6 +48,9 @@ _NOTICE_TTL = 10
 _REDIS_OK_TTL = 60
 _RESUME_TTL = 86400
 _PROMPTED_TTL = 30 * 86400
+_PENDING_TTL = 900
+_PENDING_MAX_ALBUM = 10
+RESUME_FLAG = "consent_resumed"
 
 # (user_id, terms_version, privacy_version) -> True / state. رقم النسخة داخل المفتاح، فرفعه
 # يُبطل كل الكاش تلقائياً دون أي تنظيف.
@@ -214,11 +220,18 @@ def build_declined_text() -> str:
     )
 
 
-def build_accepted_text() -> str:
+def build_accepted_text(resuming: bool = False, callback_pending: bool = False) -> str:
+    if resuming:
+        return "✅ <b>شكراً لك، تمت الموافقة.</b>\n\n⏳ جارٍ متابعة طلبك السابق…"
+    if callback_pending:
+        return "✅ <b>شكراً لك، تمت الموافقة.</b>\n\n↩️ اضغط الزر الذي ضغطته قبل قليل مرة أخرى لمتابعة طلبك."
     return (
         "✅ <b>شكراً لك، تمت الموافقة.</b>\n\n"
         "أرسل ملفك أو نصك أو صورك لإنشاء اختبار، أو اكتب /start لعرض القائمة الرئيسية."
     )
+
+def build_resume_failed_text() -> str:
+    return "⚠️ تعذّرت متابعة طلبك السابق تلقائياً.\nتمت الموافقة بنجاح، فقط أعد إرسال ملفك أو رسالتك."
 
 
 def build_consent_keyboard(include_decline: bool = True) -> InlineKeyboardMarkup:
@@ -261,6 +274,101 @@ async def pop_start_payload(user_id: int):
     except Exception as exc:
         logger.warning("Could not read consent resume payload: %s", exc)
         return None
+
+def _pending_key(user_id: int) -> str:
+    return f"consent:pending:{user_id}"
+
+def _is_start_command(message: Message) -> bool:
+    text = (message.text or "").strip()
+    return text.startswith("/") and text.split(maxsplit=1)[0].split("@")[0].lower() == "/start"
+
+async def remember_pending_message(message: Message) -> None:
+    if message.from_user is None or _is_start_command(message):
+        return
+    try:
+        raw = message.model_dump_json(exclude_none=True)
+        redis = _redis(); key = _pending_key(message.from_user.id)
+        group_id = message.media_group_id; append = False
+        if group_id:
+            head = await redis.lindex(key, 0)
+            if head is not None:
+                head = head.decode() if isinstance(head, bytes) else head
+                append = json.loads(head).get("media_group_id") == group_id
+            if append and await redis.llen(key) >= _PENDING_MAX_ALBUM:
+                return
+        if not append:
+            await redis.delete(key)
+        await redis.rpush(key, raw); await redis.expire(key, _PENDING_TTL)
+        await redis.delete(_pending_cb_key(message.from_user.id))
+    except Exception as exc:
+        logger.warning("Could not store pending message for consent resume: %s", exc)
+
+def _pending_cb_key(user_id: int) -> str:
+    return f"consent:pending_cb:{user_id}"
+
+async def remember_pending_callback(call: CallbackQuery) -> None:
+    if call.from_user is None or not call.data:
+        return
+    try:
+        message = call.message
+        payload = json.dumps({"data": call.data, "message_id": getattr(message, "message_id", None), "chat_id": getattr(getattr(message, "chat", None), "id", None)})
+        redis = _redis(); await redis.set(_pending_cb_key(call.from_user.id), payload, ex=_PENDING_TTL)
+        await redis.delete(_pending_key(call.from_user.id))
+    except Exception as exc:
+        logger.warning("Could not store pending consent callback: %s", exc)
+
+async def pop_pending_callback(user_id: int):
+    try:
+        redis = _redis(); key = _pending_cb_key(user_id)
+        async with redis.pipeline(transaction=True) as pipe:
+            pipe.get(key); pipe.delete(key); value, _ = await pipe.execute()
+        if value is None: return None
+        value = value.decode() if isinstance(value, bytes) else value
+        parsed = json.loads(value); return parsed if isinstance(parsed, dict) else None
+    except Exception as exc:
+        logger.warning("Could not read pending consent callback: %s", exc); return None
+
+async def clear_pending_callback(user_id: int) -> None:
+    try: await _redis().delete(_pending_cb_key(user_id))
+    except Exception as exc: logger.warning("Could not clear pending consent callback: %s", exc)
+
+async def clear_pending_messages(user_id: int) -> None:
+    try: await _redis().delete(_pending_key(user_id))
+    except Exception as exc: logger.warning("Could not clear pending consent messages: %s", exc)
+
+async def pop_pending_messages(user_id: int, bot=None) -> List[Message]:
+    try:
+        redis = _redis(); key = _pending_key(user_id)
+        async with redis.pipeline(transaction=True) as pipe:
+            pipe.lrange(key, 0, -1); pipe.delete(key); items, _ = await pipe.execute()
+    except Exception as exc:
+        logger.warning("Could not read pending consent messages: %s", exc); return []
+    messages = []
+    for item in items or []:
+        try:
+            text = item.decode() if isinstance(item, bytes) else item; msg = Message.model_validate_json(text)
+            if bot is not None: msg = msg.as_(bot)
+            if msg.from_user is not None and msg.from_user.id == user_id: messages.append(msg)
+        except Exception as exc: logger.warning("Dropping malformed pending consent message: %s", exc)
+    return messages
+
+async def replay_pending_messages(bot, messages: List[Message]) -> int:
+    if not messages: return 0
+    from aiogram.types import Update
+    from config import dp
+    replayed = 0; failed_user_id = None
+    for msg in messages:
+        try:
+            update = Update(update_id=int(time.time() * 1000) % 2_000_000_000, message=msg)
+            await dp.feed_update(bot, update, **{RESUME_FLAG: True}); replayed += 1
+        except Exception as exc:
+            logger.error("Failed to resume message after consent: %s", exc, exc_info=True)
+            if failed_user_id is None and getattr(msg, "from_user", None) is not None: failed_user_id = msg.from_user.id
+        if len(messages) > 1: await asyncio.sleep(0.15)
+    if failed_user_id is not None:
+        try: await bot.send_message(failed_user_id, build_resume_failed_text())
+        except Exception as exc: logger.warning("Could not tell user that consent resume failed: %s", exc)
+    return replayed
 
 
 async def _mark_prompted(user_id: int) -> None:
@@ -321,6 +429,10 @@ class ConsentMiddleware(BaseMiddleware):
         if state == STATE_OK:
             return await handler(event, data)
 
+        if not data.get(RESUME_FLAG):
+            if isinstance(event, Message): await remember_pending_message(event)
+            elif isinstance(event, CallbackQuery): await remember_pending_callback(event)
+
         if user.id not in self._notices and await self._first_prompt(user.id):
             from task_utils import spawn
             spawn(_mark_prompted(user.id))
@@ -370,3 +482,4 @@ class ConsentMiddleware(BaseMiddleware):
         if sent and activity_state is not None:
             from helpers.supabase_helper.analytics import log_usage_event
             await log_usage_event(user_id, "consent_prompted", {"consent_state": activity_state})
+

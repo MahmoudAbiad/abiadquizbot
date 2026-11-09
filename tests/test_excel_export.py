@@ -11,7 +11,7 @@ from unittest.mock import Mock
 from openpyxl import load_workbook
 from PIL import Image
 from reliability_support import load_functions
-from services.export_branding import BOT_HANDLE, BOT_URL, branding_aspect, branding_png
+from services.export_branding import branding_aspect, branding_png
 
 
 def exporter():
@@ -83,10 +83,7 @@ class ExcelExportTests(unittest.TestCase):
             for row in sheet:
                 for cell in row:
                     self.assertNotEqual(cell.data_type, 'f')
-                    if cell.value == BOT_HANDLE:   # الرابط الوحيد المسموح: شارة الختام الثابتة
-                        self.assertEqual(cell.hyperlink.target, BOT_URL)
-                    else:
-                        self.assertIsNone(cell.hyperlink)
+                    self.assertIsNone(cell.hyperlink)
         self.assertEqual(wb.worksheets[0]['B2'].value, q['question'])
         self.assertEqual(wb.worksheets[1]['B2'].value, '=1+1')
 

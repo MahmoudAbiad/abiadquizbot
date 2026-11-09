@@ -1,23 +1,18 @@
-"""شارة الختام (لوغو أبيض + تلغرام + @AbiadQuizMakerbot) إجبارية بكل صيغ تصدير الاختبار.
-
-المعرّف نص حقيقي قابل للتحديد وللضغط (يفتح البوت)، وليس مرسوماً داخل الصورة."""
+"""شارة الختام (لوغو أبيض + تلغرام + @AbiadQuizMakerbot) إجبارية بكل صيغ تصدير الاختبار."""
 import io
 import unittest
-from pathlib import Path
 
 import fitz
 from docx import Document
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
-from docx.oxml.ns import qn
 from openpyxl import load_workbook
 
-from services.export_branding import BADGE_H, BADGE_W, BOT_HANDLE, BOT_URL, branding_png
+from services.export_branding import BOT_HANDLE, branding_png
 from services.export_options import ExportOptions
 from services.export_service import build_quiz_docx, build_quiz_pdf, build_quiz_xlsx
 
 
 def badges(page):
-    return sum(1 for img in page.get_images(full=True) if (img[2], img[3]) == (BADGE_W, BADGE_H))
+    return sum(1 for img in page.get_images(full=True) if (img[2], img[3]) == (1200, 220))
 
 
 def quiz(n, lang="ar"):
@@ -38,10 +33,6 @@ class BrandingTests(unittest.TestCase):
             self.assertEqual(sum(badges(p) for p in student), 1)
             teacher = fitz.open(stream=build_quiz_pdf("t", quiz(5, lang), "simple", True), filetype="pdf")
             self.assertEqual(sum(badges(p) for p in teacher), 2)
-            for doc, expected in ((student, 1), (teacher, 2)):
-                self.assertEqual(sum(page.get_text().count(BOT_HANDLE) for page in doc), expected)
-                uris = [link.get("uri") for page in doc for link in page.get_links()]
-                self.assertEqual(uris.count(BOT_URL), expected)
 
     def test_full_page_does_not_push_badge_to_extra_page(self):
         data = build_quiz_pdf("t", quiz(16), "simple", False,
@@ -61,45 +52,12 @@ class BrandingTests(unittest.TestCase):
         data = build_quiz_docx("t", quiz(4), "simple", False)
         self.assertEqual(len(Document(io.BytesIO(data)).inline_shapes), 1)
 
-    def test_docx_handle_is_real_clickable_text(self):
-        for lang in ("ar", "en"):
-            for answers, expected in ((False, 1), (True, 2)):
-                doc = Document(io.BytesIO(build_quiz_docx("t", quiz(4, lang), "simple", answers)))
-                links = list(doc.element.body.iter(qn("w:hyperlink")))
-                self.assertEqual(len(links), expected)
-                for link in links:
-                    self.assertEqual("".join(t.text for t in link.iter(qn("w:t"))), BOT_HANDLE)
-                    rel = doc.part.rels[link.get(qn("r:id"))]
-                    self.assertEqual((rel.reltype, rel.target_ref, rel.is_external), (RT.HYPERLINK, BOT_URL, True))
-
-    def test_docx_handle_paragraph_is_ltr_so_at_sign_stays_first(self):
-        doc = Document(io.BytesIO(build_quiz_docx("t", quiz(4), "simple", False, ExportOptions(columns=2))))
-        link = next(doc.element.body.iter(qn("w:hyperlink")))
-        self.assertIsNone(link.getparent().find(qn("w:pPr")).find(qn("w:bidi")))
-
     def test_xlsx_badge_below_last_row_and_does_not_break_cells(self):
         data = build_quiz_xlsx("t", quiz(3), "simple", False)
         wb = load_workbook(io.BytesIO(data))
         for sheet in wb:
             self.assertEqual(len(sheet._images), 1)
-            image_row = sheet._images[0].anchor._from.row + 1
-            handles = [c for row in sheet.iter_rows() for c in row if c.value == BOT_HANDLE]
-            self.assertEqual(len(handles), 1)
-            cell = handles[0]
-            self.assertEqual(cell.hyperlink.target, BOT_URL)
-            self.assertEqual(cell.data_type, "s")
-            self.assertGreater(image_row, 4)          # تحت رأس الجدول + 3 أسئلة (أو جدول المعلومات)
-            self.assertGreater(cell.row, image_row)   # المعرّف تحت الصورة
-
-    def test_xlsx_handle_row_is_not_imported_as_a_question(self):
-        import tempfile
-        from services.excel_import import read_quiz_xlsx
-        data = build_quiz_xlsx("t", quiz(3, "en"), "simple", True)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "export.xlsx"
-            path.write_bytes(data)
-            _, questions = read_quiz_xlsx(str(path))
-        self.assertEqual(len(questions), 3)
+            self.assertGreater(sheet._images[0].anchor._from.row + 1, sheet.max_row)
 
 
 if __name__ == "__main__":
