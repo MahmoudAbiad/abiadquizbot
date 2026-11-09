@@ -42,6 +42,7 @@ from helpers.gemini_helper import get_pdf_page_count_sync
 from helpers.points_calculator import calculate_cached_points_cost, calculate_quiz_points_cost
 from keyboards import (
     get_multiple_quizzes_keyboard, get_question_count_keyboard,
+    get_quiz_summary_keyboard, get_quiz_ready_exam_settings_keyboard, get_quiz_standard_settings_keyboard,
     get_translation_choice_keyboard, get_quiz_type_keyboard,
     get_web_upload_redirect_keyboard, get_quiz_extraction_choice_keyboard,
     get_quiz_detected_count_keyboard, get_classification_vote_keyboard,
@@ -270,29 +271,20 @@ DEFAULT_COUNT_SUGGESTIONS = [5, 10, 15, 20]
 
 async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[int], state: FSMContext, target_for_send: Optional[types.Message] = None) -> None:
     """
-    🆕 يبني نص وكيبورد شاشة عدد الأسئلة المدمجة (اختيار العدد + التكلفة + زر البدء
-    بنفس الشاشة) ويعرضها. لو message_id متوفر يُعدَّل نفس الرسالة (bot.edit_message_text)
-    بغض النظر عن مصدر الحدث (ضغطة زر أو رسالة نصية بعدد مخصص) - هذا ما يسمح بدمج
-    مسار "الكتابة اليدوية لعدد مخصص" بنفس شاشة الأزرار السريعة بدل رسالة منفصلة.
-    لو مافي message_id بعد (أول عرض)، تُرسَل رسالة جديدة عبر target_for_send وتُخزَّن
-    معرّفاتها بالحالة ليُعاد استخدامها بكل التحديثات اللاحقة.
+    🆕 لوحة ملخص إعدادات الكويز الموحدة:
+    تعرض شاشة واحدة تتضمن ملخصاً شاملاً للإعدادات الافتراضية مع 3 أزرار فقط:
+    1. إنشاء الاختبار (بدء مباشر مع التكلفة)
+    2. إعدادات الاختبار (تخصيص الخيارات)
+    3. إلغاء الطلب
+
+    وعند فتح «إعدادات الاختبار»، تتحول الشاشة إلى لوحة تعديل تفاعلية لتغيير
+    العدد، الصعوبة، طريقة الاستخراج، ونوع الأسئلة مع زر للرجوع للملخص في أي وقت.
     """
     data = await state.get_data()
     items = int(data.get("items_count") or 1)
     is_album = bool(data.get("is_album"))
     ready_exam = data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH
     selected_count = int(data.get("selected_question_count") or (0 if ready_exam else DEFAULT_COUNT_SUGGESTIONS[1]))
-    count_prompt_text = data.get(
-        "count_prompt_text",
-        "📝 كم سؤالاً تريد استخراجه وتوليده من هذا المحتوى؟",
-    )
-
-    if ready_exam:
-        count_prompt_text = (MSG_QUIZ_DETECTED_COUNT_TEMPLATE.format(count=selected_count)
-                             if selected_count else "تعذر تحديد عدد الأسئلة تلقائياً. اضغط «تعديل عدد الأسئلة» وأدخل العدد الموجود في اختبارك.")
-        notice = data.get("quiz_detection_notice")
-        if notice:
-            count_prompt_text = f"{notice}\n\n{count_prompt_text}"
 
     mode = determine_execution_mode(items, selected_count, is_album=is_album, content_source=data.get("content_source"))
     cost = await calculate_quiz_points_cost(items, selected_count, is_album)
@@ -303,24 +295,133 @@ async def _render_question_count_screen(bot, chat_id: int, message_id: Optional[
         extraction_mode=data.get("quiz_extraction_mode"),
     )
 
-    heading = "✅ مراجعة العدد والتكلفة" if ready_exam else "3 من 3 · مراجعة وتوليد"
-    text = f"<b>{heading}</b>\n\n{count_prompt_text}\n\n{build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)}"
-    text += ("\n\nالتكلفة محسوبة على العدد المعتمد أعلاه. يمكنك تعديله قبل بدء الاستخراج."
-             if ready_exam else "\n\nغيّر العدد من الأزرار أو اكتبه مباشرة. لا يبدأ التوليد إلا بعد تأكيدك.")
-    if mode in ("Super-PDF", "Super-Images", "Super-Text"):
-        text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
+    in_settings = bool(data.get("in_settings_mode", False))
 
-    # 🆕 اختبار جاهز (محلول/غير محلول): لا معنى لأزرار عدد جاهزة عشوائية (5/10/15/20) هنا -
-    # العدد محدَّد فعلياً بالمستند نفسه وتم رصده تلقائياً (راجع show_question_count_screen
-    # أدناه). كيبورد مخصص بزر تعديل يدوي (لو الرصد غير دقيق) + زر بدء الاستخراج فقط.
-    subject_type = data.get("subject_type")
-    if subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH:
-        keyboard = get_quiz_detected_count_keyboard(selected_count)
+    if not in_settings:
+        heading = "📋 <b>ملخص إعدادات الاختبار</b>"
+        is_solved = data.get("subject_type") == SUBJECT_QUIZ_SOLVED
+        is_english = data.get("subject_type") == SUBJECT_ENGLISH or data.get("content_subject_type") == SUBJECT_ENGLISH
+        is_french = data.get("subject_type") == SUBJECT_FRENCH or data.get("content_subject_type") == SUBJECT_FRENCH
+
+        extra_lang = ""
+        if is_english or is_french:
+            lang_name = "الفرنسية" if is_french else "الإنجليزية"
+            cur_trans = data.get("english_mode", "translated")
+            trans_label = "مترجمة للعربية 🌐" if cur_trans == "translated" else f"بـ{lang_name} فقط 🔤"
+            extra_lang = f"\n• لغة الأسئلة: {trans_label}"
+
+        if ready_exam:
+            exam_type_str = "📝 اختبار جاهز محلول" if is_solved else "📝 اختبار جاهز غير محلول"
+            ext_mode = data.get("quiz_extraction_mode")
+            if ext_mode == QUIZ_EXTRACTION_MODE_AS_IS:
+                solve_str = "📄 استخدام أجوبة المصدر"
+            elif ext_mode == QUIZ_EXTRACTION_MODE_AI_SOLVE:
+                solve_str = "🤖 حل بالذكاء الاصطناعي"
+            else:
+                solve_str = "📄 استخدام أجوبة المصدر" if is_solved else "🤖 حل بالذكاء الاصطناعي"
+
+            count_str = f"<b>{selected_count}</b> سؤالاً" if selected_count else "تعذر تحديده آلياً"
+            text = (
+                f"{heading}\n\n"
+                f"• نوع المحتوى: {exam_type_str}\n"
+                f"• طريقة الحل: <b>{solve_str}</b>\n"
+                f"• عدد الأسئلة: {count_str}{extra_lang}\n\n"
+                f"💰 <b>التكلفة: {cost:.2f} نقطة</b>\n\n"
+                "💡 اضغط <b>«إنشاء الاختبار»</b> للبدء فوراً بهذه الإعدادات،\n"
+                "أو <b>«إعدادات الاختبار»</b> لتخصيص الخيارات أو تعديل العدد."
+            )
+        else:
+            transparency = build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)
+            text = (
+                f"{heading}\n\n"
+                f"{transparency}{extra_lang}\n\n"
+                "💡 اضغط <b>«إنشاء الاختبار»</b> للبدء فوراً بالإعدادات الافتراضية،\n"
+                "أو <b>«إعدادات الاختبار»</b> لتخصيص النوع أو الصعوبة أو العدد."
+            )
+
+        if mode in ("Super-PDF", "Super-Images", "Super-Text"):
+            text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
+
+        summary_kb_fn = globals().get("get_quiz_summary_keyboard")
+        if summary_kb_fn:
+            keyboard = summary_kb_fn(selected_count=selected_count, cost=cost)
+        else:
+            try:
+                from keyboards import get_quiz_summary_keyboard as fn
+                keyboard = fn(selected_count=selected_count, cost=cost)
+            except Exception:
+                keyboard = get_quiz_detected_count_keyboard(selected_count) if ready_exam else get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
+
     else:
-        keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
+        heading = "⚙️ <b>إعدادات الاختبار</b>"
+        is_solved = data.get("subject_type") == SUBJECT_QUIZ_SOLVED
+        is_math = data.get("content_subject_type") == SUBJECT_MATH
+        is_english = data.get("subject_type") == SUBJECT_ENGLISH or data.get("content_subject_type") == SUBJECT_ENGLISH
+        is_french = data.get("subject_type") == SUBJECT_FRENCH or data.get("content_subject_type") == SUBJECT_FRENCH
+        is_lang = is_english or is_french
+        lang_name = "الفرنسية" if is_french else "الإنجليزية"
 
-    if ready_exam and not selected_count:
-        text = f"<b>{heading}</b>\n\n{count_prompt_text}"
+        if ready_exam:
+            ext_mode = data.get("quiz_extraction_mode") or (QUIZ_EXTRACTION_MODE_AS_IS if is_solved else QUIZ_EXTRACTION_MODE_AI_SOLVE)
+            text = (
+                f"{heading}\n\n"
+                f"• المحتوى: {'اختبار محلول' if is_solved else 'اختبار غير محلول'}\n"
+                f"• طريقة الاستخراج: <b>{QUIZ_EXTRACTION_MODE_LABELS_AR.get(ext_mode, ext_mode)}</b>\n"
+                f"• عدد الأسئلة: <b>{selected_count}</b> سؤالاً\n"
+                f"💰 <b>التكلفة: {cost:.2f} نقطة</b>\n\n"
+                "يمكنك تعديل الخيارات من الأزرار أدناه، ثم بدء التوليد أو الرجوع للملخص:"
+            )
+            settings_kb_fn = globals().get("get_quiz_ready_exam_settings_keyboard")
+            if not settings_kb_fn:
+                try:
+                    from keyboards import get_quiz_ready_exam_settings_keyboard as settings_kb_fn
+                except Exception:
+                    settings_kb_fn = None
+            if settings_kb_fn:
+                keyboard = settings_kb_fn(
+                    selected_count=selected_count,
+                    solved=is_solved,
+                    extraction_mode=ext_mode,
+                    is_math=is_math,
+                    is_language=is_lang,
+                    english_mode=data.get("english_mode"),
+                    lang_name=lang_name,
+                    cost=cost,
+                )
+            else:
+                keyboard = get_quiz_detected_count_keyboard(selected_count)
+        else:
+            transparency = build_transparency_text(items, selected_count, mode, cost, difficulty, question_type_label)
+            text = (
+                f"{heading}\n\n"
+                f"{transparency}\n\n"
+                "يمكنك تعديل الخيارات من الأزرار أدناه، ثم بدء التوليد أو الرجوع للملخص:"
+            )
+            standard_kb_fn = globals().get("get_quiz_standard_settings_keyboard")
+            if not standard_kb_fn:
+                try:
+                    from keyboards import get_quiz_standard_settings_keyboard as standard_kb_fn
+                except Exception:
+                    standard_kb_fn = None
+            if standard_kb_fn:
+                keyboard = standard_kb_fn(
+                    items=items,
+                    is_album=is_album,
+                    selected_count=selected_count,
+                    suggestions=DEFAULT_COUNT_SUGGESTIONS,
+                    selected_difficulty=difficulty,
+                    selected_type=data.get("question_type", QUESTION_TYPE_GENERAL),
+                    subject_type=data.get("subject_type", SUBJECT_OTHER),
+                    suggested_types=data.get("suggested_question_types", []),
+                    english_mode=data.get("english_mode"),
+                    content_subject_type=data.get("content_subject_type"),
+                    cost=cost,
+                )
+            else:
+                keyboard = get_question_count_keyboard(items, is_album, selected_count, DEFAULT_COUNT_SUGGESTIONS)
+
+        if mode in ("Super-PDF", "Super-Images", "Super-Text"):
+            text += f"\n\n{MSG_SUPER_PROCESSING_ALERT}"
 
     if message_id:
         try:
@@ -545,58 +646,47 @@ async def ask_question_count(
         except Exception as exc:
             log_warning(logger, f"Could not send classification vote prompt for {file_hash}: {exc}")
 
-    # 🆕 اختبار جاهز (محلول/غير محلول): لهما أولوية تدفق مستقلة عن باقي المواد - لا شاشة
-    # نوع/صعوبة أسئلة (لا معنى لها هنا: المهمة استخراج أسئلة موجودة فعلياً بالمستند وليست
-    # توليد أسئلة جديدة بنوع/صعوبة مختارين). راجع دستور الميزة بالأسفل.
+    # 🆕 إعداد وتوليد الكويز عبر شاشة الملخص الموحدة (بدلاً من الشاشات المتتالية):
+    # نضبط الإعدادات الافتراضية الذكية مسبقاً، ونعرض الملخص فوراً مع 3 أزرار فقط:
+    # 1. إنشاء الاختبار (بالإعدادات الافتراضية المحددة)
+    # 2. إعدادات الاختبار (لتعديل أي خيار)
+    # 3. إلغاء الطلب
     if classification.subject in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
-        # 🆕 نُخزّن العدد التقريبي المرصود آلياً (classification.question_count) بالحالة
-        # فور معرفته، بغض النظر عن مسار الشاشات اللاحق (تخيير محلول/انتقال مباشر لغير
-        # محلول) - كلاهما ينتهي عند show_question_count_screen التي تقرأه لاحقاً بدل
-        # سؤال الطالب "كم سؤالاً تريد؟" بأزرار عدد عشوائية (راجع التعليق هناك).
         detected_count = classification.question_count
         if detected_count is not None:
             detected_count = max(1, min(int(detected_count), MAX_QUESTIONS_TO_GENERATE))
-        await state.update_data(detected_question_count=detected_count, selected_question_count=detected_count)
 
-        # 🆕 اختبار جاهز بمادة إنجليزي/فرنسي (content_subject - راجع services/subject_classifier.py):
-        # نعرض شاشة اختيار "مترجمة/بدون ترجمة" أولاً (نفس شاشة المواد العادية بالأسفل)
-        # قبل الانتقال لمسار الاختبار الجاهز - القرار يُخزَّن بـ english_mode ويُقرأ لاحقاً
-        # بـ services/quiz_service.py (effective_subject/content_language). بعد اختيار
-        # الطالب، _apply_translation_choice يكمل تلقائياً لمسار الاختبار الجاهز الصحيح
-        # (محلول/غير محلول) بدل شاشة نوع الأسئلة العادية.
-        if classification.content_subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
-            await state.update_data(quiz_detection_notice=None)
-            await state.set_state(QuizState.waiting_for_translation_choice)
-            detected_msg = (
-                MSG_ENGLISH_CONTENT_DETECTED if classification.content_subject == SUBJECT_ENGLISH
-                else MSG_FRENCH_CONTENT_DETECTED
-            )
-            translation_keyboard = get_translation_choice_keyboard(classification.content_subject)
-            await status_target.edit_text(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
-            return
+        is_solved = (classification.subject == SUBJECT_QUIZ_SOLVED)
+        # الافتراضي لاختبار جاهز محلول: استخدام أجوبة المصدر
+        # الافتراضي لاختبار غير محلول: حل بالذكاء الاصطناعي
+        default_extraction_mode = QUIZ_EXTRACTION_MODE_AS_IS if is_solved else QUIZ_EXTRACTION_MODE_AI_SOLVE
+        is_lang = classification.content_subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH)
+        default_english_mode = "translated" if is_lang else None
+        count = detected_count or 10
 
-        # مادة أخرى غير لغوية (رياضيات/عام) - لا شاشة ترجمة، ننتقل مباشرة لمسار الاختبار الجاهز.
-        await state.update_data(english_mode=None)
-        if classification.subject == SUBJECT_QUIZ_SOLVED:
-            await _proceed_to_quiz_solved_screen(status_target, state, edit=True)
-        else:
-            await _proceed_to_quiz_unsolved_screen(status_target, state, edit=True)
-        return
-
-    # 🆕 الإنجليزي والفرنسي يعاملان بنفس التدفق بالضبط (شاشة اختيار "مترجمة/بدون ترجمة")
-    # - الفارق الوحيد هو نص رسالة الاكتشاف ونصوص أزرار الكيبورد (راجع get_translation_choice_keyboard).
-    if classification.subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH):
-        await state.set_state(QuizState.waiting_for_translation_choice)
-        detected_msg = (
-            MSG_ENGLISH_CONTENT_DETECTED if classification.subject == SUBJECT_ENGLISH
-            else MSG_FRENCH_CONTENT_DETECTED
+        await state.update_data(
+            detected_question_count=detected_count,
+            selected_question_count=count,
+            quiz_extraction_mode=default_extraction_mode,
+            english_mode=default_english_mode,
+            in_settings_mode=False,
+            quiz_detection_notice=None,
         )
-        translation_keyboard = get_translation_choice_keyboard(classification.subject)
-        await status_target.edit_text(detected_msg, parse_mode="HTML", reply_markup=translation_keyboard)
-        return
+    else:
+        is_lang = classification.subject in (SUBJECT_ENGLISH, SUBJECT_FRENCH)
+        default_english_mode = "translated" if is_lang else None
+        await state.update_data(
+            selected_question_count=DEFAULT_COUNT_SUGGESTIONS[1],
+            quiz_extraction_mode=None,
+            english_mode=default_english_mode,
+            in_settings_mode=False,
+            quiz_detection_notice=None,
+        )
 
-    await state.update_data(english_mode=None, quiz_extraction_mode=None)
-    await _show_quiz_options_screen(status_target, state, edit=True)
+    await state.set_state(QuizState.waiting_for_count)
+    await _render_question_count_screen(
+        status_target.bot, status_target.chat.id, status_target.message_id, state, target_for_send=status_target
+    )
 
 async def _render_cache_decision_screen(reply_target: types.Message, state: FSMContext, edit: bool = False, viewer_id: Optional[int] = None) -> None:
     """
@@ -965,26 +1055,24 @@ async def _apply_quiz_extraction_choice(call: types.CallbackQuery, state: FSMCon
     await state.update_data(quiz_extraction_mode=extraction_mode, question_type=QUESTION_TYPE_GENERAL, custom_question_type_text=None)
     await show_question_count_screen(call.message, state, edit=True)
 
-@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_generate_new")
+@router.callback_query(F.data == "quiz_generate_new")
 async def handle_quiz_generate_new(call: types.CallbackQuery, state: FSMContext) -> None:
-    """Reuse detection and suggestions, but start ordinary generation, not extraction."""
+    """إعادة استخدام المحتوى لتوليد أسئلة جديدة بدلاً من استخراج الاختبار الجاهز."""
     data = await state.get_data()
-    if data.get("subject_type") not in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED):
-        await call.answer()
-        return
     await state.update_data(
         subject_type=data.get("content_subject_type") or SUBJECT_OTHER,
         quiz_extraction_mode=None, quiz_detection_notice=None,
         question_type=QUESTION_TYPE_GENERAL, custom_question_type_text=None,
-        difficulty=DIFFICULTY_MEDIUM, detected_question_count=None,
-        selected_question_count=None, review_count_to_restore=None,
-        count_prompt_text="📝 كم سؤالاً جديداً تريد توليده من هذا المحتوى؟",
+        difficulty=DIFFICULTY_MEDIUM,
+        selected_question_count=DEFAULT_COUNT_SUGGESTIONS[1],
+        in_settings_mode=True,
     )
-    await _show_quiz_options_screen(call.message, state, edit=True)
+    await state.set_state(QuizState.waiting_for_count)
+    await _render_question_count_screen(call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message)
     await call.answer()
 
 
-@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_generate_similar_math")
+@router.callback_query(F.data == "quiz_generate_similar_math")
 async def handle_quiz_generate_similar_math(call: types.CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     if data.get("content_subject_type") != SUBJECT_MATH:
@@ -993,39 +1081,62 @@ async def handle_quiz_generate_similar_math(call: types.CallbackQuery, state: FS
     await state.update_data(
         question_type=QUESTION_TYPE_SIMILAR_MATH, custom_question_type_text=None,
         quiz_extraction_mode=None, quiz_detection_notice=None,
-        count_prompt_text="🧩 كم مسألة جديدة تريد توليدها بنفس النمط؟",
+        in_settings_mode=True,
     )
-    await state.set_state(QuizState.waiting_for_quiz_options)
-    from handlers.quiz_options import _render_difficulty_screen
-    await _render_difficulty_screen(call.message, state, edit=True)
+    await state.set_state(QuizState.waiting_for_count)
+    await _render_question_count_screen(call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message)
     await call.answer()
 
 
-@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_extract_as_is")
+@router.callback_query(F.data.in_({"quiz_extract_as_is", "qset_ext:as_is"}))
 async def handle_quiz_extract_as_is(call: types.CallbackQuery, state: FSMContext) -> None:
     """الطالب اختار اعتماد الأجوبة المدوّنة بالمستند كما هي دون حلّها بالذكاء الاصطناعي."""
     try:
-        await _apply_quiz_extraction_choice(call, state, QUIZ_EXTRACTION_MODE_AS_IS)
+        await state.update_data(quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AS_IS)
+        await _render_question_count_screen(call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message)
     except Exception as exc:
         log_error(logger, f"Quiz extraction choice (as_is) failed: {exc}", exception=exc)
-        await call.message.answer(
-            "❌ تعذر تنفيذ الاختيار، حاول مجدداً.", reply_markup=get_quiz_extraction_choice_keyboard(),
-        )
     finally:
         await call.answer()
 
-@router.callback_query(QuizState.waiting_for_quiz_extraction_choice, F.data == "quiz_extract_ai_solve")
+@router.callback_query(F.data.in_({"quiz_extract_ai_solve", "qset_ext:ai_solve"}))
 async def handle_quiz_extract_ai_solve(call: types.CallbackQuery, state: FSMContext) -> None:
-    """الطالب اختار تجاهل أجوبة المستند وحلّ الاختبار بالذكاء الاصطناعي بدلاً منها."""
+    """الطالب اختار حلّ الاختبار بالذكاء الاصطناعي."""
     try:
-        await _apply_quiz_extraction_choice(call, state, QUIZ_EXTRACTION_MODE_AI_SOLVE)
+        await state.update_data(quiz_extraction_mode=QUIZ_EXTRACTION_MODE_AI_SOLVE)
+        await _render_question_count_screen(call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message)
     except Exception as exc:
         log_error(logger, f"Quiz extraction choice (ai_solve) failed: {exc}", exception=exc)
-        await call.message.answer(
-            "❌ تعذر تنفيذ الاختيار، حاول مجدداً.", reply_markup=get_quiz_extraction_choice_keyboard(),
-        )
     finally:
         await call.answer()
+
+@router.callback_query(F.data.startswith("qopt_trans:"))
+async def handle_set_translation_mode(call: types.CallbackQuery, state: FSMContext) -> None:
+    """تبديل خيار الترجمة مباشرة من لوحة الإعدادات."""
+    mode = call.data.split(":", 1)[1]
+    await state.update_data(english_mode=mode)
+    await _render_question_count_screen(
+        call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message
+    )
+    await call.answer()
+
+@router.callback_query(F.data == "qset_open_types")
+async def handle_open_question_types(call: types.CallbackQuery, state: FSMContext) -> None:
+    """فتح قائمة اختيار نوع الأسئلة من شاشة الإعدادات."""
+    data = await state.get_data()
+    keyboard = get_quiz_type_keyboard(
+        subject_type=data.get("subject_type", SUBJECT_OTHER),
+        suggested_types=data.get("suggested_question_types", []),
+        selected_type=data.get("question_type", QUESTION_TYPE_GENERAL),
+    )
+    kb_list = list(keyboard.inline_keyboard)
+    kb_list.insert(-1, [types.InlineKeyboardButton(text="🔙 الرجوع للإعدادات", callback_data="quiz_open_settings")])
+    await call.message.edit_text(
+        MSG_QUIZ_TYPE_PROMPT,
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb_list)
+    )
+    await call.answer()
 
 # ==================== معالجات قرار الكاش والأزرار المتعددة ====================
 
@@ -1140,8 +1251,22 @@ async def handle_count_custom_prompt(call: types.CallbackQuery, state: FSMContex
         await call.answer()
 
 
-@router.callback_query(QuizState.waiting_for_count, F.data == "qcount_review")
+@router.callback_query(F.data == "quiz_open_settings")
+async def handle_open_quiz_settings(call: types.CallbackQuery, state: FSMContext) -> None:
+    """فتح شاشة إعدادات الكويز المتقدمة لتخصيص الخيارات."""
+    await state.set_state(QuizState.waiting_for_count)
+    await state.update_data(in_settings_mode=True)
+    await _render_question_count_screen(
+        call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.in_({"quiz_back_summary", "qcount_review"}))
 async def back_to_count_review(call: types.CallbackQuery, state: FSMContext):
+    """الرجوع إلى لوحة ملخص إعدادات الكويز ذات الـ 3 أزرار."""
+    await state.set_state(QuizState.waiting_for_count)
+    await state.update_data(in_settings_mode=False)
     await _render_question_count_screen(call.bot, call.message.chat.id,
         call.message.message_id, state, target_for_send=call.message)
     await call.answer()
