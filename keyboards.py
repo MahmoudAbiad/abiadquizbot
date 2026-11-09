@@ -390,198 +390,31 @@ def get_question_count_quick_keyboard(suggestions: list = None) -> types.InlineK
 
 
 def get_question_count_keyboard(
-    items: int,
-    is_album: bool,
-    selected_count: int,
-    suggestions: list = None,
-    selected_difficulty: str = DIFFICULTY_MEDIUM,
-    selected_type: str = QUESTION_TYPE_GENERAL,
-    subject_type: str = "other",
-    suggested_types: list = None,
-    english_mode: Optional[str] = None,
-    content_subject_type: Optional[str] = None,
-    cost: Optional[float] = None,
-    is_unified: bool = True,
+    items: int, is_album: bool, selected_count: int, suggestions: list = None
 ) -> types.InlineKeyboardMarkup:
     """
-    🆕 شاشة لوحة إعداد الكويز الموحدة (Unified Quiz Dashboard):
-    تدمج نوع الأسئلة + الصعوبة + عدد الأسئلة + لغة الأسئلة المترجمة مع زر البدء المباشر
-    في واجهة تفاعلية واحدة سريعة بنقرة واحدة (1-Click).
+    🆕 شاشة عدد الأسئلة المدمجة - خطوة واحدة بدل خطوتين منفصلتين (اختيار عدد ← ثم شاشة
+    تأكيد وتكلفة مستقلة). السعر لا يظهر على الأزرار (تفادي الازدحام البصري) - مصدر
+    وحيد للسعر هو سطر "تكلفة العملية" بنص الرسالة فوق الكيبورد (build_transparency_text
+    بـ handlers/files.py._render_question_count_screen)، ويتحدّث تلقائياً مع كل تغيير
+    بالعدد المختار لأن الرسالة كلها تُعاد بناؤها بكل تعديل (edit_message_text).
     """
-    if not is_unified:
-        kb = []
-        row = []
-        for n in (suggestions or [5, 10, 15, 20]):
-            label = f"{n} سؤال"
-            text = f"✅ {label}" if selected_count == n else label
-            row.append(types.InlineKeyboardButton(text=text, callback_data=f"qcount_pick_{n}"))
-            if len(row) == 2:
-                kb.append(row)
-                row = []
-        if row:
-            kb.append(row)
-        kb.append([types.InlineKeyboardButton(text="✏️ عدد مخصص (اكتبه مباشرة)", callback_data="qcount_custom")])
-        kb.append([types.InlineKeyboardButton(text=f"🚀 توليد {selected_count} أسئلة", callback_data="qcount_start")])
-        kb.append([types.InlineKeyboardButton(text="🔙 تعديل الصعوبة", callback_data="qback_to_difficulty")])
-        kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
-        return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
     kb = []
-
-    # 1. خيار لغة الأسئلة (عند اكتشاف محتوى إنجليزي أو فرنسي)
-    is_english = subject_type == SUBJECT_ENGLISH or content_subject_type == SUBJECT_ENGLISH
-    is_french = subject_type == SUBJECT_FRENCH or content_subject_type == SUBJECT_FRENCH
-    if is_english or is_french:
-        lang_label = "الإنجليزية" if is_english else "الفرنسية"
-        cur_trans = english_mode or "translated"
-        trans_text = "✅ 🌐 مترجمة للعربية" if cur_trans == "translated" else "🌐 مترجمة للعربية"
-        plain_text = f"✅ 🔤 بـ{lang_label} فقط" if cur_trans == "plain" else f"🔤 بـ{lang_label} فقط"
-        kb.append([
-            types.InlineKeyboardButton(text=trans_text, callback_data="qopt_trans:translated"),
-            types.InlineKeyboardButton(text=plain_text, callback_data="qopt_trans:plain"),
-        ])
-
-    # 2. نوع الأسئلة
-    type_row = []
-    is_general = selected_type == QUESTION_TYPE_GENERAL
-    type_row.append(types.InlineKeyboardButton(
-        text="✅ 📚 شامل" if is_general else "📚 شامل",
-        callback_data="qtype_general"
-    ))
-    if subject_type == SUBJECT_MATH or content_subject_type == SUBJECT_MATH:
-        is_prob = selected_type == "problems"
-        type_row.append(types.InlineKeyboardButton(
-            text="✅ 🧮 مسائل" if is_prob else "🧮 مسائل",
-            callback_data="qtype_problems"
-        ))
-        is_sim = selected_type == QUESTION_TYPE_SIMILAR_MATH
-        type_row.append(types.InlineKeyboardButton(
-            text=f"✅ {BTN_SIMILAR_MATH}" if is_sim else BTN_SIMILAR_MATH,
-            callback_data=f"qtype_{QUESTION_TYPE_SIMILAR_MATH}"
-        ))
-    elif is_english or is_french:
-        is_gram = selected_type == "grammar"
-        type_row.append(types.InlineKeyboardButton(
-            text="✅ 📝 قواعد" if is_gram else "📝 قواعد",
-            callback_data="qtype_grammar"
-        ))
-        is_read = selected_type == "reading"
-        type_row.append(types.InlineKeyboardButton(
-            text="✅ 📗 قراءة" if is_read else "📗 قراءة",
-            callback_data="qtype_reading"
-        ))
-    elif suggested_types:
-        for idx, label in enumerate(suggested_types[:2]):
-            val = f"other_{idx}"
-            is_s = selected_type == val
-            type_row.append(types.InlineKeyboardButton(
-                text=f"✅ {label}" if is_s else label,
-                callback_data=f"qtype_{val}"
-            ))
-
-    if len(type_row) <= 3:
-        kb.append(type_row)
-    else:
-        kb.append(type_row[:2])
-        kb.append(type_row[2:])
-
-    is_custom_type = selected_type == QUESTION_TYPE_CUSTOM
-    kb.append([types.InlineKeyboardButton(
-        text="✅ ✏️ تفضيل خاص للأسئلة" if is_custom_type else "✏️ تفضيل خاص للأسئلة",
-        callback_data="qtype_custom"
-    )])
-
-    # 3. الصعوبة
-    diff_row = []
-    for val in (DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED):
-        lbl = DIFFICULTY_LABELS_AR[val]
-        text = f"✅ {lbl}" if selected_difficulty == val else lbl
-        diff_row.append(types.InlineKeyboardButton(text=text, callback_data=f"qdiff_{val}"))
-    kb.append(diff_row)
-
-    prog_label = DIFFICULTY_LABELS_AR[DIFFICULTY_PROGRESSIVE]
-    prog_text = f"✅ {prog_label}" if selected_difficulty == DIFFICULTY_PROGRESSIVE else prog_label
-    kb.append([types.InlineKeyboardButton(text=prog_text, callback_data=f"qdiff_{DIFFICULTY_PROGRESSIVE}")])
-
-    # 4. عدد الأسئلة
-    count_row = []
+    row = []
     for n in (suggestions or [5, 10, 15, 20]):
-        text = f"✅ {n}" if selected_count == n else str(n)
-        count_row.append(types.InlineKeyboardButton(text=text, callback_data=f"qcount_pick_{n}"))
-    is_custom_num = selected_count not in (suggestions or [5, 10, 15, 20])
-    count_row.append(types.InlineKeyboardButton(
-        text=f"✅ {selected_count}" if is_custom_num else "✏️ مخصص",
-        callback_data="qcount_custom"
-    ))
-    kb.append(count_row)
+        label = f"{n} سؤال"
+        text = f"✅ {label}" if selected_count == n else label
+        row.append(types.InlineKeyboardButton(text=text, callback_data=f"qcount_pick_{n}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
 
-    # 5. زر البدء المباشر
-    cost_str = f" • {cost:.1f} نقطة" if cost is not None else ""
-    kb.append([types.InlineKeyboardButton(
-        text=f"🚀 ابدأ توليد الكويز ({selected_count} أسئلة{cost_str})",
-        callback_data="qcount_start"
-    )])
-
-    # 6. إلغاء
+    kb.append([types.InlineKeyboardButton(text="✏️ عدد مخصص (اكتبه مباشرة)", callback_data="qcount_custom")])
+    kb.append([types.InlineKeyboardButton(text=f"🚀 توليد {selected_count} أسئلة", callback_data="qcount_start")])
+    kb.append([types.InlineKeyboardButton(text="🔙 تعديل الصعوبة", callback_data="qback_to_difficulty")])
     kb.append([types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")])
-    return types.InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-def get_unified_quiz_extraction_keyboard(
-    selected_count: int,
-    solved: bool = True,
-    is_math: bool = False,
-    is_language: bool = False,
-    english_mode: Optional[str] = None,
-    lang_name: str = "الإنجليزية",
-    cost: Optional[float] = None,
-) -> types.InlineKeyboardMarkup:
-    """
-    🆕 شاشة استخراج الاختبارات الجاهزة الموحدة (Unified Extraction Screen):
-    تدمج رصد الأسئلة + خيارات الاستخراج + الترجمة + تأكيد البدء بنقرة واحدة مباشرة.
-    """
-    kb = []
-
-    # 1. خيار الترجمة إن وجد محتوى لغوي
-    if is_language:
-        cur_trans = english_mode or "translated"
-        trans_text = "✅ 🌐 مترجمة للعربية" if cur_trans == "translated" else "🌐 مترجمة للعربية"
-        plain_text = f"✅ 🔤 بـ{lang_name} فقط" if cur_trans == "plain" else f"🔤 بـ{lang_name} فقط"
-        kb.append([
-            types.InlineKeyboardButton(text=trans_text, callback_data="qopt_trans:translated"),
-            types.InlineKeyboardButton(text=plain_text, callback_data="qopt_trans:plain"),
-        ])
-
-    # 2. أزرار الاستخراج الفوري (1-Click Start)
-    count_label = f"الـ {selected_count} سؤالاً" if selected_count > 0 else "الأسئلة"
-    cost_str = f" ({cost:.1f} نقطة)" if cost is not None else ""
-    if solved:
-        kb.append([types.InlineKeyboardButton(
-            text=f"🚀 استخراج {count_label} مع الإجابات المدوّنة{cost_str}",
-            callback_data="quiz_extract_as_is",
-        )])
-        kb.append([types.InlineKeyboardButton(
-            text=f"🤖 حل {count_label} بالذكاء الاصطناعي{cost_str}",
-            callback_data="quiz_extract_ai_solve",
-        )])
-    else:
-        kb.append([types.InlineKeyboardButton(
-            text=f"🤖 حل واستخراج {count_label} بالذكاء الاصطناعي{cost_str}",
-            callback_data="quiz_extract_ai_solve",
-        )])
-
-    # 3. خيارات إضافية
-    extra_row = [types.InlineKeyboardButton(text="✨ توليد أسئلة جديدة من المحتوى", callback_data="quiz_generate_new")]
-    if is_math:
-        extra_row.append(types.InlineKeyboardButton(text=BTN_SIMILAR_MATH, callback_data="quiz_generate_similar_math"))
-    kb.append(extra_row)
-
-    # 4. تعديل العدد والإلغاء
-    kb.append([
-        types.InlineKeyboardButton(text="✏️ تعديل عدد الأسئلة", callback_data="qcount_custom"),
-        types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request"),
-    ])
-
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_quiz_detected_count_keyboard(selected_count: int) -> types.InlineKeyboardMarkup:

@@ -1,12 +1,23 @@
 # handlers/quiz_options.py
 """
 ==============================================================================
-MODULE: Quiz Options Screen (لوحة خيارات الكويز الموحدة)
+MODULE: Quiz Options Screen (شاشة اختيار نوع الأسئلة + الصعوبة)
 ==============================================================================
-🆕 يدير هذا الراوتر خيارات الكويز (نوع الأسئلة، الصعوبة، والترجمة) في إطار
-شاشة لوحة الكويز الموحدة (Unified Dashboard).
-تعديل أي خيار (نوع / صعوبة / ترجمة) يُحدّث نفس الشاشة فورياً عبر (edit_message_text)
-دون الحاجة للتنقل بين مراحل متتالية.
+🆕 يدير هذا الراوتر شاشة الخيارات - مرحلتان متتاليتان بنفس الرسالة (edit_text) بدل
+شاشة واحدة مزدحمة بكل الأزرار معاً:
+
+  المرحلة 1 (نوع الأسئلة) → المرحلة 2 (الصعوبة) → شاشة عدد الأسئلة
+
+اختيار أي زر بأي مرحلة ينقل تلقائياً للمرحلة التالية مباشرة - بدون زر "متابعة"
+منفصل - لتقليل عدد الضغطات وعدد الأزرار الظاهرة بنفس الوقت.
+
+⚠️ ملاحظة تصميم مهمة (سبب خلل سابق تم إصلاحه): كل أزرار "qtype_*" (بما فيها
+"qtype_custom" و"qtype_general") تُعالَج بمعالج واحد فقط (handle_type_screen
+أدناه) عبر فحص القيمة داخلياً بـ if/elif، بدل معالجات متعددة مسجّلة بفلاتر
+متداخلة (F.data.startswith("qtype_") و F.data == "qtype_custom" معاً) - لأن
+aiogram ينفّذ أول معالج مطابق بترتيب التسجيل فقط ويتوقف، فأي تداخل بين فلترين
+كان يعني أن المعالج الأعم (startswith) يبتلع ضغطات المعالج الأخص (== الدقيق)
+قبل ما توصله أبداً، بغض النظر عن ترتيب كتابتها بالملف.
 ==============================================================================
 """
 
@@ -25,6 +36,7 @@ from constants import (
 )
 from keyboards import get_quiz_difficulty_keyboard, get_quiz_type_keyboard
 from logger import get_logger, log_error
+from handlers.files import show_question_count_screen
 
 logger = get_logger(__name__)
 router = Router()
@@ -55,64 +67,66 @@ def _type_display_label(data: dict) -> str:
 
 
 async def _render_type_screen(target: types.Message, state: FSMContext, edit: bool) -> None:
-    from handlers.files import _render_question_count_screen
-    await state.set_state(QuizState.waiting_for_count)
-    msg_id = target.message_id if edit else None
-    await _render_question_count_screen(target.bot, target.chat.id, msg_id, state, target_for_send=target)
+    data = await state.get_data()
+    if data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("content_subject_type") == SUBJECT_MATH:
+        from handlers.files import _proceed_to_quiz_solved_screen, _proceed_to_quiz_unsolved_screen
+        show = _proceed_to_quiz_solved_screen if data["subject_type"] == SUBJECT_QUIZ_SOLVED else _proceed_to_quiz_unsolved_screen
+        await show(target, state, edit=edit)
+        return
+    keyboard = get_quiz_type_keyboard(
+        subject_type=data.get("subject_type", SUBJECT_OTHER),
+        suggested_types=data.get("suggested_question_types", []),
+        selected_type=data.get("question_type", QUESTION_TYPE_GENERAL),
+    )
+    if edit:
+        await target.edit_text(MSG_QUIZ_TYPE_PROMPT, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await target.answer(MSG_QUIZ_TYPE_PROMPT, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def _render_difficulty_screen(target: types.Message, state: FSMContext, edit: bool) -> None:
-    from handlers.files import _render_question_count_screen
-    await state.set_state(QuizState.waiting_for_count)
-    msg_id = target.message_id if edit else None
-    await _render_question_count_screen(target.bot, target.chat.id, msg_id, state, target_for_send=target)
+    data = await state.get_data()
+    text = MSG_QUIZ_DIFFICULTY_PROMPT.format(type_label=escape(_type_display_label(data)))
+    if data.get("question_type") == QUESTION_TYPE_SIMILAR_MATH:
+        text += "\n\n" + MSG_SIMILAR_MATH_NOTICE
+    keyboard = get_quiz_difficulty_keyboard(selected_difficulty=data.get("difficulty", DIFFICULTY_MEDIUM))
+    if edit:
+        await target.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
-# ==================== معالجات لوحة الكويز الموحدة ====================
+# ==================== المرحلة 1: اختيار نوع الأسئلة ====================
 
-@router.callback_query(F.data.startswith("qtype_"))
+@router.callback_query(QuizState.waiting_for_quiz_options, F.data.startswith("qtype_"))
 async def handle_type_screen(call: types.CallbackQuery, state: FSMContext) -> None:
     """
-    معالج موحّد لخيارات نوع الأسئلة: يحدّث النوع فورياً على نفس لوحة الكويز (Dashboard)
-    دون نقل الطالب لشاشات مستقلة.
+    معالج موحّد لكل أزرار مرحلة النوع (قيمة ثابتة / "general" / "custom"). راجع
+    ملاحظة التصميم أعلى الملف لسبب توحيدها بمعالج واحد بدل معالجات متعددة.
     """
     value = call.data.replace("qtype_", "", 1)
     try:
-        if value == QUESTION_TYPE_CUSTOM:
+        if value == QUESTION_TYPE_SIMILAR_MATH:
+            data = await state.get_data()
+            if (data.get("content_subject_type") or data.get("subject_type")) != SUBJECT_MATH:
+                return
+            await state.update_data(quiz_extraction_mode=None, quiz_detection_notice=None,
+                                    count_prompt_text="🧩 كم مسألة جديدة تريد توليدها بنفس النمط؟")
+        else:
+            await state.update_data(count_prompt_text="📝 كم سؤالاً تريد توليده من هذا المحتوى؟")
+        if value == "custom":
             await state.set_state(QuizState.waiting_for_custom_question_type)
             await call.message.edit_text(
                 MSG_CUSTOM_QUESTION_TYPE_PROMPT,
                 reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                    [types.InlineKeyboardButton(text="🔙 الرجوع للوحة الكويز", callback_data="qcount_review")],
+                    [types.InlineKeyboardButton(text="🔙 رجوع", callback_data="qback_to_type")],
                     [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
                 ]),
             )
-            return
-
-        if value == QUESTION_TYPE_SIMILAR_MATH:
-            data = await state.get_data()
-            if (data.get("content_subject_type") or data.get("subject_type")) != SUBJECT_MATH:
-                await call.answer("هذا الخيار مخصص لمحتوى الرياضيات.", show_alert=True)
-                return
-            await state.update_data(
-                question_type=QUESTION_TYPE_SIMILAR_MATH,
-                custom_question_type_text=None,
-                quiz_extraction_mode=None,
-                quiz_detection_notice=None,
-                count_prompt_text="🧩 كم مسألة جديدة تريد توليدها بنفس النمط؟",
-            )
         else:
-            await state.update_data(
-                question_type=value,
-                custom_question_type_text=None,
-                count_prompt_text="📝 كم سؤالاً تريد توليده من هذا المحتوى؟",
-            )
-
-        from handlers.files import _render_question_count_screen
-        await state.set_state(QuizState.waiting_for_count)
-        await _render_question_count_screen(
-            call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message
-        )
+            # value == "general" أو قيمة ثابتة (problems/grammar/...) أو "other_<index>"
+            await state.update_data(question_type=value, custom_question_type_text=None)
+            await _render_difficulty_screen(call.message, state, edit=True)
     except Exception as exc:
         log_error(logger, f"Quiz type screen handling failed: {exc}", exception=exc)
     finally:
@@ -121,12 +135,10 @@ async def handle_type_screen(call: types.CallbackQuery, state: FSMContext) -> No
 
 @router.callback_query(F.data == "qback_to_type")
 async def handle_back_to_type_screen(call: types.CallbackQuery, state: FSMContext) -> None:
-    """رجوع للوحة الكويز الموحدة."""
-    await state.set_state(QuizState.waiting_for_count)
-    from handlers.files import _render_question_count_screen
-    await _render_question_count_screen(
-        call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message
-    )
+    """رجوع لمرحلة النوع - سواء من مرحلة الصعوبة أو من خطوة إدخال النص المخصص،
+    بدون فقدان أي اختيار سابق (question_type يبقى محفوظاً بالحالة)."""
+    await state.set_state(QuizState.waiting_for_quiz_options)
+    await _render_type_screen(call.message, state, edit=True)
     await call.answer()
 
 
@@ -134,7 +146,7 @@ async def handle_back_to_type_screen(call: types.CallbackQuery, state: FSMContex
 
 @router.message(QuizState.waiting_for_custom_question_type, F.text)
 async def handle_custom_question_type_text(message: types.Message, state: FSMContext) -> None:
-    """استقبال نص تفضيل نوع الأسئلة الحر، ثم العودة مباشرة للوحة الكويز الموحدة."""
+    """استقبال نص تفضيل نوع الأسئلة الحر، ثم الانتقال مباشرة لمرحلة الصعوبة."""
     text = (message.text or "").strip()
     if not text:
         await message.answer(MSG_CUSTOM_QUESTION_TYPE_PROMPT)
@@ -144,56 +156,39 @@ async def handle_custom_question_type_text(message: types.Message, state: FSMCon
         return
 
     await state.update_data(question_type=QUESTION_TYPE_CUSTOM, custom_question_type_text=text)
-    await state.set_state(QuizState.waiting_for_count)
-    data = await state.get_data()
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    from handlers.files import _render_question_count_screen
-    await _render_question_count_screen(
-        message.bot,
-        data.get("count_screen_chat_id", message.chat.id),
-        data.get("count_screen_message_id"),
-        state,
-        target_for_send=message,
-    )
+    await state.set_state(QuizState.waiting_for_quiz_options)
+    # 🆕 هذا المسار الوحيد الذي يرسل رسالة جديدة بدل تعديل القائمة (لأن مصدر الحدث رسالة
+    # نصية من الطالب وليس ضغطة زر على رسالة البوت نفسها) - باقي التدفق كله edit_text.
+    await _render_difficulty_screen(message, state, edit=False)
 
 
-# ==================== اختيار الصعوبة ====================
+# ==================== المرحلة 2: اختيار الصعوبة ====================
 
-@router.callback_query(F.data == "qback_to_difficulty")
+@router.callback_query(QuizState.waiting_for_count, F.data == "qback_to_difficulty")
 async def back_to_difficulty(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED) and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH:
         await call.answer("هذا الاختبار لا يحتاج اختيار الصعوبة.", show_alert=True)
         return
     await state.update_data(review_count_to_restore=data.get("selected_question_count"))
-    from handlers.files import _render_question_count_screen
-    await state.set_state(QuizState.waiting_for_count)
-    await _render_question_count_screen(
-        call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message
-    )
+    await state.set_state(QuizState.waiting_for_quiz_options)
+    await _render_difficulty_screen(call.message, state, edit=True)
     await call.answer()
 
-
-@router.callback_query(F.data.startswith("qdiff_"))
+@router.callback_query(QuizState.waiting_for_quiz_options, F.data.startswith("qdiff_"))
 async def handle_difficulty_screen(call: types.CallbackQuery, state: FSMContext) -> None:
-    """اختيار الصعوبة: يحدّث الصعوبة فورياً على نفس لوحة الكويز الموحدة (Dashboard)."""
+    """اختيار الصعوبة = الخطوة الأخيرة، تنتقل مباشرة لشاشة عدد الأسئلة."""
     value = call.data.replace("qdiff_", "", 1)
     if value not in (DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE):
         await call.answer()
         return
     await state.update_data(difficulty=value)
-    from handlers.files import _render_question_count_screen
-    await state.set_state(QuizState.waiting_for_count)
+
     try:
-        await _render_question_count_screen(
-            call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message
-        )
+        await show_question_count_screen(call.message, state, edit=True)
     except Exception as exc:
-        log_error(logger, f"Failed to update difficulty on count screen: {exc}", exception=exc)
+        log_error(logger, f"Failed to proceed from difficulty screen to count screen: {exc}", exception=exc)
+        await call.message.answer("❌ حدث خطأ غير متوقع، حاول مجدداً.")
     finally:
         await call.answer()
-
 
