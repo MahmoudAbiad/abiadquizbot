@@ -83,7 +83,7 @@ async def handle_type_screen(call: types.CallbackQuery, state: FSMContext) -> No
             await call.message.edit_text(
                 MSG_CUSTOM_QUESTION_TYPE_PROMPT,
                 reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                    [types.InlineKeyboardButton(text="🔙 الرجوع للوحة الكويز", callback_data="qcount_review")],
+                    [types.InlineKeyboardButton(text="🔙 الرجوع للإعدادات", callback_data="quiz_open_settings")],
                     [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
                 ]),
             )
@@ -143,7 +143,7 @@ async def handle_custom_question_type_text(message: types.Message, state: FSMCon
         await message.answer(ERROR_CUSTOM_QUESTION_TYPE_TOO_LONG.format(max_len=MAX_CUSTOM_QUESTION_TYPE_LENGTH))
         return
 
-    await state.update_data(question_type=QUESTION_TYPE_CUSTOM, custom_question_type_text=text)
+    await state.update_data(question_type=QUESTION_TYPE_CUSTOM, custom_question_type_text=text, in_settings_mode=True)
     await state.set_state(QuizState.waiting_for_count)
     data = await state.get_data()
     try:
