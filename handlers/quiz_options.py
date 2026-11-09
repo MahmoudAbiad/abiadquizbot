@@ -98,7 +98,7 @@ async def _render_difficulty_screen(target: types.Message, state: FSMContext, ed
 
 # ==================== المرحلة 1: اختيار نوع الأسئلة ====================
 
-@router.callback_query(F.data.startswith("qtype_"))
+@router.callback_query(QuizState.waiting_for_quiz_options, F.data.startswith("qtype_"))
 async def handle_type_screen(call: types.CallbackQuery, state: FSMContext) -> None:
     """
     معالج موحّد لكل أزرار مرحلة النوع (قيمة ثابتة / "general" / "custom"). راجع
@@ -106,10 +106,8 @@ async def handle_type_screen(call: types.CallbackQuery, state: FSMContext) -> No
     """
     value = call.data.replace("qtype_", "", 1)
     try:
-        data = await state.get_data()
-        in_settings = bool(data.get("in_settings_mode", False))
-
         if value == QUESTION_TYPE_SIMILAR_MATH:
+            data = await state.get_data()
             if (data.get("content_subject_type") or data.get("subject_type")) != SUBJECT_MATH:
                 return
             await state.update_data(quiz_extraction_mode=None, quiz_detection_notice=None,
@@ -118,23 +116,17 @@ async def handle_type_screen(call: types.CallbackQuery, state: FSMContext) -> No
             await state.update_data(count_prompt_text="📝 كم سؤالاً تريد توليده من هذا المحتوى؟")
         if value == "custom":
             await state.set_state(QuizState.waiting_for_custom_question_type)
-            back_btn = [types.InlineKeyboardButton(text="🔙 الرجوع للإعدادات", callback_data="quiz_open_settings")] if in_settings else [types.InlineKeyboardButton(text="🔙 رجوع", callback_data="qback_to_type")]
             await call.message.edit_text(
                 MSG_CUSTOM_QUESTION_TYPE_PROMPT,
                 reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                    back_btn,
+                    [types.InlineKeyboardButton(text="🔙 رجوع", callback_data="qback_to_type")],
                     [types.InlineKeyboardButton(text=BTN_CANCEL_REQUEST, callback_data="cancel_upload_request")],
                 ]),
             )
         else:
             # value == "general" أو قيمة ثابتة (problems/grammar/...) أو "other_<index>"
             await state.update_data(question_type=value, custom_question_type_text=None)
-            if in_settings:
-                await state.set_state(QuizState.waiting_for_count)
-                from handlers.files import _render_question_count_screen
-                await _render_question_count_screen(call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message)
-            else:
-                await _render_difficulty_screen(call.message, state, edit=True)
+            await _render_difficulty_screen(call.message, state, edit=True)
     except Exception as exc:
         log_error(logger, f"Quiz type screen handling failed: {exc}", exception=exc)
     finally:
@@ -154,7 +146,7 @@ async def handle_back_to_type_screen(call: types.CallbackQuery, state: FSMContex
 
 @router.message(QuizState.waiting_for_custom_question_type, F.text)
 async def handle_custom_question_type_text(message: types.Message, state: FSMContext) -> None:
-    """استقبال نص تفضيل نوع الأسئلة الحر، ثم الانتقال مباشرة لمرحلة الصعوبة أو الرجوع للإعدادات."""
+    """استقبال نص تفضيل نوع الأسئلة الحر، ثم الانتقال مباشرة لمرحلة الصعوبة."""
     text = (message.text or "").strip()
     if not text:
         await message.answer(MSG_CUSTOM_QUESTION_TYPE_PROMPT)
@@ -163,21 +155,11 @@ async def handle_custom_question_type_text(message: types.Message, state: FSMCon
         await message.answer(ERROR_CUSTOM_QUESTION_TYPE_TOO_LONG.format(max_len=MAX_CUSTOM_QUESTION_TYPE_LENGTH))
         return
 
-    data = await state.get_data()
-    in_settings = bool(data.get("in_settings_mode", False))
     await state.update_data(question_type=QUESTION_TYPE_CUSTOM, custom_question_type_text=text)
-
-    if in_settings:
-        await state.set_state(QuizState.waiting_for_count)
-        from handlers.files import _render_question_count_screen
-        chat_id = data.get("count_screen_chat_id") or message.chat.id
-        msg_id = data.get("count_screen_message_id")
-        await _render_question_count_screen(message.bot, chat_id, msg_id, state, target_for_send=message)
-    else:
-        await state.set_state(QuizState.waiting_for_quiz_options)
-        # 🆕 هذا المسار الوحيد الذي يرسل رسالة جديدة بدل تعديل القائمة (لأن مصدر الحدث رسالة
-        # نصية من الطالب وليس ضغطة زر على رسالة البوت نفسها) - باقي التدفق كله edit_text.
-        await _render_difficulty_screen(message, state, edit=False)
+    await state.set_state(QuizState.waiting_for_quiz_options)
+    # 🆕 هذا المسار الوحيد الذي يرسل رسالة جديدة بدل تعديل القائمة (لأن مصدر الحدث رسالة
+    # نصية من الطالب وليس ضغطة زر على رسالة البوت نفسها) - باقي التدفق كله edit_text.
+    await _render_difficulty_screen(message, state, edit=False)
 
 
 # ==================== المرحلة 2: اختيار الصعوبة ====================
@@ -193,23 +175,14 @@ async def back_to_difficulty(call: types.CallbackQuery, state: FSMContext):
     await _render_difficulty_screen(call.message, state, edit=True)
     await call.answer()
 
-@router.callback_query(F.data.startswith("qdiff_"))
+@router.callback_query(QuizState.waiting_for_quiz_options, F.data.startswith("qdiff_"))
 async def handle_difficulty_screen(call: types.CallbackQuery, state: FSMContext) -> None:
-    """اختيار الصعوبة: يحدّث القيمة وينتقل مباشرة لشاشة عدد الأسئلة أو يعيد عرض الإعدادات."""
+    """اختيار الصعوبة = الخطوة الأخيرة، تنتقل مباشرة لشاشة عدد الأسئلة."""
     value = call.data.replace("qdiff_", "", 1)
     if value not in (DIFFICULTY_EASY, DIFFICULTY_MEDIUM, DIFFICULTY_ADVANCED, DIFFICULTY_PROGRESSIVE):
         await call.answer()
         return
     await state.update_data(difficulty=value)
-
-    data = await state.get_data()
-    in_settings = bool(data.get("in_settings_mode", False))
-    if in_settings:
-        await state.set_state(QuizState.waiting_for_count)
-        from handlers.files import _render_question_count_screen
-        await _render_question_count_screen(call.bot, call.message.chat.id, call.message.message_id, state, target_for_send=call.message)
-        await call.answer()
-        return
 
     try:
         await show_question_count_screen(call.message, state, edit=True)
