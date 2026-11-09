@@ -32,8 +32,9 @@ class PrintExportTests(unittest.TestCase):
     def test_word_versions(self):
         a = Document(io.BytesIO(build_quiz_docx('اختبار', [sample()], include_answers=False)))
         b = Document(io.BytesIO(build_quiz_docx('اختبار', [sample()], include_answers=True)))
-        self.assertEqual(len(a.inline_shapes), 1)
-        self.assertEqual(len(b.inline_shapes), 2)
+        # صورة السؤال الرياضي + شارة الختام الإجبارية (نسخة الأستاذ: + صورة الحل + شارة نهاية الملف).
+        self.assertEqual(len(a.inline_shapes), 2)
+        self.assertEqual(len(b.inline_shapes), 4)
 
     def test_long_question_continues(self):
         q = sample()
