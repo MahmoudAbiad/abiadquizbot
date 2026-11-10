@@ -89,12 +89,21 @@ def _estimate_export_seconds(questions: List[dict], fmt: str) -> int:
 
 
 def _export_waiting_text(elapsed: float, estimate: int) -> str:
+    total = max(5, int(estimate or 15))
+    if elapsed <= total:
+        fraction = 0.85 * (elapsed / total)
+    else:
+        overtime = elapsed - total
+        fraction = 0.85 + 0.10 * (1.0 - (1.0 / (1.0 + overtime / max(10.0, total * 0.5))))
+    fraction = max(0.0, min(0.95, fraction))
+    filled = max(0, min(10, round(fraction * 10)))
+    bar = "▰" * filled + "▱" * (10 - filled)
     remaining = estimate - int(elapsed)
     if remaining > 0:
-        return f"⏳ جارٍ تجهيز ملفك. الوقت المتوقع المتبقي: نحو {remaining} ثانية."
+        return f"⏳ جارٍ تجهيز ملفك...\n\n{bar}\n⏱️ الوقت المتوقع المتبقي: نحو {remaining} ثانية."
     if elapsed < estimate * 2:
-        return "⏳ استغرق تجهيز الملف وقتاً أطول من المتوقع، وما زلنا نعمل عليه."
-    return "⏳ ما زلنا نجهّز الملف. سنرسله هنا فور اكتماله؛ لا تحتاج لإعادة الطلب."
+        return f"⏳ استغرق تجهيز الملف وقتاً أطول من المتوقع، وما زلنا نعمل عليه.\n\n{bar}\n⏱️ مضى: {int(elapsed)} ثانية"
+    return f"⏳ ما زلنا نجهّز الملف. سنرسله هنا فور اكتماله؛ لا تحتاج لإعادة الطلب.\n\n{bar}\n⏱️ مضى: {int(elapsed)} ثانية"
 
 _FORMAT_RE = re.compile(r"^export_(docx|pdf|xlsx)([st]?)_([sma])$")
 _STYLE_RE = re.compile(r"^export_style_([sma])$")

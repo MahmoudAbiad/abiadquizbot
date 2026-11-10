@@ -111,31 +111,79 @@ def _extract_extension(message: types.Message) -> str:
     return ext if ext else ".mp3"
 
 
-async def _run_audio_transcription_heartbeat(status_msg: types.Message, duration_minutes: int) -> None:
-    """نبضة تحديث حية لرسالة الانتظار أثناء التفريغ الصوتي لإبقاء الطالب مطمئناً بالوقت المنقضي والمتوقع."""
-    est_total = max(20, int(duration_minutes or 1) * int(ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE or 12))
+def _format_audio_eta_ar(seconds: float) -> str:
+    sec = max(5, int(round(seconds / 5.0) * 5))
+    if sec >= 90:
+        minutes = max(1, round(sec / 60))
+        return f"~{minutes} دقيقة"
+    return f"~{sec} ثانية"
+
+
+def _build_audio_progress_text(
+    header: str,
+    elapsed: float,
+    typical: int,
+    footer: str = "يرجى الانتظار قليلاً، سنعرض لك النتيجة فور الاكتمال.",
+) -> str:
+    total = max(5, int(typical or 15))
+    if elapsed <= total:
+        fraction = 0.85 * (elapsed / total)
+    else:
+        overtime = elapsed - total
+        fraction = 0.85 + 0.10 * (1.0 - (1.0 / (1.0 + overtime / max(10.0, total * 0.5))))
+    fraction = max(0.0, min(0.95, fraction))
+    filled = max(0, min(10, round(fraction * 10)))
+    bar = "▰" * filled + "▱" * (10 - filled)
+
+    if elapsed < total * 0.95:
+        remaining = max(5.0, total - elapsed)
+        time_line = f"⏱️ المتبقي تقريباً: <b>{_format_audio_eta_ar(remaining)}</b>"
+    elif elapsed < total * 1.6:
+        time_line = f"⏱️ مضى: <b>{int(elapsed)} ثانية</b> — في المراحل الأخيرة..."
+    else:
+        time_line = f"⏱️ مضى: <b>{int(elapsed)} ثانية</b> — العملية أطول من المعتاد، ما زالت جارية..."
+
+    lines = [header, "", bar, time_line]
+    if footer:
+        lines.extend(["", footer])
+    return "\n".join(lines)
+
+
+async def _run_audio_progress_heartbeat(
+    status_msg: types.Message,
+    header: str,
+    typical: int,
+    interval: float = 4.0,
+    footer: str = "يرجى الانتظار قليلاً، سنعرض لك النتيجة فور الاكتمال.",
+) -> None:
+    """نبضة تحديث حية بشريط تقدم مرئي وعداد تنازلي للوقت المتبقي."""
     started = time.monotonic()
-    last_text = None
+    last_text = _build_audio_progress_text(header, 0, typical, footer=footer)
     while True:
-        await asyncio.sleep(12)
-        elapsed = int(time.monotonic() - started)
-        remaining = max(5, est_total - elapsed)
-        if elapsed < est_total:
-            progress_line = f"⏳ مضى <b>{elapsed} ثانية</b> · المتبقي التقديري: ~<b>{remaining} ثانية</b>"
-        else:
-            progress_line = f"⏳ مضى <b>{elapsed} ثانية</b> · جارٍ تنسيق ومراجعة الفقرات النهائية..."
-        new_text = (
-            "🎙️ <b>جارٍ تفريغ المحاضرة نصياً وتنظيمها أكاديمياً...</b>\n\n"
-            f"{progress_line}\n"
-            "يرجى الانتظار قليلاً، سنعرض لك الخيارات فور الاكتمال."
-        )
+        await asyncio.sleep(interval)
+        elapsed = time.monotonic() - started
+        new_text = _build_audio_progress_text(header, elapsed, typical, footer=footer)
         if new_text == last_text:
             continue
         try:
             await status_msg.edit_text(new_text, parse_mode="HTML")
             last_text = new_text
-        except Exception:
-            pass
+        except Exception as exc:
+            retry_after = getattr(exc, "retry_after", None)
+            if isinstance(retry_after, (int, float)) and retry_after > 0:
+                await asyncio.sleep(min(float(retry_after), 30.0))
+
+
+async def _run_audio_transcription_heartbeat(status_msg: types.Message, duration_minutes: int) -> None:
+    """نبضة تحديث حية لرسالة الانتظار أثناء التفريغ الصوتي مع شريط تقدم مرئي والوقت المتبقي."""
+    est_total = max(20, int(duration_minutes or 1) * int(ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE or 12))
+    await _run_audio_progress_heartbeat(
+        status_msg,
+        "🎙️ <b>جارٍ تفريغ المحاضرة نصياً وتنظيمها أكاديمياً...</b>",
+        est_total,
+        interval=5.0,
+        footer="يرجى الانتظار قليلاً، سنعرض لك الخيارات فور الاكتمال.",
+    )
 
 
 async def _send_insufficient_balance(
@@ -417,8 +465,20 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
             "duration_minutes": duration_minutes, "cost": cost,
         }))
 
+        est_transcribe_s = max(20, int(duration_minutes or 1) * int(globals().get("ESTIMATED_TRANSCRIPTION_SECONDS_PER_MINUTE", 12) or 12))
+        prog_fn = globals().get("_build_audio_progress_text")
+        initial_transcribe_text = (
+            prog_fn(
+                "🎙️ <b>جارٍ تفريغ المحاضرة نصياً وتنظيمها أكاديمياً...</b>",
+                0,
+                est_transcribe_s,
+                footer="يرجى الانتظار قليلاً، سنعرض لك الخيارات فور الاكتمال.",
+            )
+            if prog_fn
+            else "🎙️ <b>جارٍ تفريغ المحاضرة نصياً...</b>\n\n▱▱▱▱▱▱▱▱▱▱\n⏱️ قد تستغرق العملية بضع دقائق حسب طول المحاضرة."
+        )
         await call.message.edit_text(
-            "🎙️ <b>جارٍ تفريغ المحاضرة نصياً...</b>\nقد تستغرق العملية بضع دقائق حسب طول المحاضرة.",
+            initial_transcribe_text,
             parse_mode="HTML",
         )
 
@@ -636,8 +696,32 @@ async def handle_audio_summarize(call: types.CallbackQuery, state: FSMContext) -
         summary = data.get("summary_text")
         summary_truncated = bool(data.get("summary_truncated"))
         if not summary:
-            status_msg = await call.message.answer("✨ جارٍ تلخيص المحاضرة وصياغتها أكاديمياً، يرجى الانتظار...")
-            summary_result = await summarize_lecture_text(pure_text)
+            word_count = len(pure_text.split())
+            typical_sum_s = max(15, min(75, int(12 + word_count / 110)))
+            sum_header = "✨ <b>جارٍ تلخيص المحاضرة وصياغتها أكاديمياً...</b>"
+            sum_footer = "يرجى الانتظار قليلاً، يتم الآن استخلاص النقاط والمفاهيم الأساسية."
+            prog_fn = globals().get("_build_audio_progress_text")
+            hb_fn = globals().get("_run_audio_progress_heartbeat")
+            initial_sum_text = (
+                prog_fn(sum_header, 0, typical_sum_s, footer=sum_footer)
+                if prog_fn
+                else f"{sum_header}\n\n▱▱▱▱▱▱▱▱▱▱\n⏱️ المتبقي تقريباً: ~{typical_sum_s} ثانية"
+            )
+            status_msg = await call.message.answer(initial_sum_text, parse_mode="HTML")
+            sum_hb_task = (
+                asyncio.create_task(hb_fn(status_msg, sum_header, typical_sum_s, interval=4.0, footer=sum_footer))
+                if hb_fn is not None
+                else None
+            )
+            try:
+                summary_result = await summarize_lecture_text(pure_text)
+            finally:
+                if sum_hb_task is not None:
+                    sum_hb_task.cancel()
+                    try:
+                        await sum_hb_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
             if not summary_result or not summary_result[0] or not summary_result[0].strip():
                 await status_msg.edit_text("⚠️ تعذر توليد تلخيص للمحاضرة، حاول مجدداً لاحقاً.")
                 return
@@ -728,6 +812,9 @@ async def handle_audio_export_back(call: types.CallbackQuery) -> None:
 async def handle_audio_export_format(call: types.CallbackQuery, state: FSMContext) -> None:
     """يولّد ملف Word أو PDF بتصميم عصري منسّق من الملخص الأكاديمي أو النص الكامل حسب اختيار الطالب."""
     await call.answer()
+    status_msg = None
+    export_hb_task = None
+    sent_doc = False
     try:
         data = await state.get_data()
         base_title = data.get("source_title", "محاضرة صوتية")
@@ -748,6 +835,22 @@ async def handle_audio_export_format(call: types.CallbackQuery, state: FSMContex
 
         is_docx = call.data.endswith("_docx")
         ext = "docx" if is_docx else "pdf"
+        fmt_label = "Word (DOCX)" if is_docx else "PDF"
+        typical_export_s = max(10, min(40, int(8 + len(content) / 1500)))
+        export_header = f"📄 <b>جارٍ تجهيز وتنسيق ملف {fmt_label}...</b>"
+        export_footer = "سنرسل لك الملف هنا فور اكتمال تنسيقه."
+        prog_fn = globals().get("_build_audio_progress_text")
+        hb_fn = globals().get("_run_audio_progress_heartbeat")
+        initial_export_text = (
+            prog_fn(export_header, 0, typical_export_s, footer=export_footer)
+            if prog_fn
+            else f"{export_header}\n\n▱▱▱▱▱▱▱▱▱▱\n⏱️ المتبقي تقريباً: ~{typical_export_s} ثانية"
+        )
+        status_msg = await call.message.answer(initial_export_text, parse_mode="HTML")
+        if hb_fn is not None:
+            export_hb_task = asyncio.create_task(
+                hb_fn(status_msg, export_header, typical_export_s, interval=3.0, footer=export_footer)
+            )
 
         file_bytes = await offload.remote_build_document(ext, title, content, style=STYLE_MODERN)
         if file_bytes is None:
@@ -757,15 +860,41 @@ async def handle_audio_export_format(call: types.CallbackQuery, state: FSMContex
                 file_bytes = await asyncio.to_thread(build_document_pdf, title, content, STYLE_MODERN)
 
         if not file_bytes:
-            await call.message.answer("❌ تعذر إنشاء الملف، حاول مجدداً.")
+            if export_hb_task is not None:
+                export_hb_task.cancel()
+            if status_msg is not None:
+                await status_msg.edit_text("❌ تعذر إنشاء الملف، حاول مجدداً.")
+            else:
+                await call.message.answer("❌ تعذر إنشاء الملف، حاول مجدداً.")
             return
 
         filename = build_export_filename(title, ext)
         doc = types.BufferedInputFile(file_bytes, filename=filename)
         await call.message.answer_document(doc, caption=f"📄 {title}")
+        sent_doc = True
     except Exception as exc:
         log_error(logger, f"Audio export format failed: {exc}", exception=exc)
-        await call.message.answer("❌ تعذر تصدير الملف، حاول مجدداً.")
+        if export_hb_task is not None:
+            export_hb_task.cancel()
+        if status_msg is not None:
+            try:
+                await status_msg.edit_text("❌ تعذر تصدير الملف، حاول مجدداً.")
+            except Exception:
+                await call.message.answer("❌ تعذر تصدير الملف، حاول مجدداً.")
+        else:
+            await call.message.answer("❌ تعذر تصدير الملف، حاول مجدداً.")
+    finally:
+        if export_hb_task is not None:
+            export_hb_task.cancel()
+            try:
+                await export_hb_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if status_msg is not None and sent_doc:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
 
 @router.callback_query(QuizState.waiting_for_audio_action, F.data == "audio_act_quiz")

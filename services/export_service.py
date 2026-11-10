@@ -2714,7 +2714,6 @@ class _DocumentPDFRenderer:
 
     def _draw_callout_box(self, raw_text: str, size: float = 10.8):
         lead, rest = _split_lead_in_term(raw_text)
-        clean_full = f"{lead} {rest}".strip() if lead else _strip_inline_markdown(raw_text, for_pdf=True)
         font_en_b = self.font_en_bold
         font_ar_b = self.font_ar_bold or font_en_b
         font_en_r = self.font_en_regular
@@ -2722,13 +2721,49 @@ class _DocumentPDFRenderer:
         box_w = self.page_w - 2 * self.margin
         pad_x = 14
         pad_y = 9
+        inner_indent = pad_x + 2
         max_w = box_w - 2 * pad_x - 4
-        lines = _wrap_line(clean_full, self.is_ar, font_en_b, font_ar_b, size, max_w)
         line_h = size + 5.5
-        box_h = len(lines) * line_h + 2 * pad_y
+
+        # حساب تخطيط الأسطر بحيث يكون العنوان الاستهلالي (مثل "تنبيه من المحاضر:" أو "ركز هنا:")
+        # وحده باللون الكهرماني العريض، وكامل جملة الشرح (سواء في السطر الأول أو الثاني) بلون فحمي موحد!
+        first_line_split = False
+        first_rest_str = ""
+        body_lines: List[str] = []
+        lead_w = 0.0
+
+        if lead and rest:
+            lead_w = _mixed_width(lead, self.is_ar, font_en_b, font_ar_b, size) + pdfmetrics.stringWidth("  ", font_en_r, size)
+            remaining_first_w = max_w - lead_w
+            if remaining_first_w >= 80:
+                words = rest.split()
+                first_words: List[str] = []
+                rest_idx = 0
+                for i, w in enumerate(words):
+                    trial = " ".join(first_words + [w])
+                    if _mixed_width(trial, self.is_ar, font_en_r, font_ar_r, size) <= remaining_first_w:
+                        first_words.append(w)
+                        rest_idx = i + 1
+                    else:
+                        break
+                if first_words:
+                    first_line_split = True
+                    first_rest_str = " ".join(first_words)
+                    leftover = " ".join(words[rest_idx:]).strip()
+                    if leftover:
+                        body_lines = _wrap_line(leftover, self.is_ar, font_en_r, font_ar_r, size, max_w)
+            if not first_line_split:
+                body_lines = _wrap_line(rest, self.is_ar, font_en_r, font_ar_r, size, max_w)
+        else:
+            clean_only = _strip_inline_markdown(raw_text, for_pdf=True)
+            body_lines = _wrap_line(clean_only, self.is_ar, font_en_r, font_ar_r, size, max_w)
+
+        total_lines_count = (1 + len(body_lines)) if (lead and rest) else len(body_lines)
+        box_h = max(1, total_lines_count) * line_h + 2 * pad_y
 
         if box_h > self.page_h - 2 * self.margin - 50:
-            self._draw_paragraph(clean_full, size, bold=True, color=self.COLOR_CALLOUT_TITLE, extra_indent=12, gap_after=10)
+            clean_full = f"{lead} {rest}".strip() if lead else _strip_inline_markdown(raw_text, for_pdf=True)
+            self._draw_paragraph(clean_full, size, bold=False, color=self.COLOR_BODY, extra_indent=12, gap_after=10)
             return
 
         self._ensure_space(box_h + 24)
@@ -2747,17 +2782,32 @@ class _DocumentPDFRenderer:
         self.c.restoreState()
 
         cur_y = top_y - pad_y - size + 2.5
-        for idx, line in enumerate(lines):
-            # السطر الأول بلون كهرماني عريض إن كان يحتوي مقدمة التنبيه، والباقي بلون فحمي مريح للقراءة
-            use_bold = (idx == 0 and bool(lead))
-            line_color = self.COLOR_CALLOUT_TITLE if idx == 0 else self.COLOR_BODY
+        if lead and rest:
+            # نرسم عبارة التنبيه الاستهلالية وحدها باللون الكهرماني العريض
             _draw_mixed_line(
-                self.c, line, self.is_ar,
-                font_en_b if use_bold else font_en_r,
-                font_ar_b if use_bold else font_ar_r,
-                size, cur_y, line_color, self.margin, self.page_w, extra_indent=pad_x + 2,
+                self.c, lead, self.is_ar, font_en_b, font_ar_b,
+                size, cur_y, self.COLOR_CALLOUT_TITLE, self.margin, self.page_w, extra_indent=inner_indent,
             )
+            if first_line_split and first_rest_str:
+                # نرسم تكملة السطر الأول بجانبها مباشرة باللون الفحمي العادي (نفس لون السطر الثاني تماماً)
+                _draw_mixed_line(
+                    self.c, first_rest_str, self.is_ar, font_en_r, font_ar_r,
+                    size, cur_y, self.COLOR_BODY, self.margin, self.page_w, extra_indent=inner_indent + lead_w,
+                )
             cur_y -= line_h
+            for line in body_lines:
+                _draw_mixed_line(
+                    self.c, line, self.is_ar, font_en_r, font_ar_r,
+                    size, cur_y, self.COLOR_BODY, self.margin, self.page_w, extra_indent=inner_indent,
+                )
+                cur_y -= line_h
+        else:
+            for line in body_lines:
+                _draw_mixed_line(
+                    self.c, line, self.is_ar, font_en_r, font_ar_r,
+                    size, cur_y, self.COLOR_BODY, self.margin, self.page_w, extra_indent=inner_indent,
+                )
+                cur_y -= line_h
         self.y = top_y - box_h - 22
 
     def _draw_formula_box(self, raw_formula: str, size: float = 11.5):
