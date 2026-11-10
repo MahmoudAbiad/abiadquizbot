@@ -34,13 +34,15 @@ _GREEK_MAP: Dict[str, str] = {
 }
 
 _SYMBOL_MAP: Dict[str, str] = {
-    "leq": "≤", "geq": "≥", "neq": "≠", "approx": "≈", "equiv": "≡",
+    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
+    "approx": "≈", "equiv": "≡", "sim": "~",
     "times": "×", "div": "÷", "pm": "±", "mp": "∓", "cdot": "·",
-    "rightarrow": "→", "to": "→", "leftarrow": "←", "Rightarrow": "⇒",
+    "rightarrow": "→", "to": "→", "leftarrow": "←", "gets": "←",
+    "Rightarrow": "⇒", "implies": "⇒", "Leftarrow": "⇐", "iff": "⇔", "leftrightarrow": "↔",
     "infty": "∞", "sum": "∑", "int": "∫", "lim": "lim", "prod": "∏",
     "partial": "∂", "nabla": "∇", "in": "∈", "notin": "∉", "subset": "⊂",
     "cup": "∪", "cap": "∩", "forall": "∀", "exists": "∃", "cong": "≅",
-    "perp": "⊥", "parallel": "∥", "angle": "∠", "degree": "°",
+    "perp": "⊥", "parallel": "∥", "angle": "∠", "degree": "°", "circ": "°",
     "%": "%",
 }
 
@@ -194,12 +196,12 @@ def latex_to_plain(text: str) -> str:
     result = _replace_frac(result)
     result = _replace_sqrt(result)
 
-    # 3) الأس والدليل السفلي
-    result = _replace_scripts(result)
-
-    # 4) أوامر بأقواس بيتشال منها القوس بس (زي \text{...} \mathrm{...})
+    # 3) أوامر بأقواس بيتشال منها القوس أولاً (زي \text{...} \mathrm{...}) حتى تعمل الأسس بعدها بانتظام
     for cmd in _COMMANDS_TO_DROP:
         result = _replace_braced_command(result, cmd, lambda inner: inner)
+
+    # 4) الأس والدليل السفلي
+    result = _replace_scripts(result)
 
     # 5) الحروف اليونانية والرموز الرياضية الشائعة
     def _sym_or_greek(m: "re.Match") -> str:
@@ -213,7 +215,7 @@ def latex_to_plain(text: str) -> str:
     result = re.sub(r"\\([A-Za-z]+)", _sym_or_greek, result)
 
     # 6) تنظيف أقواس LaTeX المتبقية بدون أمر (زي {x+y} وحدها) وأي backslash تائه
-    result = result.replace("\\,", " ").replace("\\;", " ").replace("\\!", "")
+    result = result.replace("\\ ", " ").replace("\\,", " ").replace("\\;", " ").replace("\\:", " ").replace("\\!", "")
     result = result.replace("{", "").replace("}", "")
     result = result.replace("\\", "")
 

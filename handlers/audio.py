@@ -23,6 +23,7 @@ Redis، آلية القفل (QuizState.processing_audio)، أو أي تحقق أ
 import asyncio
 from task_utils import spawn
 import os
+import re
 import time
 import uuid
 from typing import Any, Dict
@@ -90,6 +91,16 @@ MAX_INLINE_TEXT_CHARS = 4000  # حد رسالة تيليجرام النصية ا
 
 
 # ==================== أدوات مساعدة داخلية (طبقة Handler فقط) ====================
+
+def _clean_audio_source_title(raw_title: str, duration_minutes: int) -> str:
+    if not raw_title or not str(raw_title).strip():
+        return f"محاضرة صوتية ({duration_minutes} دقيقة)"
+    cleaned = os.path.splitext(str(raw_title).strip())[0]
+    cleaned = re.sub(r"\.(m4a|mp3|wav|ogg|oga|opus|aac|flac|mp4|webm|wma|amr|aiff|aif)$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("_", " ").strip(" -–—")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or f"محاضرة صوتية ({duration_minutes} دقيقة)"
+
 
 def _extract_extension(message: types.Message) -> str:
     if message.voice:
@@ -469,7 +480,8 @@ async def handle_audio_confirm_start(call: types.CallbackQuery, state: FSMContex
                 "duration_minutes": duration_minutes, "cost": cost, "partial_refund": partial_refund_amount,
             }))
 
-        final_title = source_title or f"محاضرة صوتية ({duration_minutes} دقيقة)"
+        clean_fn = globals().get("_clean_audio_source_title")
+        final_title = clean_fn(source_title, duration_minutes) if clean_fn else (source_title or f"محاضرة صوتية ({duration_minutes} دقيقة)")
         await state.update_data(
             pure_text=pure_text,
             summary_text=None,
@@ -968,7 +980,8 @@ async def process_web_uploaded_audio(
         # 🆕 لا خصم ولا تفريغ هون - فقط تخزين مؤقت لبيانات الطلب بانتظار تأكيد الطالب.
         # object_path (نسخة Supabase Storage) يُحفظ أيضاً بالـ state ليُحذف لاحقاً
         # عند التأكيد أو الإلغاء بدل حذفه فوراً هون.
-        source_title = declared_file_name or f"محاضرة صوتية ({duration_minutes} دقيقة)"
+        clean_fn = globals().get("_clean_audio_source_title")
+        source_title = clean_fn(declared_file_name, duration_minutes) if clean_fn else (declared_file_name or f"محاضرة صوتية ({duration_minutes} دقيقة)")
         await state.update_data(
             pending_audio_path=destination,
             pending_audio_object_path=object_path,
