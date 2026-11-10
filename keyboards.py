@@ -51,6 +51,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         referral_bonus_points = await get_setting("referral_bonus_points")
         kb = [
             [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
+            [types.InlineKeyboardButton(text="📅 إنشاء جدول دراسي وتنظيم الوقت", callback_data="study_sched:menu", style="primary")],
             [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu", style="primary")],
             [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
             [types.InlineKeyboardButton(text="⚙️ الإعدادات", callback_data="student_settings")],
@@ -1628,4 +1629,85 @@ def get_group_setup_ceremony_keyboard(session_id: str, cfg: dict, *, enabled: bo
         [_setup_btn("👁 معاينة الحفل", session_id, "s:cer:pv")],
         _back_row(session_id),
     ]
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ==============================================================================
+# لوحات مفاتيح الجداول الدراسية وتنظيم الوقت (Study Schedules Keyboards)
+# ==============================================================================
+
+def get_study_schedule_menu_keyboard() -> types.InlineKeyboardMarkup:
+    """لوحة اختيار نوع الجدول الدراسي (أسبوعي أم سنوي كامل)"""
+    kb = [
+        [types.InlineKeyboardButton(text="🗓️ جدول أسبوعي (ماذا أدرس خلال الأسبوع)", callback_data="study_sched:type:weekly")],
+        [types.InlineKeyboardButton(text="🏛️ جدول لكامل العام (البرنامج السنوي الشامل)", callback_data="study_sched:type:annual")],
+        [types.InlineKeyboardButton(text="🔙 العودة للقائمة الرئيسية", callback_data="student_home")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_study_schedule_categories_keyboard(sched_type: str = "weekly") -> types.InlineKeyboardMarkup:
+    """لوحة اختيار الفئة الدراسية (بكالوريا علمي، بكالوريا أدبي، طلاب الجامعة)"""
+    from services.study_schedule_data import CATEGORIES, CATEGORY_BAC_SCI, CATEGORY_BAC_LIT, CATEGORY_UNIV
+    kb = [
+        [types.InlineKeyboardButton(text="🔬 بكالوريا علمي (سوريا)", callback_data=f"study_sched:cat:{sched_type}:{CATEGORY_BAC_SCI}")],
+        [types.InlineKeyboardButton(text="📚 بكالوريا أدبي (سوريا)", callback_data=f"study_sched:cat:{sched_type}:{CATEGORY_BAC_LIT}")],
+        [types.InlineKeyboardButton(text="🎓 طلاب الجامعة (مخصص)", callback_data=f"study_sched:cat:{sched_type}:{CATEGORY_UNIV}")],
+        [types.InlineKeyboardButton(text="🔙 رجوع لنوع الجدول", callback_data="study_sched:menu")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_study_schedule_university_tracks_keyboard(sched_type: str = "weekly") -> types.InlineKeyboardMarkup:
+    """لوحة اختيار التخصص الجامعي لطلاب الجامعة"""
+    from services.study_schedule_data import UNIVERSITY_TRACKS, TRACK_MEDICAL, TRACK_ENGINEERING, TRACK_HUMANITIES, TRACK_GENERAL
+    kb = [
+        [types.InlineKeyboardButton(text="🩺 الكليات الطبية والصحية", callback_data=f"study_sched:univ:{sched_type}:{TRACK_MEDICAL}")],
+        [types.InlineKeyboardButton(text="⚙️ الكليات الهندسية والتقنية", callback_data=f"study_sched:univ:{sched_type}:{TRACK_ENGINEERING}")],
+        [types.InlineKeyboardButton(text="⚖️ الكليات الاقتصادية والنظرية", callback_data=f"study_sched:univ:{sched_type}:{TRACK_HUMANITIES}")],
+        [types.InlineKeyboardButton(text="📖 برنامج جامعي عام وشامل", callback_data=f"study_sched:univ:{sched_type}:{TRACK_GENERAL}")],
+        [types.InlineKeyboardButton(text="🔙 رجوع للفئات", callback_data=f"study_sched:type:{sched_type}")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_study_schedule_theme_keyboard(sched_type: str, category: str, track: str = "none") -> types.InlineKeyboardMarkup:
+    """لوحة اختيار الشكل والتصميم اللوني للجدول الدراسي"""
+    from services.study_schedule_data import THEMES
+    kb = []
+    for theme_id, info in THEMES.items():
+        kb.append([types.InlineKeyboardButton(
+            text=info["badge_name"],
+            callback_data=f"study_sched:gen:{sched_type}:{category}:{track}:{theme_id}"
+        )])
+    back_target = f"study_sched:cat:{sched_type}:univ" if category == "univ" else f"study_sched:type:{sched_type}"
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع للاختيار السابق", callback_data=back_target)])
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_study_schedule_result_keyboard(sched_type: str, category: str, current_theme: str, track: str = "none") -> types.InlineKeyboardMarkup:
+    """لوحة التحكم بعد توليد الجدول (تغيير التصميم اللوني، اختيار جدول آخر، العودة للرئيسية)"""
+    from services.study_schedule_data import THEMES
+    theme_buttons = []
+    for theme_id, info in THEMES.items():
+        if theme_id != current_theme:
+            theme_buttons.append(types.InlineKeyboardButton(
+                text=info["name"],
+                callback_data=f"study_sched:gen:{sched_type}:{category}:{track}:{theme_id}"
+            ))
+    
+    rows = []
+    if theme_buttons:
+        rows.append(theme_buttons[:2])
+        if len(theme_buttons) > 2:
+            rows.append(theme_buttons[2:])
+            
+    other_type = "annual" if sched_type == "weekly" else "weekly"
+    other_label = "🏛️ عرض الخطة السنوية" if sched_type == "weekly" else "🗓️ عرض الجدول الأسبوعي"
+    
+    rows.append([types.InlineKeyboardButton(text=other_label, callback_data=f"study_sched:cat:{other_type}:{category}")])
+    rows.append([
+        types.InlineKeyboardButton(text="🔄 جدول لفئة أخرى", callback_data=f"study_sched:type:{sched_type}"),
+        types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="student_home")
+    ])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)

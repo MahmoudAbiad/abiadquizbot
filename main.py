@@ -39,6 +39,7 @@ from handlers import (
     group_quiz_cert_router,
     payments_router,
     gifts_router,
+    study_schedule_router,
 )
 from handlers.session_navigation import router as session_navigation_router
 from middlewares import ThrottlingMiddleware, ErrorTrackingMiddleware, MaintenanceMiddleware, UsageCallbackMiddleware, GroupQuizOnlyMiddleware
@@ -106,6 +107,7 @@ def main():
         group_quiz_cert_router,  # 🎓 استقبال اسم الاختبار/الجهة للشهادات بخاص الأدمن
         payments_router,  # 💳 أزرار الشحن الذاتي (pay:*) - راجع handlers/payments.py
         gifts_router,
+        study_schedule_router,
         start_router,
         admin_router,
         sharing_router,
