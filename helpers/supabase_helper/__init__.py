@@ -105,6 +105,7 @@ from .feature_flags import (
 
 from .admin_ops import (
     admin_add_points,
+    admin_grant_direct_gift,
     admin_get_global_stats,
     admin_search_user,
     admin_get_users_page,
@@ -202,7 +203,7 @@ __all__ = [
     "_flag_redis_key", "_decode_flag_value",
     "is_feature_enabled", "set_feature_flag", "get_all_feature_flags",
     # admin_ops
-    "admin_add_points", "admin_get_global_stats", "admin_search_user", "admin_get_users_page",
+    "admin_add_points", "admin_grant_direct_gift", "admin_get_global_stats", "admin_search_user", "admin_get_users_page",
     # leaderboard
     "get_or_update_high_score", "publish_score_to_leaderboard",
     "hide_score_from_leaderboard", "get_my_leaderboard_status",

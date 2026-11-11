@@ -1213,11 +1213,89 @@ def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
+DIRECT_GIFT_PRESET_TITLES = {
+    "admin": "هدية من الإدارة",
+    "special": "هدية خاصة",
+    "reward": "مكافأة تميز",
+    "welcome": "هدية مستخدم جديد",
+}
+
+
 def get_admin_direct_message_charge_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🎁 شحن مجاني", callback_data=f"admin_direct_charge_free_{user_id}")],
+        [types.InlineKeyboardButton(text="🔄 شحن مجاني", callback_data=f"admin_direct_charge_free_{user_id}")],
+        [types.InlineKeyboardButton(text="🎁 شحن هدايا", callback_data=f"admin_direct_charge_gift_{user_id}")],
         [types.InlineKeyboardButton(text="💳 شحن مدفوع", callback_data=f"admin_direct_charge_paid_{user_id}")],
         [types.InlineKeyboardButton(text="⏭️ بدون شحن", callback_data=f"admin_direct_charge_none_{user_id}")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
+    ])
+
+
+def get_admin_direct_gift_mode_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text="🎁 هدية مستخدم جديد - 150 نقطة صالحة لمدة شهر",
+            callback_data="admin_direct_gift_preset_welcome",
+        )],
+        [types.InlineKeyboardButton(
+            text="⚙️ خيار مخصص",
+            callback_data="admin_direct_gift_preset_custom",
+        )],
+        [types.InlineKeyboardButton(
+            text="🔙 رجوع لأنواع الشحن",
+            callback_data="admin_direct_gift_back_types",
+        )],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
+    ])
+
+
+def get_admin_direct_gift_title_keyboard() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="🎁 هدية من الإدارة", callback_data="admin_direct_gift_title_admin"),
+            types.InlineKeyboardButton(text="🌟 هدية خاصة", callback_data="admin_direct_gift_title_special"),
+        ],
+        [
+            types.InlineKeyboardButton(text="🏆 مكافأة تميز", callback_data="admin_direct_gift_title_reward"),
+            types.InlineKeyboardButton(text="🎉 هدية مستخدم جديد", callback_data="admin_direct_gift_title_welcome"),
+        ],
+        [types.InlineKeyboardButton(text="🔙 رجوع لخيارات الهدية", callback_data="admin_direct_gift_back_mode")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
+    ])
+
+
+def get_admin_direct_gift_amount_keyboard() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="➕ 25", callback_data="admin_direct_gift_amt_25"),
+            types.InlineKeyboardButton(text="➕ 50", callback_data="admin_direct_gift_amt_50"),
+            types.InlineKeyboardButton(text="➕ 100", callback_data="admin_direct_gift_amt_100"),
+        ],
+        [
+            types.InlineKeyboardButton(text="➕ 150", callback_data="admin_direct_gift_amt_150"),
+            types.InlineKeyboardButton(text="➕ 250", callback_data="admin_direct_gift_amt_250"),
+            types.InlineKeyboardButton(text="➕ 500", callback_data="admin_direct_gift_amt_500"),
+        ],
+        [types.InlineKeyboardButton(text="✍️ كمية مخصصة", callback_data="admin_direct_gift_amt_custom")],
+        [types.InlineKeyboardButton(text="🔙 رجوع لاسم الهدية", callback_data="admin_direct_gift_back_title")],
+        [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
+    ])
+
+
+def get_admin_direct_gift_days_keyboard() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="📅 يوم واحد", callback_data="admin_direct_gift_days_1"),
+            types.InlineKeyboardButton(text="📅 3 أيام", callback_data="admin_direct_gift_days_3"),
+            types.InlineKeyboardButton(text="📅 أسبوع (7 أيام)", callback_data="admin_direct_gift_days_7"),
+        ],
+        [
+            types.InlineKeyboardButton(text="📅 أسبوعان (14 يوماً)", callback_data="admin_direct_gift_days_14"),
+            types.InlineKeyboardButton(text="📅 شهر (30 يوماً)", callback_data="admin_direct_gift_days_30"),
+        ],
+        [types.InlineKeyboardButton(text="♾️ بدون انتهاء", callback_data="admin_direct_gift_days_0")],
+        [types.InlineKeyboardButton(text="✍️ مدة مخصصة", callback_data="admin_direct_gift_days_custom")],
+        [types.InlineKeyboardButton(text="🔙 رجوع للكمية", callback_data="admin_direct_gift_back_amount")],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")],
     ])
 
