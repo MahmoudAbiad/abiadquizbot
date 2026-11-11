@@ -53,7 +53,11 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_welcome_text_shows_total_only(self):
         text = ui.welcome_text(35.5, 10, 5.5, 20)
-        self.assertIn('رصيدك المتاح: 35.50', text)
+        self.assertIn('رصيدك المتاح: 35 نقطة', text)
+        self.assertNotIn('35.50', text)
+        self.assertNotIn('35.5', text)
+        self.assertIn('رصيدك المتاح: 36 نقطة', ui.welcome_text(35.99999999999, 0, 0, 0))
+        self.assertIn('رصيدك المتاح: 0 نقطة', ui.welcome_text(0.75, 0, 0, 0))
         self.assertNotIn('يومي 10.00', text)
         self.assertNotIn('هدايا 5.50', text)
         self.assertNotIn('مدفوع 20.00', text)
@@ -116,7 +120,8 @@ class StudentNavigationTests(unittest.IsolatedAsyncioTestCase):
             supabase=supabase, gift_balances=gift_balances,
             build_welcome_text=ui.welcome_text, HOME_TEXT=ui.HOME_TEXT, logger=Mock())
         text = await env['_student_home_text'](42)
-        self.assertIn('رصيدك المتاح: 35.50 نقطة', text)
+        self.assertIn('رصيدك المتاح: 35 نقطة', text)
+        self.assertNotIn('35.50', text)
         self.assertIn('تفاصيل الرصيد موجودة في «رصيدي وهداياي».', text)
         supabase.table.assert_called_once_with('users')
         query.select.assert_called_once_with('free_points,paid_points')

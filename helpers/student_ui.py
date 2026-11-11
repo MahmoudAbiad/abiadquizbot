@@ -1,5 +1,6 @@
 """Presentation-only copy shared by the private student journey."""
 from html import escape
+from math import floor
 
 HOME_TEXT = (
     "🏠 <b>مساحتك الدراسية</b>\n\n"
@@ -132,12 +133,25 @@ def export_presets_text(presets):
     )
 
 
+def _whole_points(points):
+    """الرقم الصحيح فقط (بدون كسور) لعرض الرصيد في رسالة الترحيب.
+
+    يُقطَّع الكسر ولا يُقرَّب للأعلى كي لا يرى الطالب أكثر مما يملك فعلاً؛
+    التفاصيل الدقيقة (بالفاصلة) تبقى في «رصيدي وهداياي».
+    الإبسيلون يتفادى أخطاء الفاصلة العائمة (مثلاً 35.9999999 تُعرض 36).
+    """
+    try:
+        return floor(float(points or 0) + 1e-9)
+    except (TypeError, ValueError):
+        return 0
+
+
 def welcome_text(points, free_points, gift_points, paid_points, renewed=False):
     greeting = "☀️ <b>أهلاً بعودتك — تجدّد رصيدك اليومي</b>" if renewed else "👋 <b>أهلاً بعودتك</b>"
     return (
         f"{greeting}\n\n"
         "أرسل محتواك مباشرة، أو اختر «كيف أستخدم البوت؟» لتعرف خطوات إنشاء الكويز.\n\n"
-        f"💰 <b>رصيدك المتاح: {points:.2f} نقطة</b>\n"
+        f"💰 <b>رصيدك المتاح: {_whole_points(points)} نقطة</b>\n"
         "تفاصيل الرصيد موجودة في «رصيدي وهداياي».\n"
         "تظهر تكلفة كل طلب قبل بدء التوليد."
     )
