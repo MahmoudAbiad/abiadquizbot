@@ -1,386 +1,157 @@
-# سجل تطوير بوت الكويزات - abiadquizbot (الحالة الحالية)
+# المرجع المعماري والحالة الحالية للمشروع — abiadquizbot (`CURRENT_STATE.md`)
 
-## Unified expanded/super generation batches (2026-10-19, draft PR #7)
+> **آخر تحديث شامل:** نوفمبر 2026  
+> **الغرض من هذا الملف:** يمثّل هذا المستند المرجع المعماري الموحّد للحالة الفعلية للكود المصدري في المستودع. يُقرأ قبل إجراء أي تعديل جديد لفهم البنية الحالية، تدفق البيانات، القيود المعمارية، وترتيب الطبقات. للسجل التاريخي المتسلسل للتعديلات السابقة راجع [`docs/HISTORY_LOG.md`](HISTORY_LOG.md).
 
-- Scope: **generating new questions AND extracting original ready-made exams** through the same bounded batch infrastructure. Pre-generation subject classification, audio transcription and standard requests remain unchanged. Standard requests (<=30 questions and <=15 pages/items, except super images >10) retain their previous single-request behavior.
-- Bounded generation (20 questions max per request) preserves exact requested totals. **Ready-made extraction** instead fetches *up to* 20 original questions per request, resumes after the last source question, and may end with fewer questions than the detected/selected estimate. Never fabricate questions just to reach that estimate. Both modes checkpoint completed batches and never publish partial results after a provider failure.
-- PDFs: <=15 source pages are passed whole to each batch; longer PDFs preserve 2/3 overlapping context-page ownership ranges, with batch requests within each part.
-- Images: 1–10 images are passed intact to each batch whenever requested questions >30. >10-image albums use three image groups; every group runs bounded batches. For **exam extraction**, image groups are contiguous, to preserve source question order (creation keeps its existing 3-way distribution). Original images go to multimodal models; there is no OCR stage.
-- Direct text, DOCX/PPTX/TXT extracted text, and audio transcripts: the **entire text** is provided to every batch; no semantic chunking or summaries are introduced. Pure-text requests follow the same batch coordinator when >30 questions or estimated text pages >15. Office extracts and audio transcription retain existing handling.
-- Album requests >30 questions now count as expanded even if <=10 images; existing pricing rules still apply. Very long text may show Super-Text instead of the incorrect Super-PDF label. No changes to point deduction/refund or cached-quiz discount.
-- Model/key fallback remains automatic per failed batch. A request-scoped Gemini Files API session reuses file references for the same key; different credentials receive private new uploads. The successful model/key is preferred for later batches (regular requests' round-robin is unchanged).
-- Valid previous batches, plus per-source exhaustion states for extraction, are checkpointed in Redis for 2 hours per user/source/prompt, then resumed on a matching subsequent attempt. Checkpoint expiration does **not** automatically restart a failed chat request. Failed whole requests still refund points as before, while completed partial batches can be reused.
-- Offline tests added for PDF short/large, album standard/super, text, original-answer extraction, 5-choice preservation, end-of-document, duplicates, checkpoint resume, and per-key file reuse. Do not release without GitHub CI and a real provider/Redis smoke test.
+## 1. نظرة معمارية عامة
 
+يعمل المشروع كبوت تيليجرام غير متزامن (Async Python 3.11 / `aiogram v3`) مع خادم ويب مدمج (`FastAPI` + `uvicorn`) وسيرفر رسم وتصدير منفصل اختياري (`render_worker.py`).
 
-## تجربة الطالب: البداية إلى التحميل (2026-10-18)
+### المكونات الأساسية للبنية التحتية:
+1. **عملية البوت الرئيسية (`main.py` / `webhook_server.py`):**
+   - في بيئة الإنتاج (عند ضبط `WEBHOOK_URL`): تشغّل خادم FastAPI الذي يستقبل تحديثات تيليجرام على `/webhook` ويودعها ذرياً في طابور Redis (`WebhookQueue`) قبل إرجاع `200 OK`، بالإضافة لتقديم تطبيقات الـ Mini Apps (`/webapp`) ونقاط نهاية الرفع، الدفع، لعبة Runner، وإحصاءات الموقع العام.
+   - في بيئة التطوير (بدون `WEBHOOK_URL`): تشغّل وضع `Polling` مع تشغيل نفس الحلقات الخلفية الدورية.
+2. **سيرفر الرسم والتصدير المنفصل (`render_worker.py`):**
+   - يعمل من نفس المستودع عند ضبط `APP_ROLE=render_worker`.
+   - لا يستورد تيليجرام أو Supabase أو Redis، بل يدير مسبح عمليات فرعية (`ProcessPoolExecutor` بعمليتين معزولتين) لتنفيذ مهام Matplotlib / Pillow / ReportLab / python-docx / ffmpeg الثقيلة دون استهلاك ذاكرة عملية البوت الرئيسية (المحدودة بـ 512MB).
+3. **قاعدة البيانات (`Supabase / PostgreSQL`):**
+   - المخزن الدائم للمستخدمين، المحفظة الذرية والهدايا، الكويزات، المفضلة، لوحة الشرف، جلسات الكويز الجماعي وأقفالها، ملفات تعريف التصدير، الموافقات القانونية، سجلات الدفع، بنك التحديات والمباريات، بيانات لعبة Runner، والتحليلات.
+4. **التخزين السريع والحالة (`Redis / Upstash`):**
+   - يُستخدم لتخزين حالات FSM (بانتهاء صلاحية 24 ساعة)، طابور الـ Webhook الموثوق، أقفال المستخدمين الموزعة (`UserLock`)، كاش تصنيف المحتوى (`subject_classify:v3:`)، نقاط حفظ دفعات التوليد (`batch_generation` لمدة ساعتين)، لقطات التدرب على الأخطاء، حالة وضع الصيانة، وحضور المشاهدين في التحديات.
+5. **التخزين السحابي للملفات (`Cloudflare R2` + `Supabase Storage`):**
+   - **Cloudflare R2 (`helpers/r2_helper.py`):** يستقبل الملفات الكبيرة المرفوعة مباشرة من متصفح الطالب عبر روابط موقّعة (`Presigned PUT URLs`) للمستندات (حتى 100MB)، الصوتيات (حتى 250MB)، وألبومات الصور (حتى 50 صورة)، ويُنظَّف تلقائياً بعد المعالجة أو عبر حلقة التنظيف الدورية.
+   - **Supabase Storage (`quiz-images`):** يحفظ صور الأسئلة الرياضية المرسومة وصور لعبة Runner.
 
-- الرئيسية تقدّم إنشاء الكويز والمحفوظات، مع رابط مساعدة فعلي `/help` وأوامر المحفظة.
-  الترحيب يعرض الرصيد الحقيقي بدون أسعار ثابتة أو وعود وقتية. يبقى مسار أول مستخدم مختصراً.
-- التنقل الجديد `student_*` معلوماتي ولا يصفّر FSM؛ زر `quiz_home` القديم أيضاً يحافظ
-  على اختبار أحدث وبيانات التصدير. لا تغيير على صلاحيات أو خصم النقاط أو التوليد.
-- خطوات النوع/الصعوبة/مراجعة التكلفة مرقّمة؛ رجوع من العدد للصعوبة يحفظ العدد المختار،
-  ورجوع من كتابة عدد مخصص إلى الملخص بدون إلغاء الطلب. الاختبار الجاهز له عنوان مستقل.
-- التصدير يعدّل نفس شاشة الخيارات عند اختيار التنسيق والرجوع؛ يوضح نسختي الطالب والأستاذ،
-  مع رجوع سياقي من المفضلة. تحميل الملفات القديمة وcallback_data القديمة مدعومان.
-- النتيجة تقدّم الحفظ/التحميل وإعادة المحاولة قبل التقييم الاختياري. آخر سؤال يوضح «عرض النتيجة».
-- المفضلة الفارغة تقترح إنشاء كويز؛ أسماء المستخدمين والبحث والتفضيلات تُعرض بـ HTML escaping.
-- `tests/test_student_ui.py` يغطي سلامة التنقل والرجوع والحفاظ على الاختيارات وحدود أزرار Telegram.
+## 2. ترتيب الـ Middlewares والـ Routers (حرج جداً)
 
-## وضع الصيانة اليدوي (2026-10-18)
+يعتمد سلوك البوت على الترتيب الدقيق لتسجيل الـ Middlewares والـ Routers في `main.py`:
 
-- لوحة الأدمن > وضع الصيانة: تشغيل/إيقاف، تخصيص رسالة نصية مع معاينة وحفظ صريح،
-  استعادة الرسالة الافتراضية. الموعد إن كُتب ضمن الرسالة نص فقط، بلا جدولة تلقائية.
-- الإعداد محفوظ في Redis بدون TTL تحت `maintenance:<bot_id>`، مستقل لكل بوت ويستمر
-  بعد إعادة تشغيل التطبيق؛ يُفقد إذا حُذفت بيانات Redis نفسها. لا تغيير على مخطط Supabase.
-- Middleware على update يمنع تفاعلات غير الأدمن قبل معالجات البوت، مع بوابة مماثلة
-  لمسارات Mini App (رفع الصوت/الملفات/الصور وتعديل الأسئلة). إشعارات عضوية البوت
-  وتحديثات إغلاق الاستفتاء تستمر، والعمليات التي بدأت بالفعل لا تُلغى مالياً أو تقنياً.
-- إيقاف الصيانة يعيد الاستخدام فوراً؛ تخصيص الرسالة أو استعادتها لا يغيّر حالة التشغيل.
-- إشعار صيانة واحد لكل مستخدم كل 10 ثوانٍ (مشترك بين الرسائل والأزرار وإجابات الاستفتاء).
-  المحاولات الزائدة تبقى ممنوعة، وتُجاب الأزرار بصمت. كاش محلي محدود بـ10000 مستخدم
-  لكل عملية؛ لا يؤخر إيقاف الصيانة ولا يوقف فحص حالتها من Redis.
-- `tests/test_maintenance.py`: اختبارات الحفظ، العزل، الحماية، النصوص والمعاينة.
+### أولاً: Update Outer Middlewares (تُنفَّذ على كل التحديثات بالترتيب)
+1. **`GroupQuizOnlyMiddleware` (`middlewares.py`):** يعزل محادثات المجموعات تماماً عن معالجات الطلاب الفردية؛ لا يسمح في المجموعات إلا بأوامر إطلاق الكويز الجماعي (`/groupquiz`، `/start gq_...`) وبادئات أزرار الكويز الجماعي (`gql:`, `gqa:`, `gqn:`, `gqk:`, `gqt:`, `gqp:`, `gqc:`, `gqe:`, `gqs:`, `gqg:`, `gqgr:`, `gqchl:`, `gqchr:`, `gqchp:`).
+2. **`ErrorTrackingMiddleware` (`middlewares.py`):** يربط كل تحديث بمعرّف المستخدم عبر `error_context.py` لتسجيل أي خطأ في لوحة تحليلات الأدمن تلقائياً، ويلتقط الاستثناءات غير المعالجة لإرسال اعتذار آمن للطالب.
+3. **`MaintenanceMiddleware` (`middlewares.py`):** يفحص حالة الصيانة في Redis (`maintenance:<bot_id>`)؛ يمنع غير الأدمن من التفاعل أثناء الصيانة بمعدل تنبيه واحد كل 10 ثوانٍ لكل مستخدم.
 
-## Optional Render rendering/export offload (2026-10-18)
+### ثانياً: Message & Callback Inner Middlewares
+1. **`ThrottlingMiddleware`:** حماية من التكرار السريع (1.2 ثانية للرسائل، 0.8 ثانية للأزرار) مع إعفاء الرسائل المعاد تمريرها بعد الموافقة القانونية (`consent_resumed=True`).
+2. **`PracticeCallbackGuard` (`services/mistake_practice.py`):** يمنع تداخل أزرار الحفظ/المشاركة/إعادة اللعب القديمة مع جلسة «التدرب على الأخطاء» النشطة.
+3. **`UsageCallbackMiddleware` (`middlewares.py`):** يسجّل نوايا استخدام الأزرار في المحادثات الخاصة بالخلفية دون حفظ بيانات حساسة.
+4. **`ConsentMiddleware` (`services/consent.py`):** بوابة الموافقة على شروط الخدمة وسياسة الخصوصية. تحفظ الرسالة أو الألبوم أو ضغطة الزر المعلّقة في Redis (لمدة 15 دقيقة) وتستأنف تنفيذها تلقائياً فور ضغط «أوافق».
 
-- Preserve the current test branch and local behavior with OFFLOAD_ENABLED=0.
-- Separate stateless HTTP service on the same branch; two spawned render processes,
-  bounded admission, child-side cleanup and recovery. Rendering/export only; AI,
-  audio processing, database and Telegram remain on the bot.
-- Preserve student/teacher exports, shared export queue, local fallback limits and
-  cancellation handling. Circuit checks happen after connection admission; strict
-  no-local-fallback mode is honored for all active-offload failure paths.
-- Deployment/configuration and verification details: docs/offload.md.
+### ثالثاً: ترتيب الـ Routers في `dp.include_routers`
+```text
+1. consent_router              (أزرار الموافقة القانونية)
+2. settings_router             (إعدادات الطالب وتفضيلات الإشعارات)
+3. runner_router               (إطلاق لعبة رحلة أبيض)
+4. session_navigation_router   (حماية الجلسات النشطة: استئناف / إنهاء ومتابعة / إلغاء)
+5. challenge_game_router       (التحديات: الأرض والأبراج والهجمات غير المتزامنة cg:*)
+6. challenge_live_router       (المواجهات المباشرة الحية lv:* + المشاهدة sp:*)
+7. group_quiz_router           (الكويز الجماعي — يسبق start_router وquiz_runner_router لالتقاط /start gq_ وإجابات الاستفتاء الجماعية)
+8. group_quiz_cert_router      (استقبال نصوص شهادات التقدير وحفل التكريم بخاص الأدمن)
+9. payments_router             (الشحن الذاتي وأزرار مراجعة الدفعات pay:*)
+10. gifts_router               (المحفظة وأكواد الهدايا)
+11. start_router               (الترحيب، القائمة الرئيسية، الحساب، المساعدة)
+12. admin_router               (لوحة تحكم الأدمن بكافة أقسامها الـ 15)
+13. sharing_router             (مشاركة الكويزات)
+14. audio_router               (المحاضرات الصوتية — يسبق files_router لالتقاط إلغاء الطلب الصوتي)
+15. files_router               (استقبال الملفات، الصور، النصوص، Excel، الكاش، وبدء التوليد)
+16. quiz_options_router        (اختيار نوع الأسئلة والصعوبة)
+17. quiz_runner_router         (حل الكويز الفردي، النتيجة، المراجعة، التدرب على الأخطاء، وتعديل الأسئلة)
+18. favorites_router           (المفضلة والأقسام)
+19. leaderboard_router         (لوحة الشرف)
+20. export_router              (تصدير Word / PDF / Excel وإعدادات الورقة)
+21. quiz_delete_router         (حذف الكويز نهائياً)
+```
 
-**هذا الملف خفيف ومخصص للقراءة الروتينية قبل أي تعديل جديد** - القرارات المعمارية،
-حالة الاختبار، والمعلومات التقنية الضرورية فقط. للسجل التاريخي الكامل (كل الإصلاحات
-والميزات بالتفصيل وبالترتيب الزمني) راجع **[`HISTORY_LOG.md`](HISTORY_LOG.md)** -
-غير ضروري قراءته بشكل روتيني، فقط عند الحاجة لفهم سياق قرار قديم أو تحقيق ببلاغ خلل
-مشابه لقديم.
+## 3. الأنظمة الفرعية وتفاصيلها التقنية الحالية
 
-**قاعدة أساسية لأي AI تاني بيقرأ هالملف:** لا تفترض إنه الكود شغّال 100% لمجرد إنه
-`py_compile` نجح. كل الشغل الموثّق تحت اتعمل وتحقق منه syntax-wise فقط (ما في بيئة
-تشغيل فعلية متاحة للـ AI بمعظم الحالات). **لازم** تسأل المستخدم شو جرّب فعلياً وشو نتيجة
-كل تجربة قبل ما تبني فوق أي طبقة، خصوصاً الطبقات الحساسة مالياً (خصم نقاط، استرجاع).
+### 3.1 طبقة الذكاء الاصطناعي وتوليد الكويزات (`services/ai/` + `helpers/gemini_helper/`)
+- **فصل المسؤوليات:**
+  - حزمة `helpers/gemini_helper/` تحتفظ بواجهات الاستدعاء العامة (`generate_quiz_smart`, `generate_structured_with_cascade`, `generate_text_with_cascade`) وتدير تخطيط البرومبت، تقسيم الصفحات/الصور، وتنسيق الدفعات (`batch_generation.py`).
+  - حزمة `services/ai/` تدير العقود المحايدة (`contracts.py`)، المحولات (`adapters.py` لـ Gemini وVertex وOpenAI-compatible وCloudflare Vision)، تدوير المفاتيح والتبريد (`runtime.py` و`rate_limits.py`)، ميزانيات الوقت (`time_budget.py`)، مستويات التفكير (`thinking.py`)، جلسات الملفات (`file_session.py`)، والتشخيصات (`diagnostics.py`).
+- **التوليد الموحّد بالدفعات (`batch_generation.py`):**
+  - يعالج طلبات التوليد الموسّع (>30 سؤالاً أو >15 صفحة/صورة) وطلبات **استخراج الاختبارات الجاهزة** (`QUIZ_EXTRACTION_MODE_AS_IS` / `AI_SOLVE`) عبر دفعات سقفها 20 سؤالاً للدفعة.
+  - يحفظ الدفعات المنجزة في Redis لمدة ساعتين لاستئنافها عند إعادة المحاولة، ويعيد استخدام الملفات المرفوعة إلى Gemini Files API ضمن نفس المفتاح عبر `GeminiFileSession`.
+- **تقدير الوقت والنبضة (`generation_eta.py` + `generation_heartbeat.py`):**
+  - استُبدلت عبارات الانتظار العشوائية في مسار توليد الكويز بحلقة نبضة تحسب `typical / slow / ceiling` وتحدّث شريط التقدم كل 5–15 ثانية دون عداد سالب.
 
----
+### 3.2 النظام المالي، المحفظة الذرية، الهدايا، والشحن الذاتي
+- **المحفظة الذرية (`wallet_debit` في SQL + `helpers/supabase_helper/users.py` & `gifts.py`):**
+  - الأرصدة مقسمة إلى: `free_points` (تتجدد يومياً)، `point_gifts` (هدايا بصلاحية زمنية)، و`paid_points` (رصيد مدفوع دائم).
+  - يتم الخصم ذرياً عبر RPC `wallet_debit` بالترتيب: المجاني ← الهدايا الأقدم انتهاءً ← المدفوع، ويُسجّل إيصال تقسيم الخصم في `wallet_debits` لضمان استرجاع كل جزء لمصدره الأصلي عند الفشل (`refund_user_points_split`).
+  - تميّز طبقة التطبيق عبر `WalletDebitError` (`services/wallet_errors.py`) بين نقص الرصيد الفعلي وبين أخطاء الشبكة/RPC التقنية حتى لا تُحذف مدخلات الطالب عند حدوث خطأ تقني عابر.
+- **التجديد اليومي (`services/daily_renewal.py`):**
+  - يعمل عبر `pg_cron` الساعة **20:00 بتوقيت دمشق** (`daily_renewal_cycle_day`) لتحديث `free_points` إلى الحد اليومي، مع عامل خلفية يرسل الإشعارات للطلاب الذين فعّلوا الإشعار وتقرير إجمالي للأدمن.
+- **الشحن الذاتي (`services/payment_service.py` + `payment_parser.py`):**
+  - يستقبل أحداث تطبيق MacroDroid على `/api/payments/macrodroid` (`notification`, `screen`, `manual_request`, `heartbeat`).
+  - يدعم التأكيد اليدوي من مجموعة الأدمن أو **الشحن التلقائي** (`payments_auto_confirm`) بشروط صارمة (تطابق المبلغ والعملة، كود طلب وحيد من 6 أرقام، أحدث بطاقة في شاشة شام كاش، وعمر الحوالة ≤ 15 دقيقة، ضمن السقف اليومي وسقف الطلب).
 
-## 🎯 السياق العام
+### 3.3 نظام التصدير وسيرفر الرسم المنفصل (`export_service.py` + `render_worker.py`)
+- **إعدادات الورقة (`services/export_options.py` + `export_layout.py`):**
+  - شاشة إعدادات مقسمة إلى 3 أقسام فرعية (`بيانات الورقة`، `التخطيط والمظهر`، `الإجابات والطالب`) بالإضافة إلى `قوالب جاهزة` و`تعبئة سريعة` برسالة واحدة، وحفظ الإعدادات الدائمة في جدول `export_profiles`.
+  - تدعم حتى **16 سؤالاً بالصفحة**، تقسيم الصفحة إلى **عمودين** بخط فاصل اختياري، ومسودة حل تحت كل سؤال (أسطر / شبكة مربعات / إطار فارغ).
+- **حماية الذاكرة والتفويض (`offload.py` + `processing_limits.py`):**
+  - تشترك عمليات التوليد الثقيلة والتصدير المحلي في `HEAVY_PROCESSING_SEMAPHORE` (حد 2 لكل عملية) بالإضافة إلى طابور التصدير (`EXPORT_SLOT` بحد أقصى 8 طلبات بالانتظار، طلب واحد لكل مستخدم).
+  - عند تفعيل `OFFLOAD_ENABLED=1`، تُرسل طلبات رسم الصور، الشهادات، حفل التكريم، وتصدير PDF/Word إلى `render_worker.py` عبر HTTP محمي بـ `X-Worker-Secret`.
 
-المستخدم طلب تطوير بوت كويزات تيليجرام (aiogram v3 + Gemini AI + Supabase) بهدف:
-1. تقليل عدد الخطوات/الرسائل اللي الطالب لازم يمرّ فيها قبل ما يبلش التوليد.
-2. إضافة تخصيص لنوع الأسئلة (حسب المادة) ومستوى الصعوبة.
-3. تحسين نظام الكاش (عرض تفاصيل + فلترة + سقف مستقل لكل تركيبة).
-4. (لسا ما اتعمل) خيار "استخراج كامل الأسئلة من الملف" بتسعير لاحق آمن.
+### 3.4 الكويز الجماعي (`handlers/group_quiz.py` + `services/group_*`)
+- **الإعداد الموحد (`gqs:`):** شاشة ملخص واحدة في خاص الأدمن تتحكم بنوع الجلسة (تنافسي/مجهول)، إظهار الأسماء، عدد الأوائل (`top_n`)، المؤقت، الفاصل الزمني أو الإرسال دفعة واحدة (`burst`)، قفل المحادثة، الشهادات، وحفل التكريم.
+- **قفل المحادثة (`group_quiz_lock.py`):** يحفظ الصلاحيات الأصلية للمجموعة في جدول `group_quiz_chat_locks` قبل تقييد إرسال الرسائل، ويستعيدها حتمياً عند نهاية الجلسة أو عبر حلقة النبضة عند إعادة تشغيل السيرفر.
+- **التكريم البصري (`certificate_renderer.py` + `ceremony_renderer.py`):** بعد نشر الترتيب النهائي، يرسل البوت (اختيارياً) فيديو/صورة حفل التكريم باللهب والموسيقى متبوعاً بألبوم شهادات التقدير للمتصدرين.
 
-بالتوازي، صارت عدة جولات إصلاحات وميزات مستقلة (توليد النص، الألبوم، استرجاع النقاط،
-خاصية الإلغاء، نمط الكويز الرياضي المصوّر، وإعادة تصميم لوحة الشرف) - موثّقة كلها
-بالترتيب الزمني بقسم "سجل الإصلاحات والميزات" تحت.
+### 3.5 التحديات (`challenge_*`) ولعبة «رحلة أبيض» (`runner_*`)
+- **التحديات:** تعمل بالكامل بالاعتماد على PostgreSQL RPCs الذرية (دون الاعتماد على FSM لمجرى المباراة). تشمل بنك المحتوى (`0008`)، الأرض والأبراج والهجمات غير المتزامنة (`0009` + `0011`–`0014`)، المواجهات الحية المباشرة (`0010`)، وضع المشاهدة الحية للمدافع (`0015`)، وأرشفة/حذف الفروع (`0016`).
+- **لعبة رحلة أبيض (Runner):** تعمل كتطبيق ويب مصغر (`/webapp/runner`) يتواصل مع `/api/runner/*`. محمية بحراسة ثلاثية (`RUNNER_ENABLED=1` + مطابقة مرجع مشروع Supabase + مفتاح `runner_enabled` في لوحة الأدمن).
 
-كل قرارات التصميم الأساسية اتحسمت بنقاش مطوّل قبل أي تنفيذ - ملخصها بقسم
-"القرارات المعمارية المتفق عليها" تحت.
+## 4. الحلقات الخلفية الدورية (Background Loops)
 
----
+تعمل الحلقات التالية في كلا وضعَي التشغيل (`Webhook` في `webhook_server.py` و`Polling` في `main.py`):
 
-## 🧠 القرارات المعمارية المتفق عليها (السياق الكامل - لأي AI يكمل)
-
-1. **الكاش:** يُعرض دائماً كل الكويزات المخزّنة للملف بغض النظر عن نوعها/صعوبتها،
-   لكن سقف "التوليد المجاني الإضافي" (discount) مستقل لكل تركيبة (نوع مادة × نوع
-   أسئلة × صعوبة) - `MAX_FILE_QUIZZES_LIMIT` لكل تركيبة على حدة.
-2. **شاشة قرار الكاش تظهر قبل معرفة نوع/صعوبة الأسئلة المطلوبة** (التصنيف يصير فقط لو
-   ما في كاش، أو لو الطالب اختار "توليد جديد" من شاشة الكاش) - هذا **متعمّد وليس خللاً**،
-   اتفقنا عليه صراحة لتفادي سؤال الطالب عن التخصيص قبل ما يشوف إذا أصلاً في كويزات جاهزة.
-3. **الصعوبة لا تؤثر على التسعير** (قرار صريح من المستخدم).
-4. **فلترة الكاش محلية بالكامل** (لا استعلامات إضافية لقاعدة البيانات أو AI).
-5. **الأمان المالي:** أي عملية توليد تخصم النقاط *قبل* الاستدعاء الفعلي لـ AI، وتسترجعها
-   تلقائياً لو فشل التوليد (`refund_user_on_failure` / `refund_user_points`). أي منطق
-   جديد (خصوصاً "استخراج الكل" الجاي) لازم يحافظ على نفس المبدأ ولا يخصم بدون ضمان
-   استرجاع عند الفشل.
-6. **لوحة الشرف:** النتيجة تُحفظ خاصة افتراضياً دائماً (`is_public = False`)، وقرار
-   النشر/الإخفاء يبقى دائماً اختيارياً وحصراً تحت لوحة الشرف نفسها (لا سؤال إجباري
-   بشاشة نتيجة الكويز) - راجع تفاصيل التصميم بقسم لوحة الشرف تحت.
-
----
-
-## ⏳ المتبقي: خيار "استخراج كامل الأسئلة من الملف"
-
-**لسا ما اتبلش فيه إطلاقاً.** هذا آخر جزء من الخطة الأصلية وأكبرهم تعقيداً لأنه يخالف
-مبدأ التسعير المسبق المتبع بكل الشاشات الحالية.
-
-### المشكلة الجوهرية (نوقشت مطوّلاً، القرار موثّق تحت)
-النظام الحالي بالكامل مبني على **دفع مسبق**: نحسب التكلفة الدقيقة → نتأكد من الرصيد →
-نخصم → نولّد → لو فشل نرجّع النقاط. لكن "استخراج الكل" يعني إننا **ما بنعرف العدد
-الحقيقي إلا بعد التوليد الفعلي** - يعني التكلفة الحقيقية غير معروفة مسبقاً.
-
-### الحل اللي اتفقنا عليه (ولسا ما اتنفذ):
-1. **تقدير مسبق تقريبي (سقف أقصى نظري)** لعدد الأسئلة المتوقع، بناءً على عدد
-   الصفحات/طول النص (فيه أصلاً `PAGES_PER_QUIZ_RATIO` بـ `constants.py` كمرجع مشابه).
-2. **نتحقق فقط إن رصيد الطالب يغطي السقف الأقصى النظري** (مو التكلفة الفعلية اللي لسا
-   مجهولة) قبل السماح بالبدء - لمنع أي طالب رصيده صفر من الدخول بمشوار توليد كامل
-   بيكلّفنا فعلياً (استدعاء Gemini حقيقي) بدون أي مقابل.
-3. بعد التوليد الفعلي، نحسب التكلفة الحقيقية (المفروض ≤ السقف لأنه اتأكدنا مسبقاً)
-   ونخصمها فعلياً.
-4. **لا تسعير ظاهر على الزر نفسه** (بعكس باقي الخيارات المسعّرة مسبقاً) - فقط
-   **alert تأكيد** يوضح للطالب إن العدد النهائي غير مضمون ومرتبط بمحتوى الملف، وإن
-   الخصم سيصير تلقائياً بعد التوليد حسب العدد الفعلي، وإن العملية ستفشل (بدون خصم) لو
-   الرصيد ما يكفي حتى للسقف الأدنى المعقول.
-
-### نقاط تصميم لازم تُحسم قبل التنفيذ الفعلي (لسا مفتوحة):
-- إذا التوليد نجح لكن العدد الفعلي أكبر من المتوقع (نادر، بس ممكن) والرصيد الفعلي
-  متبقي أقل من التكلفة الحقيقية بعد التوليد؟ (يفترض هذا السيناريو نادر جداً لأننا
-  تحققنا من السقف الأقصى مسبقاً، لكن لازم قرار صريح: هل نخصم كل رصيده المتبقي فقط، أو
-  نقص عدد الأسئلة المعروضة للطالب لتطابق رصيده الفعلي، أو نمنع الحالة أصلاً بجعل
-  السقف الأقصى المتحقق منه مسبقاً أعلى بهامش أمان كافٍ؟).
-- شكل الزر بالضبط بشاشة عدد الأسئلة (`get_question_count_keyboard`) - هل هو زر خامس
-  إضافي بجانب أزرار 5/10/15/20، أم صف منفصل بعنوان مختلف؟
-- نص الـ alert بالضبط (`answerCallbackQuery(show_alert=True)` غالباً، أو رسالة
-  منفصلة بزر "متابعة/تراجع").
-- **الأهم: لازم تسجيل هالبادئة الجديدة لأزرار الـ callback (اقترح `qextract_` أو
-  مشابه) بحيث ما تتضارب مع أي بادئة موجودة (`qcount_`, `qtype_`, `qdiff_`,
-  `cachefilter_`) - راجع قسم "خلل تم اكتشافه" بالطبقة 2 تحت قبل تسجيل أي معالج جديد.**
-
----
-
-## 🩹 تعديل UX (2026-08-28) - الجولة الثانية: حذف الدليل التعليمي بالكامل
-
-**طلب صريح من المستخدم:** حذف دليل الـ5 خطوات نهائياً لأنه "لا يحمل نفع حقيقي"،
-واستبداله بما اقترحته الجولة الأولى من الفحص: رسالة ترحيب من سطرين + زر واحد بارز.
-هذا يُلغي الجولة الأولى الموثّقة أدناه (المثال الحي وإعادة ترتيب الزر بالخطوة 1) لأن
-كامل ملف `handlers/tutorial.py` حُذف.
-
-**ما تغيّر فعلياً:**
-1. **`handlers/tutorial.py` حُذف بالكامل** (كان يحتوي الدليل بخطواته الخمس، أوامر
-   `/help`، والزر `how_to_use`).
-2. **`handlers/start.py`:** رسالة الترحيب للمستخدم الجديد (`status == "new"`) أصبحت
-   سطرين فقط (ترحيب + رصيد النقاط) + زر واحد `"🚀 أرسل أول ملف الآن"`
-   (`callback_data="new_user_send_now"`). أُضيف معالج جديد لهذا الزر
-   (`ack_new_user_start`) يعرض تأكيداً قصيراً + القائمة الرئيسية فوراً بعده - **بنفس
-   المبدأ القديم** (الحفاظ على وصول المستخدم لأزرار شحن الرصيد/المفضلة/الدعم دون
-   الحاجة لكتابة `/start` يدوياً من جديد) لكن بدون أي محتوى تعليمي إضافي.
-   ⚠️ تفاصيل حُذفت عمداً من رسالة الترحيب الجديدة القصيرة (لم تعد تظهر تلقائياً هناك):
-   تجدد النقاط اليومي (`daily_renewal_points`)، وتنويه مكافأة الإحالة عند وجود
-   referrer. هذه المعلومات ما زالت موجودة بأماكن أخرى بالكود (شاشة `recharge_info`
-   مثلاً) لكن لم تعد تُعرض تلقائياً لحظة `/start` الأولى - **قرار واعٍ لتحقيق الإيجاز
-   المطلوب، لكن يستحق ملاحظة أي أثر على معدل التفعيل عبر الإحالة إن لاحظه المستخدم
-   لاحقاً بالتحليلات.**
-3. **إزالة كل مرجع لـ `/help` وزر "كيف يعمل البوت؟":**
-   - `keyboards.py`: حُذف صف الزر `how_to_use` من `get_main_menu_keyboard`.
-   - `config.py::set_bot_commands` و`handlers/start.py::set_bot_commands` (نسخة
-     الـ polling المحلية): حُذف أمر `help` من كلا قائمتي أوامر الطلاب والآدمن.
-4. **`main.py` و`handlers/__init__.py`:** إزالة استيراد وتسجيل `tutorial_router`.
-5. **`handlers/admin/analytics.py`:** تُركت تسميات الأحداث القديمة
-   `tutorial_opened`/`tutorial_completed` بـ `EVENT_LABELS` (لن تُسجَّل بعد الآن، لكن
-   أُبقيت لقراءة البيانات التاريخية بشكل صحيح من لوحة التحليلات)، وأُضيف حدث جديد
-   `start_cta_acknowledged` يقابل ضغطة الزر الجديد.
-
-**فحص شامل:** `python3 -m compileall .` نجح على كامل المشروع بدون أي خطأ استيراد أو
-صياغة - تم التأكد من عدم وجود أي مرجع متبقٍ لـ `tutorial`/`how_to_use` في أي ملف عدا
-تسميات EVENT_LABELS التاريخية المذكورة أعلاه.
-
-**لم يُختبر على بيئة تشغيل حقيقية بعد.** يحتاج المستخدم تأكيد يدوي على الأقل لـ:
-- مستخدم جديد فعلي: هل رسالة الترحيب القصيرة + الزر تظهر بشكل صحيح؟
-- الضغط على "🚀 أرسل أول ملف الآن": هل يعرض التأكيد + القائمة الرئيسية بدون خطأ؟
-- التأكد أن أمر `/help` لم يعد يظهر بقائمة الأوامر الزرقاء بتيليجرام (قد يحتاج وقتاً
-  ليتحدّث الكاش من طرف تيليجرام، أو محاولة `/start` جديد لإعادة تسجيل الأوامر).
-
----
-
-## 🩹 تعديل UX (2026-08-28) - الجولة الأولى (مُلغاة الآن، أُبقيت للتوثيق التاريخي)
-
-**السياق:** طلب المستخدم تقييم UX لتجربة المستخدم الجديد بناءً على لقطات شاشة حقيقية
-لجلسة `/start` كاملة على البوت المنشور فعلياً، ثم طلب البدء بالإصلاح. الفحص أظهر أن
-معظم بنود الخطة المقترحة (دمج رسالة الترحيب مع الخطوة 1، شريط تقدم، زر "تخطّي" متاح من
-أول خطوة، عدم فرض تسلسل صارم، أزرار عدد أسئلة جاهزة بدل إدخال حر إجباري، قائمة رئيسية
-غير مزدحمة) **منفّذة مسبقاً بالفعل** في `handlers/tutorial.py` / `handlers/start.py` /
-`keyboards.py` (موثّقة بتعليقات 🆕 داخل كل ملف). التعديلان اللي انضافا حينها (مثال حي
-لشكل السؤال + إعادة ترتيب زر الخطوة 1) **أصبحا بلا أثر الآن** لأن `handlers/tutorial.py`
-حُذف بالكامل بالجولة الثانية أعلاه.
-
----
-
-## 🧪 حالة الاختبار الحالية
-
-**لم يتم اختبار طبقات "تخصيص نوع/صعوبة الأسئلة والكاش" (الطبقات 1-4 تحت) على بيئة
-تشغيل حقيقية بشكل كامل بعد من طرفي (لا يوجد وصول لتشغيل البوت فعلياً - فقط
-`py_compile` وفحوصات نصية آلية للتأكد من عدم وجود أخطاء نحوية أو تضارب معالجات).**
-
-المستخدم جرّب الطبقات 1-2 جزئياً ولاحظ واعدّل معي 4 مشاكل حقيقية (موثّقة تحت، كلها
-مصلّحة الآن). **لسا ما تم تأكيد دورة كاملة ناجحة من طرف المستخدم** (رفع ملف → تصنيف →
-نوع/صعوبة → عدد → توليد فعلي → عرض الكويز)، ولا اختبار مسار الكاش/الفلترة، ولا اختبار
-حالات الإلغاء/الفشل.
-
-**التوصية (متفق عليها مع المستخدم):** عدم البدء بخيار "استخراج الكل" لغاية ما يتأكد
-المستخدم من 3 أشياء:
-1. دورة كاملة ناجحة (رفع → تصنيف → نوع/صعوبة → عدد → توليد → عرض الكويز).
-2. مسار الكاش (رفع نفس الملف تاني، عرض تفاصيل صحيحة، فلترة لو أكتر من كويز).
-3. حالة إلغاء/فشل متعمّدة (زر إلغاء من كذا شاشة، التأكد من عدم خصم نقاط بالغلط).
-
-(الميزات الأخرى الموثّقة تحت - توليد النص، الألبوم، الكويز الرياضي المصوّر، لوحة
-الشرف - كل وحدة منها موثّق حالة اختبارها ضمن قسمها الخاص بالسجل التاريخي تحت.)
-
----
-
-## 📂 خريطة الملفات المتأثرة (مرجع سريع - طبقات تخصيص نوع/صعوبة الأسئلة)
-
-| الملف | الحالة | الدور |
+| الحلقة | الملف المصدر | الوظيفة والدورية |
 |---|---|---|
-| `migration_quiz_options.sql` | جديد | تعديل قاعدة البيانات (مُطبَّق فعلياً على Supabase الحقيقي) |
-| `services/subject_classifier.py` | جديد | التصنيف الموحّد (يحل محل math_detector + english_detector) |
-| `services/math_detector.py` | **محذوف** | كان DEPRECATED وغير مستورد من أي مكان - حُذف نهائياً |
-| `services/english_detector.py` | **محذوف** | كان DEPRECATED وغير مستورد من أي مكان - حُذف نهائياً |
-| `handlers/quiz_options.py` | جديد | راوتر شاشة نوع/صعوبة الأسئلة (مرحلتين) |
-| `handlers/files.py` | معدَّل بكثافة | كل تدفق الاستقبال، الكاش، عدد الأسئلة المدمج، بدء التوليد |
-| `handlers/__init__.py`, `main.py` | معدَّل | تسجيل `quiz_options_router` الجديد |
-| `keyboards.py` | معدَّل بكثافة | `get_quiz_type_keyboard`, `get_quiz_difficulty_keyboard`, `get_multiple_quizzes_keyboard` (فلترة), `get_question_count_keyboard` (مدمجة). `get_generation_confirm_keyboard` **محذوفة** |
-| `config.py` | معدَّل | حالات FSM جديدة، `waiting_for_generation_confirm` **محذوفة** |
-| `constants.py` | معدَّل بكثافة | ثوابت الصعوبة/النوع، برومبت التصنيف، حقن البرومبتات |
-| `helpers/gemini_helper.py` | معدَّل | حقن `{difficulty_instruction}`/`{question_type_instruction}` |
-| `helpers/supabase_helper.py` | معدَّل | `get_file_quizzes`/`save_file_quiz_multiple` بأعمدة جديدة |
-| `services/quiz_service.py` | معدَّل بكثافة | `combo_quiz_count`, `build_question_type_label`, `resolve_generation_question_type_text` |
+| `group_quiz_heartbeat_loop` | `handlers/group_quiz.py` | إرسال الأسئلة المجدولة، إغلاق الجلسات المنتهية، واستعادة أقفال المجموعات (كل 12 ثانية) |
+| `group_quiz_cleanup_loop` | `services/group_quiz_store.py` | حذف جلسات الكويز الجماعي المنتهية الأقدم من 90 يوماً والجلسات المعلقة (كل 12 ساعة) |
+| `challenge_heartbeat_loop` | `handlers/challenge_game.py` | متابعة مهل الهجمات غير المتزامنة وإرسال إشعارات التحديات |
+| `challenge_live_loop` | `handlers/challenge_live.py` | مطابقة طابور المواجهات المباشرة ومتابعة مؤقتات الأسئلة الحية |
+| `challenge_spectator_loop` | `handlers/challenge_spectator.py` | تحديث شاشات المشاهدين وتنظيف جلسات المشاهدة المنتهية في Redis |
+| `runner_cleanup_loop` | `services/runner_cleanup.py` | تنظيف جولات وصور لعبة Runner المنتهية من Storage والقاعدة (كل ساعة عند التفعيل) |
+| `pending_cleanup_loop` | `handlers/session_navigation.py` | تنظيف طلبات الرفع المعلّقة المنتهية (>30 دقيقة) من R2 وRedis (كل دقيقة) |
+| `gift_campaign_loop` | `services/gift_campaigns.py` | تنفيذ منح وإرسال إشعارات حملات الهدايا الجماعية المباشرة |
+| `daily_renewal_loop` | `services/daily_renewal.py` | إرسال إشعارات التجديد اليومي للطلاب وتقرير الأدمن اليومي |
+| `scheduled_analytics_batch_loop` | `webhook_server.py` | تفريغ طابور أحداث التحليلات من Redis إلى Supabase (كل 60 ثانية — وضع Webhook) |
+| `scheduled_cleanup_loop` | `webhook_server.py` | تنظيف التنزيلات المحلية (>48 ساعة)، ملفات R2 اليتيمة (>ساعة)، والأحداث/الكويزات القديمة (كل 12 ساعة — وضع Webhook) |
+| `payment_watchdog_loop` | `services/payment_service.py` | إنهاء طلبات الدفع المنتهية والتنبيه عن إشعارات الدفع اليتيمة أو العالقة (كل 60 ثانية — وضع Webhook) |
 
----
+## 5. نقاط نهاية HTTP (`webhook_server.py` & `render_worker.py`)
 
-## 🔧 معلومات تقنية للاستمرارية
+### خادم البوت (`webhook_server.py`)
+- `GET/HEAD /` و`GET/HEAD /health`: فحص جاهزية السيرفر.
+- `POST /webhook`: استقبال تحديثات تيليجرام (محمي بـ `X-Telegram-Bot-Api-Secret-Token`).
+- `GET /api/public-stats`: إحصاءات الموقع العام (عدد الطلاب والأسئلة، مفعّل عند `PUBLIC_WEBSITE_STATS_ENABLED=true`).
+- `POST /api/payments/macrodroid`: استقبال أحداث الدفع من تطبيق MacroDroid (محمي بـ `X-Payment-Secret`).
+- `POST /api/audio-upload/init` و`/complete`: رفع المحاضرات الصوتية عبر Mini App إلى R2.
+- `POST /api/file-upload/init` و`/complete`: رفع المستندات عبر Mini App إلى R2.
+- `POST /api/image-upload/init` و`/complete`: رفع ألبومات الصور عبر Mini App إلى R2.
+- `POST /api/upload-failure`: تسجيل أخطاء الرفع من المتصفح في التحليلات.
+- `POST /api/question-edit/fetch` و`/save`: جلب وحفظ تعديلات الأسئلة الرياضية والجداول والمصفوفات.
+- `GET/POST /api/runner/*` (`services/runner_api.py`): نقاط نهاية لعبة «رحلة أبيض» (`/config`, `/start`, `/question`, `/ready`, `/answer`, `/track`, `/coins`, `/buy-jetpack`, `/buy-car`, `/equip`, `/abandon`, `/settings`, `/ai-times`).
 
-- **Supabase project المستخدم فعلياً:** `telegramquizbot` (project_id: `<project-ref>`) -
-  فيه مشروع تاني بنفس الاسم تقريباً (`Test_telegramquizbot`) لكنه غير نشط، **لا تلمسه
-  بالغلط**.
-- **بادئات callback_data المحجوزة حالياً (لا تكرر أي وحدة فيها لأي زر جديد):**
-  `qtype_`, `qdiff_`, `qback_to_type`, `qcount_pick_`, `qcount_custom`, `qcount_start`,
-  `cachefilter_type_`, `cachefilter_diff_`, `cache_action_no`, `use_multi_`,
-  `cancel_upload_request`, `publish_score_`, `hide_score_`, `leaderboard_`,
-  `admin_recent_errors` (exact match), `admin_referrals_`, `admin_ref_detail_`
-  (آخر ثلاثة من دمج تتبع الأخطاء/الإحالات — راجع `HISTORY_LOG.md` [2026-08-27]),
-  `cancel_question_edit` (exact match، زر تراجع تعديل سؤال أثناء الكويز — راجع
-  `HISTORY_LOG.md` [2026-08-30]).
-- **⚠️ ملاحظة على فحص التصادم أعلاه:** الـ regex الحالي (`[^)]*F\.data`) لا يلتقط
-  ديكوريتورات فيها `StateFilter(...)` أو أي استدعاء آخر بأقواس متداخلة *قبل* `F.data`
-  ضمن نفس `@router.callback_query(...)` (القوس الأول يقفل الـ character class مبكراً)
-  - مثال حقيقي: `@router.callback_query(StateFilter(*QUIZ_EDIT_STATES), F.data == "cancel_question_edit")`
-  لا يظهر أصلاً بنتائج الفحص. تحقّق يدوياً بـ `grep` مباشر لأي `callback_data` جديد
-  بدل الاعتماد على السكربت وحده لو الديكوريتور بهالشكل.
-- **قبل تسجيل أي معالج callback جديد:** شغّل هالفحص للتأكد من عدم وجود تصادم بادئات
-  (استبدل المسار حسب الحاجة):
-  ```python
-  import re, os
-  startswith_filters, exact_filters = [], []
-  for root, dirs, files in os.walk('handlers'):
-      for fn in files:
-          if not fn.endswith('.py'): continue
-          path = os.path.join(root, fn)
-          src = open(path, encoding='utf-8').read()
-          for m in re.finditer(r'@router\.callback_query\([^)]*F\.data\.startswith\(\"([^\"]+)\"\)', src):
-              startswith_filters.append((path, m.group(1)))
-          for m in re.finditer(r'@router\.callback_query\([^)]*F\.data == \"([^\"]+)\"', src):
-              exact_filters.append((path, m.group(1)))
-  for f_ex, val in exact_filters:
-      for f_sw, prefix in startswith_filters:
-          if val.startswith(prefix) and val != prefix:
-              print(f'COLLISION: "{val}" ({f_ex}) shadowed by startswith("{prefix}") ({f_sw})')
-  ```
-- **بعد أي تعديل:** دايماً شغّل `python3 -m py_compile <كل الملفات المعدّلة>` وتحقق من
-  كل الاستيرادات من `constants.py` فعلياً معرّفة (نفس أسلوب الفحص المستخدم بكل الطبقات
-  تحت) قبل التسليم.
+### سيرفر الرسم المنفصل (`render_worker.py`)
+- `GET/HEAD /` و`GET/HEAD /health`: فحص جاهزية الـ Worker (يعلن الجاهزية بعد إحماء عمليتي الرسم `WORKER_WARMUP=1`).
+- `POST /v1/render/question-image`: رسم صورة PNG لسؤال رياضي أو سؤال لعبة Runner.
+- `POST /v1/render/certificate`: رسم صورة PNG لشهادة تقدير الكويز الجماعي.
+- `POST /v1/render/ceremony`: رسم صورة PNG أو توليد فيديو MP4 لحفل التكريم.
+- `POST /v1/export/quiz`: بناء ملف PDF أو Word لكويز كامل (مع دعم كافة إعدادات `export_options`).
+- `POST /v1/export/document`: بناء ملف PDF أو Word لنص حر (تفريغ/ملخص محاضرة صوتية).
 
----
+## 6. قواعد الاستمرارية والفحص قبل أي تعديل جديد
 
----
-
-## 🩹 تعديل UX (2026-08-28) - الجولة الثالثة: تأجيل ظهور القائمة الرئيسية لمستخدم جديد
-
-**طلب صريح من المستخدم:** بدل إظهار القائمة الرئيسية فور ضغط "🚀 أرسل أول ملف الآن"
-(الجولة الثانية)، يجب تأجيلها لتظهر فقط بعد أن ينهي المستخدم **أول اختبار كامل فعلياً**.
-
-**التنفيذ:**
-1. **`helpers/supabase_helper.py`:** دالة جديدة `has_completed_any_quiz_before(user_id)`
-   - فحص `count("exact")` بسيط على جدول `quiz_attempts` (`is_completed=True`). عند أي
-     خطأ بالاستعلام، تُرجع `True` تحفظاً (نفضّل عدم إخفاء القائمة عن مستخدم قديم
-     بالغلط على خطر إظهارها الخاطئ لمستخدم جديد).
-2. **`handlers/quiz_runner.py::_handle_quiz_completion`:** قبل عرض نتيجة الاختبار،
-   يُحسب `is_first_completion` (فقط لو الاختبار اكتمل فعلياً، ليس `stopped_early`).
-   لو `True`: بعد رسالة النتيجة مباشرة، تُرسل رسالة تهنئة قصيرة + القائمة الرئيسية.
-3. **`handlers/start.py::ack_new_user_start`:** أُزيل إرسال القائمة الرئيسية من هنا
-   (كان يظهر فور ضغط الزر بالجولة الثانية) - الزر الآن يعرض فقط تأكيداً قصيراً بدون
-   قائمة.
-
-**حالات حافة مقصودة (لم تُغيَّر، اتخاذ قرار واعٍ):**
-- مستخدم جديد يبدأ اختباراً ثم **يوقفه مبكراً** أو **يغادر بدون إكمال**: لن يرى القائمة
-  الرئيسية عبر هذا المسار إطلاقاً. يبقى بإمكانه الوصول لها عبر `/start` مرة أخرى
-  (حالته لن تكون "new" بعدها، فسيحصل على الترحيب القديم الكامل مع القائمة كالمعتاد -
-  سلوك غير معدَّل). لم يُطلب معالجة هذه الحالة صراحة - يستحق قراراً صريحاً لاحقاً إن
-  لوحظ ارتفاع بنسبة المستخدمين الذين يتوقفون دون إكمال أول اختبار ودون العودة لاحقاً.
-
-**فحص:** `python3 -m compileall .` نجح على كامل المشروع. الاستعلام الجديد لا يخصم
-نقاطاً ولا يغيّر أي منطق مالي - قراءة فقط (`select ... count="exact"`).
-
-**لم يُختبر على بيئة تشغيل حقيقية بعد.**
-
----
-
-## 🩹 تعديل UX (2026-08-28) - الجولة الرابعة: زر "عرض القائمة" بدل إرفاقها تلقائياً
-
-**السياق:** تأكَّد المستخدم أن الجولة الثالثة (تأجيل القائمة لأول اختبار مكتمل) تعمل
-فعلياً بعد تنظيف بيانات اختبار قديمة. طلب تحسيناً إضافياً بسيطاً: بدل إرفاق القائمة
-الرئيسية كاملة تلقائياً مع رسالة التهنئة، تُعرض رسالة تهنئة قصيرة بزر واحد فقط
-"📋 عرض القائمة" - الضغط عليه هو من يستدعي القائمة فعلياً (تخفيف ازدحام بصري).
-
-**التنفيذ (`handlers/quiz_runner.py`):**
-1. رسالة التهنئة بعد أول اختبار مكتمل أصبحت نصاً قصيراً فقط ("🎉 أحسنت في أول اختبار
-   لك!") مرفقة بزر واحد `callback_data="show_menu_after_first_quiz"`.
-2. معالج جديد `show_menu_after_first_quiz` يستدعي دالة `_send_main_menu` الموجودة
-   مسبقاً بالملف (لم تُعدَّل)، ثم يزيل الزر نفسه من الرسالة بعد الضغط
-   (`edit_reply_markup(reply_markup=None)`) لمنع الضغط المتكرر غير المجدي.
-
-**فحص:** `callback_data` الجديد فريد (لا تصادم مع البادئات المحجوزة بـ
-`docs/CURRENT_STATE.md`). `python3 -m compileall .` نجح على كامل المشروع.
-
-**لم يُختبر على بيئة تشغيل حقيقية بعد.**
-
----
-
-## 🧹 إعادة الهيكلة (خطوات 0-1) - كسر دورات الاستيراد بين الـ handlers
-
-- `services/flow_state.py` (جديد): `build_state_for_chat(chat_id, user_id)` - كانت `_build_state_for_chat` داخل `handlers/audio.py`.
-- أسماء صارت عامة (كانت خاصة `_x` وتُستورد بين الملفات): `start_loaded_quiz` و`send_main_menu` (في `handlers/quiz_runner.py`)، `ask_question_count` و`show_question_count_screen` (في `handlers/files.py`).
-- أُزيلت كل الاستيرادات الكسولة بين `files` / `audio` / `quiz_runner` / `start` / `quiz_options` (صارت top-level).
-- `tests/smoke_import_test.py` (جديد): يستورد كل الوحدات ويتحقق من الـ routers. تشغيل: `python tests/smoke_import_test.py`.
-- إصلاح docstring بـ `services/image_quiz_renderer.py` (كان يعطي SyntaxWarning)، وإضافة `.gitignore`.
-- ⚠️ تحقق ساكن + استيراد فقط (لا تشغيل فعلي مع تيليجرام/Supabase): جرّب فعلياً رفع ملف، رفع صوت، وفتح كويز مشترك، قبل النشر.
-
-## 🧩 إعادة الهيكلة (خطوة 2) - تقسيم helpers/gemini_helper.py إلى حزمة
-
-`helpers/gemini_helper.py` (1428 سطر) صار حزمة `helpers/gemini_helper/` (أكبر ملف فيها 283 سطراً). `__init__.py` يعيد تصدير كل الأسماء السابقة، فكل `from helpers.gemini_helper import ...` الموجود يعمل بلا تعديل.
-
-| الملف | المسؤولية |
-|---|---|
-| `clients.py` | `API_KEYS`، عملاء Gemini/Groq/Vertex (Singletons)، إعدادات البيئة |
-| `state.py` | ContextVars لآخر توليد، `_record_token_usage`، `get_last_generation_metadata` |
-| `parsing.py` | `_repair_json_backslashes`، `_parse_structured_gemini_response` |
-| `cascade.py` | حظر/تبريد (مفتاح، موديل)، Round-Robin، `_execute_cascade` |
-| `media.py` | MIME، Inline مقابل Files API، تقسيم PDF/الصور |
-| `loading.py` | رسالة الانتظار المتحركة |
-| `schemas.py` | `QuizTable`/`QuizMatrix`/`QuizQuestion`/`QuizResponse` |
-| `generic.py` | `generate_structured_with_cascade`، `generate_text_with_cascade` |
-| `generation.py` | المسار العادي + Super PDF/Images |
-| `text_generation.py` | Groq السريع + احتياطي Gemini للنص |
-| `prompts.py` | تعليمات الصعوبة ونوع الأسئلة |
-| `quiz_generator.py` | `generate_quiz_smart` (نقطة الدخول) |
-
-- ⚠️ `current_key_pointer` (عدّاد Round-Robin) لا يُعاد تصديره عمداً: يُعاد ربطه بـ `global` داخل `cascade.py`، فأي نسخة منه خارجها ستكون قديمة. لا أحد يستورده خارج الحزمة اليوم.
-- أسماء الـ logger صارت لكل ملف على حدة (مثلاً `helpers.gemini_helper.cascade`) بدل `helpers.gemini_helper` - انتبه لو عندك فلاتر لوغز تعتمد على الاسم القديم.
-- أي تعديل مستقبلي على حالة مشتركة (`blocked_model_keys`، `_GEMINI_CLIENTS`، `API_KEYS`) يجب أن يعدّل الكائن نفسه (in-place) لا أن يعيد ربط الاسم.
-- تحقق (ساكن + اختبار تكافؤ بعميل Gemini وهمي، قبل/بعد، مخرجات مطابقة حرفياً): ترميم JSON/LaTeX، حظر/تبريد المفاتيح، Round-Robin، فشل-ثم-نجاح بين المفاتيح، `generate_quiz_smart` بمساراته (رياضي/نص/ملفات/Super PDF) مع `chunk_details` والـ metadata. لم يُجرَّب مع Gemini/Groq/Vertex الحقيقية.
-
-## الكويز الجماعي: إعداد بالخاص + وضع burst (2026-10-02)
-- **إعداد الغروب صار بخاص البوت**: زر «👥 شغّل الكويز ضمن غروب» (`gqg:`) يعرض غروباتك الجاهزة (من `bot_chat_memberships`، أنت أدمن فيها لايف) + زر «➕ أضف البوت لغروب»؛ اختيار غروب (`gqchp:`) يبدأ الإعداد كله بالخاص، تماماً مثل القنوات. عند إضافة البوت لغروب يصل زر «🚀 ابدأ على هالغروب» تلقائياً (`_notify_channel_ready`).
-- `/groupquiz <id>` و`/start gq_<id>` داخل الغروب ما زالا يعملان لكن للتحديد فقط: يسجّلان الغروب ويرسلان شاشة الإعداد لخاص الأدمن (لو ما فتح البوت بالخاص يُطلب منه Start). فشل أول سؤال يُبلَّغ به الأدمن بالخاص أولاً.
-- **وضع burst «🚀 كل الأسئلة دفعة واحدة»** (`pacing_mode='burst'`): يظهر فقط عند «بدون مؤقّت». `run_burst_session` يرسل كل الأسئلة بفاصل `BURST_GAP_SECONDS` (6ث). الاستفتاءات كلها تبقى مفتوحة (لا `stop_poll` عند الإنهاء). إن انقطعت العملية تستأنف النبضة من `questions_sent`.
-- ⚠️ يتطلب `db/migrations/0003_group_quiz_burst_pacing.sql` (توسيع قيد `pacing_mode`) على الإنتاج قبل النشر.
-- لم يُجرَّب مع تيليجرام الحقيقي؛ اختُبر منطق المنفّذ بكائنات وهمية + smoke import.
-
-## الكويز الجماعي: عدد الأوائل + القنوات مجهولة فقط (2026-10-02)
-- **شاشة «🏅 عدد الأوائل»** (`gqk:`) بعد شاشة الأسماء بالنمط التنافسي: أزرار جاهزة (3/5/10/15/20) + ➖/➕ + تأكيد، المدى 1–20. تُخزَّن بـ `group_quiz_sessions.top_n` (الافتراضي بالقاعدة 20 = السلوك القديم). الترتيب النهائي يقصّ عند `top_n` ويعرضها بالعنوان، والميداليات 🥇🥈🥉 للثلاثة الأوائل. تظهر بتفاصيل الجلسة بلوحة الأدمن.
-- **القنوات مجهولة فقط** (قيد تيليجرام): إعداد القناة يتخطى شاشة التنافسي ويثبّت `poll_is_anonymous=true` ثم يذهب للمؤقّت مباشرة. `gqa:…:c` على جلسة قناة مرفوض، و`choose_group_pacing` يفرض المجهول كشبكة أمان لجلسات قنوات قديمة.
-- ⚠️ يتطلب `db/migrations/0004_group_quiz_top_n.sql` (طُبّقت على الإنتاج).
-- ملاحظة: الترتيب (وبالتالي عدد الأوائل) يعمل فقط حين تُسجَّل الإجابات، أي جلسات بمؤقّت حالياً — راجع بند «تنافسي بلا مؤقّت» المعلّق.
+1. **فحص تصادم بادئات `callback_data`:**
+   تأكد دائماً من عدم تداخل أي `callback_data` جديد مع البادئات المسجلة حالياً (مثل `qtype_`, `qdiff_`, `qcount_`, `cachefilter_`, `use_multi_`, `xo|`, `gqs:`, `gql:`, `gqa:`, `gqn:`, `gqk:`, `gqt:`, `gqp:`, `gqc:`, `gqe:`, `gqg:`, `gqch`, `pay:`, `gift`, `cg:`, `lv:`, `sp:`, `consent:`, `snav:`, `mprac:`, `student_`, `admin_`) والتزم بحد تيليجرام الأقصى (64 بايت).
+2. **الأمان المالي:**
+   لا تخصم نقاطاً إلا عبر الدوال الذرية المعتمدة (`update_user_stats` / `wallet_debit`)، وتعامل دائماً مع `WalletDebitError` بشكل منفصل عن رفض الرصيد (`None`)، واحتفظ ببيانات الخصم (`debit_id` / تقسيم الأرصدة) لضمان الاسترجاع الكامل أو الجزئي عبر `refund_user_points_split` عند فشل التوليد.
+3. **التحقق الآلي قبل التسليم:**
+   ```bash
+   python3 -m compileall -q .
+   python3 tests/smoke_import_test.py
+   python3 -m unittest discover -s tests -p 'test_*.py'
+   ```

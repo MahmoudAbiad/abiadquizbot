@@ -179,7 +179,7 @@ def _clean_document_title(title: str, is_ar: bool = True) -> str:
 
 
 def _clean_latex_and_symbols(text: str, for_pdf: bool = True) -> str:
-    """ينظف أي بقايا LaTeX ($...$, \text, \implies, \leftarrow) والرموز غير المدعومة في خطوط PDF."""
+    r"""ينظف أي بقايا LaTeX ($...$, \text, \implies, \leftarrow) والرموز غير المدعومة في خطوط PDF."""
     if not text:
         return ""
     cleaned = _EMOJI_STRIP_RE.sub("", str(text))
