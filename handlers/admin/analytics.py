@@ -161,9 +161,9 @@ async def show_today_quizzes_handler(call: types.CallbackQuery):
             time_str = q.get("time_str") or format_syria_time(q.get("created_at", ""))
             
             student = q.get("users") or {}
-            user_id = q.get("creator_id") or student.get("user_id", "غير معروف")
+            user_id = q.get("creator_id") or student.get("user_id", "مستخدم محذوف")
             username = f"@{student['username']}" if student.get("username") and student['username'] != "Unknown" else "بدون يوزر"
-            name = f"{student.get('first_name', '')} {student.get('last_name', '')}".strip() or "بدون اسم"
+            name = f"{student.get('first_name', '')} {student.get('last_name', '')}".strip() or ("مستخدم محذوف" if q.get("creator_id") is None else "بدون اسم")
 
             report_lines.append(
                 f"<b>{idx}. {html.escape(title)}</b>\n"

@@ -654,7 +654,7 @@ async def admin_get_today_quizzes() -> List[Dict[str, Any]]:
             .select("id, source_title, created_at, creator_id") \
             .gte("created_at", start_of_today_utc)
         if ADMIN_ID:
-            query = query.neq("creator_id", ADMIN_ID)
+            query = query.or_(f"creator_id.neq.{ADMIN_ID},creator_id.is.null")
         res = await query \
             .order("created_at", desc=True) \
             .execute()
@@ -831,4 +831,3 @@ async def admin_get_shared_links_stats(days: int, limit: int, offset: int) -> Li
     except Exception as e:
         log_error(logger, f"Error fetching shared links stats: {e}")
         raise
-
