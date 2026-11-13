@@ -56,6 +56,7 @@ RESUME_FLAG = "consent_resumed"
 # يُبطل كل الكاش تلقائياً دون أي تنظيف.
 _ok_cache: TTLCache = TTLCache(maxsize=50000, ttl=_OK_CACHE_TTL)
 _denied_cache: TTLCache = TTLCache(maxsize=50000, ttl=_DENIED_CACHE_TTL)
+_active_middlewares: list = []
 
 
 def _redis():
@@ -100,6 +101,44 @@ async def forget_denied(user_id: int, tv: int, pv: int) -> None:
         await _redis().delete(_ok_redis_key(user_id, tv, pv))
     except Exception as exc:
         logger.warning("Could not revoke cached consent in Redis: %s", exc)
+
+
+async def purge_user_consent_cache(user_id: int) -> int:
+    """يمسح كافة سجلات كاش الموافقة المحلية وفي Redis لمستخدم محدد فوراً (عند حذف موافقته أو حسابه)."""
+    uid = int(user_id)
+    for cache in (_ok_cache, _denied_cache):
+        for k in [k for k in list(cache.keys()) if isinstance(k, tuple) and len(k) >= 1 and k[0] == uid]:
+            cache.pop(k, None)
+    for mw in list(_active_middlewares):
+        try:
+            mw._notices.pop(uid, None)
+        except Exception:
+            pass
+
+    deleted = 0
+    try:
+        redis = _redis()
+        tv, pv = await current_versions()
+        keys_to_delete = [
+            _ok_redis_key(uid, tv, pv),
+            f"consent:prompted:{uid}",
+            _resume_key(uid),
+            _pending_key(uid),
+            _pending_cb_key(uid),
+            f"consent:lock:{uid}",
+        ]
+        try:
+            async for k in redis.scan_iter(match=f"consent:ok:{uid}:*", count=50):
+                k_str = k.decode() if isinstance(k, bytes) else str(k)
+                if k_str not in keys_to_delete:
+                    keys_to_delete.append(k_str)
+        except Exception:
+            pass
+        if keys_to_delete:
+            deleted = int(await redis.delete(*keys_to_delete) or 0)
+    except Exception as exc:
+        logger.warning("Could not purge consent Redis keys for user %s: %s", uid, exc)
+    return deleted
 
 
 async def get_consent_state(user_id: int) -> str:
@@ -389,6 +428,7 @@ class ConsentMiddleware(BaseMiddleware):
     def __init__(self) -> None:
         # حجز قبل أول await حتى تتشارك التحديثات المتزامنة نفس الحد.
         self._notices: TTLCache = TTLCache(maxsize=50000, ttl=_NOTICE_TTL)
+        _active_middlewares.append(self)
 
     async def __call__(
         self,
@@ -482,4 +522,3 @@ class ConsentMiddleware(BaseMiddleware):
         if sent and activity_state is not None:
             from helpers.supabase_helper.analytics import log_usage_event
             await log_usage_event(user_id, "consent_prompted", {"consent_state": activity_state})
-

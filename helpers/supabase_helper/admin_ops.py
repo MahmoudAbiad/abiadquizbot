@@ -1,15 +1,17 @@
 """
 supabase_helper.admin_ops
 ============================
-Admin Operations: إضافة نقاط يدوياً، منح هدايا مباشرة، إحصائيات عامة، والبحث عن مستخدم.
+Admin Operations: إضافة نقاط يدوياً، منح هدايا مباشرة، إحصائيات عامة، البحث عن مستخدم،
+وخيارات حذف المستخدمين وبياناتهم.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Any, Tuple
 import uuid
 
 from ._client import supabase, logger
 from .gifts import enrich_balances, gift_balances
+from .classification import _get_file_hashes_for_quiz_ids, _cleanup_classification_for_hashes
 
 # ==================== Admin Operations ====================
 async def admin_add_points(target_id: int, amount: int, balance_type: str = "paid") -> Optional[int]:
@@ -158,3 +160,181 @@ async def admin_get_users_page(page: int = 1, query: str = "", page_size: int = 
     if page > pages:
         return await admin_get_users_page(pages, query, page_size)
     return await enrich_balances(response.data or []), total, page, pages
+
+
+async def admin_get_user_deletion_summary(target_id: int) -> Optional[Dict[str, Any]]:
+    """جلب ملخص شامل عن المستخدم قبل الحذف: بيانات الحساب، عدد الكويزات المولدة عن طريقه، وحالة الموافقة القانونية."""
+    try:
+        uid = int(target_id)
+        users = await admin_search_user(str(uid))
+        user_row = users[0] if users else None
+
+        owned_count = 0
+        try:
+            q_res = await supabase.table("quizzes").select("id", count="exact").eq("creator_id", uid).execute()
+            owned_count = int(q_res.count or 0)
+        except Exception as exc:
+            logger.warning(f"Could not count owned quizzes for user {uid}: {exc}")
+
+        consent_row = None
+        try:
+            c_res = await (
+                supabase.table("user_consents")
+                .select("status, terms_version, privacy_version, first_prompted_at, decided_at, updated_at")
+                .eq("user_id", uid)
+                .limit(1)
+                .execute()
+            )
+            if c_res.data:
+                consent_row = c_res.data[0]
+        except Exception as exc:
+            logger.warning(f"Could not fetch consent status for user {uid}: {exc}")
+
+        if not user_row and owned_count == 0 and not consent_row:
+            return None
+
+        return {
+            "user": user_row,
+            "owned_quizzes_count": owned_count,
+            "consent": consent_row,
+        }
+    except Exception as e:
+        logger.error(f"Error in admin_get_user_deletion_summary for {target_id}: {e}")
+        return None
+
+
+async def admin_get_user_generated_quizzes(
+    creator_id: int, limit: int = 5, offset: int = 0
+) -> Tuple[List[Dict[str, Any]], int]:
+    """جلب الكويزات التي أنشأها هذا الطالب فعلياً فقط (creator_id) لاستعراضها قبل الحذف."""
+    try:
+        uid = int(creator_id)
+        count_res = await supabase.table("quizzes").select("id", count="exact").eq("creator_id", uid).execute()
+        total = int(count_res.count or 0)
+        if total == 0:
+            return [], 0
+
+        res = await (
+            supabase.table("quizzes")
+            .select("id, source_title, created_at, likes, dislikes, difficulty, question_type_label, quiz_data")
+            .eq("creator_id", uid)
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        rows = res.data or []
+        for r in rows:
+            qdata = r.get("quiz_data")
+            r["questions_len"] = len(qdata) if isinstance(qdata, list) else 0
+            r.pop("quiz_data", None)
+        return rows, total
+    except Exception as e:
+        logger.error(f"Error in admin_get_user_generated_quizzes for {creator_id}: {e}")
+        return [], 0
+
+
+async def admin_delete_user_action(target_id: int, mode: str) -> Optional[Dict[str, Any]]:
+    """
+    تنفيذ أحد خيارات الحذف الأربعة للمستخدم:
+      - 'full_wipe'    : حذف المستخدم بالكامل مع كامل أثره وكويزاته وموافقته على البوت.
+      - 'keep_quizzes' : حذف المستخدم بالكامل مع كامل أثره وموافقته، مع الإبقاء على الكويزات المولدة عن طريقه (creator_id = NULL).
+      - 'consent_only' : حذف حالة وسجل موافقته على البوت فقط.
+      - 'quizzes_only' : حذف الكويزات المولدة عن طريقه فقط.
+    """
+    if mode not in ("full_wipe", "keep_quizzes", "consent_only", "quizzes_only"):
+        return None
+    uid = int(target_id)
+    try:
+        try:
+            rpc_res = await supabase.rpc("admin_delete_user_action", {
+                "p_user_id": uid,
+                "p_mode": mode,
+            }).execute()
+            data = rpc_res.data
+            if isinstance(data, list) and data:
+                data = data[0]
+            if isinstance(data, dict) and data.get("status") == "ok":
+                deleted_ids = data.get("deleted_quiz_ids") or []
+                if deleted_ids:
+                    try:
+                        from services.runner_cleanup import delete_runner_prefix
+                        for qid in deleted_ids:
+                            await delete_runner_prefix(str(qid))
+                    except Exception:
+                        logger.warning("Runner prefix cleanup deferred to retention loop", exc_info=True)
+                return data
+        except Exception as rpc_exc:
+            if str(getattr(rpc_exc, "code", "")) not in {"42883", "PGRST202"}:
+                raise
+            # مسار احتياطي مباشر في حال عدم توفر الـ RPC ببيئة اختبار معزولة
+            deleted_quiz_ids: List[str] = []
+            kept_quizzes_count = 0
+
+            if mode == "consent_only":
+                await supabase.table("user_consent_events").delete().eq("user_id", uid).execute()
+                await supabase.table("user_consents").delete().eq("user_id", uid).execute()
+                return {
+                    "status": "ok",
+                    "mode": mode,
+                    "consent_deleted": True,
+                    "deleted_quizzes_count": 0,
+                    "kept_quizzes_count": 0,
+                    "deleted_quiz_ids": [],
+                }
+
+            if mode in ("quizzes_only", "full_wipe"):
+                q_res = await supabase.table("quizzes").select("id, file_hash").eq("creator_id", uid).execute()
+                q_rows = q_res.data or []
+                deleted_quiz_ids = [str(r["id"]) for r in q_rows if r.get("id")]
+                file_hashes = list({r["file_hash"] for r in q_rows if r.get("file_hash")})
+                if deleted_quiz_ids:
+                    await supabase.table("quizzes").delete().eq("creator_id", uid).execute()
+                    if file_hashes:
+                        await _cleanup_classification_for_hashes(file_hashes)
+                    try:
+                        from services.runner_cleanup import delete_runner_prefix
+                        for qid in deleted_quiz_ids:
+                            await delete_runner_prefix(str(qid))
+                    except Exception:
+                        pass
+                if mode == "quizzes_only":
+                    return {
+                        "status": "ok",
+                        "mode": mode,
+                        "consent_deleted": False,
+                        "deleted_quizzes_count": len(deleted_quiz_ids),
+                        "kept_quizzes_count": 0,
+                        "deleted_quiz_ids": deleted_quiz_ids,
+                    }
+
+            if mode == "keep_quizzes":
+                q_res = await supabase.table("quizzes").select("id", count="exact").eq("creator_id", uid).execute()
+                kept_quizzes_count = int(q_res.count or 0)
+                if kept_quizzes_count > 0:
+                    await supabase.table("quizzes").update({"creator_id": None}).eq("creator_id", uid).execute()
+
+            await supabase.table("user_consent_events").delete().eq("user_id", uid).execute()
+            await supabase.table("user_consents").delete().eq("user_id", uid).execute()
+            for tbl in (
+                "usage_events", "ai_generation_log", "classification_votes",
+                "daily_renewal_deliveries", "gift_code_redemptions",
+                "admin_gift_recipients", "payment_orders", "group_quiz_answers",
+                "group_quiz_participants", "quiz_attempts", "quiz_votes", "logs",
+            ):
+                try:
+                    await supabase.table(tbl).delete().eq("user_id", uid).execute()
+                except Exception:
+                    pass
+            await supabase.table("users").delete().eq("user_id", uid).execute()
+            return {
+                "status": "ok",
+                "mode": mode,
+                "consent_deleted": True,
+                "deleted_quizzes_count": len(deleted_quiz_ids),
+                "kept_quizzes_count": kept_quizzes_count,
+                "deleted_quiz_ids": deleted_quiz_ids,
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error in admin_delete_user_action({target_id}, {mode}): {e}")
+        return None

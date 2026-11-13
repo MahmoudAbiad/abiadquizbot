@@ -109,6 +109,9 @@ from .admin_ops import (
     admin_get_global_stats,
     admin_search_user,
     admin_get_users_page,
+    admin_get_user_deletion_summary,
+    admin_get_user_generated_quizzes,
+    admin_delete_user_action,
 )
 
 from .leaderboard import (
@@ -204,6 +207,7 @@ __all__ = [
     "is_feature_enabled", "set_feature_flag", "get_all_feature_flags",
     # admin_ops
     "admin_add_points", "admin_grant_direct_gift", "admin_get_global_stats", "admin_search_user", "admin_get_users_page",
+    "admin_get_user_deletion_summary", "admin_get_user_generated_quizzes", "admin_delete_user_action",
     # leaderboard
     "get_or_update_high_score", "publish_score_to_leaderboard",
     "hide_score_from_leaderboard", "get_my_leaderboard_status",
