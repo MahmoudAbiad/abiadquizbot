@@ -48,6 +48,21 @@ class LanguagePromptTests(unittest.TestCase):
                     else:
                         self.assertNotIn("Numbered Cloze", prompt)
 
+    def test_generic_and_extraction_prompts_follow_source_language(self):
+        # ملف غير مصنّف (مثل جيولوجيا إنجليزي) يجب أن تخرج أسئلته بلغة المصدر لا بلغة التعليمات.
+        for name in ("SYSTEM_PROMPT_GENERATE_QUESTIONS", "SYSTEM_PROMPT_EXTRACT_READY_QUIZ",
+                     "SYSTEM_PROMPT_GENERATE_MATH_QUESTIONS", "SYSTEM_PROMPT_GENERATE_SIMILAR_MATH_QUESTIONS"):
+            prompt = getattr(C, name)
+            with self.subTest(prompt=name):
+                self.assertEqual(prompt.count("[لغة المخرجات - إلزامي]"), 1)
+                self.assertIn("لغة المحتوى التعليمي في المصدر", prompt)
+                self.assertIn("لا تترجم المحتوى إلى العربية", prompt)
+        # قوالب العدد والصعوبة ما زالت سليمة بعد إضافة القاعدة.
+        for placeholder in ("{count}", "{option_count}", "{difficulty_instruction}", "{question_type_instruction}"):
+            self.assertIn(placeholder, C.SYSTEM_PROMPT_GENERATE_QUESTIONS)
+        # موجّهات اللغات الأجنبية لها وضعها الخاص ولا تتأثر بالقاعدة العامة.
+        self.assertNotIn("[لغة المخرجات - إلزامي]", C.SYSTEM_PROMPT_GENERATE_ENGLISH_PLAIN_QUESTIONS)
+
     def test_exam_extraction_is_a_distinct_task(self):
         self.assertIn("لا تولّد أسئلة جديدة", C.SYSTEM_PROMPT_EXTRACT_READY_QUIZ)
         for mode in (C.QUIZ_EXTRACTION_MODE_AS_IS, C.QUIZ_EXTRACTION_MODE_AI_SOLVE):
