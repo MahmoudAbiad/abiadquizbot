@@ -13,14 +13,18 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
-from config import bot
+from config import bot, ADMIN_ID
 from helpers.supabase_helper import (
     supabase, 
     admin_add_points,
     admin_grant_direct_gift,
     admin_get_global_stats, 
     admin_search_user,
-    admin_get_users_page
+    admin_get_users_page,
+    admin_get_user_deletion_summary,
+    admin_get_user_generated_quizzes,
+    admin_delete_user_action,
+    admin_delete_quiz,
 )
 from keyboards import (
     DIRECT_GIFT_PRESET_TITLES,
@@ -28,6 +32,8 @@ from keyboards import (
     get_admin_communication_keyboard,
     get_admin_users_menu_keyboard,
     get_admin_user_actions_keyboard,
+    get_admin_user_delete_menu_keyboard,
+    get_admin_user_delete_confirm_keyboard,
     get_admin_charge_options_keyboard,
     get_admin_direct_message_charge_keyboard,
     get_admin_direct_gift_mode_keyboard,
@@ -38,6 +44,8 @@ from keyboards import (
     get_cancel_keyboard,
     get_analytics_keyboard,
 )
+from services.flow_state import get_user_redis_active_summary, reset_user_redis_operations
+from services.consent import purge_user_consent_cache
 from logger import get_logger
 from helpers.supabase_helper.gifts import enrich_balances
 from services.gift_presentation import expiry_text, remaining_expiry_text
@@ -1414,5 +1422,432 @@ async def show_user_quizzes_handler(call: types.CallbackQuery):
         logger.error(f"Error rendering user quizzes: {e}")
         try:
             await call.answer("❌ تعذر جلب كويزات هذا الطالب.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+
+
+# ==================== إدارة حذف المستخدمين وتصفير عمليات Redis ====================
+
+def _format_consent_status_line(consent: dict | None) -> str:
+    if not consent:
+        return "➖ غير مسجل (لم يُعرض عليه بعد)"
+    status = consent.get("status")
+    tv = int(consent.get("terms_version") or 0)
+    pv = int(consent.get("privacy_version") or 0)
+    if status == "accepted":
+        return f"✅ موافق (الشروط v{tv} · الخصوصية v{pv})"
+    if status == "declined":
+        return f"❌ رافض (الشروط v{tv} · الخصوصية v{pv})"
+    return "⏳ بانتظار الموافقة (تم عرض الرسالة)"
+
+
+def _format_redis_status_line(redis_info: dict | None) -> str:
+    if not redis_info or not redis_info.get("is_busy"):
+        return "🟢 خامل (لا توجد عمليات أو أقفال عالقة)"
+    parts = []
+    if redis_info.get("fsm_state"):
+        parts.append(str(redis_info.get("fsm_label") or redis_info["fsm_state"]))
+    if redis_info.get("has_processing_lock"):
+        parts.append("🔒 قفل معالجة نشط (UserLock)")
+    if redis_info.get("has_pending_navigation"):
+        parts.append("🧭 انتقال جلسة معلّق")
+    return "🟠 " + " | ".join(parts)
+
+
+def _build_user_delete_menu_text(
+    target_id: int,
+    summary: dict,
+    redis_info: dict | None = None,
+    banner: str = "",
+) -> str:
+    u = summary.get("user") or {}
+    owned_count = int(summary.get("owned_quizzes_count") or 0)
+    consent = summary.get("consent")
+    username_str = (
+        f"@{html.escape(str(u['username']))}"
+        if u.get("username") and u["username"] != "Unknown"
+        else "بدون يوزر"
+    )
+    full_name = (
+        f"{html.escape(str(u.get('first_name') or '')[:100])} "
+        f"{html.escape(str(u.get('last_name') or '')[:100])}"
+    ).strip() or "غير مسجل بجدول الطلاب"
+
+    header = f"{banner}\n\n" if banner else ""
+    return (
+        f"{header}"
+        "🗑 <b>خيارات حذف الطالب وتصفير جلساته</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"┣ 🆔 الآيدي: <code>{target_id}</code>\n"
+        f"┣ 👤 الطالب: <b>{full_name}</b> ({username_str})\n"
+        f"┣ 📜 حالة الموافقة على البوت: {_format_consent_status_line(consent)}\n"
+        f"┣ 🗂 الكويزات المولدة عن طريقه: <code>{owned_count}</code> كويز\n"
+        f"┗ ⚡ حالة Redis الحالية: {_format_redis_status_line(redis_info)}\n\n"
+        "اختر الإجراء المطلوب بدقة (سيُطلب منك تأكيد إضافي قبل أي حذف):"
+    )
+
+
+async def _render_user_delete_menu(call: types.CallbackQuery, target_id: int, banner: str = "") -> bool:
+    summary = await admin_get_user_deletion_summary(target_id)
+    if not summary:
+        try:
+            await call.answer("❌ لم يعد هذا المستخدم موجوداً بقاعدة البيانات.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+        return False
+    redis_info = await get_user_redis_active_summary(target_id)
+    text = _build_user_delete_menu_text(target_id, summary, redis_info, banner=banner)
+    kb = get_admin_user_delete_menu_keyboard(target_id, int(summary.get("owned_quizzes_count") or 0))
+    await safe_edit_text(call.message, text, reply_markup=kb)
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
+    return True
+
+
+@router.callback_query(F.data.startswith("admin_user_delete_menu_"))
+async def show_user_delete_menu(call: types.CallbackQuery):
+    try:
+        target_id = int(call.data.replace("admin_user_delete_menu_", "", 1))
+        await _render_user_delete_menu(call, target_id)
+    except Exception as e:
+        logger.error(f"Error opening user delete menu: {e}")
+        try:
+            await call.answer("❌ تعذر فتح قائمة الحذف.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+
+
+@router.callback_query(F.data.startswith("admin_user_redis_reset_"))
+async def handle_admin_user_redis_reset(call: types.CallbackQuery):
+    try:
+        target_id = int(call.data.replace("admin_user_redis_reset_", "", 1))
+        res = await reset_user_redis_operations(target_id, include_consent_cache=False)
+        prev_label = html.escape(str(res.get("prev_state_label") or "لا توجد حالة معلّقة"))
+        lock_str = "نعم (تم فكّه وإلغاء المهمة)" if res.get("had_processing_lock") else "لا"
+        nav_str = "نعم (تم مسحه وتنظيف المرفقات)" if res.get("had_pending_navigation") else "لا"
+        banner = (
+            "⚡ <b>تم تصفير جميع عمليات وجلسات Redis النشطة للطالب!</b>\n"
+            f"┣ 📌 الحالة السابقة: <code>{prev_label}</code>\n"
+            f"┣ 🔒 قفل المعالجة (UserLock): <b>{lock_str}</b>\n"
+            f"┣ 🧭 انتقال جلسة معلّق: <b>{nav_str}</b>\n"
+            f"┗ 🧹 المفاتيح الممسوحة: <code>{res.get('deleted_keys', 0)}</code>"
+        )
+        # إذا كان الأدمن داخل شاشة خيارات الحذف، نبقى فيها مع البانر؛ وإلا نحدّث بروفايل الطالب
+        current_text = getattr(call.message, "text", None) or getattr(call.message, "caption", None) or ""
+        if "خيارات حذف الطالب" in current_text:
+            await _render_user_delete_menu(call, target_id, banner=banner)
+        else:
+            rendered = await render_user_profile(call, target_id, banner=banner)
+            if not rendered:
+                await safe_edit_text(
+                    call.message,
+                    f"{banner}\n\nℹ️ هذا المعرف (<code>{target_id}</code>) غير مسجل حالياً بجدول الطلاب.",
+                    reply_markup=get_admin_users_menu_keyboard(),
+                )
+        try:
+            await call.answer("⚡ تم تصفير عمليات Redis بنجاح")
+        except TelegramBadRequest:
+            pass
+    except Exception as e:
+        logger.error(f"Error resetting Redis operations for user: {e}")
+        try:
+            await call.answer("❌ حدث خطأ أثناء تصفير عمليات Redis.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+
+
+async def _render_generated_quizzes_preview(call: types.CallbackQuery, target_id: int, page: int = 1, banner: str = "") -> None:
+    page = max(1, int(page))
+    offset = (page - 1) * USER_QUIZZES_PAGE_SIZE
+    quizzes, total = await admin_get_user_generated_quizzes(
+        creator_id=target_id, limit=USER_QUIZZES_PAGE_SIZE, offset=offset
+    )
+    if total == 0:
+        if banner:
+            await _render_user_delete_menu(call, target_id, banner=banner + "\n📭 لم يتبقَّ أي كويز مولد لهذا الطالب.")
+            return
+        try:
+            await call.answer("📭 هذا الطالب لم يُنشئ أي كويزات مولدة خاصة به.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+        return
+
+    total_pages = max(1, -(-total // USER_QUIZZES_PAGE_SIZE))
+    if page > total_pages:
+        page = total_pages
+        offset = (page - 1) * USER_QUIZZES_PAGE_SIZE
+        quizzes, total = await admin_get_user_generated_quizzes(
+            creator_id=target_id, limit=USER_QUIZZES_PAGE_SIZE, offset=offset
+        )
+
+    report_lines = []
+    kb = []
+    for idx, q in enumerate(quizzes, start=offset + 1):
+        quiz_id = q["id"]
+        title = q.get("source_title") or "كويز بدون عنوان"
+        time_syria = _short_syria_time(q.get("created_at"))
+        likes = q.get("likes", 0)
+        dislikes = q.get("dislikes", 0)
+        q_len = q.get("questions_len") or 0
+        q_len_str = f" · <code>{q_len}</code> سؤال" if q_len else ""
+
+        report_lines.append(
+            f"<b>{idx}. {html.escape(title)}</b>{q_len_str}\n"
+            f" ┣ 🕒 تاريخ الإنشاء: <code>{time_syria}</code>\n"
+            f" ┗ 👍 {likes} | 👎 {dislikes}\n"
+            "───────────────────"
+        )
+        kb.append([
+            types.InlineKeyboardButton(text=f"🎯 تجربة #{idx}: {title[:18]}", callback_data=f"afb_try_{quiz_id}"),
+            types.InlineKeyboardButton(text="🗑 حذف فردي", callback_data=f"admin_del_single_q_{target_id}_{page}_{quiz_id}"),
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(types.InlineKeyboardButton(text="◀️ السابق", callback_data=f"admin_del_preview_q_{target_id}_{page - 1}"))
+    if page < total_pages:
+        nav_row.append(types.InlineKeyboardButton(text="التالي ▶️", callback_data=f"admin_del_preview_q_{target_id}_{page + 1}"))
+    if nav_row:
+        kb.append(nav_row)
+
+    kb.append([
+        types.InlineKeyboardButton(text=f"🗂 حذف كل كويزاته ({total})", callback_data=f"admin_del_ask_quizzes_{target_id}"),
+        types.InlineKeyboardButton(text="👤 حذف الطالب مع الإبقاء عليها", callback_data=f"admin_del_ask_keepq_{target_id}"),
+    ])
+    kb.append([types.InlineKeyboardButton(text="💥 حذف الطالب مع كويزاته بالكامل", callback_data=f"admin_del_ask_full_{target_id}")])
+    kb.append([types.InlineKeyboardButton(text="🔙 رجوع لخيارات حذف الطالب", callback_data=f"admin_user_delete_menu_{target_id}")])
+
+    header = f"{banner}\n\n" if banner else ""
+    text = (
+        f"{header}"
+        f"👁 <b>استعراض الكويزات المولدة عن طريق الطالب (<code>{target_id}</code>)</b>\n"
+        f"📄 الصفحة {page} من أصل {total_pages} (الإجمالي: <code>{total}</code> كويز مولد)\n"
+        "───────────────────\n\n"
+        + "\n".join(report_lines)
+    )
+    await safe_edit_text(call.message, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
+    try:
+        await call.answer()
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith("admin_del_preview_q_"))
+async def show_user_generated_quizzes_preview(call: types.CallbackQuery):
+    try:
+        rest = call.data.replace("admin_del_preview_q_", "", 1)
+        target_str, page_str = rest.rsplit("_", 1)
+        await _render_generated_quizzes_preview(call, int(target_str), int(page_str))
+    except Exception as e:
+        logger.error(f"Error rendering generated quizzes preview: {e}")
+        try:
+            await call.answer("❌ تعذر استعراض الكويزات المولدة.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+
+
+@router.callback_query(F.data.startswith("admin_del_single_q_"))
+async def delete_single_generated_quiz_from_preview(call: types.CallbackQuery):
+    try:
+        rest = call.data.replace("admin_del_single_q_", "", 1)
+        target_str, page_str, quiz_id = rest.split("_", 2)
+        target_id = int(target_str)
+        page = int(page_str)
+
+        ok = await admin_delete_quiz(quiz_id)
+        if ok:
+            try:
+                from services.runner_cleanup import delete_runner_prefix
+                await delete_runner_prefix(quiz_id)
+            except Exception:
+                pass
+            await _render_generated_quizzes_preview(
+                call, target_id, page=page, banner="✅ <b>تم حذف الكويز المحدد نهائياً.</b>"
+            )
+        else:
+            try:
+                await call.answer("❌ تعذر حذف هذا الكويز.", show_alert=True)
+            except TelegramBadRequest:
+                pass
+    except Exception as e:
+        logger.error(f"Error deleting single quiz from preview: {e}")
+        try:
+            await call.answer("❌ حدث خطأ أثناء حذف الكويز.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+
+
+@router.callback_query(F.data.startswith("admin_del_ask_"))
+async def ask_user_delete_confirmation(call: types.CallbackQuery):
+    try:
+        rest = call.data.replace("admin_del_ask_", "", 1)
+        mode, target_str = rest.split("_", 1)
+        target_id = int(target_str)
+
+        if mode in ("full", "keepq") and ADMIN_ID and int(target_id) == int(ADMIN_ID):
+            await call.answer("⚠️ لا يمكن حذف حساب الأدمن الرئيسي من البوت.", show_alert=True)
+            return
+
+        summary = await admin_get_user_deletion_summary(target_id)
+        if not summary:
+            await call.answer("❌ لم يعد هذا المستخدم موجوداً.", show_alert=True)
+            return
+
+        owned_count = int(summary.get("owned_quizzes_count") or 0)
+        consent_line = _format_consent_status_line(summary.get("consent"))
+
+        if mode == "full":
+            desc = (
+                "⚠️ <b>تأكيد الحذف النهائي الشامل (حذف المستخدم وكامل أثره)</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"المستخدم المستهدف: <code>{target_id}</code>\n\n"
+                "سيتم تنفيذ الآتي بشكل نهائي لا رجعة فيه:\n"
+                "• حذف حساب الطالب ورصيده وهداياه وسجل محفظته بالكامل.\n"
+                f"• حذف جميع الكويزات المولدة عن طريقه (<code>{owned_count}</code> كويز) من الجدول المركزي والكاش.\n"
+                "• حذف موافقته القانونية على شروط البوت وسياسة الخصوصية.\n"
+                "• حذف كافة محاولاته، نقاطه، تقييماته، تحدياته، وسجلات نشاطه.\n"
+                "• تصفير كافة عملياته وجلساته النشطة في Redis."
+            )
+        elif mode == "keepq":
+            desc = (
+                "⚠️ <b>تأكيد حذف الطالب بالكامل مع الإبقاء على كويزاته</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"المستخدم المستهدف: <code>{target_id}</code>\n\n"
+                "سيتم تنفيذ الآتي بشكل نهائي:\n"
+                "• حذف حساب الطالب ورصيده وهداياه وموافقته القانونية وكل سجلاته الشخصية.\n"
+                "• تصفير كافة عملياته وجلساته النشطة في Redis.\n"
+                f"• ✅ <b>الإبقاء على جميع الكويزات المولدة عن طريقه (<code>{owned_count}</code> كويز)</b> في الكاش المركزي وروابط المشاركة ليستفيد منها باقي الطلاب (مع فك ارتباطها بحسابه)."
+            )
+        elif mode == "consent":
+            desc = (
+                "⚠️ <b>تأكيد حذف حالة الموافقة على البوت فقط</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"المستخدم المستهدف: <code>{target_id}</code>\n"
+                f"الحالة الحالية: {consent_line}\n\n"
+                "سيتم تنفيذ الآتي:\n"
+                "• حذف سجل موافقته من قاعدة البيانات (<code>user_consents</code> / <code>user_consent_events</code>) ومسح كاش الموافقة في Redis فوراً.\n"
+                "• عند أول رسالة أو ضغطة زر قادمة منه، ستظهر له بوابة الموافقة على الشروط وسياسة الخصوصية من جديد.\n"
+                "• ✅ يبقى حسابه، رصيده، هداياه، وكويزاته كما هي تماماً دون أي مساس."
+            )
+        elif mode == "quizzes":
+            desc = (
+                "⚠️ <b>تأكيد حذف كويزات الطالب المولدة فقط</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"المستخدم المستهدف: <code>{target_id}</code>\n"
+                f"عدد الكويزات المولدة عن طريقه: <code>{owned_count}</code> كويز\n\n"
+                "سيتم تنفيذ الآتي:\n"
+                f"• حذف جميع الكويزات التي أنشأها هذا الطالب (<code>{owned_count}</code> كويز) نهائياً من الجدول المركزي والكاش.\n"
+                "• ✅ يبقى حساب الطالب، رصيده، هداياه، وموافقته على البوت كما هي دون حذف."
+            )
+        else:
+            await call.answer("خيار غير معروف.", show_alert=True)
+            return
+
+        kb = get_admin_user_delete_confirm_keyboard(target_id, mode, owned_count)
+        await safe_edit_text(call.message, desc, reply_markup=kb)
+        try:
+            await call.answer()
+        except TelegramBadRequest:
+            pass
+    except Exception as e:
+        logger.error(f"Error asking user delete confirmation: {e}")
+        try:
+            await call.answer("❌ تعذر تجهيز شاشة التأكيد.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+
+
+@router.callback_query(F.data.startswith("admin_del_exec_"))
+async def execute_user_delete_action(call: types.CallbackQuery):
+    try:
+        rest = call.data.replace("admin_del_exec_", "", 1)
+        mode, target_str = rest.split("_", 1)
+        target_id = int(target_str)
+
+        mode_map = {
+            "full": "full_wipe",
+            "keepq": "keep_quizzes",
+            "consent": "consent_only",
+            "quizzes": "quizzes_only",
+        }
+        db_mode = mode_map.get(mode)
+        if not db_mode:
+            await call.answer("خيار غير صالح.", show_alert=True)
+            return
+
+        if mode in ("full", "keepq") and ADMIN_ID and int(target_id) == int(ADMIN_ID):
+            await call.answer("⚠️ لا يمكن حذف حساب الأدمن الرئيسي.", show_alert=True)
+            return
+
+        result = await admin_delete_user_action(target_id, db_mode)
+        if not result or result.get("status") != "ok":
+            await call.answer("❌ تعذر تنفيذ عملية الحذف في قاعدة البيانات، حاول مجدداً.", show_alert=True)
+            return
+
+        deleted_q = int(result.get("deleted_quizzes_count") or 0)
+        kept_q = int(result.get("kept_quizzes_count") or 0)
+
+        if mode == "full":
+            redis_res = await reset_user_redis_operations(target_id, include_consent_cache=True)
+            text = (
+                "✅ <b>تم حذف المستخدم وكامل أثره نهائياً بنجاح!</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"┣ 🆔 الآيدي المحذوف: <code>{target_id}</code>\n"
+                f"┣ 🗂 الكويزات المولدة المحذوفة: <code>{deleted_q}</code> كويز\n"
+                "┣ 📜 موافقة الشروط والخصوصية: <b>تم حذفها بالكامل</b>\n"
+                f"┗ ⚡ مفاتيح وجلسات Redis المصفّرة: <code>{redis_res.get('deleted_keys', 0)}</code>"
+            )
+            await safe_edit_text(call.message, text, reply_markup=get_admin_users_menu_keyboard())
+            try:
+                await call.answer("🗑️ تم الحذف النهائي الشامل")
+            except TelegramBadRequest:
+                pass
+            return
+
+        if mode == "keepq":
+            redis_res = await reset_user_redis_operations(target_id, include_consent_cache=True)
+            text = (
+                "✅ <b>تم حذف المستخدم بالكامل مع الإبقاء على كويزاته بنجاح!</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"┣ 🆔 الآيدي المحذوف: <code>{target_id}</code>\n"
+                f"┣ 🗂 الكويزات المحتفظ بها في الكاش: <code>{kept_q}</code> كويز\n"
+                "┣ 📜 موافقة الشروط والخصوصية: <b>تم حذفها بالكامل</b>\n"
+                f"┗ ⚡ مفاتيح وجلسات Redis المصفّرة: <code>{redis_res.get('deleted_keys', 0)}</code>"
+            )
+            await safe_edit_text(call.message, text, reply_markup=get_admin_users_menu_keyboard())
+            try:
+                await call.answer("✅ تم حذف المستخدم مع الإبقاء على كويزاته")
+            except TelegramBadRequest:
+                pass
+            return
+
+        if mode == "consent":
+            await purge_user_consent_cache(target_id)
+            banner = (
+                "✅ <b>تم حذف حالة موافقة الطالب على البوت ومسح الكاش فوراً!</b>\n"
+                "سيُطلب منه الموافقة على الشروط وسياسة الخصوصية مجدداً عند أول تفاعل."
+            )
+            await _render_user_delete_menu(call, target_id, banner=banner)
+            try:
+                await call.answer("📜 تم حذف حالة الموافقة")
+            except TelegramBadRequest:
+                pass
+            return
+
+        if mode == "quizzes":
+            banner = f"✅ <b>تم حذف جميع الكويزات المولدة عن طريق هذا الطالب (<code>{deleted_q}</code> كويز) مع الإبقاء على حسابه!</b>"
+            await _render_user_delete_menu(call, target_id, banner=banner)
+            try:
+                await call.answer(f"🗂 تم حذف {deleted_q} كويز")
+            except TelegramBadRequest:
+                pass
+            return
+
+    except Exception as e:
+        logger.error(f"Error executing user delete action: {e}")
+        try:
+            await call.answer("❌ حدث خطأ غير متوقع أثناء تنفيذ الحذف.", show_alert=True)
         except TelegramBadRequest:
             pass

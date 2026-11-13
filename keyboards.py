@@ -1212,9 +1212,67 @@ def get_admin_user_actions_keyboard(user_id: int, username: Optional[str] = None
             types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}"),
             types.InlineKeyboardButton(text="🎯 كويزات هذا الطالب", callback_data=f"admin_user_quizzes_{user_id}_p_1")
         ],
+        [
+            types.InlineKeyboardButton(text="⚡ تصفير عمليات Redis", callback_data=f"admin_user_redis_reset_{user_id}"),
+            types.InlineKeyboardButton(text="🗑 خيارات حذف الطالب", callback_data=f"admin_user_delete_menu_{user_id}")
+        ],
         [build_contact_button(user_id, username)],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")]
     ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_admin_user_delete_menu_keyboard(user_id: int, owned_quizzes_count: int = 0) -> types.InlineKeyboardMarkup:
+    kb = [
+        [types.InlineKeyboardButton(
+            text=f"👁 استعراض الكويزات المولدة ({owned_quizzes_count})",
+            callback_data=f"admin_del_preview_q_{user_id}_1",
+        )],
+        [types.InlineKeyboardButton(
+            text="💥 حذف نهائي شامل (مع الكويزات والموافقة)",
+            callback_data=f"admin_del_ask_full_{user_id}",
+        )],
+        [types.InlineKeyboardButton(
+            text=f"👤 حذف الطالب مع الإبقاء على كويزاته ({owned_quizzes_count})",
+            callback_data=f"admin_del_ask_keepq_{user_id}",
+        )],
+        [types.InlineKeyboardButton(
+            text="📜 حذف حالة الموافقة على البوت فقط",
+            callback_data=f"admin_del_ask_consent_{user_id}",
+        )],
+        [types.InlineKeyboardButton(
+            text=f"🗂 حذف كويزاته المولدة فقط ({owned_quizzes_count})",
+            callback_data=f"admin_del_ask_quizzes_{user_id}",
+        )],
+        [types.InlineKeyboardButton(
+            text="⚡ تصفير عملياته النشطة في Redis",
+            callback_data=f"admin_user_redis_reset_{user_id}",
+        )],
+        [types.InlineKeyboardButton(
+            text="🔙 رجوع لبيانات الطالب",
+            callback_data=f"admin_user_profile_{user_id}",
+        )],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_admin_user_delete_confirm_keyboard(
+    user_id: int, mode: str, owned_quizzes_count: int = 0
+) -> types.InlineKeyboardMarkup:
+    kb = []
+    if mode in ("full", "keepq", "quizzes") and owned_quizzes_count > 0:
+        kb.append([types.InlineKeyboardButton(
+            text=f"👁 استعراض الكويزات المولدة ({owned_quizzes_count}) قبل الحذف",
+            callback_data=f"admin_del_preview_q_{user_id}_1",
+        )])
+    kb.append([types.InlineKeyboardButton(
+        text="✅ نعم، تأكيد التنفيذ النهائي",
+        callback_data=f"admin_del_exec_{mode}_{user_id}",
+    )])
+    kb.append([types.InlineKeyboardButton(
+        text="🔙 تراجع",
+        callback_data=f"admin_user_delete_menu_{user_id}",
+    )])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_charge_options_keyboard(user_id: int) -> types.InlineKeyboardMarkup:
