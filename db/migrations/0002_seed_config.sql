@@ -9,7 +9,7 @@ INSERT INTO public.app_settings (key, value, label) VALUES
   ('classification_vote_threshold', 3,   NULL),
   ('daily_renewal_points',          25,  'نقاط التجديد اليومي المجاني'),
   ('referral_bonus_points',         25,  'مكافأة الإحالة عند نجاح كويز الصديق المُحال'),
-  ('welcome_points',                150, 'نقاط الترحيب عند أول تسجيل')
+  ('welcome_points',                100, 'نقاط الترحيب عند أول تسجيل')
 ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO public.feature_flags (key, enabled) VALUES

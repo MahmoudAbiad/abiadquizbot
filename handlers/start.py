@@ -14,10 +14,14 @@ from helpers.supabase_helper import (
 )
 from logger import get_logger, log_info
 from handlers.quiz_runner import start_loaded_quiz
-from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL
+from constants import ADMIN_CONTACT, SUPPORT_BOT_URL, OFFICIAL_CHANNEL_URL, OFFICIAL_CHANNEL_CHAT_ID
+from helpers.settings_helper import get_setting
 from utils import safe_title
 from helpers.student_ui import UPLOAD_TEXT, HELP_TEXT, HOME_TEXT, welcome_text as build_welcome_text
-from helpers.supabase_helper.gifts import gift_balances, redeem as redeem_gift_code
+from helpers.supabase_helper.gifts import (
+    gift_balances, redeem as redeem_gift_code,
+    has_claimed_channel_reward, claim_channel_join_reward,
+)
 from services.gift_links import gift_code_from_start
 from services.gift_presentation import expiry_text, remaining_expiry_text
 
@@ -349,6 +353,123 @@ async def student_help(msg: types.Message):
     await msg.answer(HELP_TEXT, parse_mode="HTML", reply_markup=_student_info_keyboard())
 
 
+# ==================== 📢 مكافأة الاشتراك في قناة إعلامات البوت (50 نقطة لمرة واحدة) ====================
+
+def _official_channel_targets() -> list:
+    targets = []
+    if OFFICIAL_CHANNEL_URL and "t.me/" in OFFICIAL_CHANNEL_URL:
+        slug = OFFICIAL_CHANNEL_URL.split("t.me/", 1)[1].strip("/").split("?")[0]
+        if slug and not slug.startswith("+"):
+            targets.append(f"@{slug.lstrip('@')}")
+    if OFFICIAL_CHANNEL_CHAT_ID:
+        targets.append(int(OFFICIAL_CHANNEL_CHAT_ID))
+    return targets
+
+
+async def _is_user_subscribed_to_official_channel(user_id: int) -> Optional[bool]:
+    """فحص اشتراك الطالب الفعلي في قناة إعلامات البوت عبر Telegram API."""
+    saw_not_member = False
+    for target in _official_channel_targets():
+        try:
+            member = await bot.get_chat_member(target, user_id)
+            status = str(getattr(member, "status", "")).lower()
+            if "." in status:
+                status = status.rsplit(".", 1)[-1]
+            if status in ("member", "administrator", "creator"):
+                return True
+            if status == "restricted" and getattr(member, "is_member", False):
+                return True
+            if status in ("left", "kicked", "restricted"):
+                saw_not_member = True
+        except Exception as exc:
+            logger.warning(f"Channel membership check failed for target={target}, user={user_id}: {exc}")
+    if saw_not_member:
+        return False
+    return None
+
+
+async def _refresh_main_menu_after_channel_reward(call: types.CallbackQuery) -> None:
+    info = await bot.get_me()
+    menu = await get_main_menu_keyboard(info.username, call.from_user.id)
+    home_text = await _student_home_text(call.from_user.id)
+    await _show_student_navigation_screen(call, home_text, menu)
+
+
+@router.callback_query(F.data == "channel_reward:open", F.message.chat.type == "private")
+async def open_channel_reward_screen(call: types.CallbackQuery):
+    try:
+        if await has_claimed_channel_reward(call.from_user.id):
+            await _refresh_main_menu_after_channel_reward(call)
+            await call.answer("✅ لقد حصلت على مكافأة الاشتراك في القناة مسبقاً!", show_alert=True)
+            return
+
+        channel_bonus = await get_setting("channel_join_bonus_points") or 50
+        text = (
+            f"📢 <b>مهمة الاشتراك في قناة إعلامات البوت (+{channel_bonus:g} نقطة)</b>\n\n"
+            "اشترك في قناة البوت الرسمية لمتابعة التحديثات والأخبار وأكواد الهدايا، "
+            f"واحصل فوراً على <b>{channel_bonus:g} نقطة هدية</b> (تُمنح لمرة واحدة فقط):\n\n"
+            "1️⃣ اضغط على «📢 الانضمام لقناة إعلامات البوت» واشترك في القناة.\n"
+            f"2️⃣ بعد الاشتراك، اضغط على «✅ اشتركت · استلم {channel_bonus:g} نقطة»."
+        )
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="📢 الانضمام لقناة إعلامات البوت", url=OFFICIAL_CHANNEL_URL)],
+            [types.InlineKeyboardButton(
+                text=f"✅ اشتركت · استلم {channel_bonus:g} نقطة",
+                callback_data="channel_reward:claim",
+            )],
+            [types.InlineKeyboardButton(text="🔙 رجوع للقائمة الرئيسية", callback_data="student_home")],
+        ])
+        await _show_student_navigation_screen(call, text, kb)
+        await call.answer()
+    except Exception as exc:
+        logger.error(f"Error in open_channel_reward_screen: {exc}", exc_info=True)
+        await call.answer("⚠️ حدث خطأ غير متوقع، حاول مجدداً.", show_alert=True)
+
+
+@router.callback_query(F.data == "channel_reward:claim", F.message.chat.type == "private")
+async def claim_channel_reward_handler(call: types.CallbackQuery):
+    try:
+        if await has_claimed_channel_reward(call.from_user.id):
+            await _refresh_main_menu_after_channel_reward(call)
+            await call.answer("✅ لقد استلمت مكافأة الاشتراك في القناة مسبقاً!", show_alert=True)
+            return
+
+        subscribed = await _is_user_subscribed_to_official_channel(call.from_user.id)
+        if subscribed is False:
+            await call.answer(
+                "⚠️ لم نتمكن من رصد اشتراكك في القناة بعد! اضغط على «الانضمام لقناة إعلامات البوت» واشترك أولاً، ثم اضغط استلام النقاط.",
+                show_alert=True,
+            )
+            return
+        if subscribed is None:
+            await call.answer(
+                "⚠️ تعذّر التحقق من الاشتراك حالياً، تأكد من انضمامك للقناة ثم حاول بعد لحظات.",
+                show_alert=True,
+            )
+            return
+
+        res = await claim_channel_join_reward(call.from_user.id)
+        status = res.get("status")
+        if status == "ok":
+            pts = float(res.get("points") or 50)
+            spawn(log_usage_event(call.from_user.id, "channel_join_reward_claimed", {"points": pts}))
+            await _refresh_main_menu_after_channel_reward(call)
+            await call.answer(
+                f"🎉 مبارك! تم التحقق من اشتراكك في القناة وأُضيفت {pts:g} نقطة هدية إلى رصيدك بنجاح.",
+                show_alert=True,
+            )
+            return
+        if status == "already_claimed":
+            await _refresh_main_menu_after_channel_reward(call)
+            await call.answer("✅ لقد استلمت مكافأة الاشتراك في القناة مسبقاً!", show_alert=True)
+            return
+
+        await call.answer("⚠️ تعذّر إضافة المكافأة حالياً، حاول مجدداً.", show_alert=True)
+    except Exception as exc:
+        logger.error(f"Error in claim_channel_reward_handler: {exc}", exc_info=True)
+        await call.answer("⚠️ حدث خطأ غير متوقع، حاول مجدداً.", show_alert=True)
+
+
 @router.callback_query(F.data == "recharge_info")
 async def show_recharge_info(call: types.CallbackQuery):
     try:
@@ -359,7 +480,8 @@ async def show_recharge_info(call: types.CallbackQuery):
             return
         recharge_text = (
             "🔋 <b>شحن النقاط</b>\n\n"
-            "اختر الباقة المطلوبة، ثم اضغط «تواصل للشحن» لمعرفة طريقة الدفع.\n\n"
+            "اختر الباقة المطلوبة، ثم اضغط «تواصل للشحن» لمعرفة طريقة الدفع، "
+            "أو استخدم «🧮 حاسبة النقاط» لتصميم باقة مخصصة.\n\n"
             "💵 الأسعار بالليرة السورية."
         )
         await call.message.answer(
@@ -386,6 +508,10 @@ def get_recharge_keyboard(selected_package: Optional[str] = None):
         )]
         for points, price in RECHARGE_PACKAGES.items()
     ]
+    rows.append([types.InlineKeyboardButton(
+        text="🧮 حاسبة النقاط",
+        callback_data="calc:menu",
+    )])
     if selected_package in RECHARGE_PACKAGES:
         price = RECHARGE_PACKAGES[selected_package]
         draft = (
@@ -475,5 +601,3 @@ async def cmd_channel(message: types.Message):
     
     # تسجيل حدث فتح القناة
     spawn(log_usage_event(message.from_user.id, "channel_opened"))
-
-

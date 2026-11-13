@@ -1,5 +1,5 @@
 """
-إدارة الإعدادات القابلة للتعديل (نقاط الترحيب، التجديد اليومي، مكافأة الإحالة) من جدول
+إدارة الإعدادات القابلة للتعديل (نقاط الترحيب، التجديد اليومي، مكافأة الإحالة، ومكافأة الاشتراك بالقناة) من جدول
 app_settings في سوبا بيس، بدلاً من قيم ثابتة في constants.py. الهدف: تمكين تعديلها من
 لوحة الإدارة مباشرة دون الحاجة لتعديل الكود أو إعادة نشر البوت.
 
@@ -27,6 +27,7 @@ SETTINGS_CACHE_TTL_SECONDS = 30
 _DEFAULTS: Dict[str, float] = {
     "welcome_points": float(WELCOME_POINTS),
     "welcome_gift_days": 30,
+    "channel_join_bonus_points": 50.0,
     "referral_gift_days": 0,
     "daily_renewal_points": float(DAILY_RENEWAL_POINTS),
     "referral_bonus_points": float(REFERRAL_BONUS_POINTS),
@@ -81,6 +82,7 @@ SETTING_LABELS: Dict[str, str] = {
     "welcome_gift_days": "⏳ صلاحية هدية الترحيب بالأيام (0 = بلا انتهاء)",
     "referral_gift_days": "⏳ صلاحية هدية الإحالة بالأيام (0 = بلا انتهاء)",
     "welcome_points": "🎁 نقاط الترحيب (عند أول تسجيل)",
+    "channel_join_bonus_points": "📢 مكافأة الاشتراك في قناة البوت (لمرة واحدة)",
     "daily_renewal_points": "🔄 نقاط التجديد اليومي المجاني",
     "referral_bonus_points": "🤝 مكافأة الإحالة (لكل صديق)",
     "classification_vote_threshold": "🗳 عتبة تثبيت تصنيف المادة (عدد الأصوات)",
@@ -233,4 +235,3 @@ async def get_ai_request_timeout() -> float:
     low = SETTING_MIN_VALUES["ai_request_timeout"]
     high = SETTING_MAX_VALUES["ai_request_timeout"]
     return max(low, min(high, float(value)))
-

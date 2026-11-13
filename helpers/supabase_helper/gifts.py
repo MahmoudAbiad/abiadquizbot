@@ -1,4 +1,5 @@
 """Gift ledger and atomic wallet operations (server-side service role only)."""
+import datetime
 import secrets
 import uuid
 from ._client import supabase
@@ -33,6 +34,62 @@ async def list_gifts(user_id, page=0, page_size=5):
 async def redeem(user_id, code):
     result = await supabase.rpc('redeem_gift_code', {'p_user_id': user_id, 'p_code': code}).execute()
     return result.data
+
+
+async def has_claimed_channel_reward(user_id: int) -> bool:
+    """التحقق مما إذا كان المستخدم قد حصل مسبقاً على مكافأة الاشتراك في قناة إعلامات البوت."""
+    result = await (
+        supabase.table('point_gifts')
+        .select('id')
+        .eq('user_id', int(user_id))
+        .eq('source', 'welcome')
+        .eq('source_key', 'channel_join')
+        .limit(1)
+        .execute()
+    )
+    return bool(result.data)
+
+
+async def claim_channel_join_reward(user_id: int) -> dict:
+    """منح مكافأة الاشتراك في قناة البوت (50 نقطة) ذرياً لمرة واحدة فقط لكل مستخدم."""
+    try:
+        result = await supabase.rpc('claim_channel_join_gift', {'p_user_id': int(user_id)}).execute()
+        if isinstance(result.data, dict):
+            return result.data
+        if isinstance(result.data, list) and result.data:
+            return result.data[0]
+    except Exception:
+        pass
+
+    # مسار احتياطي مباشر في حال لم تكن دالة الـ RPC مفعلة بعد على بيئة فرعية
+    if await has_claimed_channel_reward(user_id):
+        return {'status': 'already_claimed'}
+    from helpers.settings_helper import get_setting
+    points = float(await get_setting('channel_join_bonus_points') or 50)
+    days = int(await get_setting('welcome_gift_days') or 30)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expires_at = None if days <= 0 else (now + datetime.timedelta(days=days)).isoformat()
+    try:
+        ins = await supabase.table('point_gifts').insert({
+            'user_id': int(user_id),
+            'source': 'welcome',
+            'source_key': 'channel_join',
+            'title': 'هدية الاشتراك في قناة البوت',
+            'original_amount': points,
+            'remaining_amount': points,
+            'expires_at': expires_at,
+        }).execute()
+        row = ins.data[0] if ins.data else {}
+        return {
+            'status': 'ok',
+            'gift_id': row.get('id'),
+            'points': points,
+            'expires_at': row.get('expires_at', expires_at),
+        }
+    except Exception as exc:
+        if '23505' in str(exc) or 'point_gifts_user_id_source_source_key_key' in str(exc):
+            return {'status': 'already_claimed'}
+        raise
 
 
 async def debit(user_id, amount, questions):

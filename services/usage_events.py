@@ -71,10 +71,17 @@ CALLBACK_EVENTS = {
     "audio_act_quiz": ("audio_quiz_clicked", "🎯 ضغط اختبار من المحاضرة"),
     "audio_act_export": ("audio_export_clicked", "📄 ضغط تصدير المحاضرة"),
     "audio_act_send_text": ("audio_text_clicked", "📋 ضغط عرض نص المحاضرة"),
+    "calc:menu": ("points_calculator_opened", "🧮 فتح حاسبة النقاط"),
+    "calc:explain": ("points_pricing_explained", "💡 عرض آلية حساب النقاط"),
+    "channel_reward:open": ("channel_reward_opened", "📢 فتح مهمة الاشتراك في القناة"),
+    "channel_reward:claim": ("channel_reward_claim_clicked", "✅ ضغط استلام مكافأة القناة"),
 }
 # Capture only action categories; never store callback tokens, gift codes or payloads.
 CALLBACK_PATTERNS = [
     (r"gift:list:[0-9]{1,8}", "gifts_clicked", "🎁 ضغط عرض الهدايا"),
+    (r"calc:auto:[0-9]{1,3}", "points_calc_auto_used", "⚡ استخدام الحساب التلقائي للاستهلاك"),
+    (r"calc:m:[0-9]{1,4}:[0-9]{1,4}:[0-9]{1,4}", "points_calc_manual_used", "🛠️ استخدام الحساب اليدوي للاستهلاك"),
+    (r"pay:custom:[0-9]{1,6}", "custom_package_selected", "📦 اختيار باقة شحن مخصصة"),
     (r"qpractice:[a-f0-9]{16}", "mistake_practice_clicked", "🎯 ضغط التدريب على الأخطاء"),
     (r"qrevstart:[a-f0-9]{16}", "error_review_clicked", "📚 ضغط مراجعة الأخطاء"),
     (r"qrev:[a-f0-9]{16}:[0-9]{1,4}", "error_review_clicked", "📚 ضغط مراجعة الأخطاء"),
@@ -108,6 +115,7 @@ EVENT_LABELS.update({
     "gift_code_redeemed": "🎁 نجاح شحن كود هدية",
     "gift_code_rejected": "🚫 رفض كود هدية",
     "insufficient_balance_blocked": "🚫 الرصيد غير كافٍ",
+    "channel_join_reward_claimed": "🎉 استلام مكافأة الاشتراك في القناة",
 })
 
 

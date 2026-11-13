@@ -261,6 +261,42 @@ class DirectGiftChargeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("مكافأة تميز", preview_text)
         self.assertIn("10 يوم", preview_text)
 
+
+    async def test_custom_gift_flow_with_zero_days_no_expiry(self):
+        self.grant_gift.return_value = {
+            "status": "ok",
+            "gift_id": "gift-no-expiry",
+            "title": "هدية خاصة",
+            "points": 100.0,
+            "expires_at": None,
+            "gift_points": 100.0,
+            "total_points": 120.0,
+        }
+        await self.state.update_data(
+            direct_message_target_id=999,
+            direct_message_balance_before=20.0,
+            direct_message_mode="charge",
+            direct_message_text="هدية دائمة لك!",
+            direct_message_charge_type="gift",
+            direct_message_gift_title="هدية خاصة",
+            direct_message_charge_amount=100,
+        )
+        call_days_zero = self._call("admin_direct_gift_days_0")
+        await self.env["process_direct_gift_days_button"](call_days_zero, self.state)
+        self.assertEqual(self.state.status, "waiting_for_direct_message_confirm")
+        self.assertEqual(self.state.data["direct_message_gift_days"], 0)
+        preview_text = call_days_zero.message.answer.await_args.args[0]
+        self.assertIn("بدون انتهاء", preview_text)
+
+        call_confirm = self._call("admin_confirm_direct_message")
+        await self.env["process_confirm_direct_message"](call_confirm, self.state)
+        self.grant_gift.assert_awaited_once()
+        kwargs = self.grant_gift.await_args.kwargs
+        self.assertEqual(kwargs["target_id"], 999)
+        self.assertEqual(kwargs["amount"], 100)
+        self.assertEqual(kwargs["valid_days"], 0)
+        self.assertEqual(kwargs["title"], "هدية خاصة")
+
     async def test_free_and_paid_charge_types_prompt_for_amount_then_confirm(self):
         await self.state.update_data(
             direct_message_target_id=555,

@@ -158,7 +158,8 @@ async def _open_codes() -> Set[str]:
 
 
 async def create_order(user_id: int, package: Dict[str, Any]) -> Dict[str, Any]:
-    """ينشئ طلباً جديداً بكود فريد. يرمي OpenOrderExists لو للطالب طلب مفتوح."""
+    """ينشئ طلباً جديداً بكود فريد (يدعم الباقات الثابتة والباقات المخصصة التي يكون package_id فيها None).
+    يرمي OpenOrderExists لو للطالب طلب مفتوح."""
     expires = _now() + datetime.timedelta(minutes=PAYMENT_ORDER_TTL_MINUTES)
     last_error: Optional[Exception] = None
     for _ in range(5):
@@ -166,7 +167,7 @@ async def create_order(user_id: int, package: Dict[str, Any]) -> Dict[str, Any]:
         try:
             res = await supabase.table("payment_orders").insert({
                 "user_id": user_id,
-                "package_id": package["id"],
+                "package_id": package.get("id"),
                 "points": package["points"],
                 "amount": package["price"],
                 "currency": package["currency"],
@@ -745,4 +746,3 @@ async def payment_watchdog_loop() -> None:
             logger.error(f"payment watchdog iteration failed: {exc}", exc_info=True)
         tick += 1
         await asyncio.sleep(60)
-

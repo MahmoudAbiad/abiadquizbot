@@ -531,7 +531,8 @@ async def process_confirm_direct_message(call: types.CallbackQuery, state: FSMCo
     balance_before = float(data.get("direct_message_balance_before") or 0)
     include_balance = bool(data.get("direct_message_include_balance"))
     gift_title = data.get("direct_message_gift_title") or "هدية مستخدم جديد"
-    gift_days = int(data.get("direct_message_gift_days") or 30)
+    raw_gift_days = data.get("direct_message_gift_days")
+    gift_days = int(30 if raw_gift_days is None else raw_gift_days)
     gift_source_key = data.get("direct_message_gift_source_key") or f"direct:{uuid.uuid4()}"
     await state.clear()
     await call.answer()

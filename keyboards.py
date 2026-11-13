@@ -49,6 +49,30 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
         # 🆕 مكافأة الإحالة تُقرأ من app_settings كي يبقى نص الزر متطابقاً مع القيمة
         # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
         referral_bonus_points = await get_setting("referral_bonus_points")
+        referral_row = [
+            types.InlineKeyboardButton(
+                text=f"🎁 دعوة صديق · {referral_bonus_points:g} نقاط",
+                switch_inline_query=f"\nحوّل محتواك الدراسي إلى كويز عبر البوت: {ref_link}",
+            )
+        ]
+        try:
+            from helpers.supabase_helper.gifts import has_claimed_channel_reward
+            channel_claimed = await has_claimed_channel_reward(user_id)
+        except Exception:
+            channel_claimed = False
+        if not channel_claimed:
+            try:
+                channel_bonus_points = await get_setting("channel_join_bonus_points")
+            except Exception:
+                channel_bonus_points = 50
+            if not channel_bonus_points or channel_bonus_points <= 0:
+                channel_bonus_points = 50
+            referral_row.append(
+                types.InlineKeyboardButton(
+                    text=f"📢 اشترك بالقناة · {channel_bonus_points:g} نقطة",
+                    callback_data="channel_reward:open",
+                )
+            )
         kb = [
             [types.InlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
             [types.InlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu", style="primary")],
@@ -58,7 +82,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
                 types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL),
                 types.InlineKeyboardButton(text="💬 الدعم الفني", url=SUPPORT_BOT_URL)
             ],
-            [types.InlineKeyboardButton(text=f"🎁 دعوة صديق · {referral_bonus_points:g} نقاط", switch_inline_query=f"\nحوّل محتواك الدراسي إلى كويز عبر البوت: {ref_link}")]
+            referral_row,
         ]
         from helpers.supabase_helper.feature_flags import is_feature_enabled
         if await is_feature_enabled("challenge_system_enabled", default=False):

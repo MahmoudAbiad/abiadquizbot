@@ -202,7 +202,8 @@ AI_REQUEST_TIMEOUT = 120  # Seconds
 # ==================== Points & Token System ====================
 WELCOME_POINTS = 100          # تمنح مرة واحدة عند تسجيل المستخدم لأول مرة
 DAILY_RENEWAL_POINTS = 50     # تجديد مجاني يومي يكفي لكويز سريع واحد
-REFERRAL_BONUS_POINTS = 50
+REFERRAL_BONUS_POINTS = 25
+CHANNEL_JOIN_BONUS_POINTS = 50  # مكافأة لمرة واحدة عند الاشتراك في قناة إعلامات البوت
 DISCOUNT_RATE_FOR_CACHED = 0.1  # تكلفة 10% فقط للكويز المعاد استخدامه (خصم 90%)
 
 # ==================== API Rate Limiting ====================
@@ -731,6 +732,7 @@ PAYMENT_STALLED_EVENT_MINUTES = 3          # حدث screen/manual_request لم �
 # 🔗 استبدل YourSupportBotUsername بيوزر بوت الدعم الخاص بك
 SUPPORT_BOT_URL = "https://t.me/AbiadSupportBot"
 OFFICIAL_CHANNEL_URL = "https://t.me/abiadquizmaker"
+OFFICIAL_CHANNEL_CHAT_ID = int(os.getenv("OFFICIAL_CHANNEL_CHAT_ID", "-1004376690066") or -1004376690066)
 
     # ==================== Users.py Configuration ====================
 
@@ -973,4 +975,5 @@ MSG_UPLOAD_FILE_MISSING = (
     "(يحدث عند تحديث البوت أو بعد مرور وقت طويل على الرفع).\n"
     "أعد إرسال الملف لبدء طلب جديد."
 )
+
 
