@@ -1,4 +1,11 @@
 -- Migration: Admin user deletion controls (full wipe, keep quizzes, consent only, quizzes only)
+-- Legal & Compliance Note:
+--   Standalone consent reset ('consent_only') is strictly restricted at the database,
+--   service, and UI layers to the designated QA test account (@Kp7771a / user_id 8959792818).
+--   For real production users, legal consent records (public.user_consents and
+--   public.user_consent_events) can never be selectively wiped while the user account
+--   remains active; they are only removed upon complete account erasure ('full_wipe'
+--   or 'keep_quizzes').
 BEGIN;
 
 -- 1. Allow keeping quizzes when their creator user is deleted
@@ -48,7 +55,7 @@ $function$;
 -- 3. Atomic admin RPC for the 4 user deletion modes:
 --    'full_wipe'    : delete user + all traces + consent + generated quizzes
 --    'keep_quizzes' : delete user + all traces + consent, but keep generated quizzes (creator_id = NULL)
---    'consent_only' : delete user consent state & history only
+--    'consent_only' : delete user consent state & history ONLY for the designated QA test account (@Kp7771a / 8959792818)
 --    'quizzes_only' : delete user's generated quizzes only
 CREATE OR REPLACE FUNCTION public.admin_delete_user_action(p_user_id bigint, p_mode text)
 RETURNS jsonb
@@ -58,6 +65,8 @@ SET search_path = ''
 AS $function$
 DECLARE
     v_user_existed boolean := false;
+    v_username text := NULL;
+    v_is_test_account boolean := false;
     v_consent_deleted boolean := false;
     v_deleted_quizzes_count integer := 0;
     v_kept_quizzes_count integer := 0;
@@ -74,11 +83,32 @@ BEGIN
         RAISE EXCEPTION 'invalid deletion mode: %', p_mode;
     END IF;
 
-    SELECT EXISTS(SELECT 1 FROM public.users WHERE user_id = p_user_id)
-      INTO v_user_existed;
+    SELECT true, u.username
+      INTO v_user_existed, v_username
+      FROM public.users u
+     WHERE u.user_id = p_user_id;
 
-    -- Mode 3: Consent only
+    v_user_existed := COALESCE(v_user_existed, false);
+    v_is_test_account := (
+        p_user_id = 8959792818
+        OR LOWER(LTRIM(COALESCE(v_username, ''), '@')) = 'kp7771a'
+    );
+
+    -- Mode 3: Consent only (Strictly restricted to designated QA test account @Kp7771a / 8959792818)
     IF p_mode = 'consent_only' THEN
+        IF NOT v_is_test_account THEN
+            RETURN jsonb_build_object(
+                'status', 'forbidden_non_test_account',
+                'mode', p_mode,
+                'user_existed', v_user_existed,
+                'consent_deleted', false,
+                'deleted_quizzes_count', 0,
+                'kept_quizzes_count', 0,
+                'deleted_quiz_ids', '[]'::jsonb,
+                'error', 'consent_only reset is restricted to designated QA test account @Kp7771a (8959792818)'
+            );
+        END IF;
+
         DELETE FROM public.user_consent_events WHERE user_id = p_user_id;
         DELETE FROM public.user_consents WHERE user_id = p_user_id;
         v_consent_deleted := true;

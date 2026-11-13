@@ -13,6 +13,44 @@ from ._client import supabase, logger
 from .gifts import enrich_balances, gift_balances
 from .classification import _get_file_hashes_for_quiz_ids, _cleanup_classification_for_hashes
 
+# حساب الاختبار المعتمد (QA) المسموح بتصفير موافقته القانونية منفردة دون حذف الحساب،
+# وذلك لحماية حجية سجل الموافقات القانونية (user_consent_events) لجميع الطلاب الفعليين.
+QA_TEST_USER_IDS: Tuple[int, ...] = (8959792818,)
+QA_TEST_USERNAMES: Tuple[str, ...] = ("kp7771a",)
+
+
+def is_qa_test_user(user_or_username: Any, user_id: Optional[int] = None) -> bool:
+    """
+    التحقق مما إذا كان الحساب هو حساب الاختبار المعتمد (@Kp7771a / ID: 8959792818).
+    يُحظر تصفير سجل الموافقة القانونية منفرداً (consent_only) لأي حساب آخر غير حساب الاختبار.
+    """
+    uid = user_id
+    raw_username = ""
+    if isinstance(user_or_username, dict):
+        if uid is None and user_or_username.get("user_id") is not None:
+            try:
+                uid = int(user_or_username["user_id"])
+            except (ValueError, TypeError):
+                uid = None
+        raw_username = str(user_or_username.get("username") or "")
+    elif isinstance(user_or_username, int):
+        uid = user_or_username
+    else:
+        raw_username = str(user_or_username or "")
+
+    if uid is not None:
+        try:
+            if int(uid) in QA_TEST_USER_IDS:
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    clean = raw_username.strip().lstrip("@").lower()
+    if not clean or clean == "unknown":
+        return False
+    return clean in QA_TEST_USERNAMES
+
+
 # ==================== Admin Operations ====================
 async def admin_add_points(target_id: int, amount: int, balance_type: str = "paid") -> Optional[int]:
     try:
@@ -197,6 +235,7 @@ async def admin_get_user_deletion_summary(target_id: int) -> Optional[Dict[str, 
             "user": user_row,
             "owned_quizzes_count": owned_count,
             "consent": consent_row,
+            "is_test_account": is_qa_test_user(user_row, user_id=uid),
         }
     except Exception as e:
         logger.error(f"Error in admin_get_user_deletion_summary for {target_id}: {e}")
@@ -238,7 +277,7 @@ async def admin_delete_user_action(target_id: int, mode: str) -> Optional[Dict[s
     تنفيذ أحد خيارات الحذف الأربعة للمستخدم:
       - 'full_wipe'    : حذف المستخدم بالكامل مع كامل أثره وكويزاته وموافقته على البوت.
       - 'keep_quizzes' : حذف المستخدم بالكامل مع كامل أثره وموافقته، مع الإبقاء على الكويزات المولدة عن طريقه (creator_id = NULL).
-      - 'consent_only' : حذف حالة وسجل موافقته على البوت فقط.
+      - 'consent_only' : حذف حالة وسجل موافقته على البوت فقط (مقيّد قانونياً بحساب الاختبار @Kp7771a / 8959792818 فقط).
       - 'quizzes_only' : حذف الكويزات المولدة عن طريقه فقط.
     """
     if mode not in ("full_wipe", "keep_quizzes", "consent_only", "quizzes_only"):
@@ -253,16 +292,19 @@ async def admin_delete_user_action(target_id: int, mode: str) -> Optional[Dict[s
             data = rpc_res.data
             if isinstance(data, list) and data:
                 data = data[0]
-            if isinstance(data, dict) and data.get("status") == "ok":
-                deleted_ids = data.get("deleted_quiz_ids") or []
-                if deleted_ids:
-                    try:
-                        from services.runner_cleanup import delete_runner_prefix
-                        for qid in deleted_ids:
-                            await delete_runner_prefix(str(qid))
-                    except Exception:
-                        logger.warning("Runner prefix cleanup deferred to retention loop", exc_info=True)
-                return data
+            if isinstance(data, dict):
+                if data.get("status") == "forbidden_non_test_account":
+                    return data
+                if data.get("status") == "ok":
+                    deleted_ids = data.get("deleted_quiz_ids") or []
+                    if deleted_ids:
+                        try:
+                            from services.runner_cleanup import delete_runner_prefix
+                            for qid in deleted_ids:
+                                await delete_runner_prefix(str(qid))
+                        except Exception:
+                            logger.warning("Runner prefix cleanup deferred to retention loop", exc_info=True)
+                    return data
         except Exception as rpc_exc:
             if str(getattr(rpc_exc, "code", "")) not in {"42883", "PGRST202"}:
                 raise
@@ -271,6 +313,17 @@ async def admin_delete_user_action(target_id: int, mode: str) -> Optional[Dict[s
             kept_quizzes_count = 0
 
             if mode == "consent_only":
+                u_res = await supabase.table("users").select("user_id, username").eq("user_id", uid).limit(1).execute()
+                u_row = (u_res.data or [{}])[0]
+                if not is_qa_test_user(u_row, user_id=uid):
+                    return {
+                        "status": "forbidden_non_test_account",
+                        "mode": mode,
+                        "consent_deleted": False,
+                        "deleted_quizzes_count": 0,
+                        "kept_quizzes_count": 0,
+                        "deleted_quiz_ids": [],
+                    }
                 await supabase.table("user_consent_events").delete().eq("user_id", uid).execute()
                 await supabase.table("user_consents").delete().eq("user_id", uid).execute()
                 return {
