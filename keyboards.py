@@ -47,7 +47,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
     try:
         ref_link = f"https://t.me/{bot_username}?start={user_id}"
         # 🆕 مكافأة الإحالة تُقرأ من app_settings كي يبقى نص الزر متطابقاً مع القيمة
-        # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
+        # الفعلية القable للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
         referral_bonus_points = await get_setting("referral_bonus_points")
         referral_row = [
             types.InlineKeyboardButton(
@@ -1222,7 +1222,15 @@ def get_admin_user_actions_keyboard(user_id: int, username: Optional[str] = None
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_admin_user_delete_menu_keyboard(user_id: int, owned_quizzes_count: int = 0) -> types.InlineKeyboardMarkup:
+def get_admin_user_delete_menu_keyboard(
+    user_id: int, owned_quizzes_count: int = 0, is_test_account: bool = False
+) -> types.InlineKeyboardMarkup:
+    """
+    قائمة خيارات حذف الطالب في لوحة الأدمن.
+    ملاحظة قانونية: خيار تصفير الموافقة على البوت منفرداً (admin_del_ask_consent_*)
+    يظهر ويُفعّل حصرياً لحسابات الاختبار المعتمَدة (@Kp7771a / 8959792818) لضمان عدم قابلية مسح سجل
+    الإثبات القانوني (user_consent_events) لأي طالب فعلي أثناء بقاء حسابه نشطاً.
+    """
     kb = [
         [types.InlineKeyboardButton(
             text=f"👁 استعراض الكويزات المولدة ({owned_quizzes_count})",
@@ -1236,10 +1244,13 @@ def get_admin_user_delete_menu_keyboard(user_id: int, owned_quizzes_count: int =
             text=f"👤 حذف الطالب مع الإبقاء على كويزاته ({owned_quizzes_count})",
             callback_data=f"admin_del_ask_keepq_{user_id}",
         )],
-        [types.InlineKeyboardButton(
-            text="📜 حذف حالة الموافقة على البوت فقط",
+    ]
+    if is_test_account:
+        kb.append([types.InlineKeyboardButton(
+            text="🧪 تصفير الموافقة (حساب الاختبار @Kp7771a)",
             callback_data=f"admin_del_ask_consent_{user_id}",
-        )],
+        )])
+    kb.extend([
         [types.InlineKeyboardButton(
             text=f"🗂 حذف كويزاته المولدة فقط ({owned_quizzes_count})",
             callback_data=f"admin_del_ask_quizzes_{user_id}",
@@ -1252,7 +1263,7 @@ def get_admin_user_delete_menu_keyboard(user_id: int, owned_quizzes_count: int =
             text="🔙 رجوع لبيانات الطالب",
             callback_data=f"admin_user_profile_{user_id}",
         )],
-    ]
+    ])
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
 

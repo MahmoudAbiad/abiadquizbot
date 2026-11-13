@@ -1473,6 +1473,12 @@ def _build_user_delete_menu_text(
         f"{html.escape(str(u.get('last_name') or '')[:100])}"
     ).strip() or "غير مسجل بجدول الطلاب"
 
+    is_test_account = bool(summary.get("is_test_account"))
+    account_type_line = (
+        "🧪 حساب اختبار معتمد (@Kp7771a) — تصفير الموافقة المنفرد متاح للفحص"
+        if is_test_account
+        else "🔒 حساب طالب فعلي — سجل الموافقة محمي قانونياً من الحذف المنفرد"
+    )
     header = f"{banner}\n\n" if banner else ""
     return (
         f"{header}"
@@ -1480,6 +1486,7 @@ def _build_user_delete_menu_text(
         "━━━━━━━━━━━━━━━━━━\n"
         f"┣ 🆔 الآيدي: <code>{target_id}</code>\n"
         f"┣ 👤 الطالب: <b>{full_name}</b> ({username_str})\n"
+        f"┣ 🛡 تصنيف الحساب: {account_type_line}\n"
         f"┣ 📜 حالة الموافقة على البوت: {_format_consent_status_line(consent)}\n"
         f"┣ 🗂 الكويزات المولدة عن طريقه: <code>{owned_count}</code> كويز\n"
         f"┗ ⚡ حالة Redis الحالية: {_format_redis_status_line(redis_info)}\n\n"
@@ -1497,7 +1504,11 @@ async def _render_user_delete_menu(call: types.CallbackQuery, target_id: int, ba
         return False
     redis_info = await get_user_redis_active_summary(target_id)
     text = _build_user_delete_menu_text(target_id, summary, redis_info, banner=banner)
-    kb = get_admin_user_delete_menu_keyboard(target_id, int(summary.get("owned_quizzes_count") or 0))
+    kb = get_admin_user_delete_menu_keyboard(
+        target_id,
+        int(summary.get("owned_quizzes_count") or 0),
+        is_test_account=bool(summary.get("is_test_account")),
+    )
     await safe_edit_text(call.message, text, reply_markup=kb)
     try:
         await call.answer()
@@ -1721,15 +1732,21 @@ async def ask_user_delete_confirmation(call: types.CallbackQuery):
                 f"• ✅ <b>الإبقاء على جميع الكويزات المولدة عن طريقه (<code>{owned_count}</code> كويز)</b> في الكاش المركزي وروابط المشاركة ليستفيد منها باقي الطلاب (مع فك ارتباطها بحسابه)."
             )
         elif mode == "consent":
+            if not summary.get("is_test_account"):
+                await call.answer(
+                    "🔒 تصفير الموافقة المنفرد مقيّد قانونياً بحسابات الاختبار (@Kp7771a) فقط لحماية سجل الموافقات القانونية للطلاب.",
+                    show_alert=True,
+                )
+                return
             desc = (
-                "⚠️ <b>تأكيد حذف حالة الموافقة على البوت فقط</b>\n"
+                "🧪 <b>تأكيد تصفير الموافقة على البوت (مخصص لحساب الاختبار @Kp7771a فقط)</b>\n"
                 "━━━━━━━━━━━━━━━━━━\n"
-                f"المستخدم المستهدف: <code>{target_id}</code>\n"
+                f"حساب الاختبار المستهدف: <code>{target_id}</code>\n"
                 f"الحالة الحالية: {consent_line}\n\n"
-                "سيتم تنفيذ الآتي:\n"
-                "• حذف سجل موافقته من قاعدة البيانات (<code>user_consents</code> / <code>user_consent_events</code>) ومسح كاش الموافقة في Redis فوراً.\n"
-                "• عند أول رسالة أو ضغطة زر قادمة منه، ستظهر له بوابة الموافقة على الشروط وسياسة الخصوصية من جديد.\n"
-                "• ✅ يبقى حسابه، رصيده، هداياه، وكويزاته كما هي تماماً دون أي مساس."
+                "سيتم تنفيذ الآتي لأغراض اختبار بوابة الشروط (QA):\n"
+                "• حذف سجل موافقة حساب الاختبار من قاعدة البيانات ومسح كاش الموافقة في Redis فوراً.\n"
+                "• عند أول رسالة أو ضغطة زر قادمة من حساب الاختبار، ستظهر له بوابة الموافقة على الشروط وسياسة الخصوصية من جديد.\n"
+                "• ℹ️ ملاحظة قانونية: هذا الخيار محجوب برمجياً وقاعدياً عن جميع حسابات الطلاب الفعليين لحماية حجية سجل الموافقات القانونية (<code>user_consent_events</code>)."
             )
         elif mode == "quizzes":
             desc = (
@@ -1781,7 +1798,22 @@ async def execute_user_delete_action(call: types.CallbackQuery):
             await call.answer("⚠️ لا يمكن حذف حساب الأدمن الرئيسي.", show_alert=True)
             return
 
+        if mode == "consent":
+            summary = await admin_get_user_deletion_summary(target_id)
+            if not summary or not summary.get("is_test_account"):
+                await call.answer(
+                    "🔒 تصفير الموافقة المنفرد مقيّد قانونياً بحسابات الاختبار (@Kp7771a) فقط.",
+                    show_alert=True,
+                )
+                return
+
         result = await admin_delete_user_action(target_id, db_mode)
+        if isinstance(result, dict) and result.get("status") == "forbidden_non_test_account":
+            await call.answer(
+                "🔒 تصفير الموافقة المنفرد مقيّد قانونياً بحسابات الاختبار (@Kp7771a) فقط.",
+                show_alert=True,
+            )
+            return
         if not result or result.get("status") != "ok":
             await call.answer("❌ تعذر تنفيذ عملية الحذف في قاعدة البيانات، حاول مجدداً.", show_alert=True)
             return
