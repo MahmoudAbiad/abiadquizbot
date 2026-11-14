@@ -1,9 +1,11 @@
 """
 اختبارات شاملة لنظام اللغات الـ 6 (ar, en, tr, fr, de, fa)، شاشة اختيار اللغة بعد الموافقة،
 التعرف التلقائي على لغة المستخدم، فحص رقم الهاتف (عند توفره فقط دون طلبه)،
-وباقات الشحن بالليرة السورية والدولار الأمريكي مع نسب الخصم وتلوين الخيار الأوفر.
+وباقات الشحن بالليرة السورية والدولار الأمريكي مع نسب الخصم وتلوين الخيار الأوفر،
+بالإضافة إلى تعريب القائمة الرئيسية (/start) وأزرارها ولوحة الإعدادات والمحفظة.
 """
 import asyncio
+import functools
 import re
 import sys
 import types
@@ -52,7 +54,9 @@ def _load_i18n(redis_stub=None, supabase_stub=None):
         "types": fake_types,
         "TTLCache": lambda maxsize, ttl: {},
         "logger": MagicMock(),
+        "functools": functools,
         "re": re,
+        "sys": sys,
         "urlencode": urlencode,
         "Any": object,
         "Dict": dict,
@@ -417,6 +421,36 @@ class PaymentsAndSettingsHandlersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kb.inline_keyboard[0][0].callback_data, "renewal:off")
         self.assertEqual(kb.inline_keyboard[1][0].callback_data, "student_home")
         self.assertEqual(kb.inline_keyboard[2][0].callback_data, "settings:lang")
+
+    async def test_main_menu_settings_and_wallet_six_languages(self):
+        i18n_env = _load_i18n()
+        build_settings = i18n_env["build_settings_panel_content"]
+        get_wallet = i18n_env["get_wallet_strings"]
+        translate_kb = i18n_env["translate_main_menu_keyboard"]
+
+        sample_kb = FakeInlineKeyboardMarkup([
+            [FakeInlineKeyboardButton(text="❓ كيف أستخدم البوت؟", callback_data="student_help")],
+            [FakeInlineKeyboardButton(text="⭐ اختباراتي المحفوظة", callback_data="favorites_menu")],
+            [FakeInlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
+            [FakeInlineKeyboardButton(text="⚙️ الإعدادات", callback_data="student_settings")],
+        ])
+
+        for lang in ("ar", "en", "tr", "fr", "de", "fa"):
+            s_text, s_kb = build_settings(lang, enabled=True)
+            self.assertTrue(len(s_text) > 15)
+            self.assertEqual(s_kb.inline_keyboard[0][0].callback_data, "renewal:off")
+            self.assertEqual(s_kb.inline_keyboard[1][0].callback_data, "student_home")
+            self.assertEqual(s_kb.inline_keyboard[2][0].callback_data, "settings:lang")
+
+            ws = get_wallet(lang)
+            self.assertIn("btn_recharge", ws)
+            self.assertIn("redeem_errors", ws)
+
+            if lang != "ar":
+                t_kb = translate_kb(sample_kb, lang)
+                self.assertNotEqual(t_kb.inline_keyboard[0][0].text, "❓ كيف أستخدم البوت؟")
+                self.assertNotEqual(t_kb.inline_keyboard[2][0].text, "💰 رصيدي وهداياي")
+                self.assertNotEqual(t_kb.inline_keyboard[3][0].text, "⚙️ الإعدادات")
 
 
 if __name__ == "__main__":

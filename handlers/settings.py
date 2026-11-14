@@ -13,11 +13,21 @@ router.callback_query.filter(F.message.chat.type == "private")
 async def settings_panel(user_id):
     result = await supabase.table("users").select("renewal_notifications").eq("user_id", user_id).single().execute()
     enabled = result.data["renewal_notifications"]
+    lang_code = "ar"
     lang_label = "العربية 🇸🇾"
     try:
-        from services.i18n import LANGUAGE_LABELS, get_user_language
-        lang_code = await get_user_language(user_id)
+        from services.i18n import (
+            LANGUAGE_LABELS,
+            build_settings_panel_content,
+            get_user_language,
+            install_ui_localization_hooks,
+            normalize_language_code,
+        )
+        install_ui_localization_hooks()
+        lang_code = normalize_language_code(await get_user_language(user_id))
         lang_label = LANGUAGE_LABELS.get(lang_code, "العربية 🇸🇾")
+        if lang_code != "ar":
+            return build_settings_panel_content(lang_code, enabled, lang_label)
     except Exception:
         pass
     text = ("⚙️ الإعدادات\n\n"
@@ -56,7 +66,14 @@ async def settings_callback(call: types.CallbackQuery):
         }).eq("user_id", call.from_user.id).execute()
     text, kb = await settings_panel(call.from_user.id)
     if call.data == "renewal:off":
-        text = "🔕 تم إيقاف إشعارات التجديد. يمكنك إعادة تفعيلها من ⚙️ الإعدادات.\n\n" + text
+        banner = "🔕 تم إيقاف إشعارات التجديد. يمكنك إعادة تفعيلها من ⚙️ الإعدادات."
+        try:
+            from services.i18n import get_renewal_disabled_banner, get_user_language
+            lang = await get_user_language(call.from_user.id, fallback_user_or_code=call.from_user)
+            banner = get_renewal_disabled_banner(lang)
+        except Exception:
+            pass
+        text = f"{banner}\n\n{text}"
     try:
         await call.message.edit_text(text, reply_markup=kb)
     except TelegramBadRequest as exc:
@@ -95,7 +112,8 @@ async def settings_pick_language(call: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("settings:lang:confirm:"))
 async def settings_confirm_language(call: types.CallbackQuery):
-    from services.i18n import CONSENT_CONFIRMED_TOASTS, set_user_language
+    from services.i18n import CONSENT_CONFIRMED_TOASTS, install_ui_localization_hooks, set_user_language
+    install_ui_localization_hooks()
     lang = call.data.rsplit(":", 1)[-1]
     saved = await set_user_language(call.from_user.id, lang)
     text, kb = await settings_panel(call.from_user.id)
@@ -114,3 +132,10 @@ async def private_membership(update: types.ChatMemberUpdated):
     await supabase.table("users").update({
         "bot_delivery_state": "blocked" if status == "kicked" else "reachable",
     }).eq("user_id", update.chat.id).execute()
+
+
+try:
+    from services.i18n import install_ui_localization_hooks as _install_hooks
+    _install_hooks()
+except Exception:
+    pass

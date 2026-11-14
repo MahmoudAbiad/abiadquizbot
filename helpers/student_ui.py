@@ -1,157 +1,130 @@
-"""Presentation-only copy shared by the private student journey."""
-from html import escape
-from math import floor
+"""Student-facing copy and lightweight UI helpers for private chat."""
+from aiogram import types
+from config import OFFICIAL_CHANNEL_URL, SUPPORT_BOT_URL
 
 HOME_TEXT = (
-    "🏠 <b>مساحتك الدراسية</b>\n\n"
-    "حوّل محتواك إلى كويز، أو ارجع لاختباراتك المحفوظة.\n"
-    "يمكنك إرسال ملف أو صورة أو نص هنا مباشرة في أي وقت."
+    "أهلاً بك في <b>أبيض - منشئ الكويزات الذكي</b> ✨\n\n"
+    "📤 أرسل ملفك (PDF أو Word أو PowerPoint) أو صورة واضحة أو نصاً (100 حرف على الأقل)؛ "
+    "ليحوّله البوت فوراً إلى اختبار تفاعلي ذكي!"
 )
+
 UPLOAD_TEXT = (
-    "📝 <b>إنشاء كويز جديد</b>\n\n"
-    "<b>أرسل المحتوى هنا في المحادثة:</b>\n"
-    "• ملف PDF أو Word أو PowerPoint أو TXT\n"
-    "• صورة أو مجموعة صور واضحة\n"
-    "• نص تلصقه مباشرة\n\n"
-    "📊 أو أرسل ملف Excel (.xlsx) فيه أسئلة وخيارات وإجابات صحيحة لاستيراد كويز مباشرة دون خصم نقاط. استخدم نسخة الأستاذ المصدّرة من البوت وعدّل ورقة الأسئلة.\n\n"
-    "أو اضغط الزر أدناه لفتح صفحة رفع المحتوى واختيار الصور أو المستندات أو المحاضرات الصوتية.\n\n"
-    "بعد الإرسال، تختار نوع الأسئلة وصعوبتها وعددها.\n"
-    "سترى التكلفة قبل بدء التوليد."
+    "📤 <b>أرسل مادتك الدراسية الآن!</b>\n\n"
+    "• 📄 <b>ملف:</b> PDF أو Word (.docx) أو PowerPoint (.pptx)\n"
+    "• 🖼 <b>صورة:</b> صورة واضحة لصفحة أو ملخص\n"
+    "• ✍️ <b>نص:</b> الصق نص المحاضرة مباشرة (100 حرف فأكثر)\n"
+    "• 🌐 <b>ملفك كبير؟</b> استخدم زر الرفع عبر الويب بالأسفل."
 )
+
 HELP_TEXT = (
-    "❓ <b>كيف أستخدم البوت؟</b>\n\n"
-    "<b>1. أرسل محتواك هنا في المحادثة</b>\n"
-    "• ملف PDF أو Word أو PowerPoint أو TXT\n"
-    "• صورة أو مجموعة صور واضحة\n"
-    "• نص تلصقه مباشرة\n\n"
-    "<b>2. جهّز الكويز</b>\nاختر نوع الأسئلة والصعوبة والعدد، وراجع التكلفة قبل التأكيد.\n\n"
-    "<b>3. حلّ وراجع</b>\nأجب عن الأسئلة، ثم احفظ الكويز أو شاركه أو حمّله Word / PDF / Excel.\n\n"
-    "<b>ملف كبير أو محاضرة صوتية؟</b>\nاستخدم زر رفع الملفات الكبيرة إذا كان ظاهراً في القائمة الرئيسية.\n\n"
-    "رصيدك وتواريخ هداياك من «رصيدي وهداياي».\n"
-    "الرجوع للقائمة أو فتح هذا الدليل لا يلغي طلبك الحالي."
-)
-
-EXPORT_STYLE_TEXT = (
-    "📄 <b>تحميل الكويز · 1 من 2</b>\n\n"
-    "اختر تنسيق الصفحات. الأسئلة نفسها في جميع التنسيقات.\n"
-    "بعدها تختار PDF أو Word أو Excel، مع الحلول أو بدونها."
+    "❓ <b>كيف تستخدم بوت أبيض؟</b>\n\n"
+    "1️⃣ <b>أرسل المحتوى:</b> ملف PDF/Word/PowerPoint أو صورة أو نص مباشر.\n"
+    "2️⃣ <b>خصّص الكويز:</b> اختر عدد الأسئلة، مستوى الصعوبة، ونمط العرض (كويز تفاعلي، اختبار متسلسل، أو ملف جاهز للطباعة).\n"
+    "3️⃣ <b>راجع واحفظ:</b> تدرّب على أخطائك واحفظ اختباراتك في <b>⭐ اختباراتي المحفوظة</b> للرجوع إليها في أي وقت."
 )
 
 
-def export_format_text(style_label):
+def welcome_text(
+    points: float,
+    free_points: float = 0,
+    gift_points: float = 0,
+    paid_points: float = 0,
+    renewed: bool = False,
+    lang: str = "ar",
+) -> str:
+    if lang and lang != "ar":
+        try:
+            from services.i18n import get_ui_strings
+            ui = get_ui_strings(lang)
+            if ui:
+                prefix = ui["welcome_renewed"] if renewed else ""
+                return prefix + ui["welcome_body"].format(
+                    points=float(points),
+                    free_points=float(free_points),
+                    gift_points=float(gift_points),
+                    paid_points=float(paid_points),
+                )
+        except Exception:
+            pass
+
+    prefix = "🎉 تم تجديد رصيدك اليومي!\n\n" if renewed else ""
     return (
-        "📄 <b>تحميل الكويز · 2 من 2</b>\n\n"
-        f"التنسيق: <b>{escape(style_label)}</b>\n\n"
-        "🎓 <b>نسخة الطالب:</b> الأسئلة بدون الحلول.\n"
-        "👨‍🏫 <b>نسخة الأستاذ:</b> الأسئلة مع الحلول.\n\n"
-        "اختر PDF للطباعة، أو Word للتعديل، أو Excel لتنظيم بنك الأسئلة."
+        f"{prefix}أهلاً بك في <b>أبيض - منشئ الكويزات الذكي</b> ✨\n\n"
+        f"💰 <b>رصيدك: {points:.2f} نقطة</b>\n"
+        f"🔄 مجانية: {free_points:.2f} · 🎁 هدايا: {gift_points:.2f} · 💳 مدفوعة: {paid_points:.2f}\n\n"
+        "📤 <b>أرسل محتواك الدراسي الآن لإنشاء كويز:</b>\n"
+        "• 📄 ملف (PDF أو Word أو PowerPoint)\n"
+        "• 🖼 صورة واضحة لصفحة أو سلايد\n"
+        "• ✍️ نص مباشر (100 حرف على الأقل)\n\n"
+        "اختر من الأزرار بالأسفل لإدارة اختباراتك أو رصيدك أو إعداداتك:"
     )
 
 
-def export_settings_text(summary_lines, notice=""):
-    """نص الشاشة الرئيسية لـ «إعدادات إضافية» (HTML): الأقسام + ما الذي سيُطبَّق على الملف حالياً."""
-    current = ("\n".join(f"• {escape(line)}" for line in summary_lines)
-               if summary_lines else "لا إعدادات إضافية — يُصدَّر الملف بالشكل المعتاد.")
+def get_home_text(lang: str = "ar") -> str:
+    if lang and lang != "ar":
+        try:
+            from services.i18n import get_ui_strings
+            ui = get_ui_strings(lang)
+            if ui:
+                return ui["home_text"]
+        except Exception:
+            pass
+    return HOME_TEXT
+
+
+def get_upload_text(lang: str = "ar") -> str:
+    if lang and lang != "ar":
+        try:
+            from services.i18n import get_ui_strings
+            ui = get_ui_strings(lang)
+            if ui:
+                return ui["upload_text"]
+        except Exception:
+            pass
+    return UPLOAD_TEXT
+
+
+def get_help_text(lang: str = "ar") -> str:
+    if lang and lang != "ar":
+        try:
+            from services.i18n import get_ui_strings
+            ui = get_ui_strings(lang)
+            if ui:
+                return ui["help_text"]
+        except Exception:
+            pass
+    return HELP_TEXT
+
+
+def generation_wait_text(num_questions: int, source_kind: str = "file") -> str:
     return (
-        (f"{escape(notice)}\n\n" if notice else "")
-        + "⚙️ <b>إعدادات إضافية لورقة الاختبار</b>\n\n"
-        "كلها اختيارية. افتح قسماً لتعديله، أو اختر «قوالب جاهزة» لضبط التخطيط بضغطة واحدة، ثم حمّل الملف مباشرة من أزرار PDF وWord وExcel أدناه، أو «تطبيق ورجوع» للعودة لشاشة الصيغة.\n"
-        "«💾 حفظ كإعداداتي» يحفظ إعداداتك العامة (الاسم، الصف، الأعمدة، المسودة...) لتُطبَّق تلقائياً على كل اختبار؛ "
-        "أما العنوان والمادة والتاريخ والمدة والعلامة وعدد الأسئلة بالصفحة فخاصة بكل كويز وتُمسح عند الانتقال لغيره.\n\n"
-        f"<b>الحالي:</b>\n{current}"
+        f"⏳ جاري تحليل المحتوى وتوليد <b>{num_questions} سؤال</b>...\n"
+        "قد يستغرق ذلك بضع ثوانٍ حسب حجم المادة."
     )
 
 
-_EXPORT_SECTION_INTROS = {
-    "h": (
-        "📝 <b>بيانات الورقة</b>\n\n"
-        "تظهر أعلى ورقة الاختبار. اضغط على حقل لتعديله، أو استعمل «⚡ تعبئة سريعة» لكتابتها كلها برسالة واحدة.\n"
-        "العنوان والمادة والتاريخ والمدة والعلامة خاصة بهذا الكويز، أما اسم الأستاذ والصف فتبقى لباقي الاختبارات."
-    ),
-    "l": (
-        "📐 <b>التخطيط والمظهر</b>\n\n"
-        "عدد الأسئلة بالصفحة، وترقيم الصفحات، وتقسيم الصفحة إلى عمودين، ومساحة المسودة تحت كل سؤال.\n"
-        "⚠️ عدد الأسئلة بالصفحة وتقسيم الصفحة والمسودة تُطبَّق على <b>PDF وWord فقط</b>، ولا تؤثر على Excel."
-    ),
-    "a": (
-        "🔑 <b>الإجابات وسطر الطالب</b>\n\n"
-        "اختر شكل الإجابات في نسخة الأستاذ (مع الشرح أو مفتاح الإجابة فقط)، "
-        "وهل يظهر سطر بيانات الطالب (الاسم/الشعبة/التاريخ) في الورقة.\n"
-        "⚠️ «مفتاح الإجابة فقط» يخص <b>نسخة الأستاذ فقط</b>؛ نسخة الطالب بلا إجابات أصلاً."
-    ),
-}
-
-
-def export_section_text(section, notice=""):
-    """نص شاشة قسم فرعي من الإعدادات الإضافية (h: بيانات الورقة، l: التخطيط، a: الإجابات)."""
-    return ((f"{escape(notice)}\n\n" if notice else "")
-            + _EXPORT_SECTION_INTROS.get(section, _EXPORT_SECTION_INTROS["l"]))
-
-
-_EXPORT_CHOICE_TEXTS = {
-    "pn": "📃 <b>ترقيم الصفحات</b>\n\nاختر: «افتراضي» (كما يحدده التنسيق)، أو ظاهر، أو مخفي.",
-    "cl": ("📰 <b>تقسيم الصفحة</b>\n\nعمود واحد أو عمودان. الخط الفاصل بين العمودين يظهر مع «عمودان» فقط.\n"
-           "يُطبَّق على PDF وWord فقط (لا على Excel)."),
-    "ds": ("✍️ <b>مسودة تحت كل سؤال</b>\n\nاختر حجم المساحة الفارغة تحت كل سؤال، أو «بدون».\n"
-           "يُطبَّق على PDF وWord فقط (لا على Excel)."),
-    "dt": ("📐 <b>شكل المسودة</b>\n\n«تلقائي» يختار حسب نوع السؤال (مربعات للرياضيات والعلوم، وأسطر لغيرها).\n"
-           "يُطبَّق على PDF وWord فقط (لا على Excel)."),
-}
-
-
-def export_choice_text(kind):
-    """نص شاشة اختيار قيمة واحدة: pn ترقيم الصفحات، cl التقسيم، ds حجم المسودة، dt شكلها."""
-    return _EXPORT_CHOICE_TEXTS.get(kind, _EXPORT_CHOICE_TEXTS["pn"])
-
-
-def export_bulk_prompt_text():
-    """رسالة «التعبئة السريعة»: مثال جاهز ينسخه المعلم ويعدّل عليه."""
-    return (
-        "⚡ <b>تعبئة سريعة لبيانات الورقة</b>\n\n"
-        "أرسل بياناتك برسالة واحدة، حقل بكل سطر، بصيغة «الاسم: القيمة»:\n\n"
-        "<code>المادة: رياضيات\n"
-        "الصف: التاسع\n"
-        "التاريخ: 2026/11/07\n"
-        "المدة: 45 دقيقة\n"
-        "العلامة: 100\n"
-        "العنوان: اختبار الوحدة الثانية\n"
-        "الأستاذ: أحمد</code>\n\n"
-        "• اكتب الحقول التي تريدها فقط، وما لم تذكره يبقى كما هو.\n"
-        "• يمكن كتابة أكثر من حقل بسطر واحد مفصولة بفاصلة.\n"
-        "• القيمة الجديدة تستبدل الحالية لنفس الحقل."
+def low_points_keyboard() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="💳 شحن الرصيد", callback_data="recharge_info")],
+            [types.InlineKeyboardButton(text="💰 رصيدي وهداياي", callback_data="gift:wallet")],
+            [types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="student_home")],
+        ]
     )
 
 
-def export_presets_text(presets):
-    """شاشة القوالب الجاهزة. presets = LAYOUT_PRESETS (icon / label / desc لكل قالب)."""
-    lines = "\n".join(f"{p['icon']} <b>{escape(p['label'])}:</b> {escape(p['desc'])}" for p in presets.values())
-    return (
-        "⚡ <b>قوالب جاهزة للتخطيط</b>\n\n"
-        "اختر قالباً يضبط التخطيط بضغطة واحدة (الأعمدة والمسودة وترقيم الصفحات). "
-        "بيانات الورقة واسم الأستاذ وإعدادات الإجابات لا تتغيّر، ويمكنك تعديل التفاصيل بعده.\n\n"
-        f"{lines}"
+def support_keyboard() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="💬 تواصل مع الدعم الفني", url=SUPPORT_BOT_URL)],
+            [types.InlineKeyboardButton(text="📢 قناة الأخبار", url=OFFICIAL_CHANNEL_URL)],
+            [types.InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="student_home")],
+        ]
     )
 
 
-def _whole_points(points):
-    """الرقم الصحيح فقط (بدون كسور) لعرض الرصيد في رسالة الترحيب.
-
-    يُقطَّع الكسر ولا يُقرَّب للأعلى كي لا يرى الطالب أكثر مما يملك فعلاً؛
-    التفاصيل الدقيقة (بالفاصلة) تبقى في «رصيدي وهداياي».
-    الإبسيلون يتفادى أخطاء الفاصلة العائمة (مثلاً 35.9999999 تُعرض 36).
-    """
-    try:
-        return floor(float(points or 0) + 1e-9)
-    except (TypeError, ValueError):
-        return 0
-
-
-def welcome_text(points, free_points, gift_points, paid_points, renewed=False):
-    greeting = "☀️ <b>أهلاً بعودتك — تجدّد رصيدك اليومي</b>" if renewed else "👋 <b>أهلاً بعودتك</b>"
-    return (
-        f"{greeting}\n\n"
-        "أرسل محتواك مباشرة، أو اختر «كيف أستخدم البوت؟» لتعرف خطوات إنشاء الكويز.\n\n"
-        f"💰 <b>رصيدك المتاح: {_whole_points(points)} نقطة</b>\n"
-        "تفاصيل الرصيد موجودة في «رصيدي وهداياي».\n"
-        "تظهر تكلفة كل طلب قبل بدء التوليد."
-    )
+try:
+    from services.i18n import install_ui_localization_hooks as _install_hooks
+    _install_hooks()
+except Exception:
+    pass
