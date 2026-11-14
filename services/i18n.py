@@ -710,7 +710,8 @@ def build_recharge_view(
         else:
             rows.append([
                 types.InlineKeyboardButton(
-                    text=_support_contact_button_label(lang),\n                    callback_data="recharge_choose_package",
+                    text=_support_contact_button_label(lang),
+                    callback_data="recharge_choose_package",
                 )
             ])
         return text, types.InlineKeyboardMarkup(inline_keyboard=rows)
