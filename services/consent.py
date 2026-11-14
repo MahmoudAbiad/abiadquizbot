@@ -223,7 +223,8 @@ async def get_updated_documents(user_id: int):
         return []
     row = result.data[0]
     saved = {
-        "terms": int(row.get("terms_version") or 0),\n        "privacy": int(row.get("privacy_version") or 0),
+        "terms": int(row.get("terms_version") or 0),
+        "privacy": int(row.get("privacy_version") or 0),
     }
     current = {"terms": tv, "privacy": pv}
     return [name for name in ("terms", "privacy") if 0 < saved[name] < current[name]]
