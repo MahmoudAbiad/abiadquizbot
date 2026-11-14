@@ -609,7 +609,7 @@ def _activity_event_detail(metadata, event_type=None):
     elif event_type == "quiz_generation_failed":
         labels = [("failure_reason", "السبب"), ("refund_status", "استرجاع النقاط"),
                   ("failure_stage", "المرحلة"), ("cost", "التكلفة"),
-                  ("requested_count", "عدد الأسئلة")]
+                  ("requested_count", "عدد الأسئلة"), ("extracted_count", "المستخرج")]
     else:
         labels = [("questions", "أسئلة"), ("questions_generated", "أسئلة مولّدة"),
                   ("requested_count", "المطلوب"), ("round", "جولة"), ("score", "صحيحة"),

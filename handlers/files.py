@@ -53,6 +53,7 @@ from helpers.supabase_helper import (
     reward_referrer_if_eligible, get_classification_lock, submit_classification_vote,
     has_user_voted_on_classification, is_feature_enabled,
 )
+from helpers.supabase_helper.gifts import refund as refund_wallet
 from services.usage_tracking import track_upload_rejection
 from helpers.r2_helper import delete_file_temp, delete_file_temp_batch, download_file_temp_to_file
 from utils import calculate_file_hash, ensure_directory_exists, safe_file_cleanup, safe_title, short_token_to_hash
@@ -1203,6 +1204,7 @@ def _track_quiz_generation_failure(
         "refund_status": str(refund_status)[:24],
         "failure_stage": str(failure_stage)[:32],
         "requested_count": requested_count,
+        "extracted_count": generation_meta.get("extracted_count"),
         "items_count": items_count,
         "cost": cost,
         "business_mode": mode,
@@ -1461,6 +1463,16 @@ async def handle_count_start(call: types.CallbackQuery, state: FSMContext) -> No
             await state.set_state(None)
             await status_msg.edit_text("⚠️ <b>فشل توليد الأسئلة!</b> رصيدك آمن ولم يتم خصم أي نقاط.", parse_mode="HTML")
             return
+
+        if (charged_this_attempt
+                and len(quiz_data) < count
+                and data.get("subject_type") in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
+                and data.get("question_type") != QUESTION_TYPE_SIMILAR_MATH):
+            actual_cost = await calculate_quiz_points_cost(items, len(quiz_data), is_album)
+            if actual_cost < cost and data.get("debit_id") and cost > 0:
+                refund_ratio = round((cost - actual_cost) / cost, 4)
+                await refund_wallet(call.from_user.id, data["debit_id"], refund_ratio)
+                cost = actual_cost
 
         # 🆕 (لوحة الأدمن: "📊 سجل توليد الكويزات") - نُرفق بيانات آخر توليد ناجح (الموديل
         # ومزوّده والمدة الكاملة بالثواني، راجع gemini_helper.get_last_generation_metadata)
@@ -1954,6 +1966,5 @@ async def process_web_uploaded_images(
 
 
 files_router = router
-
 
 

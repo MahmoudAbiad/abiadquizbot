@@ -80,7 +80,7 @@ class ExamCountTests(unittest.IsolatedAsyncioTestCase):
         price.assert_awaited_once_with(1, 21, False)
 
     async def test_service_uses_reviewed_count_and_rejects_short_exam_before_save(self):
-        for actual, expected_error in ((1, 'extraction_count_mismatch'), (10, ''), (12, '')):
+        for actual, expected_error in ((0, 'extraction_count_mismatch'), (1, ''), (10, ''), (12, '')):
             with self.subTest(actual=actual):
                 questions = [dict(question=str(i), options=['a','b'], correct_option_id=0)
                              for i in range(actual)]
@@ -105,12 +105,14 @@ class ExamCountTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(env['generate_quiz_smart'].await_args.kwargs['batch_enabled'])
                 if error:
                     self.assertIsNone(quiz)
-                    self.assertEqual(meta['extracted_count'], 1)
+                    self.assertEqual(meta['extracted_count'], actual)
                     save.assert_not_awaited()
                 else:
-                    self.assertEqual(len(quiz), 10)
+                    self.assertEqual(len(quiz), min(actual, 10))
+                    self.assertEqual(meta['requested_count'], 10)
+                    self.assertEqual(meta['extracted_count'], actual)
                     self.assertEqual(quiz[0]['options'], ['a','b'])
-                    self.assertEqual(len(save.await_args.kwargs['quiz_data']), 10)
+                    self.assertEqual(len(save.await_args.kwargs['quiz_data']), min(actual, 10))
 
     async def test_incomplete_exam_refunds_once_and_retains_upload_for_count_edit(self):
         fixture = regressions.DebitTests()

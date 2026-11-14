@@ -39,6 +39,7 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
             WalletDebitError=WalletDebitError, WALLET_DEBIT_ERROR_TEXT=WALLET_DEBIT_ERROR_TEXT,
             _QUIZ_CHARGE_STATE_KEYS=('debited_cost','debited_free','debited_paid','debit_id','debited_gift'),
             validate_question_count=lambda count:(True,''), SUBJECT_QUIZ_SOLVED='solved',SUBJECT_QUIZ_UNSOLVED='unsolved',
+            QUESTION_TYPE_SIMILAR_MATH='similar_math',
             calculate_quiz_points_cost=AsyncMock(return_value=2),determine_execution_mode=lambda *a,**kw:'Standard',
             _current_user=AsyncMock(return_value={'points':100}),update_user_stats=AsyncMock(return_value={'debited_free':1.5,'debited_paid':0.5,'debited_gift':0,'debit_id':'receipt-1'}),
             log_usage_event=AsyncMock(),spawn=spawn,logger=Mock(),log_error=Mock(),log_warning=Mock(),
@@ -46,7 +47,7 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
             os=os,Dict=dict,List=list,Any=object,InvalidUploadError=InvalidUploadError,safe_title=lambda t:t,
             MSG_UPLOAD_FILE_MISSING='FILE-MISSING',
             execute_quiz_generation_workflow=AsyncMock(return_value=([{'question':'ok'}],'own-id','',None)),
-            _run_processing_heartbeat=AsyncMock(), _track_quiz_generation_failure=Mock(), reward_referrer_if_eligible=AsyncMock(),start_loaded_quiz=loaded,safe_file_cleanup=Mock())
+            _run_processing_heartbeat=AsyncMock(), _track_quiz_generation_failure=Mock(), reward_referrer_if_eligible=AsyncMock(),start_loaded_quiz=loaded,safe_file_cleanup=Mock(), refund_wallet=AsyncMock())
         self.state=State({'selected_question_count':5,'items_count':1,'debited_cost':999,'debited_free':999,'debited_paid':999,'source_title':'keep'})
         return self.env['handle_count_start']
 
@@ -69,6 +70,13 @@ class DebitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state.data['source_title'],'keep')
         self.assertTrue(all(key not in self.state.data for key in ('debited_cost','debited_free','debited_paid','debit_id','debited_gift')))
         self.env['refund_user_on_failure'].assert_not_awaited()
+
+    async def test_partial_ready_exam_refunds_unused_charge(self):
+        fn=self.make()
+        self.state.data.update({'subject_type': 'solved', 'question_type': 'general'})
+        self.env['calculate_quiz_points_cost'].side_effect = [10, 2]
+        await fn(self.call, self.state)
+        self.env['refund_wallet'].assert_awaited_once_with(1, 'receipt-1', 0.8)
 
     async def test_failed_ai_refunds_once_even_if_error_message_fails(self):
         fn=self.make();self.env['execute_quiz_generation_workflow'].return_value=(None,None,'ai_failed',None)
@@ -371,4 +379,3 @@ class AudioRefundTests(unittest.IsolatedAsyncioTestCase):
                 logger=Mock(),log_info=Mock(),log_error=Mock())
             await env['handle_audio_confirm_start'](call,state)
             env['refund_wallet'].assert_awaited_once_with(1,'audio-1')
-
