@@ -456,17 +456,18 @@ async def execute_quiz_generation_workflow(
             log_warning(logger, "QUIZ_AI_DEADLINE_EXCEEDED")
             return None, None, "ai_timeout", None
 
-        if not quiz_data:
-            return None, None, "ai_failed", None
-
         if quiz_extraction_instruction:
-            # The reviewed count governs extraction, routing and billing alike.
-            # Never pad a short source or persist a silently incomplete exam.
-            if len(quiz_data) < count:
-                metadata = dict(get_last_generation_metadata() or {})
-                metadata.update(requested_count=count, extracted_count=len(quiz_data))
+            metadata = dict(get_last_generation_metadata() or {})
+            metadata.update(requested_count=count, extracted_count=len(quiz_data or []))
+            if not quiz_data:
                 return None, None, "extraction_count_mismatch", metadata
             quiz_data = quiz_data[:count]
+        elif not quiz_data:
+            return None, None, "ai_failed", None
+
+        if not quiz_extraction_instruction:
+            metadata = dict(get_last_generation_metadata() or {})
+            metadata.update(requested_count=count, extracted_count=len(quiz_data))
 
         # Validate extracted choices before persistence, rendering and polls.
         if (subject_type in (SUBJECT_QUIZ_SOLVED, SUBJECT_QUIZ_UNSOLVED)
@@ -475,13 +476,13 @@ async def execute_quiz_generation_workflow(
                 quiz_data = normalize_quiz_option_count(quiz_data)
             except ValueError as exc:
                 log_warning(logger, f"[quiz_service] Refusing malformed ready-made exam options: {exc}")
-                return None, None, "ai_failed", get_last_generation_metadata()
+                return None, None, "ai_failed", metadata
 
         # 3.1 🆕 بيانات آخر توليد ناجح (موديل/مزوّد/توكنز) - تُقرأ فوراً بعد عودة
         # generate_quiz_smart وبنفس الـ Task (راجع ContextVar بـ gemini_helper.py). كانت
         # total_tokens تُحفظ صفراً دائماً بالأسفل لأن generate_quiz_smart لا يُرجع التوكنز
         # ضمن قيمة عودتها الفعلية (Optional[List[Dict]]) - هذا هو مصدرها الفعلي الوحيد.
-        generation_metadata = get_last_generation_metadata() or {}
+        generation_metadata = metadata
         generation_total_tokens = generation_metadata.get("total_tokens", 0)
         # 🆕 يُسجَّل بجدول ai_generation_log المخصص (كان فارغاً تماماً حتى الآن) - راجع
         # migration_ai_generation_log_tokens.sql لأعمدة input_tokens/output_tokens الجديدة.
@@ -542,5 +543,4 @@ async def execute_quiz_generation_workflow(
         if is_math_mode and new_quiz_id and quiz_data:
             spawn(_prefetch_math_quiz_images(new_quiz_id, quiz_data))
 
-        return quiz_data, new_quiz_id, "", get_last_generation_metadata()
-
+        return quiz_data, new_quiz_id, "", metadata
