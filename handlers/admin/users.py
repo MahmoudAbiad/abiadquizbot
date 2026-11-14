@@ -19,6 +19,7 @@ from helpers.supabase_helper import (
     admin_add_points,
     admin_grant_direct_gift,
     admin_get_global_stats, 
+    admin_find_exact_user,
     admin_search_user,
     admin_get_users_page,
     admin_get_user_deletion_summary,
@@ -416,9 +417,13 @@ async def _present_direct_message_target(answer, state: FSMContext, user: dict):
 
 @router.message(AdminState.waiting_for_direct_message_target)
 async def process_direct_message_target(msg: types.Message, state: FSMContext):
-    query = (msg.text or "").strip()
+    query = (msg.text or "").strip().lstrip("@").strip()
     if not query:
         return await msg.answer("⚠️ أرسل آيدي المستخدم أو معرفه.", reply_markup=get_cancel_keyboard())
+
+    exact_user = await admin_find_exact_user(query)
+    if exact_user:
+        return await _present_direct_message_target(msg.answer, state, exact_user)
 
     users_data = await admin_search_user(query)
     if not users_data:
@@ -427,7 +432,31 @@ async def process_direct_message_target(msg: types.Message, state: FSMContext):
             reply_markup=get_cancel_keyboard(),
         )
 
-    await _present_direct_message_target(msg.answer, state, users_data[0])
+    report = (
+        f"🔍 <b>نتائج البحث للرسالة المخصصة: {html.escape(query[:100])}</b>\n"
+        f"👥 تم العثور على <code>{len(users_data)}</code> مستخدم مطابق — اختر الطالب المطلوب:\n\n"
+    )
+    keyboard = []
+    for idx, user in enumerate(users_data[:10], start=1):
+        raw_uname = str(user.get("username") or "").strip()
+        has_uname = bool(raw_uname and raw_uname != "Unknown")
+        uname_str = f"@{raw_uname[:64]}" if has_uname else "بدون يوزر"
+        name_parts = [
+            str(user.get(field) or "").strip()
+            for field in ("first_name", "last_name")
+            if user.get(field) and str(user.get(field)).strip() != "Unknown"
+        ]
+        name = " ".join(name_parts)[:100] or "بدون اسم"
+        report += (
+            f"<b>{idx}. {html.escape(name)}</b>\n"
+            f"👤 {html.escape(uname_str)} — 🆔 <code>{user['user_id']}</code>\n\n"
+        )
+        btn_label = f"✉️ {idx}. {uname_str if has_uname else name[:24]} ({user['user_id']})"
+        keyboard.append([types.InlineKeyboardButton(
+            text=btn_label[:64], callback_data=f"admin_direct_start_{user['user_id']}"
+        )])
+    keyboard.append([types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")])
+    await msg.answer(report, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("admin_direct_start_"))
@@ -1153,13 +1182,21 @@ async def render_user_search_page(event, query: str, token: str, page: int = 1):
                   f"👥 {total} مستخدم — الصفحة {page} من {pages}\n\n")
     keyboard = []
     for index, user in enumerate(users, start=(page - 1) * 5 + 1):
-        username = str(user.get("username") or "بدون يوزر")[:64]
-        name = " ".join(str(user.get(field) or "") for field in ("first_name", "last_name"))[:100]
+        raw_uname = str(user.get("username") or "").strip()
+        has_uname = bool(raw_uname and raw_uname != "Unknown")
+        username = f"@{raw_uname[:64]}" if has_uname else "بدون يوزر"
+        name_parts = [
+            str(user.get(field) or "").strip()
+            for field in ("first_name", "last_name")
+            if user.get(field) and str(user.get(field)).strip() != "Unknown"
+        ]
+        name = " ".join(name_parts)[:100] or "بدون اسم"
         report += (f"<b>{index}. {html.escape(name)}</b>\n"
                    f"👤 {html.escape(username)} — 🆔 <code>{user['user_id']}</code>\n"
                    f"🔗 {_telegram_profile_link(user['user_id'])}\n\n")
+        btn_label = f"👤 {index}. {raw_uname if has_uname else name[:24]} ({user['user_id']})"
         keyboard.append([types.InlineKeyboardButton(
-            text=f"👤 {index}. {username}", callback_data=f"admin_user_profile_{user['user_id']}")])
+            text=btn_label[:64], callback_data=f"admin_user_profile_{user['user_id']}")])
     navigation = []
     if page > 1:
         navigation.append(types.InlineKeyboardButton(text="⬅️ السابق", callback_data=f"admin_search_page_{token}_{page-1}"))
@@ -1182,6 +1219,14 @@ async def process_search_user(msg: types.Message, state: FSMContext):
     if not query:
         await msg.answer("⚠️ أرسل الآيدي أو المعرف أو جزءاً من المعرف.")
         return
+
+    # إذا أدخل الأدمن آيدي كاملاً أو معرفاً كاملاً ومطابقاً، نفتح بروفايل الطالب فوراً بدون شاشة نتائج البحث
+    exact_user = await admin_find_exact_user(query)
+    if exact_user:
+        await state.clear()
+        await render_user_profile(msg, exact_user["user_id"])
+        return
+
     token = uuid.uuid4().hex[:12]
     await state.clear()
     await state.update_data(admin_user_search=query, admin_user_search_token=token)

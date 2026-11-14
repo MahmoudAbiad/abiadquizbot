@@ -47,7 +47,7 @@ async def get_main_menu_keyboard(bot_username: str, user_id: int) -> types.Inlin
     try:
         ref_link = f"https://t.me/{bot_username}?start={user_id}"
         # 🆕 مكافأة الإحالة تُقرأ من app_settings كي يبقى نص الزر متطابقاً مع القيمة
-        # الفعلية القable للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
+        # الفعلية القابلة للتعديل من لوحة الإدارة، بدل رقم ثابت في الكود.
         referral_bonus_points = await get_setting("referral_bonus_points")
         referral_row = [
             types.InlineKeyboardButton(
@@ -1212,10 +1212,7 @@ def get_admin_user_actions_keyboard(user_id: int, username: Optional[str] = None
             types.InlineKeyboardButton(text="📈 نشاط هذا الطالب", callback_data=f"admin_user_activity_{user_id}"),
             types.InlineKeyboardButton(text="🎯 كويزات هذا الطالب", callback_data=f"admin_user_quizzes_{user_id}_p_1")
         ],
-        [
-            types.InlineKeyboardButton(text="⚡ تصفير عمليات Redis", callback_data=f"admin_user_redis_reset_{user_id}"),
-            types.InlineKeyboardButton(text="🗑 خيارات حذف الطالب", callback_data=f"admin_user_delete_menu_{user_id}")
-        ],
+        [types.InlineKeyboardButton(text="🗑 خيارات حذف الطالب", callback_data=f"admin_user_delete_menu_{user_id}")],
         [build_contact_button(user_id, username)],
         [types.InlineKeyboardButton(text="🏠 الرئيسية", callback_data="admin_main_menu")]
     ]
