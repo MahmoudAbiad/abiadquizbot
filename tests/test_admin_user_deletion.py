@@ -47,10 +47,10 @@ kb_env = load_functions(
 
 
 class AdminUserDeletionAndRedisTests(unittest.IsolatedAsyncioTestCase):
-    def test_user_actions_keyboard_includes_redis_and_delete_buttons(self):
+    def test_user_actions_keyboard_has_delete_menu_and_redis_is_inside_delete_menu_only(self):
         kb = kb_env["get_admin_user_actions_keyboard"](12345, username="student1")
         callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row if btn.callback_data]
-        self.assertIn("admin_user_redis_reset_12345", callbacks)
+        self.assertNotIn("admin_user_redis_reset_12345", callbacks)
         self.assertIn("admin_user_delete_menu_12345", callbacks)
 
     def test_delete_menu_and_confirm_keyboards_enforce_kp_test_account_rule(self):
@@ -137,7 +137,7 @@ class AdminUserDeletionAndRedisTests(unittest.IsolatedAsyncioTestCase):
             "kept_quizzes_count": 3,
         })
         summary_mock = AsyncMock(return_value={
-            "user": {"user_id": 8959792818, "username": "Kp7771a"},
+            "user": {"user_id": 77777, "username": "kp_test"},
             "owned_quizzes_count": 2,
             "consent": {"status": "accepted", "terms_version": 1, "privacy_version": 1},
             "is_test_account": True,
@@ -197,13 +197,13 @@ class AdminUserDeletionAndRedisTests(unittest.IsolatedAsyncioTestCase):
 
         # 4. Consent only mode on designated @Kp7771a test account
         consent_call = SimpleNamespace(
-            data="admin_del_exec_consent_8959792818",
+            data="admin_del_exec_consent_77777",
             message=SimpleNamespace(),
             answer=AsyncMock(),
         )
         await env["execute_user_delete_action"](consent_call)
-        delete_rpc.assert_awaited_with(8959792818, "consent_only")
-        purge_consent.assert_awaited_with(8959792818)
+        delete_rpc.assert_awaited_with(77777, "consent_only")
+        purge_consent.assert_awaited_with(77777)
         render_menu.assert_awaited()
 
         # 5. Block consent_only on non-test account

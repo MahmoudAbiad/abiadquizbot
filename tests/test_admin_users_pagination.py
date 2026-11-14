@@ -37,10 +37,18 @@ class Query:
         self.filters.append(lambda row: row[column] == value)
         return self
 
+    def neq(self, column, value):
+        self.filters.append(lambda row: row.get(column) != value)
+        return self
+
     def ilike(self, column, pattern):
         self.database.pattern = pattern
-        needle = pattern[1:-1].replace('\\_', '_').replace('\\%', '%').replace('\\\\', '\\')
-        self.filters.append(lambda row: needle.lower() in row[column].lower())
+        if pattern.startswith('%') and pattern.endswith('%'):
+            needle = pattern[1:-1].replace('\\_', '_').replace('\\%', '%').replace('\\\\', '\\')
+            self.filters.append(lambda row: needle.lower() in (row.get(column) or '').lower())
+        else:
+            needle = pattern.replace('\\_', '_').replace('\\%', '%').replace('\\\\', '\\')
+            self.filters.append(lambda row: (row.get(column) or '').lower() == needle.lower())
         return self
 
     async def execute(self):
@@ -62,7 +70,17 @@ class Database:
 
 class AdminUsersTests(unittest.IsolatedAsyncioTestCase):
     def helpers(self, database):
-        return load_functions('helpers/supabase_helper/admin_ops.py', {'_admin_users_query', 'admin_get_users_page'}, supabase=database, enrich_balances=AsyncMock(side_effect=lambda rows: rows))
+        return load_functions(
+            'helpers/supabase_helper/admin_ops.py',
+            {'_admin_users_query', '_scan_users_by_partial_id', 'admin_find_exact_user', 'admin_get_users_page'},
+            supabase=database,
+            enrich_balances=AsyncMock(side_effect=lambda rows: rows),
+            logger=Mock(),
+            Optional=object,
+            Dict=dict,
+            List=list,
+            Any=object,
+        )
 
     async def test_registry_can_reach_users_beyond_1000(self):
         db = Database()
@@ -82,15 +100,63 @@ class AdminUsersTests(unittest.IsolatedAsyncioTestCase):
             ids.extend(r['user_id'] for r in rows)
         self.assertEqual(ids, list(range(12, 0, -1)))
 
-    async def test_search_underscore_is_literal_and_id_is_exact(self):
+    async def test_search_underscore_is_literal_and_partial_id_matches_all_candidates(self):
         db = Database(12)
         db.rows.append(dict(user_id=13, username='mahmoudX1', joined_at='2026-10-02'))
-        helper = self.helpers(db)['admin_get_users_page']
+        helpers = self.helpers(db)
+        helper = helpers['admin_get_users_page']
         rows, count, *_ = await helper(1, 'mahmoud_1')
         self.assertEqual(count, 4)
         self.assertEqual(db.pattern, '%mahmoud\\_1%')
+        # Searching partial ID '1' returns all users whose ID contains '1' (13, 12, 11, 10, 1)
         rows, count, *_ = await helper(1, '1')
-        self.assertEqual([r['user_id'] for r in rows], [1])
+        self.assertEqual(count, 5)
+        self.assertEqual([r['user_id'] for r in rows], [13, 12, 11, 10, 1])
+
+    async def test_exact_user_lookup_vs_partial_search_routing(self):
+        db = Database(12)
+        helpers = self.helpers(db)
+        find_exact = helpers['admin_find_exact_user']
+
+        # Exact full ID -> returns exact user
+        exact_by_id = await find_exact('12')
+        self.assertEqual(exact_by_id['user_id'], 12)
+
+        # Incomplete ID that doesn't exist as an exact user_id -> returns None so partial list is shown
+        self.assertIsNone(await find_exact('9999'))
+
+        # Exact full username -> returns exact user
+        exact_by_uname = await find_exact('@MAHMOUD_5')
+        self.assertEqual(exact_by_uname['user_id'], 5)
+
+        # Partial username ('mahmoud') -> returns None so partial search list is shown
+        self.assertIsNone(await find_exact('mahmoud'))
+
+        # Verify process_search_user jumps directly to profile on exact match, and shows search list on partial
+        render_profile = AsyncMock()
+        render_search = AsyncMock()
+        env = load_functions(
+            'handlers/admin/users.py',
+            {'process_search_user'},
+            admin_find_exact_user=find_exact,
+            render_user_profile=render_profile,
+            render_user_search_page=render_search,
+            uuid=types.SimpleNamespace(uuid4=lambda: types.SimpleNamespace(hex='abcdef1234567890')),
+            types=types.SimpleNamespace(Message=object),
+            FSMContext=object,
+        )
+        state = types.SimpleNamespace(clear=AsyncMock(), update_data=AsyncMock())
+
+        msg_exact = types.SimpleNamespace(text='@mahmoud_5', answer=AsyncMock())
+        await env['process_search_user'](msg_exact, state)
+        render_profile.assert_awaited_once_with(msg_exact, 5)
+        render_search.assert_not_awaited()
+
+        render_profile.reset_mock()
+        msg_partial = types.SimpleNamespace(text='mahmoud', answer=AsyncMock())
+        await env['process_search_user'](msg_partial, state)
+        render_profile.assert_not_awaited()
+        render_search.assert_awaited_once_with(msg_partial, 'mahmoud', 'abcdef123456')
 
     async def test_outdated_page_clamped_after_user_deletion(self):
         db = Database(6)
@@ -144,3 +210,6 @@ class AdminUsersTests(unittest.IsolatedAsyncioTestCase):
         await env['callback_user_search_page'](call, state)
         env['render_user_search_page'].assert_awaited_once_with(call, 'mahmoud', 'current', 3)
 
+
+if __name__ == '__main__':
+    unittest.main()

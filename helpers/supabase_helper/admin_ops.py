@@ -161,15 +161,96 @@ async def admin_get_global_stats() -> Dict[str, int]:
         logger.error(f"Error getting global stats: {e}")
         return {"total_users": 0, "total_questions": 0}
 
+async def admin_find_exact_user(query: str) -> Optional[Dict[str, Any]]:
+    """
+    البحث عن تطابق كامل ودقيق للمستخدم:
+      - إما آيدي كامل ومطابق تماماً (user_id == int(query))
+      - أو معرف كامل ومطابق تماماً غير حساس لحالة الأحرف (LOWER(username) == LOWER(query))
+    تُرجع None إذا كان المدخل جزءاً من معرف أو جزءاً من آيدي (بحث جزئي).
+    """
+    try:
+        clean = (query or "").strip().lstrip("@").strip()
+        if not clean:
+            return None
+        if clean.isdigit():
+            res = await supabase.table("users").select("*").eq("user_id", int(clean)).limit(1).execute()
+            rows = res.data or []
+            if rows:
+                enriched = await enrich_balances(rows)
+                return enriched[0] if enriched else None
+            return None
+
+        if clean.lower() == "unknown":
+            return None
+        escaped = clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        res = await supabase.table("users").select("*").ilike("username", escaped).limit(5).execute()
+        for row in (res.data or []):
+            uname = str(row.get("username") or "").strip().lstrip("@")
+            if uname and uname.lower() != "unknown" and uname.lower() == clean.lower():
+                enriched = await enrich_balances([row])
+                return enriched[0] if enriched else None
+        return None
+    except Exception as e:
+        logger.error(f"Error in admin_find_exact_user({query}): {e}")
+        return None
+
+
+async def _scan_users_by_partial_id(digits: str) -> List[Dict[str, Any]]:
+    """جلب جميع المستخدمين الذين يحتوي user_id الخاص بهم (أو معرفهم) على سلسلة الأرقام المدخلة."""
+    matched: List[Dict[str, Any]] = []
+    last_id = None
+    while True:
+        req = supabase.table("users").select("*").order("user_id").limit(500)
+        if last_id is not None:
+            req = req.gt("user_id", last_id)
+        res = await req.execute()
+        batch = res.data or []
+        if not batch:
+            break
+        for row in batch:
+            uid_str = str(row.get("user_id") or "")
+            uname = str(row.get("username") or "").strip()
+            uname_valid = uname and uname.lower() != "unknown"
+            if digits in uid_str or (uname_valid and digits in uname.lower()):
+                matched.append(row)
+        if len(batch) < 500:
+            break
+        last_id = batch[-1]["user_id"]
+
+    # ترتيب النتائج: المطابقة في بداية الآيدي أولاً، ثم الأحدث انضماماً فالآيدي الأعلى
+    matched.sort(
+        key=lambda r: (
+            str(r.get("user_id") or "").startswith(digits),
+            str(r.get("joined_at") or ""),
+            int(r.get("user_id") or 0),
+        ),
+        reverse=True,
+    )
+    return matched
+
+
 async def admin_search_user(query: str) -> Optional[list]:
     try:
-        query = query.strip()
-        if query.isdigit():
-            res = await supabase.table("users").select("*").eq("user_id", int(query)).execute()
+        clean = (query or "").strip().lstrip("@").strip()
+        if not clean:
+            return []
+        if clean.isdigit():
+            res = await supabase.table("users").select("*").eq("user_id", int(clean)).execute()
+            if res.data:
+                return await enrich_balances(res.data)
+            partial_rows = await _scan_users_by_partial_id(clean)
+            return await enrich_balances(partial_rows[:25])
         else:
-            clean_username = query.lstrip('@')
-            res = await supabase.table("users").select("*").ilike("username", f"%{clean_username}%").execute()
-        return await enrich_balances(res.data or [])
+            escaped = clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            req = supabase.table("users").select("*")
+            if hasattr(req, "neq") and clean.lower() != "unknown":
+                req = req.neq("username", "Unknown")
+            res = await req.ilike("username", f"%{escaped}%").execute()
+            rows = [
+                r for r in (res.data or [])
+                if str(r.get("username") or "").strip().lower() != "unknown"
+            ]
+            return await enrich_balances(rows)
     except Exception as e:
         return None
 
@@ -183,20 +264,34 @@ def _admin_users_query(query: str = ""):
         else:
             # Telegram underscores are literal username characters, not SQL wildcards.
             escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            if hasattr(request, "neq") and query.lower() != "unknown":
+                request = request.neq("username", "Unknown")
             request = request.ilike("username", f"%{escaped}%")
     return request.order("joined_at", desc=True).order("user_id", desc=True)
 
 
 async def admin_get_users_page(page: int = 1, query: str = "", page_size: int = 5):
-    """Fetch one database page with an exact count; never preload the full registry."""
+    """Fetch one database page with an exact count; supports partial username and partial user_id."""
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), 100))
+    clean = (query or "").strip().lstrip("@").strip()
     start = (page - 1) * page_size
-    response = await _admin_users_query(query).range(start, start + page_size - 1).execute()
+
+    if clean and clean.isdigit():
+        matched = await _scan_users_by_partial_id(clean)
+        total = len(matched)
+        pages = max(1, (total + page_size - 1) // page_size)
+        if page > pages:
+            page = pages
+            start = (page - 1) * page_size
+        page_rows = matched[start : start + page_size]
+        return await enrich_balances(page_rows), total, page, pages
+
+    response = await _admin_users_query(clean).range(start, start + page_size - 1).execute()
     total = response.count or 0
     pages = max(1, (total + page_size - 1) // page_size)
     if page > pages:
-        return await admin_get_users_page(pages, query, page_size)
+        return await admin_get_users_page(pages, clean, page_size)
     return await enrich_balances(response.data or []), total, page, pages
 
 
