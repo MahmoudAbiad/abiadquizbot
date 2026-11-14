@@ -32,6 +32,9 @@ TERMS_URL = "https://abiad.me/terms-of-service.html?v=10"
 
 CONSENT_ACCEPT = "consent:accept"
 CONSENT_DECLINE = "consent:decline"
+CONSENT_LANG_PICK_PREFIX = "consent:lang:pick:"
+CONSENT_LANG_CONFIRM_PREFIX = "consent:lang:confirm:"
+LANGUAGE_STEP_ENABLED = True
 
 STATE_OK = "ok"              # وافق على النسخة الحالية
 STATE_NEW = "new"            # مستخدم جديد لم يوافق بعد
@@ -138,6 +141,11 @@ async def purge_user_consent_cache(user_id: int) -> int:
             deleted = int(await redis.delete(*keys_to_delete) or 0)
     except Exception as exc:
         logger.warning("Could not purge consent Redis keys for user %s: %s", uid, exc)
+    try:
+        from services.i18n import purge_user_language_cache
+        await purge_user_language_cache(uid)
+    except Exception:
+        pass
     return deleted
 
 
@@ -215,8 +223,7 @@ async def get_updated_documents(user_id: int):
         return []
     row = result.data[0]
     saved = {
-        "terms": int(row.get("terms_version") or 0),
-        "privacy": int(row.get("privacy_version") or 0),
+        "terms": int(row.get("terms_version") or 0),\n        "privacy": int(row.get("privacy_version") or 0),
     }
     current = {"terms": tv, "privacy": pv}
     return [name for name in ("terms", "privacy") if 0 < saved[name] < current[name]]
@@ -278,6 +285,53 @@ def build_consent_keyboard(include_decline: bool = True) -> InlineKeyboardMarkup
     if include_decline:
         decision_row.append(InlineKeyboardButton(text="❌ لا أوافق", callback_data=CONSENT_DECLINE))
     return InlineKeyboardMarkup(inline_keyboard=[decision_row])
+
+
+# ==================== شاشة اختيار اللغة بعد الموافقة ====================
+
+async def detect_initial_language(user: Any) -> str:
+    """التعرف التلقائي على لغة المستخدم من تيليجرام أو استرجاع لغته المحفوظة."""
+    from services.i18n import detect_telegram_language, get_user_language
+    uid = getattr(user, "id", None)
+    if uid is not None:
+        return await get_user_language(uid, fallback_user_or_code=user)
+    return detect_telegram_language(user)
+
+
+async def save_user_language(user_id: int, lang_code: str) -> str:
+    from services.i18n import set_user_language
+    return await set_user_language(user_id, lang_code)
+
+
+def build_language_prompt_text(lang_code: str = "ar") -> str:
+    from services.i18n import build_language_screen_text
+    return build_language_screen_text(lang_code)
+
+
+def build_language_keyboard(selected_lang: str = "ar") -> InlineKeyboardMarkup:
+    from services.i18n import build_language_screen_keyboard
+    return build_language_screen_keyboard(selected_lang, prefix="consent:lang", is_settings=False)
+
+
+def build_localized_accepted_message(
+    lang_code: str = "ar",
+    resuming: bool = False,
+    callback_pending: bool = False,
+) -> str:
+    from services.i18n import build_localized_accepted_text
+    return build_localized_accepted_text(lang_code, resuming=resuming, callback_pending=callback_pending)
+
+
+def get_continue_button_label(lang_code: str = "ar") -> str:
+    from services.i18n import DEEP_LINK_CONTINUE_LABELS, normalize_language_code
+    lang = normalize_language_code(lang_code)
+    return DEEP_LINK_CONTINUE_LABELS.get(lang, "▶️ متابعة")
+
+
+def get_consent_confirmed_toast(lang_code: str = "ar") -> str:
+    from services.i18n import CONSENT_CONFIRMED_TOASTS, normalize_language_code
+    lang = normalize_language_code(lang_code)
+    return CONSENT_CONFIRMED_TOASTS.get(lang, "✅ تمت الموافقة")
 
 
 # ==================== استئناف الرابط العميق ====================

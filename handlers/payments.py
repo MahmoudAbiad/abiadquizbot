@@ -31,6 +31,7 @@ from constants import (
 from handlers.admin.users import send_points_notification
 from helpers.supabase_helper import is_feature_enabled, log_usage_event, set_feature_flag
 from logger import get_logger
+from services import i18n
 from services import payment_service as ps
 from services import points_calculator_service as pcs
 from task_utils import spawn
@@ -72,41 +73,119 @@ async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup: type
     await call.message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
 
 
-async def try_show_payment_packages(call: types.CallbackQuery, edit: bool = False) -> bool:
-    """يُستدعى من شاشة الشحن (recharge_info). يرجع True لو تولّى العرض."""
+async def try_show_payment_packages(
+    call: types.CallbackQuery,
+    edit: bool = False,
+    currency_override: Optional[str] = None,
+    selected_package: Optional[str] = None,
+) -> bool:
+    """يُستدعى من شاشة الشحن (recharge_info). يعرض الباقات حسب لغة المستخدم وعملته (SYP / USD)."""
     try:
-        if not await payments_available():
-            return False
-        packages = await ps.get_active_packages()
-        if not packages:
-            return False
-
-        open_order = await ps.get_open_order_for_user(call.from_user.id)
-        if open_order:
-            await _show_open_order(call, open_order)
-            return True
-
-        rows = [[types.InlineKeyboardButton(
-            text=f"⭐ {p['points']} نقطة — {ps.format_money(p['price'], p['currency'])}" + (f" ({p['label']})" if p.get("label") else ""),
-            callback_data=f"pay:pkg:{p['id']}",
-        )] for p in packages]
-        rows.append(_calculator_button_row())
-        rows.append(_support_row())
-        text = (
-            "🔋 <b>شحن النقاط</b>\n\nاختر الباقة المناسبة، أو استخدم «🧮 حاسبة النقاط» "
-            "لمعرفة آلية الحساب واقتراح باقة مخصصة لحجم استهلاكك.\n"
-            "يُضاف الرصيد لحسابك فور تأكيد الدفعة. 🚀"
+        user_id = call.from_user.id
+        lang = await i18n.get_user_language(user_id, fallback_user_or_code=call.from_user)
+        non_syrian_phone = i18n.is_non_syrian_phone(call)
+        currency = i18n.resolve_recharge_currency(
+            lang,
+            currency_override=currency_override,
+            has_non_syrian_phone=non_syrian_phone,
         )
-        markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+        # إذا كانت لغة المستخدم عربية والعملة المختارة هي الليرة السورية (SYP)، نفحص توفر الشحن الذاتي (شام كاش)
+        if lang == "ar" and currency == "SYP" and selected_package is None and await payments_available():
+            packages = await ps.get_active_packages()
+            if packages:
+                open_order = await ps.get_open_order_for_user(user_id)
+                if open_order:
+                    await _show_open_order(call, open_order)
+                    return True
+
+                rows = [[types.InlineKeyboardButton(
+                    text=f"⭐ {p['points']} نقطة — {ps.format_money(p['price'], p['currency'])}" + (f" ({p['label']})" if p.get("label") else ""),
+                    callback_data=f"pay:pkg:{p['id']}",
+                )] for p in packages]
+                rows.append([types.InlineKeyboardButton(
+                    text=i18n.CURRENCY_TOGGLE_TO_USD_TEXT,
+                    callback_data="recharge_currency:USD",
+                )])
+                rows.append(_calculator_button_row())
+                rows.append(_support_row())
+                text = (
+                    "🔋 <b>شحن النقاط</b>\n\nاختر الباقة المناسبة، أو استخدم «🧮 حاسبة النقاط» "
+                    "لمعرفة آلية الحساب واقتراح باقة مخصصة لحجم استهلاكك.\n"
+                    "يُضاف الرصيد لحسابك فور تأكيد الدفعة. 🚀"
+                )
+                markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
+                if edit:
+                    await _edit_or_send(call, text, markup)
+                else:
+                    await call.message.answer(text, parse_mode="HTML", reply_markup=markup)
+                spawn(log_usage_event(user_id, "recharge_info_viewed"))
+                return True
+
+        # عرض شاشة الباقات (العربية بالليرة/الدولار مع زر التبديل، أو غير العربية بالدولار حصراً مع خصم الكمية وتلوين الأوفر)
+        text, markup = i18n.build_recharge_view(
+            lang_code=lang,
+            currency_override=currency,
+            selected_package=selected_package,
+            has_non_syrian_phone=non_syrian_phone,
+            admin_contact=ADMIN_CONTACT,
+        )
         if edit:
             await _edit_or_send(call, text, markup)
         else:
             await call.message.answer(text, parse_mode="HTML", reply_markup=markup)
-        spawn(log_usage_event(call.from_user.id, "recharge_info_viewed"))
+        spawn(log_usage_event(user_id, "recharge_info_viewed"))
         return True
     except Exception as exc:
         logger.error(f"try_show_payment_packages failed, falling back to support screen: {exc}", exc_info=True)
         return False
+
+
+@router.callback_query(F.data.startswith("recharge_currency:"))
+async def toggle_recharge_currency(call: types.CallbackQuery):
+    """التبديل بين عرض الأسعار بالليرة السورية (SYP) والدولار الأمريكي (USD) لمستخدمي اللغة العربية."""
+    try:
+        target_currency = call.data.split(":", 1)[1].strip().upper()
+        if target_currency not in ("SYP", "USD"):
+            target_currency = "SYP"
+        await try_show_payment_packages(call, edit=True, currency_override=target_currency)
+    except Exception as exc:
+        logger.error(f"toggle_recharge_currency failed: {exc}", exc_info=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data.startswith("recharge_package:"))
+async def select_Localized_recharge_package(call: types.CallbackQuery):
+    """اختيار باقة شحن (بالليرة أو الدولار للعربية، أو باقات الدولار 400/900/1600 للغات الأخرى) وتجهيز مراسلة الدعم."""
+    try:
+        parts = call.data.split(":")
+        if len(parts) == 3 and parts[1] == "ar_usd":
+            currency_override = "USD"
+            package = parts[2]
+        elif len(parts) == 3 and parts[1] == "intl":
+            currency_override = "USD"
+            package = parts[2]
+        else:
+            currency_override = "SYP"
+            package = parts[-1]
+
+        await try_show_payment_packages(
+            call,
+            edit=True,
+            currency_override=currency_override,
+            selected_package=package,
+        )
+    except Exception as exc:
+        logger.error(f"select_Localized_recharge_package failed: {exc}", exc_info=True)
+    finally:
+        await call.answer()
+
+
+@router.callback_query(F.data == "recharge_choose_package")
+async def remind_to_choose_recharge_package(call: types.CallbackQuery):
+    lang = await i18n.get_user_language(call.from_user.id, fallback_user_or_code=call.from_user)
+    await call.answer(i18n.get_choose_package_alert(lang), show_alert=True)
 
 
 def _order_text(order: dict, auto: bool = False) -> str:
